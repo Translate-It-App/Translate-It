@@ -6,20 +6,12 @@ import {
   LIVE_DUBBING_OFFSCREEN_ACTIONS,
 } from '../features/live-dubbing/constants.js';
 import { isAuthorizedOffscreenRouterSender, isAuthorizedLiveDubbingOffscreenControlSender } from '../features/live-dubbing/contracts.js';
+import { getScopedLogger } from '../shared/logging/logger.js';
+import { LOG_COMPONENTS } from '../shared/logging/logConstants.js';
 
-// Enhanced logging for offscreen document
-const createOffscreenLogger = () => {
-  const prefix = '[Offscreen]';
-  return {
-    debug: (...args) => console.log(`[DEBUG] ${prefix}`, ...args),
-    info: (...args) => console.log(`[INFO] ${prefix}`, ...args),
-    warn: (...args) => console.warn(`[WARN] ${prefix}`, ...args),
-    error: (...args) => console.error(`[ERROR] ${prefix}`, ...args),
-    log: (...args) => console.log(`[LOG] ${prefix}`, ...args) // Alias for compatibility
-  };
-};
-
-const logger = createOffscreenLogger();
+// Centralized scoped logger: INFO/DEBUG are gated by component level (default WARN),
+// warn/error remain functional. 'Offscreen' scope keeps logs identifiable.
+const logger = getScopedLogger(LOG_COMPONENTS.BACKGROUND, 'Offscreen');
 
 function getSafeAction(action) {
   return typeof action === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(action)
@@ -467,7 +459,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   else if (action === "GENERATE_SIMPLE_OVERLAY_ICON" && cleanMessage.data) {
     // Handle simple overlay icon generation
-    console.log('[Offscreen] Generating simple overlay icon', {
+    logger.info('Generating simple overlay icon', {
       hasProvider: typeof cleanMessage.data.provider === 'string',
     });
     try {
@@ -534,7 +526,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  */
 function handleTTSSpeak(data, sendResponse) {
   try {
-    console.log('[Offscreen] Starting TTS speak', {
+    logger.info('Starting TTS speak', {
       hasText: typeof data?.text === 'string',
       hasLanguage: typeof (data?.language || data?.lang) === 'string',
     });
@@ -545,14 +537,14 @@ function handleTTSSpeak(data, sendResponse) {
       langCode = langCode.split("-")[0]; // Convert 'en-US' to 'en'
     }
     
-    console.log('[Offscreen] Language parameter debug', {
+    logger.debug('Language parameter debug', {
       hasLanguage: Boolean(data.language),
       hasLegacyLanguage: Boolean(data.lang),
       finalLanguage: /^[A-Za-z-]{1,20}$/.test(langCode) ? langCode : 'unknown',
     });
 
     // Try Google TTS first, then fallback to Web Speech API
-    console.log('[Offscreen] Trying Google TTS', {
+    logger.debug('Trying Google TTS', {
       language: /^[A-Za-z-]{1,20}$/.test(langCode) ? langCode : 'unknown',
     });
     const googleTTSUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${encodeURIComponent(langCode)}&q=${encodeURIComponent(data.text)}&client=gtx&ttsspeed=1&total=1&idx=0&tk=1`;
@@ -560,7 +552,7 @@ function handleTTSSpeak(data, sendResponse) {
     // Attempt Google TTS with fallback
     handleAudioPlaybackWithFallback(googleTTSUrl, data, sendResponse, data.playbackToken);
   } catch (error) {
-    console.error('[Offscreen] TTS speak failed', getSafeErrorName(error));
+    logger.error('TTS speak failed', getSafeErrorName(error));
     sendResponse({ success: false, error: error.message });
   }
 }
@@ -570,7 +562,7 @@ function handleTTSSpeak(data, sendResponse) {
  */
 function handleTTSGetVoices(sendResponse) {
   try {
-    console.log("[Offscreen] Getting available TTS voices");
+    logger.info("Getting available TTS voices");
     
     if ("speechSynthesis" in window) {
       // Get available voices
@@ -585,7 +577,7 @@ function handleTTSGetVoices(sendResponse) {
           responseAlreadySent = true;
           
           voices = speechSynthesis.getVoices();
-          console.log("[Offscreen] Voices loaded:", voices.length);
+          logger.info("Voices loaded:", voices.length);
           sendResponse({ 
             success: true, 
             voices: voices.map(voice => ({
@@ -605,7 +597,7 @@ function handleTTSGetVoices(sendResponse) {
           responseAlreadySent = true;
           
           voices = speechSynthesis.getVoices();
-          console.log("[Offscreen] Timeout reached, voices available:", voices.length);
+          logger.info("Timeout reached, voices available:", voices.length);
           sendResponse({ 
             success: true, 
             voices: voices.map(voice => ({
@@ -617,7 +609,7 @@ function handleTTSGetVoices(sendResponse) {
           });
         }, 1000);
       } else {
-        console.log("[Offscreen] Voices available:", voices.length);
+        logger.info("Voices available:", voices.length);
         sendResponse({ 
           success: true, 
           voices: voices.map(voice => ({
@@ -629,11 +621,11 @@ function handleTTSGetVoices(sendResponse) {
         });
       }
     } else {
-      console.warn("[Offscreen] Speech synthesis not available");
+      logger.warn("Speech synthesis not available");
       sendResponse({ success: true, voices: [] });
     }
   } catch (error) {
-    console.error('[Offscreen] Failed to get TTS voices', getSafeErrorName(error));
+    logger.error('Failed to get TTS voices', getSafeErrorName(error));
     sendResponse({ success: false, error: error.message });
   }
 }
@@ -650,10 +642,10 @@ function handleTTSStop(sendResponse, playbackToken) {
       try {
         sendResponse(response);
       } catch (error) {
-        console.log('[Offscreen] Response already sent or connection closed', getSafeErrorName(error));
+        logger.debug('Response already sent or connection closed', getSafeErrorName(error));
       }
     } else {
-      console.log("[Offscreen] Duplicate response attempt blocked");
+      logger.debug("Duplicate response attempt blocked");
     }
   };
 
@@ -694,7 +686,7 @@ function handleTTSStop(sendResponse, playbackToken) {
       playbackToken: hasPlaybackToken ? playbackToken : (currentPlayback?.playbackToken ?? null),
     });
   } catch (error) {
-    console.error('[Offscreen] TTS stop failed', getSafeErrorName(error));
+    logger.error('TTS stop failed', getSafeErrorName(error));
     safeResponse({ success: false, error: error.message });
   }
 }
@@ -710,18 +702,18 @@ function handleTTSPause(sendResponse) {
     if (currentUtterance && speechSynthesis.speaking && !speechSynthesis.paused) {
       speechSynthesis.pause();
       paused = true;
-      console.log("[Offscreen] TTS speech paused");
+      logger.info("TTS speech paused");
     }
 
     if (currentAudio && !currentAudio.paused) {
       currentAudio.pause();
       paused = true;
-      console.log("[Offscreen] TTS audio paused");
+      logger.info("TTS audio paused");
     }
 
     sendResponse({ success: true, paused });
   } catch (error) {
-    console.error('[Offscreen] TTS pause failed', getSafeErrorName(error));
+    logger.error('TTS pause failed', getSafeErrorName(error));
     sendResponse({ success: false, error: error.message });
   }
 }
@@ -737,20 +729,20 @@ function handleTTSResume(sendResponse) {
     if (currentUtterance && speechSynthesis.paused) {
       speechSynthesis.resume();
       resumed = true;
-      console.log("[Offscreen] TTS speech resumed");
+      logger.info("TTS speech resumed");
     }
 
     if (currentAudio && currentAudio.paused) {
       currentAudio.play().catch(error => {
-        console.error('[Offscreen] TTS audio resume failed', getSafeErrorName(error));
+        logger.error('TTS audio resume failed', getSafeErrorName(error));
       });
       resumed = true;
-      console.log("[Offscreen] TTS audio resumed");
+      logger.info("TTS audio resumed");
     }
 
     sendResponse({ success: true, resumed });
   } catch (error) {
-    console.error('[Offscreen] TTS resume failed', getSafeErrorName(error));
+    logger.error('TTS resume failed', getSafeErrorName(error));
     sendResponse({ success: false, error: error.message });
   }
 }
@@ -783,7 +775,7 @@ function handleTTSGetStatus(sendResponse) {
     
     sendResponse({ success: true, status });
   } catch (error) {
-    console.error('[Offscreen] TTS get status failed', getSafeErrorName(error));
+    logger.error('TTS get status failed', getSafeErrorName(error));
     sendResponse({ success: false, error: error.message, status: 'error' });
   }
 }
@@ -880,7 +872,7 @@ function handleAudioPlaybackWithFallback(url, ttsData, sendResponse, playbackTok
         handleWebSpeechFallback(ttsData, sendResponse, playback);
       });
   } catch (error) {
-    console.error('[Offscreen] TTS setup failed', getSafeErrorName(error));
+    logger.error('TTS setup failed', getSafeErrorName(error));
     if (currentPlayback && isCurrentPlayback(currentPlayback)) {
       currentPlayback.fallbackStarted = true;
       handleWebSpeechFallback(ttsData, sendResponse, currentPlayback);
@@ -968,7 +960,7 @@ function handleWebSpeechFallback(data, sendResponse, playback) {
     utterance.onstart = () => {
       activePlayback.speechStarted = true;
       clearSpeechTimeout();
-      console.log("Web Speech TTS started");
+      logger.info("Web Speech TTS started");
     };
 
     // Keep startup failure bounded, but never terminate speech solely because utterance is long.
@@ -976,7 +968,7 @@ function handleWebSpeechFallback(data, sendResponse, playback) {
       activePlayback.speechTimeout = null;
       if (!isActiveUtterance()) return;
       if (activePlayback.speechStarted || speechSynthesis.speaking) return;
-      console.warn("[Offscreen] Web Speech TTS startup timeout, cancelling");
+      logger.warn("Web Speech TTS startup timeout, cancelling");
       fail("Web Speech API timeout", { cancelSpeech: true });
     }, 5000);
 
@@ -993,7 +985,7 @@ function handleWebSpeechFallback(data, sendResponse, playback) {
   };
 
   try {
-    console.log("[Offscreen] Using Web Speech API fallback");
+    logger.info("Using Web Speech API fallback");
     if (!("speechSynthesis" in window)) {
       throw new Error("Web Speech API not available");
     }
@@ -1009,7 +1001,7 @@ function handleWebSpeechFallback(data, sendResponse, playback) {
       startSafely();
     }
   } catch (error) {
-    console.error('[Offscreen] Web Speech API fallback failed', getSafeErrorName(error));
+    logger.error('Web Speech API fallback failed', getSafeErrorName(error));
     fail(`All TTS methods failed: ${error.message}`);
   }
 }
@@ -1030,7 +1022,7 @@ function handleAudioStop(sendResponse) {
 function handleCachedAudioPlayback(audioData, sendResponse, playbackToken) {
   let playback = null;
   try {
-    console.log("[Offscreen] Playing cached audio blob:", audioData.length, "bytes");
+    logger.info("Playing cached audio blob (bytes):", audioData.length);
 
     playback = createPlayback(playbackToken, sendResponse);
     if (!playback) return;
@@ -1040,7 +1032,7 @@ function handleCachedAudioPlayback(audioData, sendResponse, playbackToken) {
     const audioBlob = new Blob([uint8Array], { type: 'audio/mpeg' });
     const audioUrl = URL.createObjectURL(audioBlob);
     
-    console.log('[Offscreen] Created cached audio blob');
+    logger.debug('Created cached audio blob');
 
     // Create and setup audio element
     playback.audioUrl = audioUrl;
@@ -1051,14 +1043,14 @@ function handleCachedAudioPlayback(audioData, sendResponse, playbackToken) {
     // currentAudio.crossOrigin = "anonymous";
 
     resourceTracker.addEventListener(playback.audio, "ended", () => {
-      console.log("[Offscreen] Cached audio playback ended");
+      logger.info("Cached audio playback ended");
       URL.revokeObjectURL(audioUrl); // Clean up memory
       playback.audioUrl = null;
       finishPlayback(playback, 'completed');
     });
 
     resourceTracker.addEventListener(playback.audio, "error", () => {
-      console.error('[Offscreen] Cached audio playback error');
+      logger.error('Cached audio playback error');
       URL.revokeObjectURL(audioUrl); // Clean up memory
       playback.audioUrl = null;
       if (!isCurrentPlayback(playback)) return;
@@ -1071,20 +1063,20 @@ function handleCachedAudioPlayback(audioData, sendResponse, playbackToken) {
     });
 
     resourceTracker.addEventListener(playback.audio, "loadstart", () => {
-      console.log("[Offscreen] Cached audio loading started");
+      logger.debug("Cached audio loading started");
     });
 
     // Start playback
     playback.audio
       .play()
       .then(() => {
-        console.log("[Offscreen] Cached audio playback started successfully");
+        logger.info("Cached audio playback started successfully");
         if (isCurrentPlayback(playback)) {
           sendResponseOnce(playback, sendResponse, { success: true, message: "Cached audio playback started" });
         }
       })
       .catch((err) => {
-        console.error('[Offscreen] Cached audio play failed', getSafeErrorName(err));
+        logger.error('Cached audio play failed', getSafeErrorName(err));
         URL.revokeObjectURL(audioUrl);
         playback.audioUrl = null;
         if (isCurrentPlayback(playback)) {
@@ -1098,7 +1090,7 @@ function handleCachedAudioPlayback(audioData, sendResponse, playbackToken) {
       });
       
   } catch (error) {
-    console.error('[Offscreen] Cached audio setup failed', getSafeErrorName(error));
+    logger.error('Cached audio setup failed', getSafeErrorName(error));
     if (currentPlayback) {
       finishPlayback(currentPlayback, 'error', {
         success: false,
@@ -1118,27 +1110,27 @@ let ocrEngine = null;
  * Handle OCR processing with lazy loading
  */
 async function handleOCRProcess(data, sendResponse) {
-  console.log('[Offscreen] handleOCRProcess started', {
+  logger.info('handleOCRProcess started', {
     hasLanguage: typeof data?.lang === 'string',
   });
   try {
     if (!ocrEngine) {
-      console.log("[Offscreen] Loading OCR engine module...");
+      logger.info("Loading OCR engine module...");
       const module = await import('../features/screen-capture/services/ocrEngine.js');
       ocrEngine = module;
-      console.log("[Offscreen] OCR engine module loaded");
+      logger.info("OCR engine module loaded");
     }
 
     const { image, lang, coordinates } = data;
 
-    console.log('[Offscreen] Starting recognition', {
+    logger.info('Starting recognition', {
       hasLanguage: typeof lang === 'string',
     });
     const text = await ocrEngine.recognize(image, lang, coordinates);
-    console.log("[Offscreen] Recognition successful, extracted text length:", text?.length);
+    logger.info("Recognition successful, extracted text length:", text?.length);
     sendResponse({ success: true, text });
   } catch (error) {
-    console.error('[Offscreen] OCR process failed', getSafeErrorName(error));
+    logger.error('OCR process failed', getSafeErrorName(error));
 
     // Extract as much info as possible
     let errorMessage = "Unknown OCR error";

@@ -189,16 +189,15 @@ import { CONFIG } from '@/shared/config/config.js'
 import { useHighlightManager } from '../composables/useHighlightManager.js'
 import { usePromptPreview } from '../composables/usePromptPreview.js'
 import { PROMPT_REGISTRY, PromptCategory, PromptRisk } from '@/shared/config/PromptRegistry.js'
+import { getScopedLogger } from '@/shared/logging/logger.js'
+import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js'
 
 // Components
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useUnifiedI18n()
-const logger = { 
-  debug: (...args) => console.debug('[PromptTab]', ...args),
-  error: (...args) => console.error('[PromptTab]', ...args)
-}
+const logger = getScopedLogger(LOG_COMPONENTS.OPTIONS, 'PromptTab')
 const { createSetting } = useTabSettings(settingsStore, logger)
 const { validatePromptTemplate: validate, getFirstError, getFirstErrorTranslated, clearErrors } = useValidation()
 const { highlightElement } = useHighlightManager()

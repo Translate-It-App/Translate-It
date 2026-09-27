@@ -2,16 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 const mocks = vi.hoisted(() => ({
-  browserAPI: { value: null },
+  browserAPI: null,
   logger: {
     debug: vi.fn(),
     error: vi.fn()
   }
 }))
 
-vi.mock('@/composables/core/useBrowserAPI.js', () => ({
-  useBrowserAPI: () => ({ api: mocks.browserAPI })
-}))
+vi.mock('@/composables/core/useBrowserAPI.js', async () => {
+  const { ref } = await import('vue')
+  if (!mocks.browserAPI) mocks.browserAPI = ref(null)
+  return { useBrowserAPI: () => ({ api: mocks.browserAPI }) }
+})
 
 vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
   useUnifiedI18n: () => ({ t: (key) => key })

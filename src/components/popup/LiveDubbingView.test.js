@@ -65,6 +65,8 @@ const LanguageSelectorStub = {
 
 const setupLifecycle = { mounts: 0 }
 
+const controlLifecycle = { mounts: 0, unmounts: 0, nextId: 0 }
+
   const LiveDubbingControlStub = {
   name: 'LiveDubbingControl',
   props: {
@@ -73,8 +75,16 @@ const setupLifecycle = { mounts: 0 }
     startDisabled: { type: Boolean, default: false }
   },
   emits: ['busy-change', 'status-resolved'],
+  data() {
+    return { instanceId: 0 }
+  },
   mounted() {
+    controlLifecycle.mounts += 1
+    this.instanceId = ++controlLifecycle.nextId
     if (harness.controlStatusResolved) this.$emit('status-resolved')
+  },
+  unmounted() {
+    controlLifecycle.unmounts += 1
   },
   template: '<div class="live-dubbing-control-stub" />'
 }
@@ -164,6 +174,9 @@ const transcriptContent = (wrapper) => wrapper.find('#live-dubbing-transcript-pr
 describe('LiveDubbingView', () => {
   beforeEach(() => {
     setupLifecycle.mounts = 0
+    controlLifecycle.mounts = 0
+    controlLifecycle.unmounts = 0
+    controlLifecycle.nextId = 0
     harness.locale.value = 'en'
     harness.controlStatusResolved = true
     harness.store = makeStore({
@@ -222,13 +235,14 @@ describe('LiveDubbingView', () => {
   it('passes the language pending gate to START and clears it after settle', async () => {
     const wrapper = mountView({ targetLanguagePending: true })
     const control = wrapper.findComponent({ name: 'LiveDubbingControl' })
+    const controlId = control.vm.instanceId
 
     expect(control.props('startDisabled')).toBe(true)
 
     await wrapper.setProps({ targetLanguagePending: false })
     expect(wrapper.findComponent({ name: 'LiveDubbingControl' }).props('startDisabled'))
       .toBe(false)
-    expect(wrapper.findComponent({ name: 'LiveDubbingControl' }).vm).toBe(control.vm)
+    expect(wrapper.findComponent({ name: 'LiveDubbingControl' }).vm.instanceId).toBe(controlId)
   })
 
   it('renders localized labels with the shared label treatment', () => {
@@ -324,7 +338,7 @@ describe('LiveDubbingView', () => {
 
   it('toggles the disclosure state without changing subtitle settings or remounting control', async () => {
     const wrapper = mountView()
-    const control = wrapper.findComponent({ name: 'LiveDubbingControl' })
+    const controlId = wrapper.findComponent({ name: 'LiveDubbingControl' }).vm.instanceId
     const updateCount = harness.store.updateSettingAndPersist.mock.calls.length
     const localUpdateCount = harness.store.updateSettingLocally.mock.calls.length
 
@@ -334,7 +348,7 @@ describe('LiveDubbingView', () => {
     expect(transcriptContent(wrapper).attributes('inert')).toBeUndefined()
     expect(harness.store.updateSettingAndPersist).toHaveBeenCalledTimes(updateCount)
     expect(harness.store.updateSettingLocally).toHaveBeenCalledTimes(localUpdateCount)
-    expect(wrapper.findComponent({ name: 'LiveDubbingControl' }).vm).toBe(control.vm)
+    expect(wrapper.findComponent({ name: 'LiveDubbingControl' }).vm.instanceId).toBe(controlId)
 
     await transcriptHeader(wrapper).trigger('click')
     await settle()
@@ -712,7 +726,7 @@ describe('LiveDubbingView', () => {
     harness.store = deferred.store
     const wrapper = mountView()
     const sizeSelect = wrapper.findAllComponents({ name: 'BaseSelect' })[1]
-    const control = wrapper.findComponent({ name: 'LiveDubbingControl' })
+    const controlId = wrapper.findComponent({ name: 'LiveDubbingControl' }).vm.instanceId
 
     await sizeSelect.vm.$emit('update:modelValue', 'large')
     expect(deferred.writes).toHaveLength(1)
@@ -721,7 +735,7 @@ describe('LiveDubbingView', () => {
       value: 'large'
     })
     expect(harness.store.settings.LIVE_DUBBING_SUBTITLE_SIZE).toBe('large')
-    expect(wrapper.findComponent({ name: 'LiveDubbingControl' }).vm).toBe(control.vm)
+    expect(wrapper.findComponent({ name: 'LiveDubbingControl' }).vm.instanceId).toBe(controlId)
 
     deferred.writes[0].resolve()
     await settle()
@@ -979,7 +993,7 @@ describe('LiveDubbingView', () => {
     const wrapper = mountView()
     const toggles = wrapper.findAllComponents({ name: 'BaseToggle' })
     const control = () => wrapper.findComponent({ name: 'LiveDubbingControl' })
-    const initialControl = control().vm
+    const initialControlId = control().vm.instanceId
 
     toggles[0].vm.$emit('update:modelValue', true)
     toggles[1].vm.$emit('update:modelValue', true)
@@ -989,7 +1003,7 @@ describe('LiveDubbingView', () => {
     // Control stays mounted while either write is pending — its status/session
     // presentation must not flicker through remounts.
     expect(control().exists()).toBe(true)
-    expect(control().vm).toBe(initialControl)
+    expect(control().vm.instanceId).toBe(initialControlId)
     // Start is gated on every pending write.
     expect(control().props('startDisabled')).toBe(true)
 
@@ -997,14 +1011,14 @@ describe('LiveDubbingView', () => {
     deferred.writes[0].resolve()
     await settle()
     expect(control().exists()).toBe(true)
-    expect(control().vm).toBe(initialControl)
+    expect(control().vm.instanceId).toBe(initialControlId)
     expect(control().props('startDisabled')).toBe(true)
 
     // Once both writes settle, Start is re-enabled.
     deferred.writes[1].resolve()
     await settle()
     expect(control().exists()).toBe(true)
-    expect(control().vm).toBe(initialControl)
+    expect(control().vm.instanceId).toBe(initialControlId)
     expect(control().props('startDisabled')).toBe(false)
   })
 
@@ -1406,13 +1420,13 @@ describe('LiveDubbingView', () => {
   it('remounts the control on an idle provider switch so stale state cannot survive', async () => {
     const wrapper = mountView({ providerId: 'gemini' })
     const control = () => wrapper.findComponent({ name: 'LiveDubbingControl' })
-    const before = control().vm
+    const beforeId = control().vm.instanceId
 
     await wrapper.setProps({ providerId: 'openai' })
 
     expect(control().props('providerId')).toBe('openai')
     // :key follows the provider while idle → fresh instance, fresh state.
-    expect(control().vm).not.toBe(before)
+    expect(control().vm.instanceId).not.toBe(beforeId)
   })
 
   it('does not remount the control while busy, then remounts once idle', async () => {
@@ -1421,17 +1435,17 @@ describe('LiveDubbingView', () => {
 
     control().vm.$emit('busy-change', true)
     await nextTick()
-    const busyInstance = control().vm
+    const busyInstanceId = control().vm.instanceId
 
     await wrapper.setProps({ providerId: 'openai' })
     expect(control().props('providerId')).toBe('openai')
     // Key frozen while busy: same instance, no mid-session remount.
-    expect(control().vm).toBe(busyInstance)
+    expect(control().vm.instanceId).toBe(busyInstanceId)
 
     control().vm.$emit('busy-change', false)
     await nextTick()
     // Unlocking with a changed provider remounts to the fresh provider state.
-    expect(control().vm).not.toBe(busyInstance)
+    expect(control().vm.instanceId).not.toBe(busyInstanceId)
     expect(control().props('providerId')).toBe('openai')
   })
 
@@ -1440,7 +1454,7 @@ describe('LiveDubbingView', () => {
     const wrapper = mountView({ providerId: 'gemini' })
     const control = () => wrapper.findComponent({ name: 'LiveDubbingControl' })
     const setup = () => wrapper.findComponent({ name: 'LiveDubbingProviderSetup' })
-    const before = control().vm
+    const beforeId = control().vm.instanceId
 
     // Re-enter setup while idle, then complete it successfully.
     harness.store.settings.GEMINI_API_KEY = ''
@@ -1455,7 +1469,7 @@ describe('LiveDubbingView', () => {
     harness.store.settings.GEMINI_API_KEY = 'freshly-saved-key'
     await nextTick()
 
-    expect(control().vm).not.toBe(before)
+    expect(control().vm.instanceId).not.toBe(beforeId)
     expect(setup().exists()).toBe(false)
   })
 
@@ -1466,7 +1480,7 @@ describe('LiveDubbingView', () => {
 
     control().vm.$emit('busy-change', true)
     await nextTick()
-    const busyInstance = control().vm
+    const busyInstanceId = control().vm.instanceId
 
     harness.store.settings.GEMINI_API_KEY = ''
     await nextTick()
@@ -1475,6 +1489,6 @@ describe('LiveDubbingView', () => {
     await wrapper.findComponent({ name: 'LiveDubbingProviderSetup' }).vm.$emit('saved')
     await nextTick()
 
-    expect(control().vm).toBe(busyInstance)
+    expect(control().vm.instanceId).toBe(busyInstanceId)
   })
 })
