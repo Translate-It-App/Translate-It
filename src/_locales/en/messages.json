@@ -1284,7 +1284,7 @@
     "message": "Model"
   },
   "openrouter_api_model_placeholder": {
-    "message": "Enter OpenRouter model (e.g., openai/gpt-4o)"
+    "message": "Enter OpenRouter model (e.g., openai/gpt-6-luna)"
   },
   "deepseek_api_settings_title": {
     "message": "DeepSeek Settings"

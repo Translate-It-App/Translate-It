@@ -36,8 +36,8 @@ You can enter **multiple API keys** for each provider (one per line). The extens
 
 You can customize each provider's settings to balance quality and cost:
 
-- **Google Gemini:** Change the `API URL` to use different models (e.g., `gemini-2.0-flash`).
-- **OpenAI:** Enter specific model names like `gpt-4o` or `gpt-3.5-turbo`.
+- **Google Gemini:** Change the `API URL` to use different models (e.g., `gemini-3.8-flash`).
+- **OpenAI:** Enter specific model names like `gpt-6-luna` or `gpt-6-sol`.
 - **OpenRouter:** Support for a variety of models; use the model name from the [OpenRouter Docs](https://openrouter.ai/models).
 - **Requesty:** Access many models through one API; pick a curated model or enter any model ID (e.g., `openai/gpt-4o-mini`) from the [Requesty Docs](https://docs.requesty.ai).
 - **DeepSeek:** Customize model settings as per [DeepSeek Docs](https://api-docs.deepseek.com/api/list-models/); optionally set a thinking level.
@@ -49,7 +49,9 @@ You can customize each provider's settings to balance quality and cost:
 ## Default Models
 
 If you don't specify a model, these are the defaults used:
-- **OpenAI / OpenRouter:** `gpt-3.5-turbo`
+- **OpenAI:** `gpt-6-luna`
+- **OpenRouter:** `openai/gpt-6-luna`
 - **Requesty:** `openai/gpt-4o-mini`
-- **Google Gemini / WebAI to API:** `gemini-1.5-flash`
+- **Google Gemini:** `gemini-3.8-flash`
+- **WebAI to API:** `gemini-3-flash`
 - **DeepSeek:** `deepseek-flash`

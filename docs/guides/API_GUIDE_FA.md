@@ -36,8 +36,8 @@
 
 می‌توانید هر ارائه‌دهنده را برای ایجاد تعادل بین کیفیت و هزینه شخصی‌سازی کنید:
 
-- **Google Gemini:** تغییر `API URL` برای استفاده از مدل‌های مختلف (مثلاً `gemini-2.0-flash`).
-- **OpenAI:** وارد کردن نام مدل‌های خاص مانند `gpt-4o` یا `gpt-3.5-turbo`.
+- **Google Gemini:** تغییر `API URL` برای استفاده از مدل‌های مختلف (مثلاً `gemini-3.8-flash`).
+- **OpenAI:** وارد کردن نام مدل‌های خاص مانند `gpt-6-luna` یا `gpt-6-sol`.
 - **OpenRouter:** پشتیبانی از مدل‌های متنوع؛ نام مدل را از [مستندات OpenRouter](https://openrouter.ai/models) کپی کنید.
 - **Requesty:** دسترسی به مدل‌های متنوع از طریق یک API؛ یک مدل از فهرست انتخاب کنید یا شناسه مدل (مثلاً `openai/gpt-4o-mini`) را از [مستندات Requesty](https://docs.requesty.ai) وارد کنید.
 - **DeepSeek:** شخصی‌سازی مدل مطابق [مستندات DeepSeek](https://api-docs.deepseek.com/api/list-models/)؛ امکان تنظیم سطح تفکر نیز وجود دارد.
@@ -49,7 +49,9 @@
 ## مدل‌های پیش‌فرض
 
 اگر مدلی را مشخص نکنید، مدل‌های زیر به صورت پیش‌فرض استفاده می‌شوند:
-- **OpenAI / OpenRouter:** `gpt-3.5-turbo`
+- **OpenAI:** `gpt-6-luna`
+- **OpenRouter:** `openai/gpt-6-luna`
 - **Requesty:** `openai/gpt-4o-mini`
-- **Google Gemini / WebAI to API:** `gemini-1.5-flash`
+- **Google Gemini:** `gemini-3.8-flash`
+- **WebAI to API:** `gemini-3-flash`
 - **DeepSeek:** `deepseek-flash`

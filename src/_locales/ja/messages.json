@@ -1284,7 +1284,7 @@
     "message": "モデル"
   },
   "openrouter_api_model_placeholder": {
-    "message": "OpenRouterモデルを入力（例：openai/gpt-4o）"
+    "message": "OpenRouterモデルを入力（例：openai/gpt-6-luna）"
   },
   "deepseek_api_settings_title": {
     "message": "DeepSeek 設定"
