@@ -23,7 +23,7 @@ vi.mock('@/shared/config/config.js', async (importOriginal) => {
   return {
     ...actual,
     getGeminiApiKeysAsync: vi.fn().mockResolvedValue(['test-key']),
-    getGeminiModelAsync: vi.fn().mockResolvedValue('gemini-3.5-flash'),
+    getGeminiModelAsync: vi.fn().mockResolvedValue('gemini-3.8-flash'),
     getGeminiThinkingModeAsync: vi.fn().mockResolvedValue('default'),
     getGeminiApiUrlAsync: vi.fn().mockResolvedValue('https://generativelanguage.googleapis.com/v1beta/models'),
   };
@@ -59,19 +59,19 @@ describe('GeminiProvider Error Handling', () => {
 
   it.each([ResponseFormat.JSON_OBJECT, ResponseFormat.JSON_ARRAY])('uses REST JSON MIME field for %s', async (expectedFormat) => {
     const { getGeminiModelAsync } = await import('@/shared/config/config.js');
-    getGeminiModelAsync.mockResolvedValue('gemini-3.5-flash');
+    getGeminiModelAsync.mockResolvedValue('gemini-3.5-flash-lite');
     const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
 
     await provider._callAI('system prompt', 'source text', { expectedFormat });
 
     const request = executeRequest.mock.calls[0][0];
     const payload = JSON.parse(request.fetchOptions.body);
-    expect(request.url).toContain('/models/gemini-3.5-flash:generateContent?key=');
+    expect(request.url).toContain('/models/gemini-3.5-flash-lite:generateContent?key=');
     expect(payload.generationConfig).toMatchObject({
-      temperature: 0.1,
       maxOutputTokens: 8192,
       responseMimeType: 'application/json'
     });
+    expect(payload.generationConfig).not.toHaveProperty('temperature');
     expect(payload.generationConfig).not.toHaveProperty('response_mime_type');
     expect(payload.generationConfig).not.toHaveProperty('thinking_config');
     expect(payload.systemInstruction).toEqual({ parts: [{ text: 'system prompt' }] });
@@ -79,13 +79,8 @@ describe('GeminiProvider Error Handling', () => {
   });
 
   it.each([
-    ['gemini-3.7-flash', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent'],
-    ['gemini-3.6-flash', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent'],
-    ['gemini-3.5-flash', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent'],
-    ['gemini-3.5-flash-lite', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent'],
-    ['gemini-3.1-flash-lite', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent'],
-    ['gemini-3.1-pro-preview', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent'],
-    ['gemini-3-flash-preview', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent']
+    ['gemini-3.8-flash', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent'],
+    ['gemini-3.5-flash-lite', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent']
   ])('resolves %s to its configured endpoint', async (model, endpoint) => {
     const { getGeminiModelAsync } = await import('@/shared/config/config.js');
     getGeminiModelAsync.mockResolvedValue(model);
@@ -97,9 +92,40 @@ describe('GeminiProvider Error Handling', () => {
     expect(CONFIG.GEMINI_MODELS.find(configuredModel => configuredModel.value === model).url).toBe(endpoint);
   });
 
+  it.each(['gemini-3.8-flash', 'gemini-3.5-flash-lite'])(
+    'omits temperature for curated model %s',
+    async (model) => {
+      const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
+      getGeminiModelAsync.mockResolvedValue(model);
+      getGeminiThinkingModeAsync.mockResolvedValue('default');
+      const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+
+      await provider._callAI('system prompt', 'source text');
+
+      const payload = JSON.parse(executeRequest.mock.calls[0][0].fetchOptions.body);
+      expect(payload.generationConfig).not.toHaveProperty('temperature');
+      expect(payload.generationConfig).toMatchObject({ maxOutputTokens: 8192 });
+    }
+  );
+
+  it.each(['custom', 'unknown-model'])(
+    'keeps temperature 0.1 for model %s',
+    async (model) => {
+      const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
+      getGeminiModelAsync.mockResolvedValue(model);
+      getGeminiThinkingModeAsync.mockResolvedValue('default');
+      const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+
+      await provider._callAI('system prompt', 'source text');
+
+      const payload = JSON.parse(executeRequest.mock.calls[0][0].fetchOptions.body);
+      expect(payload.generationConfig.temperature).toBe(0.1);
+    }
+  );
+
   it('omits thinkingConfig in default mode for a verified model', async () => {
     const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
-    getGeminiModelAsync.mockResolvedValue('gemini-3.6-flash');
+    getGeminiModelAsync.mockResolvedValue('gemini-3.5-flash-lite');
     getGeminiThinkingModeAsync.mockResolvedValue('default');
     const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
 
@@ -110,11 +136,7 @@ describe('GeminiProvider Error Handling', () => {
   });
 
   it.each([
-    'gemini-3.6-flash',
-    'gemini-3.5-flash',
-    'gemini-3.1-flash-lite',
-    'gemini-3.1-pro-preview',
-    'gemini-3-flash-preview'
+    'gemini-3.5-flash-lite'
   ])('emits minimal thinkingConfig for verified model %s', async (model) => {
     const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
     getGeminiModelAsync.mockResolvedValue(model);
@@ -127,7 +149,7 @@ describe('GeminiProvider Error Handling', () => {
     expect(payload.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'minimal' });
   });
 
-  it.each(['gemini-3.7-flash', 'gemini-3.5-flash-lite', 'custom', 'unknown-model'])(
+  it.each(['gemini-3.8-flash', 'custom', 'unknown-model'])(
     'omits minimal thinkingConfig for unverified model %s',
     async (model) => {
       const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
@@ -146,7 +168,7 @@ describe('GeminiProvider Error Handling', () => {
     'composes minimal thinking with structured JSON mode for %s',
     async (expectedFormat) => {
       const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
-      getGeminiModelAsync.mockResolvedValue('gemini-3.5-flash');
+      getGeminiModelAsync.mockResolvedValue('gemini-3.5-flash-lite');
       getGeminiThinkingModeAsync.mockResolvedValue('minimal');
       const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
 
@@ -154,11 +176,31 @@ describe('GeminiProvider Error Handling', () => {
 
       const payload = JSON.parse(executeRequest.mock.calls[0][0].fetchOptions.body);
       expect(payload.generationConfig).toMatchObject({
-        temperature: 0.1,
         maxOutputTokens: 8192,
         responseMimeType: 'application/json',
         thinkingConfig: { thinkingLevel: 'minimal' }
       });
+      expect(payload.generationConfig).not.toHaveProperty('temperature');
+    }
+  );
+
+  it.each([ResponseFormat.JSON_OBJECT, ResponseFormat.JSON_ARRAY])(
+    'composes structured JSON mode without temperature or thinking for gemini-3.8-flash (%s)',
+    async (expectedFormat) => {
+      const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
+      getGeminiModelAsync.mockResolvedValue('gemini-3.8-flash');
+      getGeminiThinkingModeAsync.mockResolvedValue('minimal');
+      const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+
+      await provider._callAI('system prompt', 'source text', { expectedFormat });
+
+      const payload = JSON.parse(executeRequest.mock.calls[0][0].fetchOptions.body);
+      expect(payload.generationConfig).toMatchObject({
+        maxOutputTokens: 8192,
+        responseMimeType: 'application/json'
+      });
+      expect(payload.generationConfig).not.toHaveProperty('temperature');
+      expect(payload.generationConfig).not.toHaveProperty('thinkingConfig');
     }
   );
 
@@ -190,7 +232,7 @@ describe('GeminiProvider Error Handling', () => {
     ['minimal', true]
   ])('applies %s Thinking mode during structured recovery for verified model', async (thinkingMode, shouldThink) => {
     const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
-    getGeminiModelAsync.mockResolvedValue('gemini-3.6-flash');
+    getGeminiModelAsync.mockResolvedValue('gemini-3.5-flash-lite');
     getGeminiThinkingModeAsync.mockResolvedValue(thinkingMode);
     vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
 
@@ -210,7 +252,7 @@ describe('GeminiProvider Error Handling', () => {
 
   it('omits Thinking config during structured recovery for unverified model', async () => {
     const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
-    getGeminiModelAsync.mockResolvedValue('gemini-3.7-flash');
+    getGeminiModelAsync.mockResolvedValue('gemini-3.8-flash');
     getGeminiThinkingModeAsync.mockResolvedValue('minimal');
     vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
 

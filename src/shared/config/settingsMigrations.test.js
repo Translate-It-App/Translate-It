@@ -260,10 +260,16 @@ describe('Settings Migrations', () => {
   });
 
   it.each([
+    ['gemini-3.7-flash', 'gemini-3.8-flash'],
+    ['gemini-3.6-flash', 'gemini-3.8-flash'],
+    ['gemini-3.5-flash', 'gemini-3.8-flash'],
+    ['gemini-3.1-pro-preview', 'gemini-3.8-flash'],
+    ['gemini-3-flash-preview', 'gemini-3.8-flash'],
+    ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'],
     ['gemini-3.1-flash-lite-preview', 'gemini-3.5-flash-lite'],
-    ['gemini-3-pro-preview', 'gemini-3.5-flash'],
-    ['gemini-2.5-pro', 'gemini-3.6-flash'],
-    ['gemini-2.5-flash', 'gemini-3.5-flash'],
+    ['gemini-3-pro-preview', 'gemini-3.8-flash'],
+    ['gemini-2.5-pro', 'gemini-3.8-flash'],
+    ['gemini-2.5-flash', 'gemini-3.8-flash'],
     ['gemini-2.5-flash-lite', 'gemini-3.5-flash-lite']
   ])('should migrate obsolete Gemini model %s to %s', async (oldModel, newModel) => {
     const { updates, logs } = await runSettingsMigrations({
@@ -277,9 +283,9 @@ describe('Settings Migrations', () => {
   });
 
   it.each([
-    ['gemini-3.1-pro-preview', 'gemini-3.6-flash'],
-    ['gemini-3-flash-preview', 'gemini-3.5-flash']
-  ])('migrates inactive preview model %s to %s', async (oldModel, newModel) => {
+    ['gemini-3.7-flash', 'gemini-3.8-flash'],
+    ['gemini-3.6-flash', 'gemini-3.8-flash']
+  ])('migrates inactive model %s to %s', async (oldModel, newModel) => {
     const activeModels = CONFIG.GEMINI_MODELS;
     CONFIG.GEMINI_MODELS = activeModels.filter(model => model.value !== oldModel);
 
@@ -295,8 +301,8 @@ describe('Settings Migrations', () => {
     }
   });
 
-  it.each(['gemini-3.1-pro-preview', 'gemini-3-flash-preview'])(
-    'preserves active preview model %s',
+  it.each(['gemini-3.8-flash', 'gemini-3.5-flash-lite'])(
+    'preserves active model %s',
     async (model) => {
       const { updates } = await runSettingsMigrations({
         GEMINI_MODELS: [{ value: 'legacy-model', label: 'Legacy' }],
@@ -307,10 +313,10 @@ describe('Settings Migrations', () => {
     }
   );
 
-  it('keeps stable Gemini 3.1 Flash-Lite distinct from preview migration ID', async () => {
+  it('keeps stable Gemini 3.5 Flash-Lite distinct from preview migration ID', async () => {
     const stableResult = await runSettingsMigrations({
       GEMINI_MODELS: [{ value: 'legacy-model', label: 'Legacy' }],
-      GEMINI_MODEL: 'gemini-3.1-flash-lite'
+      GEMINI_MODEL: 'gemini-3.5-flash-lite'
     });
     const previewResult = await runSettingsMigrations({
       GEMINI_MODELS: [{ value: 'legacy-model', label: 'Legacy' }],

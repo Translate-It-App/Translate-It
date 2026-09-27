@@ -58,7 +58,7 @@
         :style="rtlSelectStyle"
       />
       <p class="setting-description">
-        {{ t('gemini_thinking_mode_description') || 'Provider Default uses provider behavior. Minimal is stored for future provider support.' }}
+        {{ t('gemini_thinking_mode_description') || 'Provider Default uses provider behavior. Minimal is applied only when the selected model supports it.' }}
       </p>
     </div>
   </div>

@@ -101,7 +101,9 @@ export class GeminiProvider extends BaseAIProvider {
         parts: [{ text: systemPrompt }]
       },
       generationConfig: {
-        temperature: 0.1,
+        // The deprecated sampling parameter is intentionally omitted for the curated built-in models.
+        // Custom/unknown model IDs keep temperature: 0.1 (capability unknown).
+        ...(!['gemini-3.8-flash', 'gemini-3.5-flash-lite'].includes(model) && { temperature: 0.1 }),
         maxOutputTokens: 8192, 
         // Enforce JSON Mode for Structured Data
         ...((expectedFormat === ResponseFormat.JSON_OBJECT || expectedFormat === ResponseFormat.JSON_ARRAY) && { responseMimeType: "application/json" }),

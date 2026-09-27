@@ -2160,7 +2160,7 @@
     "message": "最小"
   },
   "gemini_thinking_mode_description": {
-    "message": "プロバイダーのデフォルトはサービスの設定を使用します。最小モードは今後の対応に備えて保存されます。"
+    "message": "プロバイダーのデフォルトはサービスの設定を使用します。最小モードは選択中のモデルが対応している場合にのみ適用されます。"
   },
   "advance_section_title": {
     "message": "詳細設定"

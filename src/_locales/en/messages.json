@@ -2160,7 +2160,7 @@
     "message": "Minimal"
   },
   "gemini_thinking_mode_description": {
-    "message": "Provider Default uses provider behavior. Minimal is saved for future provider support."
+    "message": "Provider Default uses provider behavior. Minimal is applied only when the selected model supports it."
   },
   "advance_section_title": {
     "message": "Advanced Settings"
