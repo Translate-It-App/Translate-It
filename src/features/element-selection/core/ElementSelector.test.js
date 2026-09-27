@@ -116,6 +116,46 @@ describe('ElementSelector', () => {
       const result = selector.findBestTextElement(child);
       expect(result).toBe(parent);
     });
+
+    it('keeps nested inline descendants on their paragraph and switches to a sibling paragraph', () => {
+      selector.activate();
+      const wrapper = document.createElement('div');
+      Object.defineProperties(wrapper, {
+        offsetWidth: { value: 500 },
+        offsetHeight: { value: 400 },
+      });
+      const firstParagraph = document.createElement('p');
+      firstParagraph.textContent = 'First paragraph has enough meaningful text for selection.';
+      Object.defineProperties(firstParagraph, {
+        offsetWidth: { value: 200 },
+        offsetHeight: { value: 60 },
+      });
+      const firstInline = document.createElement('span');
+      firstInline.textContent = 'First paragraph';
+      const nestedInline = document.createElement('a');
+      nestedInline.textContent = ' nested link';
+      firstInline.appendChild(nestedInline);
+      firstParagraph.appendChild(firstInline);
+
+      const secondParagraph = document.createElement('p');
+      secondParagraph.textContent = 'Second paragraph also has enough text for selection.';
+      Object.defineProperties(secondParagraph, {
+        offsetWidth: { value: 200 },
+        offsetHeight: { value: 60 },
+      });
+      const secondInline = document.createElement('span');
+      secondInline.textContent = 'Second paragraph';
+      secondParagraph.appendChild(secondInline);
+      wrapper.append(firstParagraph, secondParagraph);
+      document.body.appendChild(wrapper);
+
+      selector.handleMouseOver(firstInline);
+      expect(selector.getHighlightedElement()).toBe(firstParagraph);
+      selector.handleMouseOver(nestedInline);
+      expect(selector.getHighlightedElement()).toBe(firstParagraph);
+      selector.handleMouseOver(secondInline);
+      expect(selector.getHighlightedElement()).toBe(secondParagraph);
+    });
   });
 
   describe('highlighting', () => {
@@ -188,7 +228,7 @@ describe('ElementSelector', () => {
       expect(selector.getHighlightedElement()).toBeNull();
     });
 
-    it('applies text-length heuristic independently of root eligibility', () => {
+    it('falls back to a small standalone selectable block below the strong text threshold', () => {
       selector.activate();
       isSelectableTextRoot.mockReturnValue(true); // Root says eligible
       const el = document.createElement('div');
@@ -198,7 +238,91 @@ describe('ElementSelector', () => {
 
       selector.handleMouseOver(el);
 
+      expect(selector.getHighlightedElement()).toBe(el);
+    });
+
+    it('prefers a meaningful block parent to a tiny inline descendant', () => {
+      selector.activate();
+      const parent = document.createElement('div');
+      parent.textContent = 'A meaningful block containing a short phrase.';
+      Object.defineProperty(parent, 'offsetWidth', { value: 100 });
+      Object.defineProperty(parent, 'offsetHeight', { value: 30 });
+      const inline = document.createElement('span');
+      inline.textContent = 'short phrase';
+      Object.defineProperty(inline, 'offsetWidth', { value: 10 });
+      Object.defineProperty(inline, 'offsetHeight', { value: 10 });
+      parent.appendChild(inline);
+      document.body.appendChild(parent);
+
+      expect(selector.findBestTextElement(inline)).toBe(parent);
+    });
+
+    it('does not let a delayed mouseout clear a highlighted subtree after re-entry', () => {
+      vi.useFakeTimers();
+      selector.activate();
+      const el = document.createElement('div');
+      el.textContent = 'Valid text for highlighting purposes that meets the length.';
+      Object.defineProperty(el, 'offsetWidth', { value: 200 });
+      Object.defineProperty(el, 'offsetHeight', { value: 100 });
+      const child = document.createElement('span');
+      el.appendChild(child);
+      document.body.appendChild(el);
+
+      selector.handleMouseOver(el);
+      selector.handleMouseOut();
+      selector.handleMouseOver(child);
+      vi.advanceTimersByTime(150);
+
+      expect(selector.getHighlightedElement()).toBe(el);
+      vi.useRealTimers();
+    });
+
+    it('cancels a pending clear when mouseout transitions into the highlighted subtree', () => {
+      vi.useFakeTimers();
+      selector.activate();
+      const root = document.createElement('div');
+      const child = document.createElement('span');
+      root.appendChild(child);
+      selector.currentHighlighted = root;
+      root.classList.add(selector.HIGHLIGHT_CLASS);
+
+      selector.handleMouseOut();
+      selector.handleMouseOut(child);
+      vi.advanceTimersByTime(150);
+
+      expect(selector.getHighlightedElement()).toBe(root);
+      expect(selector.highlightTimeout).toBeNull();
+      vi.useRealTimers();
+    });
+
+    it('clears after mouseout with no related target without consulting stale coordinates', () => {
+      vi.useFakeTimers();
+      selector.activate();
+      const root = document.createElement('div');
+      selector.currentHighlighted = root;
+      document.elementFromPoint = vi.fn();
+
+      selector.handleMouseOut(null);
+      vi.advanceTimersByTime(selector.config.highlightTimeout);
+
+      expect(document.elementFromPoint).not.toHaveBeenCalled();
       expect(selector.getHighlightedElement()).toBeNull();
+      vi.useRealTimers();
+    });
+
+    it('clears a pending timeout when deactivated', () => {
+      vi.useFakeTimers();
+      selector.activate();
+      const root = document.createElement('div');
+      selector.currentHighlighted = root;
+      selector.handleMouseOut();
+
+      selector.deactivate();
+      vi.advanceTimersByTime(selector.config.highlightTimeout);
+
+      expect(selector.highlightTimeout).toBeNull();
+      expect(selector.getHighlightedElement()).toBeNull();
+      vi.useRealTimers();
     });
   });
 

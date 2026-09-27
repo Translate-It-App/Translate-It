@@ -105,6 +105,13 @@ export class ElementSelector extends ResourceTracker {
       return;
     }
 
+    // A pointer may re-enter the same candidate before its delayed mouseout
+    // clear fires. Cancel that clear before the same-element fast path.
+    if (this.highlightTimeout) {
+      clearTimeout(this.highlightTimeout);
+      this.highlightTimeout = null;
+    }
+
     // Skip if already highlighted
     if (bestElement === this.currentHighlighted) {
       return;
@@ -127,8 +134,13 @@ export class ElementSelector extends ResourceTracker {
   /**
    * Handle mouse out event - clear highlight with timeout
    */
-  handleMouseOut() {
+  handleMouseOut(relatedTarget = null) {
     if (!this.isActive) return;
+
+    if (this.currentHighlighted && relatedTarget && this.currentHighlighted.contains(relatedTarget)) {
+      this.clearPendingHighlight();
+      return;
+    }
 
     // Clear any existing timeout
     if (this.highlightTimeout) {
@@ -139,6 +151,13 @@ export class ElementSelector extends ResourceTracker {
     this.highlightTimeout = setTimeout(() => {
       this.clearHighlight();
     }, this.config.highlightTimeout);
+  }
+
+  clearPendingHighlight() {
+    if (this.highlightTimeout) {
+      clearTimeout(this.highlightTimeout);
+      this.highlightTimeout = null;
+    }
   }
 
   /**
@@ -164,17 +183,27 @@ export class ElementSelector extends ResourceTracker {
    */
   findBestTextElement(startElement) {
     let maxAncestors = this.config.maxAncestors || 10;
+    let blockFallback = null;
+    let eligibleFallback = null;
 
-    // We want the DEEPEST element that satisfies the minimum requirements.
+    // Prefer the deepest meaningful block, rather than a tiny inline descendant.
     for (const element of iterateSelectElementAncestors(startElement)) {
       if (element === document.body || element === document.documentElement || maxAncestors-- <= 0) break;
       if (this.isSelectionCandidate(element)) {
         const area = element.offsetWidth * element.offsetHeight;
         const text = element.textContent?.trim() || '';
-        const wordCount = text.split(/\s+/).length;
+        const wordCount = text.split(/\s+/).filter(Boolean).length;
+        const display = window.getComputedStyle(element).display;
+        const isInline = display === 'inline' || display === 'contents';
+        if (text.length > 0 && !eligibleFallback) {
+          eligibleFallback = element;
+        }
+        if (!isInline && area > 0 && area <= this.config.maxArea && text.length > 0 && !blockFallback) {
+          blockFallback = element;
+        }
 
-        // Check if this element is a good candidate
         if (
+          !isInline &&
           area >= this.config.minArea &&
           area <= this.config.maxArea &&
           text.length >= this.config.minTextLength &&
@@ -186,15 +215,7 @@ export class ElementSelector extends ResourceTracker {
 
     }
 
-    // Fallback: if no good candidate found via area, use startElement if it is a valid text element
-    if (startElement && this.isSelectionCandidate(startElement)) {
-      const text = startElement.textContent?.trim() || '';
-      if (text.length >= this.config.minTextLength) {
-        return startElement;
-      }
-    }
-
-    return null;
+    return blockFallback || eligibleFallback;
   }
 
   /**

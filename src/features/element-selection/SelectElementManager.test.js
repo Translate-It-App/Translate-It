@@ -282,6 +282,7 @@ vi.mock('./core/ElementSelector.js', () => ({
     handleMouseOut = vi.fn();
     clearHighlight = vi.fn();
     getHighlightedElement = vi.fn();
+    findBestTextElement = vi.fn(element => element);
     isOurElement = vi.fn(() => false);
   }
 }));
@@ -1809,19 +1810,104 @@ describe('SelectElementManager', () => {
       expect(deactivate).toHaveBeenCalledTimes(1);
     });
 
-    it('should handle mouseover to highlight element', () => {
-      const mockElement = document.createElement('div');
-      const event = new MouseEvent('mouseover', { clientX: 100, clientY: 100 });
-      Object.defineProperty(event, 'target', { value: mockElement });
-      
-      // First movement
-      manager.handleMouseOver(event);
-      // Second movement to trigger highlight
-      const event2 = new MouseEvent('mouseover', { clientX: 110, clientY: 110 });
-      Object.defineProperty(event2, 'target', { value: mockElement });
-      manager.handleMouseOver(event2);
+    it('coalesces movement, ignores stale event targets, and uses the current shadow-disabled hit target', () => {
+      const staleEventTarget = document.createElement('span');
+      const hitTestedTarget = document.createElement('x-shadow-host');
+      let runFrame;
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+        runFrame = callback;
+        return 42;
+      });
+      document.elementFromPoint = vi.fn(() => hitTestedTarget);
+      const firstEvent = new MouseEvent('mouseover', { clientX: 100, clientY: 100 });
+      Object.defineProperty(firstEvent, 'target', { value: staleEventTarget });
+      const latestEvent = new MouseEvent('mousemove', { clientX: 120, clientY: 120 });
+      Object.defineProperty(latestEvent, 'target', { value: staleEventTarget });
+      manager.handleMouseOver(firstEvent);
+      manager.handleMouseMove(new MouseEvent('mousemove', { clientX: 110, clientY: 110 }));
+      manager.handleMouseMove(latestEvent);
 
-      expect(manager.elementSelector.handleMouseOver).toHaveBeenCalledWith(mockElement);
+      expect(manager.elementSelector.handleMouseOver).not.toHaveBeenCalled();
+      runFrame();
+      expect(document.elementFromPoint).toHaveBeenCalledWith(120, 120);
+      expect(manager.elementSelector.handleMouseOver).toHaveBeenCalledWith(hitTestedTarget);
+    });
+
+    it('starts tracking on the first mousemove and hit-tests the current target', () => {
+      const latestTarget = document.createElement('section');
+      let runFrame;
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+        runFrame = callback;
+        return 43;
+      });
+      document.elementFromPoint = vi.fn(() => latestTarget);
+
+      manager.handleMouseMove(new MouseEvent('mousemove', { clientX: 20, clientY: 20 }));
+      expect(runFrame).toBeTypeOf('function');
+      runFrame();
+
+      expect(document.elementFromPoint).toHaveBeenCalledWith(20, 20);
+      expect(manager.elementSelector.handleMouseOver).toHaveBeenCalledWith(latestTarget);
+    });
+
+    it('uses the click target instead of a stale highlight when its movement frame has not run', async () => {
+      const staleHighlight = document.createElement('div');
+      const clickTarget = document.createElement('section');
+      manager.elementSelector.getHighlightedElement.mockReturnValue(staleHighlight);
+      vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(45);
+      const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame');
+      manager.handleMouseMove(new MouseEvent('mousemove', { clientX: 30, clientY: 40 }));
+
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+      Object.defineProperty(click, 'target', { value: clickTarget });
+      await manager.handleClick(click);
+
+      expect(manager.elementSelector.findBestTextElement).toHaveBeenCalledWith(clickTarget);
+      expect(manager.domTranslatorAdapter.translateElement).toHaveBeenCalledWith(clickTarget, expect.any(Object));
+      expect(manager.domTranslatorAdapter.translateElement).not.toHaveBeenCalledWith(staleHighlight, expect.any(Object));
+      expect(cancelFrame).toHaveBeenCalledWith(45);
+    });
+
+    it('does not select from stationary mouseover events before genuine movement', () => {
+      const target = document.createElement('div');
+      let runFrame;
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+        runFrame = callback;
+        return 44;
+      });
+      document.elementFromPoint = vi.fn(() => target);
+
+      manager.handleMouseOver(new MouseEvent('mouseover', { clientX: 10, clientY: 10 }));
+      manager.handleMouseOver(new MouseEvent('mouseover', { clientX: 10, clientY: 10 }));
+      expect(runFrame).toBeUndefined();
+      expect(manager.elementSelector.handleMouseOver).not.toHaveBeenCalled();
+
+      manager.handleMouseOver(new MouseEvent('mouseover', { clientX: 11, clientY: 10 }));
+      runFrame();
+      expect(manager.elementSelector.handleMouseOver).toHaveBeenCalledWith(target);
+    });
+
+    it('cancels queued pointer work when listeners are removed', () => {
+      vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(42);
+      const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame');
+      manager.handleMouseOver(new MouseEvent('mouseover', { clientX: 1, clientY: 1 }));
+      manager.handleMouseMove(new MouseEvent('mousemove', { clientX: 2, clientY: 2 }));
+
+      manager.removeEventListeners();
+
+      expect(cancelFrame).toHaveBeenCalledWith(42);
+      expect(manager.mouseSelectionFrame).toBeNull();
+    });
+
+    it('forwards mouseout transitions within the highlighted subtree to cancel a pending clear', () => {
+      const root = document.createElement('div');
+      const child = document.createElement('span');
+      root.appendChild(child);
+      manager.elementSelector.getHighlightedElement.mockReturnValue(root);
+
+      manager.handleMouseOut({ relatedTarget: child });
+
+      expect(manager.elementSelector.handleMouseOut).toHaveBeenCalledWith(child);
     });
 
     it('should handle touch events', () => {
@@ -1838,6 +1924,35 @@ describe('SelectElementManager', () => {
       
       manager.handleTouchMove(moveEvent);
       expect(manager.elementSelector.handleMouseOver).toHaveBeenCalledWith(mockElement);
+    });
+
+    it('translates the touch-move highlight when touchend retains the touch-start target', async () => {
+      const touchStartTarget = document.createElement('div');
+      const touchMoveTarget = document.createElement('section');
+      let highlighted = null;
+      manager.elementSelector.handleMouseOver.mockImplementation(element => {
+        highlighted = element;
+      });
+      manager.elementSelector.getHighlightedElement.mockImplementation(() => highlighted);
+      document.elementFromPoint = vi.fn(() => touchMoveTarget);
+
+      manager.handleTouchStart(new TouchEvent('touchstart', {
+        touches: [{ clientX: 1, clientY: 1, target: touchStartTarget }],
+        cancelable: true,
+      }));
+      manager.handleTouchMove(new TouchEvent('touchmove', {
+        touches: [{ clientX: 20, clientY: 30, target: touchStartTarget }],
+        cancelable: true,
+      }));
+      const touchEnd = new TouchEvent('touchend', { cancelable: true });
+      Object.defineProperty(touchEnd, 'target', { value: touchStartTarget });
+      manager.handleTouchEnd(touchEnd);
+
+      await vi.waitFor(() => expect(manager.domTranslatorAdapter.translateElement)
+        .toHaveBeenCalledWith(touchMoveTarget, expect.any(Object)));
+      expect(manager.domTranslatorAdapter.translateElement)
+        .not.toHaveBeenCalledWith(touchStartTarget, expect.any(Object));
+      expect(isSelectableTextRoot).toHaveBeenCalledWith(touchMoveTarget);
     });
 
     it('should block auxclick (middle-click) interaction', () => {

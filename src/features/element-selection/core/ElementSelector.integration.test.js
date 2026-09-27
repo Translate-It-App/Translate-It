@@ -105,10 +105,25 @@ describe('ElementSelector with real SelectElementPolicy', () => {
     vi.restoreAllMocks();
   });
 
-  it('applies text-length heuristic independently of root policy', () => {
+  it('allows a meaningful standalone block below the strong text threshold', () => {
     const el = sizedTextElement('div', 'Too short'); // Below minTextLength (20)
     selector.handleMouseOver(el);
-    expect(selector.getHighlightedElement()).toBeNull();
+    expect(selector.getHighlightedElement()).toBe(el);
+  });
+
+  it.each(['span', 'a'])('highlights a standalone eligible inline %s root', tag => {
+    const el = sizedTextElement(tag, LONG_TEXT, 0, 0);
+    selector.handleMouseOver(el);
+    expect(selector.getHighlightedElement()).toBe(el);
+  });
+
+  it.each([
+    ['zero-sized', 0, 0],
+    ['oversized', 400, 400],
+  ])('falls back to an eligible standalone block with %s dimensions', (_label, width, height) => {
+    const el = sizedTextElement('div', LONG_TEXT, width, height);
+    selector.handleMouseOver(el);
+    expect(selector.getHighlightedElement()).toBe(el);
   });
 
   it('walks up to a parent that satisfies area/text heuristics', () => {

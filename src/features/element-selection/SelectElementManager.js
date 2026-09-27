@@ -95,6 +95,9 @@ class SelectElementManager extends ResourceTracker {
     this.selectElementLifecycleQueue = Promise.resolve();
     this.instanceId = Math.random().toString(36).substring(7);
     this.isTopFrame = window === window.top;
+    this.mouseSelectionFrame = null;
+    this.lastMouseX = undefined;
+    this.lastMouseY = undefined;
 
     // Logger
     this.logger = getScopedLogger(LOG_COMPONENTS.ELEMENT_SELECTION, 'SelectElementManager');
@@ -127,6 +130,7 @@ class SelectElementManager extends ResourceTracker {
 
     // Event handlers (bound)
     this.handleMouseOver = this.handleMouseOver.bind(this);
+    this.handleMouseMove = this.handleMouseMove.bind(this);
     this.handleMouseOut = this.handleMouseOut.bind(this);
     this.handleTouchStart = this.handleTouchStart.bind(this);
     this.handleTouchMove = this.handleTouchMove.bind(this);
@@ -231,6 +235,9 @@ class SelectElementManager extends ResourceTracker {
       this.isProcessingClick = false;
       this.isCancellationInProgress = false;
       this.hasInitialMovementOccurred = false; 
+      this._cancelPendingMouseFrame();
+      this.lastMouseX = undefined;
+      this.lastMouseY = undefined;
       this.currentOptions = activationOptions; 
 
       if (this.elementSelector) this.elementSelector.clearHighlight();
@@ -424,6 +431,7 @@ class SelectElementManager extends ResourceTracker {
   setupEventListeners() {
     if (this.isActive) {
       window.addEventListener('mouseover', this.handleMouseOver, true);
+      window.addEventListener('mousemove', this.handleMouseMove, true);
       window.addEventListener('mouseout', this.handleMouseOut, true);
       window.addEventListener('touchstart', this.handleTouchStart, { capture: true, passive: false });
       window.addEventListener('touchmove', this.handleTouchMove, { capture: true, passive: false });
@@ -444,7 +452,11 @@ class SelectElementManager extends ResourceTracker {
   }
 
   removeEventListeners() {
+    this._cancelPendingMouseFrame();
+    this.lastMouseX = undefined;
+    this.lastMouseY = undefined;
     window.removeEventListener('mouseover', this.handleMouseOver, true);
+    window.removeEventListener('mousemove', this.handleMouseMove, true);
     window.removeEventListener('mouseout', this.handleMouseOut, true);
     window.removeEventListener('touchstart', this.handleTouchStart, { capture: true, passive: false });
     window.removeEventListener('touchmove', this.handleTouchMove, { capture: true, passive: false });
@@ -464,21 +476,54 @@ class SelectElementManager extends ResourceTracker {
 
   handleMouseOver(event) {
     if (!this.isActive || this.isProcessingClick || this.isCooldownActive()) return;
+    this._queueMouseSelection(event);
+  }
+
+  /** Coalesce desktop pointer movement and resolve only the latest hit target. */
+  handleMouseMove(event) {
+    if (!this.isActive || this.isProcessingClick || this.isCooldownActive()) return;
+    // A mousemove event itself proves the pointer has moved since activation.
+    this.hasInitialMovementOccurred = true;
+    this._queueMouseSelection(event);
+  }
+
+  _queueMouseSelection(event) {
     const currentX = event.clientX;
     const currentY = event.clientY;
     if (this.lastMouseX !== undefined && (this.lastMouseX !== currentX || this.lastMouseY !== currentY)) {
-      if (!this.hasInitialMovementOccurred) this.hasInitialMovementOccurred = true;
+      this.hasInitialMovementOccurred = true;
     }
     this.lastMouseX = currentX;
     this.lastMouseY = currentY;
-    if (!this.hasInitialMovementOccurred) return;
-    const target = resolveSelectInteractionElement(
-      event,
-      element => this.elementSelector?.isOurElement(element),
-      { allowShadowDom: SELECT_ELEMENT_SHADOW_DOM_ENABLED }
-    );
-    if (!target) return;
-    this.elementSelector.handleMouseOver(target);
+    if (this.elementSelector) {
+      const highlighted = this.elementSelector.getHighlightedElement();
+      if (highlighted && event.target && highlighted.contains(event.target)) {
+        this.elementSelector.clearPendingHighlight?.();
+      }
+    }
+    if (!this.hasInitialMovementOccurred || this.mouseSelectionFrame !== null) return;
+
+    this.mouseSelectionFrame = window.requestAnimationFrame(() => {
+      this.mouseSelectionFrame = null;
+      if (!this.isActive || this.isProcessingClick || this.isCooldownActive()) return;
+
+      // Hit-test at frame time so a delayed frame never selects an obsolete event target.
+      const target = document.elementFromPoint(this.lastMouseX, this.lastMouseY);
+      if (!target) return;
+      const resolvedTarget = resolveSelectInteractionElement(
+        { target, composedPath: () => [target] },
+        element => this.elementSelector?.isOurElement(element),
+        { allowShadowDom: SELECT_ELEMENT_SHADOW_DOM_ENABLED }
+      );
+      if (resolvedTarget) this.elementSelector.handleMouseOver(resolvedTarget);
+    });
+  }
+
+  _cancelPendingMouseFrame() {
+    if (this.mouseSelectionFrame !== null) {
+      window.cancelAnimationFrame(this.mouseSelectionFrame);
+      this.mouseSelectionFrame = null;
+    }
   }
 
   handleTouchStart(event) {
@@ -505,13 +550,7 @@ class SelectElementManager extends ResourceTracker {
 
   handleMouseOut(event) {
     if (!this.isActive || this.isProcessingClick) return;
-    const target = resolveSelectInteractionElement(
-      event,
-      element => this.elementSelector?.isOurElement(element),
-      { allowShadowDom: SELECT_ELEMENT_SHADOW_DOM_ENABLED }
-    );
-    if (!target) return;
-    this.elementSelector.handleMouseOut(target);
+    this.elementSelector.handleMouseOut(event.relatedTarget);
   }
 
   handleInteraction(event) {
@@ -568,12 +607,15 @@ class SelectElementManager extends ResourceTracker {
     if (this.isProcessingClick) return;
     try {
       this.isProcessingClick = true;
-      const elementToTranslate = this.elementSelector.getHighlightedElement()
-        || resolveSelectInteractionElement(
-          event,
-          element => this.elementSelector?.isOurElement(element),
-          { allowShadowDom: SELECT_ELEMENT_SHADOW_DOM_ENABLED }
-        );
+      const interactionElement = resolveSelectInteractionElement(
+        event,
+        element => this.elementSelector?.isOurElement(element),
+        { allowShadowDom: SELECT_ELEMENT_SHADOW_DOM_ENABLED }
+      );
+      const highlightedElement = this.elementSelector.getHighlightedElement();
+      const elementToTranslate = event?.type !== 'touchend' && interactionElement
+        ? this.elementSelector.findBestTextElement(interactionElement)
+        : highlightedElement;
       if (!elementToTranslate) return;
 
       // Authoritative click revalidation: re-run root eligibility at click time
@@ -940,6 +982,7 @@ class SelectElementManager extends ResourceTracker {
   getStatus() { return { serviceActive: this.isActive, isProcessingClick: this.isProcessingClick, isInitialized: this.isInitialized, instanceId: this.instanceId, isTopFrame: this.isTopFrame }; }
   forceCleanup() {
     try {
+      this._cancelPendingMouseFrame();
       this.removeEventListeners();
       this.elementSelector.deactivate();
       if (this.isTopFrame) this.dismissNotification();
