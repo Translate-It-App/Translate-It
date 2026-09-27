@@ -1299,7 +1299,7 @@
     "message": "مدل"
   },
   "deepseek_api_model_placeholder": {
-    "message": "مدل DeepSeek را وارد کنید (مثلا: deepseek-v4-flash)"
+    "message": "مدل DeepSeek را وارد کنید (مثلا: deepseek-flash)"
   },
   "deepseek_thinking_mode_label": {
     "message": "حالت تفکر"

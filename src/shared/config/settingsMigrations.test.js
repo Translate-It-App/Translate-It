@@ -378,16 +378,19 @@ describe('Settings Migrations', () => {
   });
 
   it.each([
-    ['deepseek-chat', 'deepseek-v4-flash', 'disabled'],
-    ['deepseek-reasoner', 'deepseek-v4-flash', 'high']
-  ])('migrates inactive DeepSeek model %s to %s with %s thinking', async (oldModel, newModel, thinkingMode) => {
+    ['deepseek-v4-flash', 'deepseek-flash', 'low', undefined],
+    ['deepseek-chat', 'deepseek-flash', 'low', 'disabled'],
+    ['deepseek-reasoner', 'deepseek-flash', 'low', 'high']
+  ])('migrates inactive DeepSeek model %s to %s with %s thinking', async (oldModel, newModel, inputThinking, expectedThinking) => {
     const { updates, logs } = await runSettingsMigrations({
       DEEPSEEK_MODELS: [{ value: oldModel, label: 'Legacy' }],
-      DEEPSEEK_API_MODEL: oldModel
+      DEEPSEEK_API_MODEL: oldModel,
+      DEEPSEEK_THINKING_MODE: inputThinking
     });
 
     expect(updates.DEEPSEEK_API_MODEL).toBe(newModel);
-    expect(updates.DEEPSEEK_THINKING_MODE).toBe(thinkingMode);
+    // An already-valid Thinking Mode is preserved (no update) unless the legacy contract remaps it.
+    expect(updates.DEEPSEEK_THINKING_MODE).toBe(expectedThinking);
     expect(logs).toContain(`Migrated DEEPSEEK_API_MODEL from ${oldModel} to ${newModel}`);
   });
 
@@ -399,14 +402,14 @@ describe('Settings Migrations', () => {
       DEEPSEEK_API_MODEL: oldModel
     });
 
-    expect(updates.DEEPSEEK_API_MODEL).toBe('deepseek-v4-flash');
+    expect(updates.DEEPSEEK_API_MODEL).toBe('deepseek-flash');
     expect(updates.DEEPSEEK_THINKING_MODE).toBe(thinkingMode);
   });
 
   it('preserves current DeepSeek models and arbitrary custom IDs', async () => {
     const currentFlash = await runSettingsMigrations({
       DEEPSEEK_MODELS: [{ value: 'legacy-model', label: 'Legacy' }],
-      DEEPSEEK_API_MODEL: 'deepseek-v4-flash',
+      DEEPSEEK_API_MODEL: 'deepseek-flash',
       DEEPSEEK_THINKING_MODE: 'low'
     });
     const currentPro = await runSettingsMigrations({
@@ -428,7 +431,7 @@ describe('Settings Migrations', () => {
     expect(custom.updates.DEEPSEEK_THINKING_MODE).toBeUndefined();
   });
 
-  it('falls back to the DeepSeek V4 Flash default for an empty selection', async () => {
+  it('falls back to the DeepSeek Flash default for an empty selection', async () => {
     const { updates, logs } = await runSettingsMigrations({
       DEEPSEEK_MODELS: CONFIG.DEEPSEEK_MODELS,
       DEEPSEEK_API_MODEL: ''

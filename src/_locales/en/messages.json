@@ -1299,7 +1299,7 @@
     "message": "Model"
   },
   "deepseek_api_model_placeholder": {
-    "message": "Enter DeepSeek model (e.g., deepseek-v4-flash)"
+    "message": "Enter DeepSeek model (e.g., deepseek-flash)"
   },
   "deepseek_thinking_mode_label": {
     "message": "Thinking Mode"

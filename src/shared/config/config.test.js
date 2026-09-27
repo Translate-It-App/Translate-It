@@ -114,7 +114,7 @@ describe('Config Module', () => {
     });
 
     it('should expose approved DeepSeek text models in order', () => {
-      expect(CONFIG.DEEPSEEK_API_MODEL).toBe('deepseek-v4-flash');
+      expect(CONFIG.DEEPSEEK_API_MODEL).toBe('deepseek-flash');
       expect(CONFIG.DEEPSEEK_API_URL).toBe('https://api.deepseek.com/chat/completions');
       expect(CONFIG.DEEPSEEK_THINKING_MODE).toBe('disabled');
       expect(CONFIG.DEEPSEEK_THINKING_MODE_OPTIONS.map(option => option.value)).toEqual([
@@ -125,8 +125,8 @@ describe('Config Module', () => {
       ]);
       expect(CONFIG.DEEPSEEK_MODELS).toEqual([
         {
-          value: 'deepseek-v4-flash',
-          name: 'DeepSeek V4 Flash',
+          value: 'deepseek-flash',
+          name: 'DeepSeek Flash',
           supportsThinking: true
         },
         {

@@ -52,4 +52,4 @@
 - **OpenAI / OpenRouter:** `gpt-3.5-turbo`
 - **Requesty:** `openai/gpt-4o-mini`
 - **Google Gemini / WebAI to API:** `gemini-1.5-flash`
-- **DeepSeek:** `deepseek-v4-flash`
+- **DeepSeek:** `deepseek-flash`

@@ -1299,7 +1299,7 @@
     "message": "モデル"
   },
   "deepseek_api_model_placeholder": {
-    "message": "DeepSeekモデルを入力（例：deepseek-v4-flash）"
+    "message": "DeepSeekモデルを入力（例：deepseek-flash）"
   },
   "deepseek_thinking_mode_label": {
     "message": "思考モード"

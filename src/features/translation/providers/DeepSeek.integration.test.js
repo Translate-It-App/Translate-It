@@ -13,9 +13,9 @@ vi.mock('webextension-polyfill', () => ({
 
 vi.mock('@/shared/config/config.js', () => ({
   CONFIG: {
-    DEEPSEEK_API_MODEL: 'deepseek-v4-flash',
+    DEEPSEEK_API_MODEL: 'deepseek-flash',
     DEEPSEEK_MODELS: [
-      { value: 'deepseek-v4-flash', supportsThinking: true },
+      { value: 'deepseek-flash', supportsThinking: true },
       { value: 'deepseek-v4-pro', supportsThinking: true },
       { value: 'deepseek-chat', supportsThinking: false },
       { value: 'custom' },
@@ -29,7 +29,7 @@ vi.mock('@/shared/config/config.js', () => ({
   },
   getDeepSeekApiKeysAsync: vi.fn().mockResolvedValue(['ds-key-1', 'ds-key-2']),
   getDeepSeekApiUrlAsync: vi.fn().mockResolvedValue('https://api.deepseek.com/chat/completions'),
-  getDeepSeekApiModelAsync: vi.fn().mockResolvedValue('deepseek-v4-flash'),
+  getDeepSeekApiModelAsync: vi.fn().mockResolvedValue('deepseek-flash'),
   getDeepSeekThinkingModeAsync: vi.fn().mockResolvedValue('disabled'),
   getProviderOptimizationLevelAsync: vi.fn(() => Promise.resolve('balanced')),
 }));

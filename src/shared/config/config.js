@@ -201,7 +201,7 @@ export const CONFIG = {
   ],
   DEEPSEEK_API_KEY: "",
   DEEPSEEK_API_URL: "https://api.deepseek.com/chat/completions",
-  DEEPSEEK_API_MODEL: "deepseek-v4-flash",
+  DEEPSEEK_API_MODEL: "deepseek-flash",
   DEEPSEEK_THINKING_MODE: "disabled",
   DEEPSEEK_THINKING_MODE_OPTIONS: [
     { value: "disabled", name: "Disabled" },
@@ -210,7 +210,7 @@ export const CONFIG = {
     { value: "max", name: "Max" }
   ],
   DEEPSEEK_MODELS: [
-    { value: "deepseek-v4-flash", name: "DeepSeek V4 Flash", supportsThinking: true },
+    { value: "deepseek-flash", name: "DeepSeek Flash", supportsThinking: true },
     { value: "deepseek-v4-pro", name: "DeepSeek V4 Pro", supportsThinking: true },
     { value: "custom", name: "Custom Model", supportsThinking: false }
   ],

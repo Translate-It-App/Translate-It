@@ -41,8 +41,9 @@ const MODEL_VALUE_MIGRATIONS = {
     'gpt-4o': 'gpt-6-sol'
   },
   DEEPSEEK_MODELS: {
-    'deepseek-chat': 'deepseek-v4-flash',
-    'deepseek-reasoner': 'deepseek-v4-flash'
+    'deepseek-v4-flash': 'deepseek-flash',
+    'deepseek-chat': 'deepseek-flash',
+    'deepseek-reasoner': 'deepseek-flash'
   },
   GEMINI_MODELS: {
     'gemini-3.7-flash': 'gemini-3.8-flash',
