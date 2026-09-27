@@ -1284,7 +1284,7 @@
     "message": "Model"
   },
   "openrouter_api_model_placeholder": {
-    "message": "Enter OpenRouter model (e.g., openai/gpt-6-luna)"
+    "message": "Enter OpenRouter model"
   },
   "deepseek_api_settings_title": {
     "message": "DeepSeek Settings"
@@ -1299,7 +1299,7 @@
     "message": "Model"
   },
   "deepseek_api_model_placeholder": {
-    "message": "Enter DeepSeek model (e.g., deepseek-flash)"
+    "message": "Enter DeepSeek model"
   },
   "deepseek_thinking_mode_label": {
     "message": "Thinking Mode"

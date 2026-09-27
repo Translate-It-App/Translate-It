@@ -1284,7 +1284,7 @@
     "message": "مدل"
   },
   "openrouter_api_model_placeholder": {
-    "message": "مدل OpenRouter (مثلا: openai/gpt-6-luna) را وارد کنید"
+    "message": "مدل OpenRouter را وارد کنید"
   },
   "deepseek_api_settings_title": {
     "message": "تنظیمات DeepSeek"
@@ -1299,7 +1299,7 @@
     "message": "مدل"
   },
   "deepseek_api_model_placeholder": {
-    "message": "مدل DeepSeek را وارد کنید (مثلا: deepseek-flash)"
+    "message": "مدل DeepSeek را وارد کنید"
   },
   "deepseek_thinking_mode_label": {
     "message": "حالت تفکر"
