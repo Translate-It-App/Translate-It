@@ -14,7 +14,7 @@ vi.mock('webextension-polyfill', () => ({
 vi.mock('@/shared/config/config.js', async (importOriginal) => ({
   ...(await importOriginal()),
   getOpenRouterApiKeysAsync: vi.fn().mockResolvedValue(['key-1', 'key-2']),
-  getOpenRouterApiModelAsync: vi.fn().mockResolvedValue('openai/gpt-4o-mini'),
+  getOpenRouterApiModelAsync: vi.fn().mockResolvedValue('openai/gpt-6-luna'),
   getProviderOptimizationLevelAsync: vi.fn(() => Promise.resolve('balanced')),
 }));
 

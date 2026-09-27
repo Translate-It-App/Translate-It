@@ -22,7 +22,7 @@ vi.mock('@/shared/config/config.js', async (importOriginal) => {
   return {
     ...actual,
     getOpenRouterApiKeysAsync: vi.fn().mockResolvedValue(['test-key']),
-    getOpenRouterApiModelAsync: vi.fn().mockResolvedValue('openai/gpt-4o-mini'),
+    getOpenRouterApiModelAsync: vi.fn().mockResolvedValue('openai/gpt-6-luna'),
   };
 });
 
@@ -102,8 +102,8 @@ describe('OpenRouterProvider Error Handling', () => {
     expect(result).toBe('OpenRouter Result');
   });
 
-  it.each(['openai/gpt-4o-mini', 'openai/gpt-4o'])('preserves curated model payload for %s', async (model) => {
-    getOpenRouterApiModelAsync.mockResolvedValue(model);
+  it('sends reasoning effort none for openai/gpt-6-luna with structured JSON intact', async () => {
+    getOpenRouterApiModelAsync.mockResolvedValue('openai/gpt-6-luna');
     const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
 
     await provider._callAI('system', 'source', { expectedFormat: ResponseFormat.JSON_OBJECT });
@@ -111,15 +111,39 @@ describe('OpenRouterProvider Error Handling', () => {
     const payload = JSON.parse(executeRequest.mock.calls[0][0].fetchOptions.body);
     expect(executeRequest.mock.calls[0][0].url).toBe(CONFIG.OPENROUTER_API_URL);
     expect(payload).toMatchObject({
-      model,
+      model: 'openai/gpt-6-luna',
       messages: [
         { role: 'system', content: 'system' },
         { role: 'user', content: 'source' }
       ],
       max_tokens: 4096,
+      reasoning: { effort: 'none' },
       response_format: { type: 'json_object' }
     });
   });
+
+  it.each(['google/gemini-3.8-flash', 'anthropic/claude-sonnet-5', 'provider/custom-model'])(
+    'omits reasoning for model %s with structured JSON intact',
+    async (model) => {
+      getOpenRouterApiModelAsync.mockResolvedValue(model);
+      const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+
+      await provider._callAI('system', 'source', { expectedFormat: ResponseFormat.JSON_OBJECT });
+
+      const payload = JSON.parse(executeRequest.mock.calls[0][0].fetchOptions.body);
+      expect(executeRequest.mock.calls[0][0].url).toBe(CONFIG.OPENROUTER_API_URL);
+      expect(payload).toMatchObject({
+        model,
+        messages: [
+          { role: 'system', content: 'system' },
+          { role: 'user', content: 'source' }
+        ],
+        max_tokens: 4096,
+        response_format: { type: 'json_object' }
+      });
+      expect(payload).not.toHaveProperty('reasoning');
+    }
+  );
 
   it('sends json_object response format for JSON_ARRAY', async () => {
     const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');

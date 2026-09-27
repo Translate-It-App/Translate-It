@@ -45,6 +45,16 @@ const MODEL_VALUE_MIGRATIONS = {
     'deepseek-chat': 'deepseek-flash',
     'deepseek-reasoner': 'deepseek-flash'
   },
+  OPENROUTER_MODELS: {
+    'openai/gpt-4o-mini': 'openai/gpt-6-luna',
+    'openai/gpt-4.1-mini': 'openai/gpt-6-luna',
+    'google/gemini-2.5-flash-lite': 'google/gemini-3.5-flash-lite',
+    'google/gemini-2.5-flash': 'google/gemini-3.8-flash',
+    'mistralai/mistral-small-3.2-24b-instruct': 'mistralai/mistral-small-2603',
+    'deepseek/deepseek-chat': 'deepseek/deepseek-v4.1-flash',
+    'qwen/qwen3.5-flash-02-23': 'qwen/qwen3.8-flash',
+    'anthropic/claude-sonnet-4.6': 'anthropic/claude-sonnet-5'
+  },
   GEMINI_MODELS: {
     'gemini-3.7-flash': 'gemini-3.8-flash',
     'gemini-3.6-flash': 'gemini-3.8-flash',

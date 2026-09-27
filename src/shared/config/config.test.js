@@ -149,19 +149,18 @@ describe('Config Module', () => {
     });
 
     it('should expose the curated OpenRouter models in order', () => {
-      expect(CONFIG.OPENROUTER_API_MODEL).toBe('openai/gpt-4o-mini');
+      expect(CONFIG.OPENROUTER_API_MODEL).toBe('openai/gpt-6-luna');
       expect(CONFIG.OPENROUTER_API_URL).toBe('https://openrouter.ai/api/v1/chat/completions');
       expect(CONFIG.OPENROUTER_MODELS).toEqual([
-        { value: 'openai/gpt-4o-mini', name: 'OpenAI GPT-4o Mini' },
-        { value: 'google/gemini-2.5-flash-lite', name: 'Google Gemini 2.5 Flash-Lite' },
-        { value: 'mistralai/mistral-small-3.2-24b-instruct', name: 'Mistral Small 3.2' },
-        { value: 'google/gemini-2.5-flash', name: 'Google Gemini 2.5 Flash' },
+        { value: 'openai/gpt-6-luna', name: 'OpenAI GPT-6 Luna' },
+        { value: 'google/gemini-3.5-flash-lite', name: 'Google Gemini 3.5 Flash-Lite' },
+        { value: 'mistralai/mistral-small-2603', name: 'Mistral Small 4' },
+        { value: 'google/gemini-3.8-flash', name: 'Google Gemini 3.8 Flash' },
         { value: 'anthropic/claude-haiku-4.5', name: 'Anthropic Claude Haiku 4.5' },
-        { value: 'openai/gpt-4.1-mini', name: 'OpenAI GPT-4.1 Mini' },
-        { value: 'deepseek/deepseek-chat', name: 'DeepSeek Chat' },
-        { value: 'qwen/qwen3.5-flash-02-23', name: 'Qwen 3.5 Flash' },
+        { value: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' },
+        { value: 'qwen/qwen3.8-flash', name: 'Qwen 3.8 Flash' },
         { value: 'meta-llama/llama-3.3-70b-instruct', name: 'Meta Llama 3.3 70B' },
-        { value: 'anthropic/claude-sonnet-4.6', name: 'Anthropic Claude Sonnet 4.6' },
+        { value: 'anthropic/claude-sonnet-5', name: 'Anthropic Claude Sonnet 5' },
         { value: 'google/gemma-4-26b-a4b-it:free', name: 'Google Gemma 4 26B A4B (Free)' },
         { value: 'nvidia/nemotron-3-super-120b-a12b:free', name: 'NVIDIA Nemotron 3 Super (Free)' },
         { value: 'custom', name: 'Custom Model' }
@@ -169,7 +168,7 @@ describe('Config Module', () => {
       const curatedModels = CONFIG.OPENROUTER_MODELS.filter(model => model.value !== 'custom');
       const freeModels = curatedModels.filter(model => model.value.endsWith(':free'));
 
-      expect(curatedModels).toHaveLength(12);
+      expect(curatedModels).toHaveLength(11);
       expect(freeModels).toHaveLength(2);
       expect(freeModels.every(model => model.name.includes('(Free)'))).toBe(true);
       expect(CONFIG.OPENROUTER_MODELS.at(-1)).toEqual({ value: 'custom', name: 'Custom Model' });

@@ -21,6 +21,10 @@ import { recordProviderCompletion } from "@/features/translation/ir/TranslationO
 
 const logger = getScopedLogger(LOG_COMPONENTS.PROVIDERS, 'OpenRouter');
 
+// Curated models that require disabled reasoning. Custom/unknown IDs keep the
+// conservative payload (no reasoning effort).
+const OPENROUTER_REASONING_EFFORT_NONE_MODELS = new Set(['openai/gpt-6-luna']);
+
 export class OpenRouterProvider extends BaseAIProvider {
   static type = "ai";
   static description = "OpenRouter Multi-Model API";
@@ -82,6 +86,8 @@ export class OpenRouterProvider extends BaseAIProvider {
 
     const { messages } = await AIConversationHelper.getConversationMessages(sessionId, this.providerName, userText, systemPrompt, mode, { callPurpose, conversationParticipates });
 
+    const activeModel = model || CONFIG.OPENROUTER_API_MODEL;
+
     const fetchOptions = {
       method: "POST",
       headers: {
@@ -91,9 +97,10 @@ export class OpenRouterProvider extends BaseAIProvider {
         "X-Title": "Translate-It Extension",
       },
       body: JSON.stringify({
-        model: model || CONFIG.OPENROUTER_API_MODEL,
+        model: activeModel,
         messages: messages,
         max_tokens: 4096,
+        ...(OPENROUTER_REASONING_EFFORT_NONE_MODELS.has(activeModel) && { reasoning: { effort: 'none' } }),
         // Enforce JSON Mode if requested
         ...((expectedFormat === ResponseFormat.JSON_OBJECT || expectedFormat === ResponseFormat.JSON_ARRAY)
           && { response_format: { type: "json_object" } })

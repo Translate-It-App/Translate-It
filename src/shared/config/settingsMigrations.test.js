@@ -441,6 +441,26 @@ describe('Settings Migrations', () => {
     expect(logs.some(log => log.includes('Reset DEEPSEEK_API_MODEL'))).toBe(true);
   });
 
+  it.each([
+    ['openai/gpt-4o-mini', 'openai/gpt-6-luna'],
+    ['openai/gpt-4.1-mini', 'openai/gpt-6-luna'],
+    ['google/gemini-2.5-flash-lite', 'google/gemini-3.5-flash-lite'],
+    ['google/gemini-2.5-flash', 'google/gemini-3.8-flash'],
+    ['mistralai/mistral-small-3.2-24b-instruct', 'mistralai/mistral-small-2603'],
+    ['deepseek/deepseek-chat', 'deepseek/deepseek-v4.1-flash'],
+    ['qwen/qwen3.5-flash-02-23', 'qwen/qwen3.8-flash'],
+    ['anthropic/claude-sonnet-4.6', 'anthropic/claude-sonnet-5']
+  ])('migrates inactive OpenRouter model %s to %s', async (oldModel, newModel) => {
+    const { updates, logs } = await runSettingsMigrations({
+      OPENROUTER_MODELS: [{ value: oldModel, label: 'Legacy' }],
+      OPENROUTER_API_MODEL: oldModel
+    });
+
+    expect(updates.OPENROUTER_API_MODEL).toBe(newModel);
+    expect(CONFIG.OPENROUTER_MODELS.some(model => model.value === newModel)).toBe(true);
+    expect(logs).toContain(`Migrated OPENROUTER_API_MODEL from ${oldModel} to ${newModel}`);
+  });
+
   it.each(CONFIG.OPENROUTER_MODELS
     .filter(model => model.value !== 'custom')
     .map(model => model.value))('preserves curated OpenRouter model ID %s during list synchronization', async (model) => {
