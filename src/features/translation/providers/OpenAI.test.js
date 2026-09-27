@@ -23,7 +23,7 @@ vi.mock('@/shared/config/config.js', async (importOriginal) => {
   return {
     ...actual,
     getOpenAIApiKeysAsync: vi.fn().mockResolvedValue(['test-key']),
-    getOpenAIModelAsync: vi.fn().mockResolvedValue('gpt-4o-mini'),
+    getOpenAIModelAsync: vi.fn().mockResolvedValue('gpt-6-luna'),
   };
 });
 
@@ -96,18 +96,16 @@ describe('OpenAIProvider Error Handling', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    getOpenAIModelAsync.mockResolvedValue('gpt-4o-mini');
+    getOpenAIModelAsync.mockResolvedValue('gpt-6-luna');
     provider = new OpenAIProvider();
   });
 
   it.each([
-    ['gpt-4o', true],
-    ['gpt-4o-mini', true],
-    ['gpt-5.6-terra', false],
-    ['gpt-5.6-luna', false],
-    ['gpt-5.6-sol', false],
-    ['custom-model-id', false],
-  ])('builds modern text request for %s', async (model, supportsTemperature) => {
+    ['gpt-6-luna', 'none'],
+    ['gpt-6-sol', 'none'],
+    ['gpt-4o-mini', undefined],
+    ['custom-model-id', undefined],
+  ])('builds modern text request for %s', async (model, reasoningEffort) => {
     getOpenAIModelAsync.mockResolvedValue(model);
     const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
 
@@ -125,10 +123,12 @@ describe('OpenAIProvider Error Handling', () => {
       ],
     });
     expect(payload).not.toHaveProperty('max_tokens');
-    if (supportsTemperature) {
-      expect(payload).toHaveProperty('temperature', 0.1);
+    // No curated or custom model sends temperature; GPT-6 runs with disabled reasoning.
+    expect(payload).not.toHaveProperty('temperature');
+    if (reasoningEffort) {
+      expect(payload).toHaveProperty('reasoning_effort', reasoningEffort);
     } else {
-      expect(payload).not.toHaveProperty('temperature');
+      expect(payload).not.toHaveProperty('reasoning_effort');
     }
   });
 

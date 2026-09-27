@@ -160,12 +160,10 @@ export const CONFIG = {
   ],
   OPENAI_API_KEY: "",
   OPENAI_API_URL: "https://api.openai.com/v1/chat/completions",
-  OPENAI_API_MODEL: "gpt-5.6-luna",
+  OPENAI_API_MODEL: "gpt-6-luna",
   OPENAI_MODELS: [
-    { value: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
-    { value: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
-    { value: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
-    { value: "gpt-4o-mini", name: "GPT-4o Mini" },
+    { value: "gpt-6-luna", name: "GPT-6 Luna" },
+    { value: "gpt-6-sol", name: "GPT-6 Sol" },
     { value: "custom", name: "Custom Model" }
   ],
   OPENROUTER_API_KEY: "",

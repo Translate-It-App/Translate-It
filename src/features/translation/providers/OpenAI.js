@@ -23,8 +23,8 @@ import { recordProviderCompletion } from "@/features/translation/ir/TranslationO
 const logger = getScopedLogger(LOG_COMPONENTS.PROVIDERS, 'OpenAI');
 
 const OPENAI_REQUEST_CAPABILITIES = Object.freeze({
-  'gpt-4o': Object.freeze({ supportsTemperature: true }),
-  'gpt-4o-mini': Object.freeze({ supportsTemperature: true }),
+  'gpt-6-luna': Object.freeze({ supportsTemperature: false, reasoningEffort: 'none' }),
+  'gpt-6-sol': Object.freeze({ supportsTemperature: false, reasoningEffort: 'none' }),
 });
 
 const getRequestCapabilities = (model) => OPENAI_REQUEST_CAPABILITIES[model] || { supportsTemperature: false };
@@ -40,7 +40,7 @@ const OPENAI_REQUEST_INVALID_CODES = new Set(['invalid_request_error']);
 
 export class OpenAIProvider extends BaseAIProvider {
   static type = "ai";
-  static description = "OpenAI's GPT models (GPT-4, GPT-3.5)";
+  static description = "OpenAI GPT models";
   static displayName = "OpenAI GPT";
 
   constructor() {
@@ -134,6 +134,9 @@ export class OpenAIProvider extends BaseAIProvider {
         messages: messages,
         max_completion_tokens: 4096,
         ...(requestCapabilities.supportsTemperature && { temperature: 0.1 }),
+        // Curated GPT-6 models run with disabled reasoning; custom/unknown IDs
+        // keep the conservative payload (no temperature, no reasoning effort).
+        ...(requestCapabilities.reasoningEffort && { reasoning_effort: requestCapabilities.reasoningEffort }),
         // Enforce JSON Mode for both Object and Batch (Array) contracts
         ...((expectedFormat === ResponseFormat.JSON_OBJECT || expectedFormat === ResponseFormat.JSON_ARRAY) && { 
           response_format: { type: "json_object" } 

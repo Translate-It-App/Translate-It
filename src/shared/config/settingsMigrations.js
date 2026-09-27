@@ -29,12 +29,16 @@ const logger = getScopedLogger(LOG_COMPONENTS.CONFIG, 'SettingsMigrations');
 
 const MODEL_VALUE_MIGRATIONS = {
   OPENAI_MODELS: {
-    o1: 'gpt-5.6-terra',
-    'o1-mini': 'gpt-5.6-luna',
-    'o3-mini': 'gpt-5.6-luna',
-    'gpt-4.5-preview': 'gpt-5.6-terra',
-    'chatgpt-4o-latest': 'gpt-5.6-terra',
-    'gpt-4o': 'gpt-5.6-terra'
+    'gpt-5.6-luna': 'gpt-6-luna',
+    'gpt-4o-mini': 'gpt-6-luna',
+    'o1-mini': 'gpt-6-luna',
+    'o3-mini': 'gpt-6-luna',
+    'gpt-5.6-terra': 'gpt-6-sol',
+    'gpt-5.6-sol': 'gpt-6-sol',
+    o1: 'gpt-6-sol',
+    'gpt-4.5-preview': 'gpt-6-sol',
+    'chatgpt-4o-latest': 'gpt-6-sol',
+    'gpt-4o': 'gpt-6-sol'
   },
   DEEPSEEK_MODELS: {
     'deepseek-chat': 'deepseek-v4-flash',

@@ -94,12 +94,10 @@ describe('Config Module', () => {
 
     it('should expose approved OpenAI text models in order', () => {
       expect(CONFIG.OPENAI_API_URL).toBe('https://api.openai.com/v1/chat/completions');
-      expect(CONFIG.OPENAI_API_MODEL).toBe('gpt-5.6-luna');
+      expect(CONFIG.OPENAI_API_MODEL).toBe('gpt-6-luna');
       expect(CONFIG.OPENAI_MODELS.map(model => model.value)).toEqual([
-        'gpt-5.6-terra',
-        'gpt-5.6-luna',
-        'gpt-5.6-sol',
-        'gpt-4o-mini',
+        'gpt-6-luna',
+        'gpt-6-sol',
         'custom'
       ]);
       expect(CONFIG.OPENAI_MODELS).not.toEqual(
@@ -109,6 +107,7 @@ describe('Config Module', () => {
           expect.objectContaining({ value: 'o3-mini' }),
           expect.objectContaining({ value: 'gpt-4.5-preview' }),
           expect.objectContaining({ value: 'gpt-4o' }),
+          expect.objectContaining({ value: 'gpt-4o-mini' }),
           expect.objectContaining({ value: 'chatgpt-4o-latest' })
         ])
       );

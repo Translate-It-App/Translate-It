@@ -328,12 +328,16 @@ describe('Settings Migrations', () => {
   });
 
   it.each([
-    ['o1', 'gpt-5.6-terra'],
-    ['o1-mini', 'gpt-5.6-luna'],
-    ['o3-mini', 'gpt-5.6-luna'],
-    ['gpt-4.5-preview', 'gpt-5.6-terra'],
-    ['chatgpt-4o-latest', 'gpt-5.6-terra'],
-    ['gpt-4o', 'gpt-5.6-terra']
+    ['gpt-5.6-luna', 'gpt-6-luna'],
+    ['gpt-4o-mini', 'gpt-6-luna'],
+    ['o1-mini', 'gpt-6-luna'],
+    ['o3-mini', 'gpt-6-luna'],
+    ['gpt-5.6-terra', 'gpt-6-sol'],
+    ['gpt-5.6-sol', 'gpt-6-sol'],
+    ['o1', 'gpt-6-sol'],
+    ['gpt-4.5-preview', 'gpt-6-sol'],
+    ['chatgpt-4o-latest', 'gpt-6-sol'],
+    ['gpt-4o', 'gpt-6-sol']
   ])('migrates inactive OpenAI model %s to %s', async (oldModel, newModel) => {
     const { updates, logs } = await runSettingsMigrations({
       OPENAI_MODELS: [{ value: oldModel, label: 'Legacy' }],
@@ -347,7 +351,11 @@ describe('Settings Migrations', () => {
   it('preserves current OpenAI static and arbitrary custom models', async () => {
     const currentStatic = await runSettingsMigrations({
       OPENAI_MODELS: [{ value: 'legacy-model', label: 'Legacy' }],
-      OPENAI_API_MODEL: 'gpt-4o-mini'
+      OPENAI_API_MODEL: 'gpt-6-luna'
+    });
+    const currentSol = await runSettingsMigrations({
+      OPENAI_MODELS: [{ value: 'legacy-model', label: 'Legacy' }],
+      OPENAI_API_MODEL: 'gpt-6-sol'
     });
     const custom = await runSettingsMigrations({
       OPENAI_MODELS: [{ value: 'legacy-model', label: 'Legacy' }],
@@ -355,6 +363,7 @@ describe('Settings Migrations', () => {
     });
 
     expect(currentStatic.updates.OPENAI_API_MODEL).toBeUndefined();
+    expect(currentSol.updates.OPENAI_API_MODEL).toBeUndefined();
     expect(custom.updates.OPENAI_API_MODEL).toBeUndefined();
   });
 
