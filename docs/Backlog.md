@@ -1,71 +1,19 @@
 # Project Backlog
 
-List of features, enhancements, and ideas planned for future development.
+Translate It's active backlog is tracked in GitHub rather than in repository-local backlog files.
 
-## Features and Enhancements
+## Source of Truth
 
-- **ESC Key Flexibility**: Add option to revert and cancel `Select Element` via `ESC`.
-- **Code Cleanup**: Remove unused `compact` mode from `ProviderSelector.vue` to improve maintainability.
-- **Error Handling Refactoring**: The error handling logic is still inherited from a legacy version. Although the system currently functions correctly, it is architecturally unsound as both lower and upper layers are redundantly handling errors. Detailed information can be found in `ERROR_MANAGMENT_ISSUE.md`.
+- **Roadmap / active work:** https://github.com/orgs/Translate-It-App/projects/2
+- **Actionable work:** https://github.com/Translate-It-App/Translate-It/issues
+- **Ideas and research:** https://github.com/Translate-It-App/Translate-It/discussions
 
-- Test Connection در صفحه تنظیمات مشکل داره و همیشه fail میشه.
-- وقتی در صفحه تنظیمات Enable in Provider list رو فعال/غیرفعال میکنیم، همون موقع در افزونه اعمال نمیشه و باید ریلود کردن تا اعمال بشه.
-- صفحه تنظیمات TTS Voice Test در فایرفاکس کار نمیکنه.
-- در صفحه تنظیمات در تب Advance یک آکاردون Language Detection اشتباهی وجود دارد و باید حذف شود.
-- بروزرسانی Model ها، مثلا DeepSeek 4
+## Tracking Rules
 
+- Use an **Issue** for actionable bugs, enhancements, security work, documentation work, and technical debt.
+- Add actionable Issues to the **Translate It Roadmap** project with Status and Priority.
+- Use a **Discussion** for ideas, research, or product/architecture decisions that are not ready for implementation.
+- Use a **Tracking Issue** only when an initiative has multiple independently actionable child issues.
+- Keep architecture and behavioral source-of-truth documents under `docs/adr/`, `docs/technical/`, and `docs/roadmap/`.
 
-- Integration Module: Gmail, Twitter, Goolge Docs
-
-- در ترجمه صفحه و ترجمه المان، در سایت زیر باعث میشه جهت که راست چین میشود، زیر عکس ها قرار بگیره. باید جلوی جابه جا شدن متن ها رو گرفت در موقع چپ چین و راست چین شدن
-https://appcenter.browser.qq.com/
-
-- مقدار shared/config/constanst ها تفکیک شده. توی پروژه کدهای قدیمی هنوز فایل کامل constants.js رو ایمپورت میکنند. باید ریفکتور اتفاق بیافته تا از فایل های صحیح استفاده کنند.
-
-- بهبود حالت نوشتن
-
-- بهبود نمایش آیکون در انتخاب متن، تا برای فایرفاکس در جای مناسبی ظاهر بشه. در حال حاضر با آیکونی که خود مرورگر برای انتخاب متن انتخاب میکنه، تداخل داره.
-
-- اضافه کردن ویژگی textbox در WindowsManager تا کاربر بتونه متن رو ادیت کنه و دوباره ترجمه کنه
-
-- مینیمال کردن کامپوننت انتخاب سرعت در صفحه تنظیمات پرووایدرها
-
-- اضافه کردن جستجوی گوگل - https://github.com/LuanRT/google-this
-
-- اضافه کردن FAV برای کلمات
-
-- بهبود لاگ تا لازم نباشه در همه فایل ها تعریف بشه. باید بررسی کنم چه رویکردی بهینه تر و استاندارد است. اینکه در هر فایل لاگر ایمپورت بشه یا اینه در کلاس والد بهش ارسال شود؟
-
-- بهبود تایم‌اوت های ترجمه. در صفحه آپشن برای هر پرووایدر امکان تعیین تایم‌اوت برای اون پرووایدر اضافه شود.
-
-- برای پرووایدر OpenRouter کاربر باید بتونه انتخاب کنه که سقف Token برای API Key انتخاب شده چقدر است. در زیر خطایی است که در موقع محدودیت توکن رخ میده:
-Error during translation: Error: This request requires more credits, or fewer max_tokens. You requested up to 4096 tokens, but can only afford 2795. To increase, visit https://openrouter.ai/settings/keys and create a key with a higher weekly limit
-نکته ای که باید توجه شود این است که در هر بار درخواست، مقدار این توکن کمتر میشود. یعنی بعد از استفاده مقدار 2784 توکن داره.
-
-- اضافه کردن grok به پرووایدرها
-
----
-
-## Research and Resources
-
-### Potential Translation Providers
-- [MyMemory Translated](https://mymemory.translated.net/): Free and open-source translation engine.
-- [Reverso Context](https://www.reverso.net/text-translation#sl=eng&tl=per): For examining translations in context and usage examples.
-- [LibreTranslator (Linguist JS)](https://github.com/translate-tools/linguist-translators/blob/master/translators/LibreTranslator.js): Open-source translator implementation.
-- [Baidu Translator](https://github.com/ttop32/MouseTooltipTranslator/blob/main/src/translator/baidu.js): Investigation of Baidu translator implementation.
-- [DeepSeek Model Interface](https://asmodeus.free.nf/?i=1): Custom interface/resource for DeepSeek model.
-
-- دیکشنری
-https://github.com/crimx/ext-saladict/tree/dev/src/components/dictionaries
-
-### Other
-- [Lumetrium Prompt Catalog](https://lumetrium.com/definer/wiki/sources/ai/prompts/catalog): Catalog of specialized prompts for translation and dictionary services.
-- [Immersive Translate Prompts](https://github.com/immersive-translate/prompts/tree/main/plugins)
-- [Wiktionary](https://github.com/LearnRomanian/wiktionary-scraper)
-- [ChatGPT.com/translate](https://chatgpt.com/translate/)
-
----
-
-## Documentation
-
-- [Dictionary Integration Plan](backlog/DICTIONARY_INTEGRATION_PLAN.md)
+Do not add new backlog items to this file.
