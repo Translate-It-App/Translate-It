@@ -56,6 +56,20 @@ The assembler aggregates already-existing terminal facts. It does not own parsin
 
 Introduce a pure, deterministic assembler at the shared runtime boundary.
 
+The assembler runs only after terminal state is authoritative. Preserve this runtime order:
+
+```text
+Execution
+→ tracker terminal transition accepted
+→ TerminalExecutionRouter
+→ diagnostics finalized
+→ TranslationOutcomeAssembler
+→ Dispatcher
+→ consumers
+```
+
+It must never run before the terminal tracker transition, inside the dispatcher, inside `TranslationOperation`, or inside `TranslationEngine`.
+
 For this slice:
 
 - produce `TranslationOutcome` beside the legacy result;

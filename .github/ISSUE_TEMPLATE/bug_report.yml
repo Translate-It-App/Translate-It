@@ -32,10 +32,17 @@ body:
       label: Browser
       options:
         - Chrome
+        - Edge
         - Firefox
         - Other
     validations:
       required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Add the OS/device and browser version if relevant.
+      placeholder: e.g. Firefox 143 on Android 16, Edge 140 on Windows 11
   - type: input
     id: version
     attributes:
