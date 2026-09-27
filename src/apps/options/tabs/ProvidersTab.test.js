@@ -21,6 +21,12 @@ vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
   })
 }));
 
+vi.mock('vue-i18n', () => ({
+  useI18n: () => ({
+    t: (key) => key
+  })
+}));
+
 // Mock settings store: config-panel selection only, global API fixed
 const mockUpdateSettingLocally = vi.fn();
 const mockSettingsStore = reactive({
@@ -71,29 +77,28 @@ vi.mock('@/shared/logging/logger.js', () => ({
   })
 }));
 
-describe('ProvidersTab.vue - Config-panel selector labeling', () => {
-  // Every mount registers a live selectedProvider watcher on the shared
-  // mock store. Track wrappers so afterEach can unmount them all: otherwise
-  // a later provider assignment would fire stale watchers and pollute
-  // highlightElement assertions across tests.
-  const mountedWrappers = [];
-  const mountTab = () => {
-    const wrapper = mount(ProvidersTab);
-    mountedWrappers.push(wrapper);
-    return wrapper;
-  };
+const mountedWrappers = [];
+const mountTab = () => {
+  const wrapper = mount(ProvidersTab);
+  mountedWrappers.push(wrapper);
+  return wrapper;
+};
 
+afterEach(async () => {
+  await vi.dynamicImportSettled();
+  await flushPromises();
+  while (mountedWrappers.length) mountedWrappers.pop().unmount();
+  vi.clearAllTimers();
+  vi.useRealTimers();
+});
+
+describe('ProvidersTab.vue - Config-panel selector labeling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     currentRouteQuery.value = {};
     mockSettingsStore.settings.TRANSLATION_API = 'googlev2';
     mockSettingsStore.settings.HIDDEN_PROVIDERS = [];
     mockSettingsStore.activeConfigProvider = 'test-provider';
-  });
-
-  afterEach(() => {
-    while (mountedWrappers.length) mountedWrappers.pop().unmount();
-    vi.useRealTimers();
   });
 
   it('renders the ProvidersTab-specific label key, not the shared global key', () => {
@@ -247,7 +252,7 @@ describe('ProvidersTab.vue - Live Dubbing provider separation', () => {
   });
 
   it('keeps translation provider selection independent of LIVE_DUBBING_PROVIDER', () => {
-    const wrapper = mount(ProvidersTab);
+    const wrapper = mountTab();
 
     expect(wrapper.find('.primary-service-selection').exists()).toBe(true);
     // LIVE_DUBBING_PROVIDER was removed from the Providers UI; its persistence
