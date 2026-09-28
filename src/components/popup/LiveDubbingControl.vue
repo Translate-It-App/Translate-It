@@ -216,10 +216,12 @@ const isInitialStatusLoadingVisible = computed(() =>
 let statusRevealTimer = null
 const LOADING_PRESENTATION_DELAY_MS = 150
 let operationGeneration = 0
-// Presentation-only subtitle-refresh token, fully independent from the
-// lifecycle operationGeneration: overlapping delivery notifications each take
-// a new token and only the latest may apply. Never invalidates START/STOP.
+// Presentation-only ordering, fully independent from operationGeneration.
+// Tokens are scoped to their session so an old-session notification cannot
+// fence a different session's status read or refresh.
 let subtitlesRefreshGeneration = 0
+let subtitlesRefreshEpoch = 0
+const subtitlesRefreshGenerations = new Map()
 let removeRuntimeListener = null
 let initialStatusResolved = false
 
@@ -433,16 +435,24 @@ const showSubtitlesUnavailableNote = computed(() =>
     && subtitlesUnavailableSessionId.value === sessionId.value
     && (isRunning.value || isStarting.value))
 
-const applyStatus = (response, { preserveSession = false, syncTerminalOutcome = false, subtitlesGeneration = null } = {}) => {
+const captureSubtitlesSnapshot = () => ({
+  generation: subtitlesRefreshGeneration,
+  epoch: subtitlesRefreshEpoch
+})
+
+const isSubtitlesFenced = (sessionId, snapshot) => snapshot != null && (
+  snapshot.epoch !== subtitlesRefreshEpoch
+  || (subtitlesRefreshGenerations.get(sessionId) || 0) > snapshot.generation
+)
+
+const invalidateSubtitlesRefreshes = () => {
+  subtitlesRefreshEpoch += 1
+  subtitlesRefreshGenerations.clear()
+}
+
+const applyStatus = (response, { preserveSession = false, syncTerminalOutcome = false, subtitlesSnapshot = null } = {}) => {
   const result = unwrap(response)
   const descriptor = result.status && typeof result.status === 'object' ? result.status : result
-  // Presentation-only subtitle fence: the caller snapshots
-  // `subtitlesRefreshGeneration` before its async request. A mismatch means a
-  // newer delivery notification/refresh superseded this response in flight —
-  // lifecycle still applies normally, only the transcript-delivery boolean is
-  // suppressed. Read before the session block below, which may itself bump
-  // the counter on session loss.
-  const subtitlesFenced = subtitlesGeneration != null && subtitlesGeneration !== subtitlesRefreshGeneration
   const nextTerminalOutcome = normalizeTerminalOutcome(result.terminalOutcome)
   if (syncTerminalOutcome) terminalOutcome.value = nextTerminalOutcome
   const nextSessionId = descriptor.sessionId || result.session?.id || null
@@ -463,14 +473,12 @@ const applyStatus = (response, { preserveSession = false, syncTerminalOutcome = 
   // ownership plus the refresh's own session-acceptance rule keep old-session
   // state from leaking across. A newly tracked session (from null) never
   // invalidated and still does not.
-  if (sessionId.value == null) {
-    subtitlesRefreshGeneration += 1
-  }
+  if (sessionId.value == null) invalidateSubtitlesRefreshes()
 
   if (result.available === false || result.error === 'LIVE_DUBBING_UNSUPPORTED' || descriptor.status === 'unavailable') {
     authoritativeStatus.value = null
     state.value = 'unavailable'
-    if (!subtitlesFenced) {
+    if (sessionId.value == null || !isSubtitlesFenced(sessionId.value, subtitlesSnapshot)) {
       subtitlesUnavailable.value = false
       subtitlesUnavailableSessionId.value = null
     }
@@ -493,25 +501,26 @@ const applyStatus = (response, { preserveSession = false, syncTerminalOutcome = 
   // authoritative response with an explicit boolean associates that value
   // with that response's session. A lifecycle response without the field
   // (START/STOP) preserves refresh-obtained state for the continuing
-  // session. Adopting a new session preserves only a newer presentation
-  // value already recorded for it — a fenced response skips this block
-  // entirely (its session is adopted by lifecycle, the render gate on
-  // ownership decides); otherwise the old session's state is cleared, never
-  // carried over. Losing the session clears boolean and ownership.
-  if (!subtitlesFenced) {
-    if (sessionId.value == null) {
+  // session. A newer refresh fences only the boolean for this response's
+  // session; replacement still clears any previous-session ownership.
+  if (sessionId.value == null) {
+    subtitlesUnavailable.value = false
+    subtitlesUnavailableSessionId.value = null
+  } else {
+    const responseSessionId = sessionId.value
+    const subtitlesFenced = isSubtitlesFenced(responseSessionId, subtitlesSnapshot)
+    if (subtitlesUnavailableSessionId.value != null
+      && subtitlesUnavailableSessionId.value !== responseSessionId) {
       subtitlesUnavailable.value = false
       subtitlesUnavailableSessionId.value = null
-    } else if (sessionId.value !== prevSessionId && prevSessionId != null) {
-      subtitlesUnavailable.value = result.transcriptDeliveryUnavailable === true
-      subtitlesUnavailableSessionId.value = result.transcriptDeliveryUnavailable === true
-        || result.transcriptDeliveryUnavailable === false ? sessionId.value : null
-    } else if (result.transcriptDeliveryUnavailable === true) {
-      subtitlesUnavailable.value = true
-      subtitlesUnavailableSessionId.value = sessionId.value
-    } else if (result.transcriptDeliveryUnavailable === false) {
+    }
+    if (!subtitlesFenced && typeof result.transcriptDeliveryUnavailable === 'boolean') {
+      subtitlesUnavailable.value = result.transcriptDeliveryUnavailable
+      subtitlesUnavailableSessionId.value = responseSessionId
+    } else if (!subtitlesFenced && sessionId.value !== prevSessionId && prevSessionId != null) {
+      // Replacement without a boolean cannot inherit the previous session.
       subtitlesUnavailable.value = false
-      subtitlesUnavailableSessionId.value = sessionId.value
+      subtitlesUnavailableSessionId.value = null
     }
   }
   errorMessage.value = status === 'ERROR' || result.error
@@ -581,11 +590,11 @@ const captureCurrentFence = () => {
  */
 const refreshLifecycleForVolume = async () => {
   const generation = operationGeneration
-  const subtitlesGeneration = subtitlesRefreshGeneration
+  const subtitlesSnapshot = captureSubtitlesSnapshot()
   try {
     const response = await sendMessage({ action: 'GET_LIVE_DUBBING_STATUS' })
     if (generation !== operationGeneration) return false
-    applyStatus(response, { syncTerminalOutcome: true, subtitlesGeneration })
+    applyStatus(response, { syncTerminalOutcome: true, subtitlesSnapshot })
     return true
   } catch {
     if (generation !== operationGeneration) return false
@@ -601,11 +610,11 @@ const refreshLifecycleForVolume = async () => {
  */
 const refreshLifecycleForDubbedVolume = async () => {
   const generation = operationGeneration
-  const subtitlesGeneration = subtitlesRefreshGeneration
+  const subtitlesSnapshot = captureSubtitlesSnapshot()
   try {
     const response = await sendMessage({ action: 'GET_LIVE_DUBBING_STATUS' })
     if (generation !== operationGeneration) return false
-    applyStatus(response, { syncTerminalOutcome: true, subtitlesGeneration })
+    applyStatus(response, { syncTerminalOutcome: true, subtitlesSnapshot })
     return true
   } catch {
     if (generation !== operationGeneration) return false
@@ -1020,11 +1029,11 @@ const flushPendingDubbedVolumeSend = () => {
 
 const queryStatus = async (generation = nextOperationGeneration()) => {
   const prevFence = volumeFence.value
-  const subtitlesGeneration = subtitlesRefreshGeneration
+  const subtitlesSnapshot = captureSubtitlesSnapshot()
   try {
     const response = await sendMessage({ action: 'GET_LIVE_DUBBING_STATUS' })
     if (generation !== operationGeneration) return false
-    applyStatus(response, { syncTerminalOutcome: true, subtitlesGeneration })
+    applyStatus(response, { syncTerminalOutcome: true, subtitlesSnapshot })
     // After status recovery, recover volume if controllable — independent round trip.
     // The volumeFence watcher handles all fence transitions (active→active).
     // Only the initial mount (null→active) is owned here, since the watcher
@@ -1041,7 +1050,7 @@ const queryStatus = async (generation = nextOperationGeneration()) => {
     if (generation !== operationGeneration) return false
     state.value = 'unavailable'
     authoritativeStatus.value = null
-    if (subtitlesGeneration === subtitlesRefreshGeneration) {
+    if (!isSubtitlesFenced(sessionId.value, subtitlesSnapshot)) {
       subtitlesUnavailable.value = false
       subtitlesUnavailableSessionId.value = null
     }
@@ -1054,7 +1063,7 @@ const queryStatus = async (generation = nextOperationGeneration()) => {
 
 const start = async () => {
   const generation = nextOperationGeneration()
-  const subtitlesGeneration = subtitlesRefreshGeneration
+  const subtitlesSnapshot = captureSubtitlesSnapshot()
   const prevFence = volumeFence.value
   state.value = 'starting'
   // Presentation-only: drop stale authoritative status so a retry shows "Starting…".
@@ -1066,7 +1075,7 @@ const start = async () => {
       data: { targetLanguage: props.targetLanguage, providerId: props.providerId }
     })
     if (generation !== operationGeneration) return
-    applyStatus(response, { subtitlesGeneration })
+    applyStatus(response, { subtitlesSnapshot })
     if (state.value === 'idle') state.value = 'running'
     if (state.value === 'running' && !normalizeTerminalOutcome(unwrap(response).terminalOutcome)) {
       terminalOutcome.value = null
@@ -1086,7 +1095,7 @@ const start = async () => {
     // stoppable instead of resetting to clean idle.
     const failure = error?.data || error?.response?.data
     if (failure && typeof failure === 'object') {
-      applyStatus(failure, { preserveSession: true, subtitlesGeneration })
+      applyStatus(failure, { preserveSession: true, subtitlesSnapshot })
       if (state.value === 'idle') state.value = 'error'
       if (!errorMessage.value) errorMessage.value = getErrorMessage(error?.message, 'Unable to start live dubbing.')
     } else {
@@ -1102,7 +1111,7 @@ const stop = async () => {
   resetVolumeState()
   resetDubbedVolumeState()
   const generation = nextOperationGeneration()
-  const subtitlesGeneration = subtitlesRefreshGeneration
+  const subtitlesSnapshot = captureSubtitlesSnapshot()
   state.value = 'stopping'
   errorMessage.value = ''
   try {
@@ -1113,7 +1122,7 @@ const stop = async () => {
       data: { sessionId: sessionId.value || sessionDescriptor.value?.sessionId }
     })
     if (generation !== operationGeneration) return
-    applyStatus(response, { preserveSession: true, subtitlesGeneration })
+    applyStatus(response, { preserveSession: true, subtitlesSnapshot })
     if (state.value === 'idle') {
       // Clean idle after STOP owns no session: drop subtitle-delivery
       // presentation state and invalidate pending refreshes alongside the
@@ -1121,7 +1130,7 @@ const stop = async () => {
       // via the catch path below.
       subtitlesUnavailable.value = false
       subtitlesUnavailableSessionId.value = null
-      subtitlesRefreshGeneration += 1
+      invalidateSubtitlesRefreshes()
       sessionId.value = null
       sessionDescriptor.value = null
       sessionProviderId.value = null
@@ -1129,7 +1138,7 @@ const stop = async () => {
   } catch (error) {
     if (generation !== operationGeneration) return
     // Keep retained session available after transport failure so cleanup can retry.
-    applyStatus(error?.data || error?.response?.data || error, { preserveSession: true, subtitlesGeneration })
+    applyStatus(error?.data || error?.response?.data || error, { preserveSession: true, subtitlesSnapshot })
     state.value = sessionId.value ? 'cleanup' : 'error'
     errorMessage.value = getErrorMessage(error?.message, 'Unable to stop live dubbing.')
   }
@@ -1162,6 +1171,7 @@ const refreshSubtitlesUnavailable = async (notifiedSessionId) => {
   if (typeof notifiedSessionId !== 'string' || !notifiedSessionId) return
   subtitlesRefreshGeneration += 1
   const refreshGeneration = subtitlesRefreshGeneration
+  subtitlesRefreshGenerations.set(notifiedSessionId, refreshGeneration)
   // Active lifecycle session at request start. The refresh may still apply
   // when the UI has since adopted the notified session, but never when it
   // moved away from it — a stale old-session refresh must not overwrite the
@@ -1173,7 +1183,7 @@ const refreshSubtitlesUnavailable = async (notifiedSessionId) => {
   } catch {
     return
   }
-  if (refreshGeneration !== subtitlesRefreshGeneration) return
+  if (refreshGeneration !== subtitlesRefreshGenerations.get(notifiedSessionId)) return
   // Session-acceptance: latest-wins ordering above handles overlapping
   // refreshes; this handles lifecycle movement underneath a refresh. Accept
   // when the UI still owns the request-start session or has adopted the
