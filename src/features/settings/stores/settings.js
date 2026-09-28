@@ -459,7 +459,12 @@ export const useSettingsStore = defineStore('settings', () => {
 
       await saveAllSettings();
       if (removals.length > 0) {
-        await storageManager.remove(removals);
+        try {
+          await storageManager.remove(removals);
+        } catch (error) {
+          if (ExtensionContextManager.isContextError(error)) throw error;
+          logger.warn('[Import] Obsolete settings cleanup failed');
+        }
       }
 
       // Re-setup storage listener after import is complete

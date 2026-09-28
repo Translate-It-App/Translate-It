@@ -8,6 +8,7 @@ import { SelectionTranslationMode, CONFIG, TranslationMode } from '@/shared/conf
 import { PROMPT_REGISTRY } from '@/shared/config/PromptRegistry.js';
 import { getPersistedDefaultSettings } from '@/shared/config/settingsDefaults.js';
 import { runSettingsMigrations } from '@/shared/config/settingsMigrations.js';
+import ExtensionContextManager from '@/core/extensionContext.js';
 
 // Mock Dependencies
 vi.mock('@/shared/storage/core/StorageCore.js', () => ({
@@ -525,6 +526,60 @@ describe('Settings Store', () => {
 
       expect(store.settings).not.toHaveProperty('MICROSOFT_EDGE_AUTH_URL');
       expect(store.settings).not.toHaveProperty('MICROSOFT_EDGE_TRANSLATE_URL');
+    });
+
+    it('completes import when obsolete-key cleanup fails after settings are saved', async () => {
+      const cleanupError = new Error('storage cleanup failed');
+      runSettingsMigrations.mockResolvedValueOnce({
+        updates: {},
+        removals: ['LEGACY_SETTING'],
+        logs: []
+      });
+      storageManager.remove.mockRejectedValueOnce(cleanupError);
+      const store = useSettingsStore();
+
+      await expect(store.importSettings({ THEME: 'dark', _exported: true })).resolves.toBe(true);
+
+      expect(store.settings.THEME).toBe('dark');
+      expect(storageManager.set).toHaveBeenCalled();
+      expect(storageManager.remove).toHaveBeenCalledWith(['LEGACY_SETTING']);
+      expect(storageManager.on).toHaveBeenCalledWith('change', expect.any(Function));
+    });
+
+    it('keeps settings-save failures fatal during import', async () => {
+      const saveError = new Error('settings save failed');
+      storageManager.set.mockRejectedValueOnce(saveError);
+      runSettingsMigrations.mockResolvedValueOnce({
+        updates: {},
+        removals: ['LEGACY_SETTING'],
+        logs: []
+      });
+      const store = useSettingsStore();
+
+      await expect(store.importSettings({ THEME: 'dark', _exported: true })).rejects.toBe(saveError);
+
+      expect(storageManager.remove).not.toHaveBeenCalled();
+      expect(storageManager.on).toHaveBeenCalledWith('change', expect.any(Function));
+    });
+
+    it('propagates extension-context errors from obsolete-key cleanup', async () => {
+      const contextError = new Error('Extension context invalidated');
+      runSettingsMigrations.mockResolvedValueOnce({
+        updates: {},
+        removals: ['LEGACY_SETTING'],
+        logs: []
+      });
+      storageManager.remove.mockRejectedValueOnce(contextError);
+      ExtensionContextManager.isContextError.mockImplementation(error => error === contextError);
+      const store = useSettingsStore();
+
+      await expect(store.importSettings({ THEME: 'dark', _exported: true })).rejects.toBe(contextError);
+
+      expect(ExtensionContextManager.handleContextError).toHaveBeenCalledWith(
+        contextError,
+        'settings-store-import'
+      );
+      expect(storageManager.on).toHaveBeenCalledWith('change', expect.any(Function));
     });
 
     it('importSettings should pass legacy Mouse Hover triggers through centralized migration', async () => {
