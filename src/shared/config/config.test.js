@@ -75,6 +75,11 @@ describe('Config Module', () => {
       expect(CONFIG.LIVE_DUBBING_PROVIDER).toBe('gemini');
     });
 
+    it('should default provider-specific Original transcript preferences to disabled', () => {
+      expect(CONFIG.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(false);
+      expect(CONFIG.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(false);
+    });
+
     it('should expose the current Microsoft Edge translation endpoint without auth config', () => {
       expect(CONFIG.MICROSOFT_EDGE_TRANSLATE_URL).toBe(
         'https://edge.microsoft.com/translate/translatetext'

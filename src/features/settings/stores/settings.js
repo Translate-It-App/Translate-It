@@ -389,6 +389,7 @@ export const useSettingsStore = defineStore('settings', () => {
       }
 
       const processedSettings = await secureStorage.processImportedSettings(importData, password);
+      const explicitImportedKeys = new Set(Object.keys(processedSettings));
       const hasImportedThinkingMode = Object.prototype.hasOwnProperty.call(
         processedSettings,
         'GEMINI_THINKING_MODE'
@@ -405,7 +406,8 @@ export const useSettingsStore = defineStore('settings', () => {
       // OpenAI endpoint is a CONFIG-owned runtime constant, not an imported setting.
       delete processedSettings.OPENAI_API_URL;
 
-      // 1. Merge imported settings with default settings to ensure no missing keys
+      // 1. Merge imported settings with defaults before migration to preserve
+      // the established import contract for all other setting migrations.
       const defaultSettings = getDefaultSettings();
       // Non-editable prompt wrappers are CONFIG-owned implementation defaults that
       // are no longer persisted. Silently drop any copies carried by older backups
@@ -416,9 +418,11 @@ export const useSettingsStore = defineStore('settings', () => {
       nonEditablePromptKeys.forEach(key => {
         delete processedSettings[key];
       });
+
       const mergedSettings = { ...defaultSettings, ...processedSettings };
-      
-      // Special handling for nested MODE_PROVIDERS to ensure deep merge
+
+      // Keep imported nested provider choices complete before migrations remap
+      // legacy mode keys.
       if (processedSettings.MODE_PROVIDERS) {
         mergedSettings.MODE_PROVIDERS = {
           ...defaultSettings.MODE_PROVIDERS,
@@ -426,11 +430,15 @@ export const useSettingsStore = defineStore('settings', () => {
         };
       }
 
-      // 2. Run the centralized migration logic on the imported data
-      // This handles MODE_PROVIDERS (underscore to hyphen), API_KEY, etc.
-      const { updates, logs, removals = [] } = await runSettingsMigrations(mergedSettings);
+      // 2. Run centralized migrations against the complete default shape while
+      // passing imported-key presence so legacy migrations can distinguish
+      // explicit values from defaults injected above.
+      const { updates, logs, removals = [] } = await runSettingsMigrations(
+        mergedSettings,
+        explicitImportedKeys
+      );
 
-      // 3. Apply all migrated updates to our final settings object
+      // 3. Apply migrated values, then remove retired settings.
       Object.assign(mergedSettings, updates);
       removals.forEach(key => delete mergedSettings[key]);
       

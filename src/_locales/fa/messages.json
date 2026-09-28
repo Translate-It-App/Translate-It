@@ -278,6 +278,9 @@
   "live_dubbing_show_original_transcript": {
     "message": "اصلی"
   },
+  "live_dubbing_openai_original_info": {
+    "message": "از رونویسی اضافی با OpenAI استفاده می‌کند."
+  },
   "live_dubbing_setup_save": {
     "message": "ذخیره"
   },

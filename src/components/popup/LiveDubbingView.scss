@@ -366,6 +366,56 @@
   overflow-wrap: anywhere;
 }
 
+.live-dubbing-openai-original-info {
+  position: relative;
+  flex: 0 0 auto;
+  color: var(--color-text-muted, currentColor);
+  font-size: 11px;
+  line-height: 1;
+  cursor: help;
+}
+
+.live-dubbing-openai-original-info::after {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  inset-block-end: calc(100% + 6px);
+  width: max-content;
+  max-width: min(220px, 70vw);
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: var(--color-text, #333);
+  color: var(--color-background, #fff);
+  content: attr(data-tooltip);
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  transform: translateX(-50%);
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, visibility 120ms ease;
+}
+
+.live-dubbing-view--rtl .live-dubbing-openai-original-info::after {
+  direction: rtl;
+  text-align: start;
+}
+
+.live-dubbing-openai-original-info:hover::after,
+.live-dubbing-openai-original-info:focus-visible::after {
+  visibility: visible;
+  opacity: 1;
+}
+
+.live-dubbing-openai-original-info:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .live-dubbing-transcript-preference-toggle {
   flex: 0 0 auto;
 }
@@ -562,7 +612,8 @@
 @media (prefers-reduced-motion: reduce) {
   .live-dubbing-transcript-preferences-chevron,
   .live-dubbing-change-font-enter-active,
-  .live-dubbing-change-font-leave-active {
+  .live-dubbing-change-font-leave-active,
+  .live-dubbing-openai-original-info::after {
     transition: none;
   }
 }

@@ -129,13 +129,23 @@
                 <span class="live-dubbing-transcript-preference-label">
                   {{ t('live_dubbing_show_original_transcript', 'Original') }}
                 </span>
+                <span
+                  v-if="providerModel === LIVE_DUBBING_OPENAI_PROVIDER_ID"
+                  class="live-dubbing-openai-original-info"
+                  role="note"
+                  tabindex="0"
+                  :aria-label="t('live_dubbing_openai_original_info', 'Uses additional transcription with OpenAI.')"
+                  :data-tooltip="t('live_dubbing_openai_original_info', 'Uses additional transcription with OpenAI.')"
+                >
+                  ⓘ
+                </span>
                 <BaseToggle
                   class="live-dubbing-transcript-preference-toggle"
                   :class="{ 'live-dubbing-toggle--pending-neutral': hasOriginalPreferenceWritePending && !isOriginalOpenAIRestricted }"
                   :model-value="showOriginalTranscript"
                   :disabled="hasOriginalPreferenceWritePending || isOriginalOpenAIRestricted"
                   :title="t('live_dubbing_show_original_transcript', 'Original')"
-                  @update:model-value="updateTranscriptPreference('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT', $event)"
+                  @update:model-value="updateTranscriptPreference(originalPreferenceKey, $event)"
                 />
               </div>
               <div class="live-dubbing-transcript-preference live-dubbing-transcript-preference--size">
@@ -234,9 +244,13 @@ const { t, locale } = useUnifiedI18n()
 const settingsStore = useSettingsStore()
 const logger = getScopedLogger(LOG_COMPONENTS.UI, 'LiveDubbingView')
 
+const initialOriginalPreferenceKey = props.providerId === LIVE_DUBBING_OPENAI_PROVIDER_ID
+  ? 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI'
+  : 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI'
+
 const isTranscriptPreferencesExpanded = ref(
   settingsStore.settings?.LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT === true
-  || settingsStore.settings?.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT === true
+  || settingsStore.settings?.[initialOriginalPreferenceKey] === true
 )
 
 const TRANSCRIPT_PREFERENCES_TRANSITION_DURATION = 190
@@ -402,10 +416,16 @@ const showTranslatedTranscript = computed(() =>
   settingsStore.settings?.LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT === true
 )
 const showOriginalTranscript = computed(() =>
-  settingsStore.settings?.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT === true
+  settingsStore.settings?.[originalPreferenceKey.value] === true
 )
 const hasTranslatedPreferenceWritePending = ref(false)
-const hasOriginalPreferenceWritePending = ref(false)
+const pendingOriginalPreferenceKeys = ref(new Set())
+const originalPreferenceKey = computed(() => providerModel.value === LIVE_DUBBING_OPENAI_PROVIDER_ID
+  ? 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI'
+  : 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI')
+const hasOriginalPreferenceWritePending = computed(() =>
+  pendingOriginalPreferenceKeys.value.has(originalPreferenceKey.value)
+)
 const hasSubtitleSizePreferenceWritePending = ref(false)
 
 /**
@@ -439,23 +459,30 @@ const subtitleSizeModel = computed({
 const updateTranscriptPreference = async (key, value) => {
   const pending = key === 'LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT'
     ? hasTranslatedPreferenceWritePending
-    : key === 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT'
-      ? hasOriginalPreferenceWritePending
+    : key === 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI'
+      || key === 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI'
+      ? null
       : hasSubtitleSizePreferenceWritePending
 
-  if (pending.value) return
+  const isOriginalPreferenceKey = key === 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI'
+    || key === 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI'
+  if (isOriginalPreferenceKey
+    ? pendingOriginalPreferenceKeys.value.has(key)
+    : pending.value) return
 
   const previousValue = key === 'LIVE_DUBBING_SUBTITLE_SIZE'
     ? normalizeLiveDubbingSubtitleSize(settingsStore.getSetting(key, 'medium'))
     : settingsStore.getSetting(key, false) === true
-  pending.value = true
+  if (isOriginalPreferenceKey) pendingOriginalPreferenceKeys.value.add(key)
+  else pending.value = true
   try {
     await settingsStore.updateSettingAndPersist(key, value)
   } catch {
     // Restore local state without starting another persistence write.
     settingsStore.updateSettingLocally(key, previousValue)
   } finally {
-    pending.value = false
+    if (isOriginalPreferenceKey) pendingOriginalPreferenceKeys.value.delete(key)
+    else pending.value = false
   }
 }
 

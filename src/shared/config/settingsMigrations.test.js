@@ -40,6 +40,57 @@ describe('Settings Migrations', () => {
     expect(logs).not.toContain('Normalized LIVE_DUBBING_PROVIDER to gemini');
   });
 
+  it.each([
+    [true, true],
+    [false, false]
+  ])('splits legacy Original transcript preference %s to Gemini only', async (legacyValue, geminiValue) => {
+    const { updates, removals } = await runSettingsMigrations({
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT: legacyValue
+    });
+
+    expect(updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(geminiValue);
+    expect(updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(false);
+    expect(removals).toContain('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT');
+  });
+
+  it('preserves existing provider-specific Original transcript preferences', async () => {
+    const { updates, removals } = await runSettingsMigrations({
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT: true,
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: false,
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: true
+    });
+
+    expect(updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBeUndefined();
+    expect(updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBeUndefined();
+    expect(removals).toContain('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT');
+  });
+
+  it('uses imported-key presence when merged defaults include provider-specific values', async () => {
+    const { updates, removals } = await runSettingsMigrations({
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT: true,
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: false,
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: false
+    }, new Set(['LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT']));
+
+    expect(updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(true);
+    expect(updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBeUndefined();
+    expect(removals).toContain('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT');
+  });
+
+  it('makes the legacy Original transcript preference migration idempotent', async () => {
+    const first = await runSettingsMigrations({ LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT: true });
+    const migratedSettings = {
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: first.updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI,
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: first.updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI
+    };
+    const second = await runSettingsMigrations(migratedSettings);
+
+    expect(first.removals).toContain('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT');
+    expect(second.updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBeUndefined();
+    expect(second.updates.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBeUndefined();
+    expect(second.removals).not.toContain('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT');
+  });
+
   it.each(['gemini', 'openai'])('should preserve valid Live Dubbing provider %s', async (provider) => {
     const { updates } = await runSettingsMigrations({
       LIVE_DUBBING_PROVIDER: provider

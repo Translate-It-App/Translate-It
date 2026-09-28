@@ -127,7 +127,7 @@
 
 <script setup>
 import './ContentApp.scss'
-import { computed, onUnmounted, defineAsyncComponent } from 'vue';
+import { computed, onUnmounted, defineAsyncComponent, ref } from 'vue';
 import { Toaster } from 'vue-sonner';
 import { useWindowsManager } from '@/features/windows/composables/useWindowsManager.js';
 import { useSettingsStore } from '@/features/settings/stores/settings.js';
@@ -160,6 +160,11 @@ import { TRANSLATION_HTML } from '@/shared/constants/translation.js';
 import { CONFIG } from '@/shared/config/config.js';
 import { resolveTranslationFontFamily } from '@/shared/fonts/TranslationFontResolver.js';
 import { normalizeLiveDubbingSubtitleSize } from '@/features/live-dubbing/content/liveDubbingSubtitleSize.js';
+import {
+  getLiveDubbingTranscriptSnapshot,
+  subscribeLiveDubbingTranscript,
+} from '@/features/live-dubbing/content/liveDubbingTranscriptStore.js';
+import { shouldShowLiveDubbingOriginalTranscript } from '@/features/live-dubbing/content/liveDubbingTranscriptPresentation.js';
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 
@@ -180,12 +185,16 @@ useUnifiedI18n();
 const settingsStore = useSettingsStore();
 const mobileStore = useMobileStore();
 const tracker = useResourceTracker('content-app');
+const liveDubbingTranscript = ref(getLiveDubbingTranscriptSnapshot());
+const unsubscribeLiveDubbingTranscript = subscribeLiveDubbingTranscript((snapshot) => {
+  liveDubbingTranscript.value = snapshot;
+});
 
 const showTranslatedTranscript = computed(() =>
   settingsStore.settings?.LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT === true
 );
 const showOriginalTranscript = computed(() =>
-  settingsStore.settings?.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT === true
+  shouldShowLiveDubbingOriginalTranscript(settingsStore.settings, liveDubbingTranscript.value.providerId)
 );
 const liveDubbingFontFamily = computed(() => {
   const settings = settingsStore.settings;
@@ -299,6 +308,7 @@ useContentAppLifecycle({
 });
 
 onUnmounted(() => {
+  unsubscribeLiveDubbingTranscript();
   cleanupEventListeners();
   logger.debug('ContentApp unmounted, cleaned up WindowsManager listeners.');
 });

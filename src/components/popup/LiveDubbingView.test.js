@@ -111,7 +111,8 @@ const makeStore = (settings = {}) => {
       API_KEY: '',
        TRANSLATION_API: 'google',
        LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT: false,
-        LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT: false,
+         LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: false,
+         LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: false,
         LIVE_DUBBING_SUBTITLE_SIZE: 'medium',
         ...settings
     }),
@@ -375,14 +376,26 @@ describe('LiveDubbingView', () => {
   })
 
   it.each([
-    ['translated', { LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT: true }],
-    ['original', { LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT: true }]
-  ])('starts the Subtitles card expanded when %s subtitles are enabled', (_label, settings) => {
+    ['Dubbed', 'gemini', { LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT: true }, true],
+    ['Gemini Original', 'gemini', { LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: true }, true],
+    ['OpenAI Original', 'openai', { LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: true }, true],
+    ['OpenAI Original while Gemini is selected', 'gemini', { LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: true }, false],
+    ['Gemini Original while OpenAI is selected', 'openai', { LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: true }, false]
+  ])('initially expands for %s only when it applies to the selected provider', (_label, providerId, settings, expanded) => {
     harness.store = makeStore(settings)
+    const wrapper = mountView({ providerId })
+
+    expect(transcriptHeader(wrapper).attributes('aria-expanded')).toBe(String(expanded))
+    expect(transcriptContent(wrapper).attributes('inert') === undefined).toBe(expanded)
+  })
+
+  it('does not change the disclosure state when switching providers after mount', async () => {
+    harness.store = makeStore({ LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: true })
     const wrapper = mountView()
 
-    expect(transcriptHeader(wrapper).attributes('aria-expanded')).toBe('true')
-    expect(transcriptContent(wrapper).attributes('inert')).toBeUndefined()
+    expect(transcriptHeader(wrapper).attributes('aria-expanded')).toBe('false')
+    await wrapper.setProps({ providerId: 'openai' })
+    expect(transcriptHeader(wrapper).attributes('aria-expanded')).toBe('false')
   })
 
   it('toggles the disclosure state without changing subtitle settings or remounting control', async () => {
@@ -747,10 +760,93 @@ describe('LiveDubbingView', () => {
       1, 'LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT', true
     )
     expect(harness.store.updateSettingAndPersist).toHaveBeenNthCalledWith(
-      2, 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT', true
+      2, 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI', true
     )
     expect(harness.store.settings.LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT).toBe(true)
-    expect(harness.store.settings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT).toBe(true)
+    expect(harness.store.settings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(true)
+  })
+
+  it('persists Gemini and OpenAI Original preferences independently', async () => {
+    const wrapper = mountView()
+    const original = () => wrapper.findAllComponents({ name: 'BaseToggle' })[1]
+
+    await original().vm.$emit('update:modelValue', true)
+    expect(harness.store.updateSettingAndPersist).toHaveBeenLastCalledWith(
+      'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI', true
+    )
+    expect(harness.store.settings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(false)
+
+    await wrapper.setProps({ providerId: 'openai' })
+    await original().vm.$emit('update:modelValue', true)
+    expect(harness.store.updateSettingAndPersist).toHaveBeenLastCalledWith(
+      'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI', true
+    )
+    expect(harness.store.settings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(true)
+  })
+
+  it('shows the selected provider Original value and restores it after switching back', async () => {
+    harness.store = makeStore({ LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: true })
+    const wrapper = mountView()
+    const original = () => wrapper.findAllComponents({ name: 'BaseToggle' })[1]
+
+    expect(original().props('modelValue')).toBe(false)
+    await wrapper.setProps({ providerId: 'openai' })
+    expect(original().props('modelValue')).toBe(true)
+    await wrapper.setProps({ providerId: 'gemini' })
+    expect(original().props('modelValue')).toBe(false)
+    await wrapper.setProps({ providerId: 'openai' })
+    expect(original().props('modelValue')).toBe(true)
+  })
+
+  it('tracks and rolls back pending Original writes by provider key', async () => {
+    const deferred = makeDeferredWriteStore({ LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: true })
+    harness.store = deferred.store
+    const wrapper = mountView()
+    const original = () => wrapper.findAllComponents({ name: 'BaseToggle' })[1]
+
+    await original().vm.$emit('update:modelValue', true)
+    expect(deferred.writes[0].key).toBe('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI')
+    await wrapper.setProps({ providerId: 'openai' })
+    expect(original().props('modelValue')).toBe(true)
+    expect(original().props('disabled')).toBe(false)
+    await original().vm.$emit('update:modelValue', false)
+    expect(deferred.writes[1].key).toBe('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI')
+
+    deferred.writes[1].reject(new Error('storage unavailable'))
+    await settle()
+    expect(deferred.store.settings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(true)
+    expect(original().props('modelValue')).toBe(true)
+    deferred.writes[0].resolve()
+    await settle()
+  })
+
+  it('shows an accessible hover and keyboard tooltip for OpenAI only', async () => {
+    const wrapper = mountView()
+    expect(wrapper.find('.live-dubbing-openai-original-info').exists()).toBe(false)
+
+    await wrapper.setProps({ providerId: 'openai' })
+    const note = wrapper.find('.live-dubbing-openai-original-info')
+    expect(note.exists()).toBe(true)
+    expect(note.attributes('role')).toBe('note')
+    expect(note.attributes('tabindex')).toBe('0')
+    expect(note.attributes('aria-label')).toBe('Uses additional transcription with OpenAI.')
+    expect(note.attributes('data-tooltip')).toBe('Uses additional transcription with OpenAI.')
+    await note.trigger('mouseenter')
+    await note.trigger('focus')
+
+    const scss = readFileSync(resolve(here, 'LiveDubbingView.scss'), 'utf8')
+    expect(scss).toMatch(/\.live-dubbing-openai-original-info:hover::after/)
+    expect(scss).toMatch(/\.live-dubbing-openai-original-info:focus-visible::after/)
+    expect(scss).toMatch(/content:\s*attr\(data-tooltip\)/)
+    const tooltipRule = scss.match(/\.live-dubbing-openai-original-info::after\s*\{[^}]*\}/)?.[0]
+    const rtlTooltipRule = scss.match(/\.live-dubbing-view--rtl \.live-dubbing-openai-original-info::after\s*\{[^}]*\}/)?.[0]
+    expect(tooltipRule).toMatch(/left:\s*50%/)
+    expect(tooltipRule).toMatch(/transform:\s*translateX\(-50%\)/)
+    expect(rtlTooltipRule).toMatch(/direction:\s*rtl/)
+    expect(rtlTooltipRule).toMatch(/text-align:\s*start/)
+
+    await wrapper.setProps({ providerId: 'gemini' })
+    expect(wrapper.find('.live-dubbing-openai-original-info').exists()).toBe(false)
   })
 
   it('renders all subtitle size options independently of subtitle visibility and session state', async () => {
@@ -860,7 +956,7 @@ describe('LiveDubbingView', () => {
       1, 'LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT', true
     )
     expect(harness.store.updateSettingAndPersist).toHaveBeenNthCalledWith(
-      2, 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT', true
+      2, 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI', true
     )
   })
 
@@ -958,7 +1054,7 @@ describe('LiveDubbingView', () => {
     toggles[1].vm.$emit('update:modelValue', true)
     expect(deferred.writes).toHaveLength(2)
     expect(deferred.writes[1]).toMatchObject({
-      key: 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT',
+      key: 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI',
       value: true
     })
   })
@@ -1253,7 +1349,8 @@ describe('LiveDubbingView', () => {
 
     expect(scss).not.toMatch(/(?:padding|margin|inset)-(?:left|right)\s*:/)
     expect(scss).not.toMatch(/(?:text-align|border(?:-left|-right)?):\s*(?:left|right)/)
-    expect(scss).not.toMatch(/\b(?:left|right)\s*:\s*\d/)
+    expect(scss.replace(/\.live-dubbing-openai-original-info::after\s*\{[^}]*\}/, ''))
+      .not.toMatch(/\b(?:left|right)\s*:\s*\d/)
     // Feedback/source text aligns to the logical start edge.
     expect(scss).toMatch(/text-align:\s*start/)
     // Theme-aware tokens only — no hardcoded light/dark surfaces.

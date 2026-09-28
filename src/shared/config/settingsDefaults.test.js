@@ -35,8 +35,11 @@ describe('getPersistedDefaultSettings', () => {
     expect(defaults.LIVE_DUBBING_DUBBED_VOLUME).toBe(1);
     expect(CONFIG.LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT).toBe(false);
     expect(defaults.LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT).toBe(false);
-    expect(CONFIG.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT).toBe(false);
-    expect(defaults.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT).toBe(false);
+    expect(CONFIG.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(false);
+    expect(defaults.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(false);
+    expect(CONFIG.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(false);
+    expect(defaults.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(false);
+    expect(defaults).not.toHaveProperty('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT');
     expect(CONFIG.LIVE_DUBBING_USE_TRANSLATION_FONT).toBe(false);
     expect(defaults.LIVE_DUBBING_USE_TRANSLATION_FONT).toBe(false);
     expect(CONFIG.LIVE_DUBBING_SUBTITLE_SIZE).toBe('medium');

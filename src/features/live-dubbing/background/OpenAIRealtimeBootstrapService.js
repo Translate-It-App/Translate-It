@@ -18,7 +18,7 @@ export const OPENAI_REALTIME_TRANSLATIONS_CLIENT_SECRETS_ENDPOINT =
 export const OPENAI_REALTIME_TRANSLATE_MODEL = 'gpt-realtime-translate';
 export const OPENAI_REALTIME_WHISPER_MODEL = 'gpt-realtime-whisper';
 export const OPENAI_REALTIME_KEYS_SETTING = 'OPENAI_API_KEY';
-export const OPENAI_REALTIME_ORIGINAL_TRANSCRIPT_SETTING = 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT';
+export const OPENAI_REALTIME_ORIGINAL_TRANSCRIPT_SETTING = 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI';
 
 const KEY_INVALID_CODE_PATTERN = /invalid[_ -]?api[_ -]?key|authentication/i;
 const QUOTA_CODE_PATTERN = /insufficient[_ -]?quota|quota|billing[_ -]?hard[_ -]?limit/i;

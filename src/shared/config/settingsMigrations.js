@@ -137,6 +137,35 @@ function normalizeLiveDubbingVolumes(currentSettings, updates, migrationLog) {
 }
 
 /**
+ * Split the former shared Original transcript preference into provider-owned
+ * settings. Existing provider-specific values always take precedence.
+ */
+function migrateLiveDubbingOriginalTranscriptPreference(
+  currentSettings,
+  updates,
+  removals,
+  migrationLog,
+  explicitSettingsKeys
+) {
+  const legacyKey = 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT';
+  const geminiKey = 'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI';
+  if (!Object.prototype.hasOwnProperty.call(currentSettings, legacyKey)) return;
+
+  const geminiWasExplicitlyStored = explicitSettingsKeys
+    ? explicitSettingsKeys.has(geminiKey)
+    : Object.prototype.hasOwnProperty.call(currentSettings, geminiKey);
+  if (!geminiWasExplicitlyStored) {
+    updates[geminiKey] = currentSettings[legacyKey];
+    migrationLog.push(`Migrated ${legacyKey} to ${geminiKey}`);
+  }
+
+  // OpenAI intentionally uses its false persisted default, never the shared
+  // legacy value, because enabling Original capture incurs provider cost.
+  removals.push(legacyKey);
+  migrationLog.push(`Removed obsolete setting: ${legacyKey}`);
+}
+
+/**
  * Remove internal Microsoft Edge endpoint overrides from older installations.
  * The provider now owns one canonical endpoint and exposes no custom endpoint setting.
  */
@@ -290,7 +319,7 @@ function migrateBilingualModeKeys(currentSettings, updates, migrationLog) {
 /**
  * Main migration function - handles all settings updates
  */
-function runMainMigration(currentSettings) {
+function runMainMigration(currentSettings, explicitSettingsKeys = null) {
   const updates = {};
   const migrationLog = [];
 
@@ -298,6 +327,18 @@ function runMainMigration(currentSettings) {
   // belong in storage. New persisted keys here automatically become migration
   // targets; CONFIG-only runtime constants are excluded by not appearing here.
   const persistedDefaults = getPersistedDefaultSettings();
+
+  const removals = [];
+
+  // Preserve the former shared value for Gemini only before new defaults are
+  // added; OpenAI remains disabled unless its provider-specific value exists.
+  migrateLiveDubbingOriginalTranscriptPreference(
+    currentSettings,
+    updates,
+    removals,
+    migrationLog,
+    explicitSettingsKeys
+  );
 
   // Migrate Mode Provider keys first to ensure new structure is used
   migrateModeProviderKeys(currentSettings, updates, migrationLog);
@@ -374,7 +415,7 @@ function runMainMigration(currentSettings) {
   // A. Check for missing settings and add them
   Object.keys(persistedDefaults).forEach(key => {
     if (DO_NOT_MIGRATE.includes(key)) return;
-    if (!(key in currentSettings)) {
+    if (!(key in currentSettings) && !(key in updates)) {
       updates[key] = persistedDefaults[key];
       migrationLog.push(`Added missing setting: ${key}`);
     } else if (!(key in updates)) {
@@ -409,13 +450,14 @@ function runMainMigration(currentSettings) {
 
   // A2. Legacy storage cleanup: non-editable prompt wrappers were persisted by
   // older versions. Remove leftover copies so storage no longer carries them.
-  const removals = currentSettings
+  const obsoletePromptRemovals = currentSettings
     ? NON_EDITABLE_PROMPT_KEYS.filter(key => key in currentSettings)
     : [];
-  if (removals.length > 0) {
-    removals.forEach(key => {
+  if (obsoletePromptRemovals.length > 0) {
+    obsoletePromptRemovals.forEach(key => {
       migrationLog.push(`Removing obsolete stored prompt wrapper: ${key}`);
     });
+    removals.push(...obsoletePromptRemovals);
   }
 
   removeObsoleteMicrosoftEdgeSettings(currentSettings, removals, migrationLog);
@@ -559,9 +601,10 @@ function runMainMigration(currentSettings) {
  * `removals` to the persisted settings.
  *
  * @param {object} currentSettings Current persisted settings
- * @returns {Promise<{updates: object, removals: string[], logs: string[]>}}
+ * @param {Set<string>|null} explicitSettingsKeys Keys explicitly present in an imported settings source.
+ * @returns {Promise<{updates: object, removals: string[], logs: string[]}>}
  */
-export async function runSettingsMigrations(currentSettings) {
+export async function runSettingsMigrations(currentSettings, explicitSettingsKeys = null) {
   logger.info('Running settings migrations check');
 
   const allUpdates = {};
@@ -569,7 +612,7 @@ export async function runSettingsMigrations(currentSettings) {
   const allRemovals = [];
 
   // Always run main migration to check for missing/updated settings
-  const { updates, migrationLog, removals = [] } = runMainMigration(currentSettings);
+  const { updates, migrationLog, removals = [] } = runMainMigration(currentSettings, explicitSettingsKeys);
   Object.assign(allUpdates, updates);
   allLogs.push(...migrationLog);
   allRemovals.push(...removals);

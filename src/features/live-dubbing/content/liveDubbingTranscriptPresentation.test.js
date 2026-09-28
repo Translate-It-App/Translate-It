@@ -2,11 +2,27 @@ import { describe, expect, it } from 'vitest';
 import {
   getVisibleLiveDubbingSourceTranscript,
   getVisibleLiveDubbingTranscript,
+  shouldShowLiveDubbingOriginalTranscript,
   LIVE_DUBBING_VISIBLE_CHARACTER_LIMIT,
   LIVE_DUBBING_VISIBLE_SOURCE_CHARACTER_LIMIT,
 } from './liveDubbingTranscriptPresentation.js';
 
 describe('live dubbing transcript presentation', () => {
+  it('uses the active transcript provider preference without leaking across providers', () => {
+    const settings = {
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: true,
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: false,
+    };
+
+    expect(shouldShowLiveDubbingOriginalTranscript(settings, 'gemini')).toBe(true);
+    expect(shouldShowLiveDubbingOriginalTranscript(settings, 'openai')).toBe(false);
+    expect(shouldShowLiveDubbingOriginalTranscript({
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: false,
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: true,
+    }, 'openai')).toBe(true);
+    expect(shouldShowLiveDubbingOriginalTranscript(settings, null)).toBe(false);
+  });
+
   it('keeps short translated text with whitespace unchanged', () => {
     expect(getVisibleLiveDubbingTranscript({ translatedFragments: ['hello world'] })).toBe('hello world');
   });

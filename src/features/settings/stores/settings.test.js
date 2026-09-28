@@ -549,6 +549,60 @@ describe('Settings Store', () => {
       expect(store.settings.MOUSE_HOVER_TRIGGER).toBe('primary');
     });
 
+    it.each([
+      [true, {}, true, false],
+      [false, {}, false, false],
+      [true, {
+        LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: false,
+        LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: true
+      }, false, true],
+      [false, {
+        LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: true,
+        LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: true
+      }, true, true]
+    ])(
+      'importSettings migrates legacy Original transcript value %s while preserving explicit provider values',
+      async (legacyValue, providerValues, expectedGemini, expectedOpenAI) => {
+        secureStorage.processImportedSettings.mockResolvedValueOnce({
+          THEME: 'dark',
+          LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT: legacyValue,
+          ...providerValues
+        });
+        const { runSettingsMigrations: runRealSettingsMigrations } = await vi.importActual(
+          '@/shared/config/settingsMigrations.js'
+        );
+        runSettingsMigrations.mockImplementationOnce(runRealSettingsMigrations);
+        const store = useSettingsStore();
+
+        await store.importSettings({ THEME: 'dark', _exported: true });
+
+        expect(store.settings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(expectedGemini);
+        expect(store.settings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(expectedOpenAI);
+        expect(store.settings).not.toHaveProperty('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT');
+      }
+    );
+
+    it('importSettings should keep merged default model lists available to model migrations', async () => {
+      secureStorage.processImportedSettings.mockResolvedValueOnce({
+        THEME: 'dark',
+        OPENAI_API_MODEL: 'gpt-5.6-luna'
+      });
+      const { runSettingsMigrations: runRealSettingsMigrations } = await vi.importActual(
+        '@/shared/config/settingsMigrations.js'
+      );
+      let migrationInput;
+      runSettingsMigrations.mockImplementationOnce(async (settings, explicitSettingsKeys) => {
+        migrationInput = { ...settings };
+        return runRealSettingsMigrations(settings, explicitSettingsKeys);
+      });
+      const store = useSettingsStore();
+
+      await store.importSettings({ THEME: 'dark', _exported: true });
+
+      expect(migrationInput.OPENAI_MODELS).toEqual(CONFIG.OPENAI_MODELS);
+      expect(store.settings.OPENAI_API_MODEL).toBe('gpt-6-luna');
+    });
+
     it('importSettings should drop non-editable wrappers from old backups and keep editable prompts', async () => {
       secureStorage.processImportedSettings.mockResolvedValue({
         THEME: 'dark',

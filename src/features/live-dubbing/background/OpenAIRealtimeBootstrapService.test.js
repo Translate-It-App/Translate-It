@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@/shared/proxy/ProxySettings.js', () => ({ resolveProxyConfig: vi.fn() }));
 vi.mock('@/shared/proxy/ProxyManager.js', () => ({ proxyManager: { fetch: vi.fn() } }));
+vi.mock('@/shared/storage/core/StorageCore.js', () => ({ storageManager: { getFresh: vi.fn() } }));
 import { resolveProxyConfig } from '@/shared/proxy/ProxySettings.js';
 import { proxyManager } from '@/shared/proxy/ProxyManager.js';
+import { storageManager } from '@/shared/storage/core/StorageCore.js';
 import {
   OPENAI_REALTIME_TRANSLATE_MODEL,
   OPENAI_REALTIME_TRANSLATIONS_CLIENT_SECRETS_ENDPOINT,
   OPENAI_REALTIME_WHISPER_MODEL,
+  OPENAI_REALTIME_ORIGINAL_TRANSCRIPT_SETTING,
   OpenAIRealtimeBootstrapService,
 } from './OpenAIRealtimeBootstrapService.js';
 
@@ -108,6 +111,37 @@ describe('OpenAIRealtimeBootstrapService', () => {
     expect(JSON.parse(calls[0].options.body).session.audio.input).toEqual({
       transcription: { model: OPENAI_REALTIME_WHISPER_MODEL },
     });
+  });
+
+  it('uses only the OpenAI-specific Original subtitles setting', async () => {
+    expect(OPENAI_REALTIME_ORIGINAL_TRANSCRIPT_SETTING)
+      .toBe('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI');
+
+    const geminiOnly = createService({ originalTranscriptEnabled: vi.fn().mockResolvedValue(false) });
+    await geminiOnly.service.mintClientSecret('en-US');
+    expect(JSON.parse(geminiOnly.calls[0].options.body).session.audio.input).toBeUndefined();
+
+    const openAIEnabled = createService({ originalTranscriptEnabled: vi.fn().mockResolvedValue(true) });
+    await openAIEnabled.service.mintClientSecret('en-US');
+    expect(JSON.parse(openAIEnabled.calls[0].options.body).session.audio.input.transcription.model)
+      .toBe(OPENAI_REALTIME_WHISPER_MODEL);
+
+    storageManager.getFresh.mockResolvedValue({
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI: true,
+    });
+    const calls = [];
+    const defaultService = new OpenAIRealtimeBootstrapService({
+      getKeysImpl: async () => ['key-1'],
+      fetchImpl: async (url, options) => {
+        calls.push(options);
+        return okMint();
+      },
+    });
+    await defaultService.mintClientSecret('en-US');
+    expect(storageManager.getFresh).toHaveBeenCalledWith({
+      LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI: false,
+    });
+    expect(JSON.parse(calls[0].body).session.audio.input).toBeUndefined();
   });
 
   it('fails closed when the Original subtitles preference read fails or is not boolean true', async () => {

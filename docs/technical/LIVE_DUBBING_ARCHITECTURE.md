@@ -809,7 +809,14 @@ or descriptor adoption is performed for an uncertain owner.
 ## Transcript Subsystem
 
 Translated and original (source) transcript displays are optional, both default
-off. Gemini applies both visibility preferences in realtime. OpenAI applies
+off. The Original subtitle preference is provider-specific: Gemini and OpenAI
+each remember an independent Original value, so changing one provider's
+preference never affects the other. OpenAI's Original preference is selected
+as a START-time snapshot and defaults off independently because enabling it
+adds additional input transcription; Gemini's preference is display-only and
+does not change Gemini's transcription setup, which requests input
+transcription regardless. Gemini applies both visibility preferences in
+realtime. OpenAI applies
 translated visibility in realtime, while original visibility is session-based
 because input transcription is selected at START. When enabled, the displays
 are rendered inside the existing Shadow DOM UI host in the top frame. The
