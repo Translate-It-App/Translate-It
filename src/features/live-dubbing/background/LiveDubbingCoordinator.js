@@ -256,6 +256,7 @@ export class LiveDubbingCoordinator {
       available,
       status: cloneDescriptor(this.descriptor),
       terminalOutcome,
+      transcriptDeliveryUnavailable: this._isTranscriptDeliveryUnavailable(),
     };
   }
 
@@ -1088,6 +1089,11 @@ export class LiveDubbingCoordinator {
     }
 
     relayRecord.lastTranscriptSequence = transcriptSequence;
+    const relaySessionId = descriptor.sessionId;
+    // Latest-wins settlement fence: overlapping tab sends settle in promise
+    // order, so an older transcript settling late must not overwrite newer
+    // delivery state. Only the still-latest accepted transcript may mutate it.
+    const relayTranscriptSequence = transcriptSequence;
 
     try {
       await this.runtimeGateway.sendTabMessage(descriptor.tabId, {
@@ -1100,8 +1106,20 @@ export class LiveDubbingCoordinator {
           transcript,
         },
       }, { frameId: 0 });
+      if (this.transcriptRelayRecord?.sessionId === relaySessionId
+        && this.transcriptRelayRecord.lastTranscriptSequence === relayTranscriptSequence
+        && this.transcriptRelayRecord.deliveryUnavailable === true) {
+        this.transcriptRelayRecord.deliveryUnavailable = false;
+        void this._notifyTranscriptDeliveryChanged(relaySessionId);
+      }
     } catch {
       // Tab delivery is best effort and cannot affect the session lifecycle.
+      if (this.transcriptRelayRecord?.sessionId === relaySessionId
+        && this.transcriptRelayRecord.lastTranscriptSequence === relayTranscriptSequence
+        && this.transcriptRelayRecord.deliveryUnavailable !== true) {
+        this.transcriptRelayRecord.deliveryUnavailable = true;
+        void this._notifyTranscriptDeliveryChanged(relaySessionId);
+      }
     }
 
     return { success: true };
@@ -2830,6 +2848,41 @@ export class LiveDubbingCoordinator {
     }
   }
 
+  /**
+   * Best-effort non-terminal refresh hint for transcript-delivery state.
+   * Carries scalar session identity only; never affects lifecycle, cleanup,
+   * leases, or ownership.
+   */
+  async _notifyTranscriptDeliveryChanged(sessionId) {
+    if (!sessionId || !this.runtimeGateway?.sendMessage) return;
+
+    try {
+      await this.runtimeGateway.sendMessage({
+        action: LIVE_DUBBING_ACTIONS.TRANSCRIPT_DELIVERY_CHANGED,
+        data: { sessionId },
+      });
+    } catch {
+      // Delivery-state notification is best effort and cannot change session state.
+    }
+  }
+
+  /**
+   * Session-scoped transcript-delivery availability for UI refresh only.
+   * True only while the descriptor is active and the relay record still
+   * belongs to that same session with its non-terminal flag set.
+   */
+  _isTranscriptDeliveryUnavailable() {
+    const descriptor = this.descriptor;
+    if (!descriptor
+      || ![LIVE_DUBBING_STATUS.PREPARING_CAPTURE,
+        LIVE_DUBBING_STATUS.CONNECTING_PROVIDER,
+        LIVE_DUBBING_STATUS.RUNNING].includes(descriptor.status)) {
+      return false;
+    }
+    return this.transcriptRelayRecord?.sessionId === descriptor.sessionId
+      && this.transcriptRelayRecord.deliveryUnavailable === true;
+  }
+
   _syncTranscriptRelayRecord(descriptor) {
     const sessionId = typeof descriptor?.sessionId === 'string'
       && descriptor.sessionId.trim()
@@ -2844,6 +2897,7 @@ export class LiveDubbingCoordinator {
         sessionId,
         lastTranscriptSequence: 0,
         clearSent: false,
+        deliveryUnavailable: false,
       };
     }
     return this.transcriptRelayRecord;

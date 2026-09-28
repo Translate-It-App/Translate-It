@@ -69,6 +69,15 @@
       {{ errorParagraphText }}
     </p>
 
+    <!-- Section 2b: Non-terminal transcript-delivery note (subtitles only) -->
+    <p
+      v-if="showSubtitlesUnavailableNote"
+      class="ti-live-dubbing-control-volume-error"
+      role="status"
+    >
+      {{ t('live_dubbing_subtitles_unavailable', 'Subtitles unavailable on this tab.') }}
+    </p>
+
     <!-- Section 3: Volume controls -->
     <div
       v-if="showVolumeControl"
@@ -180,6 +189,11 @@ const sessionDescriptor = ref(null)
 const sessionProviderId = ref(null)
 const errorMessage = ref('')
 const terminalOutcome = ref(null)
+// ── Transcript-delivery availability (presentation-only) ─────────────────────
+// Sanitized boolean from getStatus (`transcriptDeliveryUnavailable`). True only
+// for the active session when top-frame transcript delivery failed. Never
+// carries notification payloads or raw errors — rendering uses the i18n note.
+const subtitlesUnavailable = ref(false)
 
 // ── Presentation-only loading delay ──────────────────────────────────────────
 // The initial GET_LIVE_DUBBING_STATUS read can resolve quickly for a cached
@@ -197,6 +211,10 @@ const isInitialStatusLoadingVisible = computed(() =>
 let statusRevealTimer = null
 const LOADING_PRESENTATION_DELAY_MS = 150
 let operationGeneration = 0
+// Presentation-only subtitle-refresh token, fully independent from the
+// lifecycle operationGeneration: overlapping delivery notifications each take
+// a new token and only the latest may apply. Never invalidates START/STOP.
+let subtitlesRefreshGeneration = 0
 let removeRuntimeListener = null
 let initialStatusResolved = false
 
@@ -400,12 +418,21 @@ const showErrorParagraph = computed(() => {
   return true
 })
 
+// Non-terminal subtitles note: shown only while a session is active and
+// controllable (running or starting). Never affects START/STOP enablement,
+// lifecycle logic, or existing paragraphs.
+const showSubtitlesUnavailableNote = computed(() =>
+  subtitlesUnavailable.value
+    && sessionId.value != null
+    && (isRunning.value || isStarting.value))
+
 const applyStatus = (response, { preserveSession = false, syncTerminalOutcome = false } = {}) => {
   const result = unwrap(response)
   const descriptor = result.status && typeof result.status === 'object' ? result.status : result
   const nextTerminalOutcome = normalizeTerminalOutcome(result.terminalOutcome)
   if (syncTerminalOutcome) terminalOutcome.value = nextTerminalOutcome
   const nextSessionId = descriptor.sessionId || result.session?.id || null
+  const prevSessionId = sessionId.value
   if (nextSessionId) {
     sessionId.value = nextSessionId
     sessionDescriptor.value = descriptor
@@ -415,10 +442,18 @@ const applyStatus = (response, { preserveSession = false, syncTerminalOutcome = 
     sessionDescriptor.value = null
     sessionProviderId.value = null
   }
+  // A lost or replaced session invalidates any pending subtitle refresh so
+  // an old request cannot affect later presentation state. A newly tracked
+  // session (from null) does not: its own refresh may still be in flight
+  // ahead of the lifecycle response.
+  if (sessionId.value == null || (prevSessionId != null && sessionId.value !== prevSessionId)) {
+    subtitlesRefreshGeneration += 1
+  }
 
   if (result.available === false || result.error === 'LIVE_DUBBING_UNSUPPORTED' || descriptor.status === 'unavailable') {
     authoritativeStatus.value = null
     state.value = 'unavailable'
+    subtitlesUnavailable.value = false
     errorMessage.value = getErrorMessage(result.error, 'Live dubbing is unavailable.')
     return
   }
@@ -434,6 +469,19 @@ const applyStatus = (response, { preserveSession = false, syncTerminalOutcome = 
     ERROR: sessionId.value ? 'cleanup' : 'error'
   }
   state.value = stateMap[status] || (result.error && result.success === false ? 'error' : 'idle')
+  // Presentation-only transcript-delivery flag. An explicit authoritative
+  // boolean always wins; a lifecycle response without the field (START/STOP)
+  // preserves refresh-obtained state for the continuing session. Session
+  // replacement without an explicit field, and losing the session, clear it.
+  if (sessionId.value == null) {
+    subtitlesUnavailable.value = false
+  } else if (sessionId.value !== prevSessionId && prevSessionId != null) {
+    subtitlesUnavailable.value = result.transcriptDeliveryUnavailable === true
+  } else if (result.transcriptDeliveryUnavailable === true) {
+    subtitlesUnavailable.value = true
+  } else if (result.transcriptDeliveryUnavailable === false) {
+    subtitlesUnavailable.value = false
+  }
   errorMessage.value = status === 'ERROR' || result.error
     ? getErrorMessage(descriptor.lastError || result.error)
     : ''
@@ -958,6 +1006,7 @@ const queryStatus = async (generation = nextOperationGeneration()) => {
     if (generation !== operationGeneration) return false
     state.value = 'unavailable'
     authoritativeStatus.value = null
+    subtitlesUnavailable.value = false
     errorMessage.value = getErrorMessage(error?.message, 'Live dubbing is unavailable.')
     resetVolumeState()
     resetDubbedVolumeState()
@@ -1026,6 +1075,12 @@ const stop = async () => {
     if (generation !== operationGeneration) return
     applyStatus(response, { preserveSession: true })
     if (state.value === 'idle') {
+      // Clean idle after STOP owns no session: drop subtitle-delivery
+      // presentation state and invalidate pending refreshes alongside the
+      // session identity. Failed/retained cleanup sessions keep their state
+      // via the catch path below.
+      subtitlesUnavailable.value = false
+      subtitlesRefreshGeneration += 1
       sessionId.value = null
       sessionDescriptor.value = null
       sessionProviderId.value = null
@@ -1040,12 +1095,47 @@ const stop = async () => {
 }
 
 const handleRuntimeMessage = (message, sender) => {
-  if (message?.action !== LIVE_DUBBING_ACTIONS.TERMINAL_OUTCOME
-    || !isAuthorizedLiveDubbingOffscreenControlSender(sender, extensionBrowser)) return
+  if (!isAuthorizedLiveDubbingOffscreenControlSender(sender, extensionBrowser)) return
+  if (message?.action === LIVE_DUBBING_ACTIONS.TRANSCRIPT_DELIVERY_CHANGED) {
+    void refreshSubtitlesUnavailable(message?.data?.sessionId)
+    return
+  }
+  if (message?.action !== LIVE_DUBBING_ACTIONS.TERMINAL_OUTCOME) return
 
   // Notifications only invalidate the view. The authoritative response is the
   // sole source used for rendering terminal outcome data.
   void queryStatus()
+}
+
+// ── Presentation-only transcript-delivery refresh ────────────────────────────
+// Reads authoritative status without touching the lifecycle operation
+// generation, so a delivery notification can never invalidate an in-flight
+// START/STOP. Updates only `subtitlesUnavailable`: the notification session
+// is a fence, never rendered state. Late results for a superseded session
+// and refresh failures change nothing; a flag whose session is gone
+// authoritatively is cleared. Lifecycle state, session ownership, volumes,
+// terminal outcome, and error state are untouched.
+const refreshSubtitlesUnavailable = async (notifiedSessionId) => {
+  if (typeof notifiedSessionId !== 'string' || !notifiedSessionId) return
+  subtitlesRefreshGeneration += 1
+  const refreshGeneration = subtitlesRefreshGeneration
+  let result
+  try {
+    result = unwrap(await sendMessage({ action: 'GET_LIVE_DUBBING_STATUS' }))
+  } catch {
+    return
+  }
+  if (refreshGeneration !== subtitlesRefreshGeneration) return
+  const descriptor = result?.status && typeof result.status === 'object' ? result.status : result
+  const currentSessionId = descriptor?.sessionId || result?.session?.id || null
+  if (currentSessionId !== notifiedSessionId) {
+    if (sessionId.value == null || sessionId.value === notifiedSessionId) {
+      subtitlesUnavailable.value = false
+    }
+    return
+  }
+  if (sessionId.value != null && sessionId.value !== notifiedSessionId) return
+  subtitlesUnavailable.value = result.transcriptDeliveryUnavailable === true
 }
 
 const clearInitialStatusReveal = () => {

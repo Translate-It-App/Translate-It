@@ -883,7 +883,12 @@ Provider Adapter → LiveDubbingController → Background Coordinator
   outside `SessionRegistry` so a service-worker restart with an active
   descriptor and an empty registry cannot create lifecycle facts.
 - Content delivery uses `frameId: 0`. Tab-message delivery failures are
-  swallowed and never fail Live Dubbing.
+  swallowed and never fail Live Dubbing. The first failure sets a
+  session-scoped non-terminal `deliveryUnavailable` relay flag (reset on
+  session change, cleared on a later successful delivery), exposed
+  sanitized via `getStatus().transcriptDeliveryUnavailable` plus a
+  best-effort non-terminal refresh notification; it never affects
+  lifecycle, cleanup, leases, or ownership.
 - A single shared Coordinator clear path emits a session-scoped clear
   action once on authoritative STOP, terminal lifecycle, START failure,
   and START timeout, covering both `translated` and `source` kinds.
