@@ -279,7 +279,9 @@ describe('LiveDubbingView', () => {
     expect(link.text()).toBe('Change font locally')
     const header = transcriptHeaderRow(wrapper)
     expect(header.element.contains(link.element)).toBe(true)
-    expect(link.element.compareDocumentPosition(header.find('.live-dubbing-transcript-preferences-chevron').element)
+    const disclosure = transcriptHeader(wrapper)
+    expect(disclosure.element.contains(header.find('.live-dubbing-transcript-preferences-chevron').element)).toBe(true)
+    expect(disclosure.element.compareDocumentPosition(link.element)
       & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(transcriptHeader(wrapper).attributes('aria-expanded')).toBe('false')
     expect(harness.tCalls).toContainEqual([
@@ -325,7 +327,7 @@ describe('LiveDubbingView', () => {
     expect(wrapper.find('.live-dubbing-change-font-link').attributes('style')).toContain('display: none')
   })
 
-  it('keeps a large title disclosure control and independent Change font button', () => {
+  it('keeps the caption and chevron in one large disclosure button, separate from Change font', () => {
     const wrapper = mountView()
     const header = transcriptHeader(wrapper)
 
@@ -335,15 +337,14 @@ describe('LiveDubbingView', () => {
     expect(header.attributes('aria-expanded')).toBe('false')
     expect(header.attributes('aria-controls')).toBe('live-dubbing-transcript-preferences-content')
     expect(header.find('.live-dubbing-card-title').text()).toBe('Subtitle preferences')
+    expect(header.find('.live-dubbing-transcript-preferences-chevron').attributes('aria-hidden')).toBe('true')
     expect(header.findAll('button, a, input, select, textarea, [tabindex]:not([tabindex="-1"])'))
       .toHaveLength(0)
     expect(transcriptHeaderRow(wrapper).findAll('button')).toHaveLength(2)
-    expect(transcriptHeaderRow(wrapper).find('.live-dubbing-change-font-link').exists()).toBe(true)
-
-    const source = readFileSync(resolve(here, 'LiveDubbingView.vue'), 'utf8')
-    const toggleTemplate = source.match(/<button\s+type="button"\s+class="live-dubbing-transcript-preferences-toggle"[\s\S]*?<\/button>/)?.[0]
-    expect(toggleTemplate).toBeTruthy()
-    expect(toggleTemplate).not.toMatch(/<button\s[\s\S]+<button\s|<a\s/)
+    const changeFont = transcriptHeaderRow(wrapper).find('.live-dubbing-change-font-link')
+    expect(changeFont.exists()).toBe(true)
+    expect(changeFont.element.parentElement).toBe(transcriptHeaderRow(wrapper).element)
+    expect(header.find('.live-dubbing-change-font-link').exists()).toBe(false)
   })
 
   it('shows Change font when expanded without coupling its click to disclosure', async () => {
@@ -1373,6 +1374,7 @@ describe('LiveDubbingView', () => {
       /\.live-dubbing-transcript-preferences-header\s*\{[\s\S]*?^\}/m
     )?.[0]
     const headerHoverRule = scss.match(/\.live-dubbing-transcript-preferences-toggle:hover\s*\{[^}]*\}/)?.[0]
+    const disclosureRule = scss.match(/\.live-dubbing-transcript-preferences-toggle\s*\{[^}]*\}/)?.[0]
     const headerFocusRule = scss.match(
       /\.live-dubbing-transcript-preferences-toggle:focus-visible\s*\{[^}]*\}/m
     )?.[0]
@@ -1384,13 +1386,15 @@ describe('LiveDubbingView', () => {
     expect(headerRule).not.toMatch(/transition\s*:/)
     expect(headerRule).not.toMatch(/transform\s*:|box-shadow\s*:/)
     expect(headerHoverRule).toBeTruthy()
-    expect(headerHoverRule).not.toMatch(/^\s*background(?:-color)?\s*:/m)
+    expect(headerHoverRule).toMatch(/background-color:\s*var\(--ti-action-hover-bg\)/)
     expect(headerHoverRule).toMatch(/color:\s*var\(--ti-action-icon-hover\)/)
     expect(headerHoverRule).not.toMatch(/(?:transform|box-shadow|border(?:-[\w-]+)?|transition|animation)\s*:/)
     expect(titleRule).toMatch(/color:\s*inherit/)
     expect(headerFocusRule).toBeTruthy()
     expect(headerFocusRule).toMatch(/outline:\s*2px\s+solid\s+var\(--color-primary\)/)
     expect(headerFocusRule).not.toMatch(/transform\s*:|box-shadow\s*:/)
+    expect(disclosureRule).toMatch(/flex:\s*1\s+1\s+auto/)
+    expect(disclosureRule).toMatch(/justify-content:\s*space-between/)
     expect(scss.match(/\.live-dubbing-transcript-preferences-toggle(?::hover|:focus-visible)?\s*\{/g))
       .toEqual(['.live-dubbing-transcript-preferences-toggle {', '.live-dubbing-transcript-preferences-toggle:hover {', '.live-dubbing-transcript-preferences-toggle:focus-visible {'])
     expect(scss).toMatch(/\.live-dubbing-transcript-preferences-chevron[\s\S]*?border-inline-end:/)

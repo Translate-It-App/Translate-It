@@ -80,6 +80,10 @@
           <span class="live-dubbing-card-title">
             {{ t('live_dubbing_transcript_preferences_label', 'Subtitles') }}
           </span>
+          <span
+            class="live-dubbing-transcript-preferences-chevron"
+            aria-hidden="true"
+          />
         </button>
         <Transition name="live-dubbing-change-font">
           <button
@@ -91,10 +95,6 @@
             {{ t('live_dubbing_change_font_label', 'Change font') }}
           </button>
         </Transition>
-        <span
-          class="live-dubbing-transcript-preferences-chevron"
-          aria-hidden="true"
-        />
       </div>
       <Transition
         :css="false"

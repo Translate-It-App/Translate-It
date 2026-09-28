@@ -250,9 +250,12 @@
 }
 
 .live-dubbing-transcript-preferences-toggle {
-  display: inline-flex;
+  box-sizing: border-box;
+  display: flex;
   flex: 1 1 auto;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   min-inline-size: 44px;
   min-block-size: 36px;
   padding: 0;
@@ -267,6 +270,7 @@
 
 .live-dubbing-transcript-preferences-toggle:hover {
   color: var(--ti-action-icon-hover);
+  background-color: var(--ti-action-hover-bg);
 }
 
 .live-dubbing-transcript-preferences-toggle:focus-visible {
