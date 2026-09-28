@@ -273,10 +273,10 @@
     "message": "تغییر فونت"
   },
   "live_dubbing_show_translated_transcript": {
-    "message": "زیرنویس ترجمه‌شده"
+    "message": "دوبله"
   },
   "live_dubbing_show_original_transcript": {
-    "message": "زیرنویس اصلی"
+    "message": "اصلی"
   },
   "live_dubbing_setup_save": {
     "message": "ذخیره"

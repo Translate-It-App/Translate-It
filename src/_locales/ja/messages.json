@@ -273,10 +273,10 @@
     "message": "フォント変更"
   },
   "live_dubbing_show_translated_transcript": {
-    "message": "翻訳字幕"
+    "message": "吹替"
   },
   "live_dubbing_show_original_transcript": {
-    "message": "元の字幕"
+    "message": "原文"
   },
   "live_dubbing_setup_save": {
     "message": "保存"

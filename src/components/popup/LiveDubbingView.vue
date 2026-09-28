@@ -66,21 +66,33 @@
       class="live-dubbing-card live-dubbing-transcript-preferences ti-live-dubbing-transcript-card"
       :aria-label="t('live_dubbing_transcript_preferences_label', 'Subtitles')"
     >
-      <button
-        type="button"
+      <div
         class="live-dubbing-transcript-preferences-header"
-        :aria-expanded="isTranscriptPreferencesExpanded"
-        aria-controls="live-dubbing-transcript-preferences-content"
-        @click="isTranscriptPreferencesExpanded = !isTranscriptPreferencesExpanded"
+        :class="{ 'live-dubbing-transcript-preferences-header--expanded': isTranscriptPreferencesExpanded }"
       >
-        <span class="live-dubbing-card-title">
-          {{ t('live_dubbing_transcript_preferences_label', 'Subtitles') }}
-        </span>
+        <button
+          type="button"
+          class="live-dubbing-transcript-preferences-toggle"
+          :aria-expanded="isTranscriptPreferencesExpanded"
+          aria-controls="live-dubbing-transcript-preferences-content"
+          @click="isTranscriptPreferencesExpanded = !isTranscriptPreferencesExpanded"
+        >
+          <span class="live-dubbing-card-title">
+            {{ t('live_dubbing_transcript_preferences_label', 'Subtitles') }}
+          </span>
+        </button>
+        <button
+          type="button"
+          class="live-dubbing-change-font-link"
+          @click="handleChangeFont"
+        >
+          {{ t('live_dubbing_change_font_label', 'Change font') }}
+        </button>
         <span
           class="live-dubbing-transcript-preferences-chevron"
           aria-hidden="true"
         />
-      </button>
+      </div>
       <Transition
         :css="false"
         @before-enter="handleTranscriptPreferencesBeforeEnter"
@@ -96,52 +108,38 @@
           :inert="!isTranscriptPreferencesExpanded ? '' : undefined"
         >
           <div class="live-dubbing-transcript-preferences-content-inner">
-            <div class="live-dubbing-transcript-preferences-actions">
-              <button
-                type="button"
-                class="live-dubbing-change-font-link"
-                @click="handleChangeFont"
-              >
-                {{ t('live_dubbing_change_font_label', 'Change font') }}
-              </button>
-            </div>
             <div class="live-dubbing-transcript-preferences-list">
               <div class="live-dubbing-transcript-preference">
                 <span class="live-dubbing-transcript-preference-label">
-                  {{ t('live_dubbing_show_translated_transcript', 'Translated subtitles') }}
+                  {{ t('live_dubbing_show_translated_transcript', 'Dubbed') }}
                 </span>
                 <BaseToggle
                   class="live-dubbing-transcript-preference-toggle"
                   :class="{ 'live-dubbing-toggle--pending-neutral': hasTranslatedPreferenceWritePending }"
                   :model-value="showTranslatedTranscript"
                   :disabled="hasTranslatedPreferenceWritePending"
-                  :title="t('live_dubbing_show_translated_transcript', 'Translated subtitles')"
+                  :title="t('live_dubbing_show_translated_transcript', 'Dubbed')"
                   @update:model-value="updateTranscriptPreference('LIVE_DUBBING_SHOW_TRANSLATED_TRANSCRIPT', $event)"
                 />
               </div>
               <div class="live-dubbing-transcript-preference">
                 <span class="live-dubbing-transcript-preference-label">
-                  {{ t('live_dubbing_show_original_transcript', 'Original subtitles') }}
+                  {{ t('live_dubbing_show_original_transcript', 'Original') }}
                 </span>
                 <BaseToggle
                   class="live-dubbing-transcript-preference-toggle"
                   :class="{ 'live-dubbing-toggle--pending-neutral': hasOriginalPreferenceWritePending && !isOriginalOpenAIRestricted }"
                   :model-value="showOriginalTranscript"
                   :disabled="hasOriginalPreferenceWritePending || isOriginalOpenAIRestricted"
-                  :title="t('live_dubbing_show_original_transcript', 'Original subtitles')"
+                  :title="t('live_dubbing_show_original_transcript', 'Original')"
                   @update:model-value="updateTranscriptPreference('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT', $event)"
                 />
               </div>
-              <div class="live-dubbing-transcript-preference">
-                <label
-                  class="live-dubbing-transcript-preference-label"
-                  for="live-dubbing-subtitle-size-select"
-                >
-                  {{ t('live_dubbing_subtitle_size_label', 'Subtitle size') }}
-                </label>
+              <div class="live-dubbing-transcript-preference live-dubbing-transcript-preference--size">
                 <BaseSelect
                   id="live-dubbing-subtitle-size-select"
                   v-model="subtitleSizeModel"
+                  :aria-label="t('live_dubbing_subtitle_size_label', 'Subtitle size')"
                   class="live-dubbing-subtitle-size-select"
                   :options="subtitleSizeOptions"
                   :disabled="hasSubtitleSizePreferenceWritePending"

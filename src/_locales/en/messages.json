@@ -273,10 +273,10 @@
     "message": "Change font"
   },
   "live_dubbing_show_translated_transcript": {
-    "message": "Translated subtitles"
+    "message": "Dubbed"
   },
   "live_dubbing_show_original_transcript": {
-    "message": "Original subtitles"
+    "message": "Original"
   },
   "live_dubbing_setup_save": {
     "message": "Save"

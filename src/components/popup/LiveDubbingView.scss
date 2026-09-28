@@ -236,6 +236,7 @@
   display: flex;
   inline-size: 100%;
   align-items: center;
+  justify-content: flex-start;
   gap: 8px;
   min-width: 0;
   margin: 0;
@@ -244,20 +245,30 @@
   border: 0;
   background: transparent;
   color: var(--text-color);
+  text-align: start;
+}
+
+.live-dubbing-transcript-preferences-toggle {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-inline-size: 44px;
+  min-block-size: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
   font: inherit;
   text-align: start;
   cursor: pointer;
-
-  &[aria-expanded="true"] {
-    padding-block-end: 6px;
-  }
-
-  &:hover {
-    color: var(--ti-action-icon-hover);
-  }
 }
 
-.live-dubbing-transcript-preferences-header:focus-visible {
+.live-dubbing-transcript-preferences-toggle:hover {
+  color: var(--ti-action-icon-hover);
+}
+
+.live-dubbing-transcript-preferences-toggle:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
   border-radius: 3px;
@@ -267,7 +278,7 @@
   flex: 0 0 auto;
   inline-size: 7px;
   block-size: 7px;
-  margin-inline-start: auto;
+  margin-inline-start: 0;
   border-inline-end: 1.5px solid currentColor;
   border-block-end: 1.5px solid currentColor;
   transform: rotate(45deg);
@@ -275,7 +286,7 @@
   opacity: 0.7;
 }
 
-.live-dubbing-transcript-preferences-header[aria-expanded="true"]
+.live-dubbing-transcript-preferences-header--expanded
   .live-dubbing-transcript-preferences-chevron {
   transform: rotate(225deg);
 }
@@ -290,16 +301,9 @@
   padding-inline: 10px;
 }
 
-.live-dubbing-transcript-preferences-actions {
-  display: flex;
-  justify-content: flex-end;
-  min-width: 0;
-  margin-block-end: 6px;
-}
-
 .live-dubbing-change-font-link {
   flex: 0 0 auto;
-  margin-inline-start: auto;
+  margin-inline-start: 0;
   padding: 0;
   border: 0;
   background: transparent;
@@ -325,21 +329,23 @@
 
 .live-dubbing-transcript-preferences-list {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  flex-flow: row wrap;
+  align-items: center;
+  gap: 8px 12px;
 }
 
 .live-dubbing-transcript-preference {
   display: flex;
   flex-direction: row;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
   min-height: 28px;
 }
 
 .live-dubbing-transcript-preference-label {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
   color: var(--text-color);
   font-size: 13px;
@@ -350,11 +356,14 @@
 
 .live-dubbing-transcript-preference-toggle {
   flex: 0 0 auto;
-  margin-inline-start: auto;
+}
+
+.live-dubbing-transcript-preference--size {
+  flex: 0 1 120px;
 }
 
 .live-dubbing-subtitle-size-select {
-  flex: 0 1 120px !important;
+  flex: 1 1 120px !important;
   inline-size: 120px !important;
   min-width: 0 !important;
   max-width: 100% !important;
