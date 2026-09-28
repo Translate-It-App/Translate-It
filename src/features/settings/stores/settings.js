@@ -458,6 +458,9 @@ export const useSettingsStore = defineStore('settings', () => {
       Object.assign(settings.value, mergedSettings);
 
       await saveAllSettings();
+      if (removals.length > 0) {
+        await storageManager.remove(removals);
+      }
 
       // Re-setup storage listener after import is complete
       await setupStorageListener();

@@ -14,6 +14,7 @@ vi.mock('@/shared/storage/core/StorageCore.js', () => ({
   storageManager: {
     get: vi.fn().mockResolvedValue({}),
     set: vi.fn().mockResolvedValue(true),
+    remove: vi.fn().mockResolvedValue(true),
     clear: vi.fn().mockResolvedValue(true),
     on: vi.fn(),
     off: vi.fn()
@@ -504,6 +505,7 @@ describe('Settings Store', () => {
 
       expect(store.settings.THEME).toBe('dark');
       expect(storageManager.set).toHaveBeenCalled();
+      expect(storageManager.remove).not.toHaveBeenCalled();
     });
 
     it('importSettings should remove obsolete endpoint overrides returned by migrations', async () => {
@@ -563,6 +565,17 @@ describe('Settings Store', () => {
     ])(
       'importSettings migrates legacy Original transcript value %s while preserving explicit provider values',
       async (legacyValue, providerValues, expectedGemini, expectedOpenAI) => {
+        const persistedSettings = {
+          LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT: legacyValue
+        };
+        storageManager.set.mockImplementationOnce(async (settings) => {
+          Object.assign(persistedSettings, settings);
+          return true;
+        });
+        storageManager.remove.mockImplementationOnce(async (keys) => {
+          keys.forEach(key => delete persistedSettings[key]);
+          return true;
+        });
         secureStorage.processImportedSettings.mockResolvedValueOnce({
           THEME: 'dark',
           LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT: legacyValue,
@@ -579,6 +592,12 @@ describe('Settings Store', () => {
         expect(store.settings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(expectedGemini);
         expect(store.settings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(expectedOpenAI);
         expect(store.settings).not.toHaveProperty('LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT');
+        expect(storageManager.remove).toHaveBeenCalledWith([
+          'LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT'
+        ]);
+        expect(persistedSettings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT).toBeUndefined();
+        expect(persistedSettings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(expectedGemini);
+        expect(persistedSettings.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(expectedOpenAI);
       }
     );
 
@@ -601,6 +620,7 @@ describe('Settings Store', () => {
 
       expect(migrationInput.OPENAI_MODELS).toEqual(CONFIG.OPENAI_MODELS);
       expect(store.settings.OPENAI_API_MODEL).toBe('gpt-6-luna');
+      expect(storageManager.remove).not.toHaveBeenCalled();
     });
 
     it('importSettings should drop non-editable wrappers from old backups and keep editable prompts', async () => {

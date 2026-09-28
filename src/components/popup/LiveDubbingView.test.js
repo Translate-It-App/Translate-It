@@ -839,9 +839,13 @@ describe('LiveDubbingView', () => {
     expect(scss).toMatch(/\.live-dubbing-openai-original-info:focus-visible::after/)
     expect(scss).toMatch(/content:\s*attr\(data-tooltip\)/)
     const tooltipRule = scss.match(/\.live-dubbing-openai-original-info::after\s*\{[^}]*\}/)?.[0]
+    const controlsRowRule = scss.match(/\.live-dubbing-transcript-preferences-list\s*\{[^}]*\}/)?.[0]
     const rtlTooltipRule = scss.match(/\.live-dubbing-view--rtl \.live-dubbing-openai-original-info::after\s*\{[^}]*\}/)?.[0]
-    expect(tooltipRule).toMatch(/left:\s*50%/)
-    expect(tooltipRule).toMatch(/transform:\s*translateX\(-50%\)/)
+    expect(controlsRowRule).toMatch(/position:\s*relative/)
+    expect(tooltipRule).toMatch(/position:\s*absolute/)
+    expect(tooltipRule).toMatch(/inset-inline:\s*0/)
+    expect(tooltipRule).toMatch(/width:\s*100%/)
+    expect(tooltipRule).not.toMatch(/(?:left:\s*50%|translateX\(-50%\))/)
     expect(rtlTooltipRule).toMatch(/direction:\s*rtl/)
     expect(rtlTooltipRule).toMatch(/text-align:\s*start/)
 
