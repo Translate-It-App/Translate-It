@@ -365,6 +365,9 @@
   "live_dubbing_status_cleanup": {
     "message": "クリーンアップが必要です"
   },
+  "live_dubbing_subtitles_unavailable": {
+    "message": "このタブでは字幕を利用できません。"
+  },
   "live_dubbing_volume_original_label": {
     "message": "オリジナル"
   },

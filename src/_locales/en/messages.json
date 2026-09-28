@@ -365,6 +365,9 @@
   "live_dubbing_status_cleanup": {
     "message": "Cleanup required"
   },
+  "live_dubbing_subtitles_unavailable": {
+    "message": "Subtitles unavailable on this tab."
+  },
   "live_dubbing_volume_original_label": {
     "message": "Original"
   },

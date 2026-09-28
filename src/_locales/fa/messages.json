@@ -365,6 +365,9 @@
   "live_dubbing_status_cleanup": {
     "message": "نیاز به پاک‌سازی"
   },
+  "live_dubbing_subtitles_unavailable": {
+    "message": "زیرنویس‌ها در این تب در دسترس نیستند."
+  },
   "live_dubbing_volume_original_label": {
     "message": "اصلی"
   },
