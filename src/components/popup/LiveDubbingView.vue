@@ -81,13 +81,16 @@
             {{ t('live_dubbing_transcript_preferences_label', 'Subtitles') }}
           </span>
         </button>
-        <button
-          type="button"
-          class="live-dubbing-change-font-link"
-          @click="handleChangeFont"
-        >
-          {{ t('live_dubbing_change_font_label', 'Change font') }}
-        </button>
+        <Transition name="live-dubbing-change-font">
+          <button
+            v-show="isTranscriptPreferencesExpanded"
+            type="button"
+            class="live-dubbing-change-font-link"
+            @click="handleChangeFont"
+          >
+            {{ t('live_dubbing_change_font_label', 'Change font') }}
+          </button>
+        </Transition>
         <span
           class="live-dubbing-transcript-preferences-chevron"
           aria-hidden="true"

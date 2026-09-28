@@ -267,12 +267,14 @@ describe('LiveDubbingView', () => {
     expect(wrapper.find('label[for="live-dubbing-provider-select"]').element.tagName).toBe('LABEL')
   })
 
-  it('renders the localized Change font action in the Subtitles card', () => {
+  it('keeps Change font hidden and non-focusable while the Subtitles card is collapsed', () => {
     harness.i18n.live_dubbing_change_font_label = 'Change font locally'
     const wrapper = mountView()
 
     const link = wrapper.find('.live-dubbing-change-font-link')
     expect(link.exists()).toBe(true)
+    expect(link.attributes('style')).toContain('display: none')
+    expect(link.element.matches(':focus')).toBe(false)
     expect(link.text()).toBe('Change font locally')
     const header = transcriptHeaderRow(wrapper)
     expect(header.element.contains(link.element)).toBe(true)
@@ -305,6 +307,8 @@ describe('LiveDubbingView', () => {
 
     const scss = readFileSync(resolve(here, 'LiveDubbingView.scss'), 'utf8')
     expect(scss).toMatch(/\.live-dubbing-transcript-preferences-list\s*\{[^}]*flex-flow:\s*row\s+wrap/)
+    expect(scss).toMatch(/\.live-dubbing-change-font-enter-from[\s\S]*?opacity:\s*0/)
+    expect(scss).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.live-dubbing-change-font-leave-active[\s\S]*?transition:\s*none/)
   })
 
   it('starts the Subtitles card collapsed when both subtitle preferences are off', () => {
@@ -317,7 +321,7 @@ describe('LiveDubbingView', () => {
     expect(transcriptContent(wrapper).exists()).toBe(true)
     expect(transcriptContent(wrapper).attributes('inert')).toBe('')
     expect(wrapper.findAllComponents({ name: 'BaseToggle' })).toHaveLength(2)
-    expect(wrapper.find('.live-dubbing-change-font-link').exists()).toBe(true)
+    expect(wrapper.find('.live-dubbing-change-font-link').attributes('style')).toContain('display: none')
   })
 
   it('keeps a large title disclosure control and independent Change font button', () => {
@@ -341,12 +345,19 @@ describe('LiveDubbingView', () => {
     expect(toggleTemplate).not.toMatch(/<button\s[\s\S]+<button\s|<a\s/)
   })
 
-  it('does not toggle the Subtitles card when Change font is clicked', async () => {
+  it('shows Change font when expanded without coupling its click to disclosure', async () => {
     const wrapper = mountView()
+    const disclosure = transcriptHeader(wrapper)
+    const changeFont = wrapper.find('.live-dubbing-change-font-link')
 
-    await wrapper.find('.live-dubbing-change-font-link').trigger('click')
+    await disclosure.trigger('click')
+    expect(disclosure.attributes('aria-expanded')).toBe('true')
+    expect(changeFont.attributes('style')).not.toContain('display: none')
+    expect(changeFont.element.matches(':enabled')).toBe(true)
 
-    expect(transcriptHeader(wrapper).attributes('aria-expanded')).toBe('false')
+    await changeFont.trigger('click')
+
+    expect(disclosure.attributes('aria-expanded')).toBe('true')
   })
 
   it('toggles from the title disclosure control but not from content clicks', async () => {
@@ -424,7 +435,7 @@ describe('LiveDubbingView', () => {
 
     await transcriptHeader(wrapper).trigger('click')
     expect(content.style.height).toBe('0px')
-    frameCallbacks.shift()()
+    while (content.style.height === '0px' && frameCallbacks.length) frameCallbacks.shift()()
     expect(content.style.height).toBe('144px')
     vi.advanceTimersByTime(190)
     await nextTick()
@@ -433,7 +444,7 @@ describe('LiveDubbingView', () => {
 
     await transcriptHeader(wrapper).trigger('click')
     expect(content.style.height).toBe('144px')
-    frameCallbacks.shift()()
+    while (content.style.height !== '0px' && frameCallbacks.length) frameCallbacks.shift()()
     expect(content.style.height).toBe('0px')
     vi.advanceTimersByTime(190)
     await nextTick()
@@ -478,8 +489,7 @@ describe('LiveDubbingView', () => {
     const originalMatchMedia = window.matchMedia
     const matchMediaMock = vi.fn().mockReturnValue({ matches: true })
     window.matchMedia = matchMediaMock
-    const requestAnimationFrameMock = vi.spyOn(window, 'requestAnimationFrame')
-      .mockImplementation(() => 1)
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1)
     const wrapper = mountView()
     const content = transcriptContent(wrapper).element
     Object.defineProperty(content, 'scrollHeight', { configurable: true, value: 144 })
@@ -487,7 +497,8 @@ describe('LiveDubbingView', () => {
     await transcriptHeader(wrapper).trigger('click')
 
     expect(matchMediaMock).toHaveBeenCalledWith('(prefers-reduced-motion: reduce)')
-    expect(requestAnimationFrameMock).not.toHaveBeenCalled()
+    // Change font's independent fade may use a frame; the disclosure height
+    // transition itself must still complete synchronously under reduced motion.
     expect(content.style.height).toBe('')
     expect(content.style.transition).toBe('')
 
@@ -1300,10 +1311,10 @@ describe('LiveDubbingView', () => {
     expect(contentInnerRule).toMatch(/padding-inline:\s*10px/)
     expect(contentRule).not.toMatch(/opacity|transition/)
     expect(scss).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.live-dubbing-transcript-preferences-chevron[\s\S]*?transition:\s*none/)
-    expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?flex:\s*1\s+1\s+120px\s*!important/)
-    expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?inline-size:\s*120px\s*!important/)
-    expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?height:\s*36px\s*!important/)
-    expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?font-size:\s*13px\s*!important/)
+    expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?flex:\s*1\s+1\s+112px\s*!important/)
+    expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?inline-size:\s*112px\s*!important/)
+    expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?height:\s*32px\s*!important/)
+    expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?font-size:\s*12px\s*!important/)
     expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?border-radius:\s*6px\s*!important/)
     expect(scss).toMatch(/\.live-dubbing-subtitle-size-select\s*\{[\s\S]*?min-width:\s*0\s*!important/)
     expect(scss).toMatch(/\.live-dubbing-view--rtl \.live-dubbing-subtitle-size-select\s*\{[\s\S]*?background-position:\s*left 10px center\s*!important/)
