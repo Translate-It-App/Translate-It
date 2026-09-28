@@ -232,11 +232,12 @@
 }
 
 .live-dubbing-transcript-preferences-header {
+  position: relative;
   box-sizing: border-box;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   inline-size: 100%;
   align-items: center;
-  justify-content: flex-start;
   gap: 8px;
   min-width: 0;
   min-block-size: 44px;
@@ -250,40 +251,44 @@
 }
 
 .live-dubbing-transcript-preferences-toggle {
-  box-sizing: border-box;
-  display: flex;
-  flex: 1 1 auto;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-inline-size: 44px;
-  min-block-size: 36px;
-  padding: 0;
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
   border: 0;
-  border-radius: 3px;
   background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: start;
   cursor: pointer;
-}
-
-.live-dubbing-transcript-preferences-toggle:hover {
-  color: var(--ti-action-icon-hover);
-  background-color: var(--ti-action-hover-bg);
 }
 
 .live-dubbing-transcript-preferences-toggle:focus-visible {
   outline: 2px solid var(--color-primary);
-  outline-offset: 2px;
+  outline-offset: 1px;
   border-radius: 3px;
 }
 
+.live-dubbing-transcript-preferences-title,
 .live-dubbing-transcript-preferences-chevron {
+  z-index: 1;
+  pointer-events: none;
+}
+
+.live-dubbing-transcript-preferences-title {
+  grid-column: 1;
+}
+
+.live-dubbing-transcript-preferences-toggle:hover ~ .live-dubbing-transcript-preferences-title,
+.live-dubbing-transcript-preferences-toggle:hover ~ .live-dubbing-transcript-preferences-chevron {
+  color: var(--ti-action-icon-hover);
+}
+
+.live-dubbing-transcript-preferences-chevron {
+  position: relative;
+  grid-column: 3;
   flex: 0 0 auto;
   inline-size: 7px;
   block-size: 7px;
-  margin-inline-start: 0;
+  margin: 0;
   border-inline-end: 1.5px solid currentColor;
   border-block-end: 1.5px solid currentColor;
   transform: rotate(45deg);
@@ -307,8 +312,12 @@
 }
 
 .live-dubbing-change-font-link {
+  position: relative;
+  z-index: 1;
+  grid-column: 2;
   flex: 0 0 auto;
   margin-inline-start: 0;
+  margin-inline-end: 0;
   padding: 0;
   border: 0;
   background: transparent;

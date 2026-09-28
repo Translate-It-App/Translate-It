@@ -73,18 +73,17 @@
         <button
           type="button"
           class="live-dubbing-transcript-preferences-toggle"
+          aria-labelledby="live-dubbing-transcript-preferences-title"
           :aria-expanded="isTranscriptPreferencesExpanded"
           aria-controls="live-dubbing-transcript-preferences-content"
           @click="isTranscriptPreferencesExpanded = !isTranscriptPreferencesExpanded"
+        />
+        <span
+          id="live-dubbing-transcript-preferences-title"
+          class="live-dubbing-card-title live-dubbing-transcript-preferences-title"
         >
-          <span class="live-dubbing-card-title">
-            {{ t('live_dubbing_transcript_preferences_label', 'Subtitles') }}
-          </span>
-          <span
-            class="live-dubbing-transcript-preferences-chevron"
-            aria-hidden="true"
-          />
-        </button>
+          {{ t('live_dubbing_transcript_preferences_label', 'Subtitles') }}
+        </span>
         <Transition name="live-dubbing-change-font">
           <button
             v-show="isTranscriptPreferencesExpanded"
@@ -95,6 +94,10 @@
             {{ t('live_dubbing_change_font_label', 'Change font') }}
           </button>
         </Transition>
+        <span
+          class="live-dubbing-transcript-preferences-chevron"
+          aria-hidden="true"
+        />
       </div>
       <Transition
         :css="false"
