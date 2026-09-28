@@ -1096,8 +1096,8 @@ export class LiveDubbingCoordinator {
     const relayTranscriptSequence = transcriptSequence;
 
     try {
-      await this.runtimeGateway.sendTabMessage(descriptor.tabId, {
-         action: message.action,
+      const deliveryResponse = await this.runtimeGateway.sendTabMessage(descriptor.tabId, {
+        action: message.action,
         data: {
           sessionId: descriptor.sessionId,
           providerId: descriptor.providerId,
@@ -1106,10 +1106,21 @@ export class LiveDubbingCoordinator {
           transcript,
         },
       }, { frameId: 0 });
-      if (this.transcriptRelayRecord?.sessionId === relaySessionId
-        && this.transcriptRelayRecord.lastTranscriptSequence === relayTranscriptSequence
-        && this.transcriptRelayRecord.deliveryUnavailable === true) {
-        this.transcriptRelayRecord.deliveryUnavailable = false;
+      // Only an explicitly accepted Content response confirms delivery. A
+      // content rejection (accepted:false, or any non-accepted shape) is
+      // unavailable delivery, handled exactly like a send failure below.
+      // Only boolean acceptance is observed; the raw response never enters
+      // state, logs, notifications, or persistence.
+      const deliveryAccepted = deliveryResponse?.accepted === true;
+      const isStillLatest = this.transcriptRelayRecord?.sessionId === relaySessionId
+        && this.transcriptRelayRecord.lastTranscriptSequence === relayTranscriptSequence;
+      if (deliveryAccepted) {
+        if (isStillLatest && this.transcriptRelayRecord.deliveryUnavailable === true) {
+          this.transcriptRelayRecord.deliveryUnavailable = false;
+          void this._notifyTranscriptDeliveryChanged(relaySessionId);
+        }
+      } else if (isStillLatest && this.transcriptRelayRecord.deliveryUnavailable !== true) {
+        this.transcriptRelayRecord.deliveryUnavailable = true;
         void this._notifyTranscriptDeliveryChanged(relaySessionId);
       }
     } catch {
