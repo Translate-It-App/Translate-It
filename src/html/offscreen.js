@@ -9,9 +9,17 @@ import { isAuthorizedOffscreenRouterSender, isAuthorizedLiveDubbingOffscreenCont
 import { getScopedLogger } from '../shared/logging/logger.js';
 import { LOG_COMPONENTS } from '../shared/logging/logConstants.js';
 
-// Centralized scoped logger: INFO/DEBUG are gated by component level (default WARN),
-// warn/error remain functional. 'Offscreen' scope keeps logs identifiable.
-const logger = getScopedLogger(LOG_COMPONENTS.BACKGROUND, 'Offscreen');
+// Hybrid offscreen logger. INFO/DEBUG stay level-gated through the centralized
+// scoped logger (default WARN keeps normal runs quiet). WARN/ERROR intentionally
+// bypass SafeConsole via direct console calls: this document never initializes
+// DebugModeBridge, so SafeConsole starts disabled and would silently discard them.
+const gatedLogger = getScopedLogger(LOG_COMPONENTS.BACKGROUND, 'Offscreen');
+const logger = {
+  debug: (...args) => gatedLogger.debug(...args),
+  info: (...args) => gatedLogger.info(...args),
+  warn: (...args) => console.warn('[Offscreen]', ...args),
+  error: (...args) => console.error('[Offscreen]', ...args),
+};
 
 function getSafeAction(action) {
   return typeof action === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(action)

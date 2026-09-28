@@ -431,6 +431,7 @@ describe('offscreen TTS terminal playback lifecycle', () => {
   });
 
   it('emits only error when timeout cancel synchronously fires onend', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await loadOffscreen();
     fetch.mockRejectedValue(new Error('network failure'));
     speechSynthesis.cancel.mockImplementation(() => state.lastUtterance?.onend?.());
@@ -455,6 +456,10 @@ describe('offscreen TTS terminal playback lifecycle', () => {
       playbackToken: 'timeout-token',
       reason: 'error'
     })]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[Offscreen]',
+      'Web Speech TTS startup timeout, cancelling',
+    );
   });
 });
 
@@ -804,5 +809,57 @@ describe('offscreen live-dubbing control sender authorization', () => {
       { id: 'other-extension', url: 'chrome-extension://other-extension/src/html/arbitrary.html', documentId: 'doc-foreign' },
     )).resolves.toEqual({ success: false, error: 'OFFSCREEN_UNAUTHORIZED' });
     expect(handle).not.toHaveBeenCalled();
+  });
+});
+
+describe('offscreen logging contract', () => {
+  it('keeps ordinary INFO/DEBUG activity out of normal test output', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    await loadOffscreen();
+
+    // Every targeted message emits debug + info traces through the gated logger.
+    await expect(sendMessage({
+      target: 'offscreen',
+      action: 'TTS_TEST',
+    })).resolves.toEqual({ success: true, message: 'Offscreen TTS ready' });
+
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(infoSpy).not.toHaveBeenCalled();
+    expect(debugSpy).not.toHaveBeenCalled();
+  });
+
+  it('still routes the WARN failure path to the diagnostic channel', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await loadOffscreen();
+
+    // Authorized action without its required payload falls through to the
+    // unknown-action WARN branch.
+    await expect(sendMessage({
+      target: 'offscreen',
+      action: 'TTS_SPEAK',
+    })).resolves.toEqual({ success: false, error: 'Unknown offscreen action: TTS_SPEAK' });
+
+    expect(warnSpy).toHaveBeenCalledWith('[Offscreen]', 'Unknown offscreen action', 'TTS_SPEAK');
+  });
+
+  it('still routes the ERROR failure path to the diagnostic channel', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await loadOffscreen();
+
+    // The test double provides speechSynthesis without getVoices, so voice
+    // lookup throws into the ERROR branch deterministically.
+    const response = await sendMessage({
+      target: 'offscreen',
+      action: 'TTS_GET_VOICES',
+    });
+
+    expect(response).toEqual(expect.objectContaining({ success: false }));
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[Offscreen]',
+      'Failed to get TTS voices',
+      expect.any(String),
+    );
   });
 });
