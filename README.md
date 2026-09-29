@@ -194,7 +194,7 @@ We follow a **Feature-Based Architecture** using Vue 3, Pinia, and Vite.
 
 Translate It is free and open source. Sponsorship directly supports its continued development, testing, and maintenance.
 
-- **Sponsorship:** Support the project through [GitHub Sponsors](https://github.com/sponsors/Amm1rr). See [SPONSORSHIP.md](./SPONSORSHIP.md).
+- **Sponsorship:** Support the project through [GitHub Sponsors](https://github.com/sponsors/Translate-It-App). See [SPONSORSHIP.md](./SPONSORSHIP.md).
 - **Partnerships:** Technical, ecosystem, and commercial collaborations are handled separately. See [PARTNERSHIPS.md](./PARTNERSHIPS.md).
 
 ---
