@@ -5,7 +5,7 @@
   <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="../docs/Store/Chrome-Store.png" alt="Chrome" height="60" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/translate-it/">
     <img src="../docs/Store/Firefox-Store.png" alt="Firefox" height="60" />
   </a>
 </p>
@@ -95,7 +95,7 @@ API キーが必要なプロバイダーと、設定なしで使えるプロバ�
   <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="../docs/Store/Chrome-Store.png" alt="Chrome" height="50" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/translate-it/">
     <img src="../docs/Store/Firefox-Store.png" alt="Firefox" height="50" />
   </a>
 </p>

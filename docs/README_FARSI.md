@@ -5,7 +5,7 @@
   <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="./Store/Chrome-Store.png" alt="فروشگاه کروم" height="60" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/translate-it/">
     <img src="./Store/Firefox-Store.png" alt="فروشگاه فایرفاکس" height="60" />
   </a>
 </p>
@@ -94,7 +94,7 @@
   <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="./Store/Chrome-Store.png" alt="فروشگاه کروم" height="50" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/translate-it/">
     <img src="./Store/Firefox-Store.png" alt="فروشگاه فایرفاکس" height="50" />
   </a>
 </p>
