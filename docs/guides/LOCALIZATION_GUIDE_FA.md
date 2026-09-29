@@ -11,7 +11,7 @@
 ### ۱. کپی کردن پروژه (Clone)
 ابتدا پروژه را در سیستم خود کپی کنید:
 ```bash
-git clone https://github.com/iSegar0/Translate-It.git
+git clone https://github.com/Translate-It-App/Translate-It.git
 ```
 
 ### ۲. پیدا کردن زبان مورد نظر

@@ -27,7 +27,7 @@
 مطمئن شوید [**Node.js**](https://nodejs.org/) و [**pnpm**](https://pnpm.io/) نصب شده باشند. سپس، ریپازیتوری را کلون کرده و وابستگی‌ها را نصب کنید:
 
 ```bash
-git clone https://github.com/iSegar0/Translate-It.git
+git clone https://github.com/Translate-It-App/Translate-It.git
 cd Translate-It
 pnpm install
 ```

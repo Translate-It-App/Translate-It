@@ -38,7 +38,7 @@ We have a dedicated **[Translation Guide](./LOCALIZATION_GUIDE.md)** that explai
 Make sure [**Node.js**](https://nodejs.org/) and [**pnpm**](https://pnpm.io/) are installed. Then, clone the repository and install the dependencies:
 
 ```bash
-git clone https://github.com/iSegar0/Translate-It.git
+git clone https://github.com/Translate-It-App/Translate-It.git
 cd Translate-It
 pnpm install
 ```
