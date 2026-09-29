@@ -1,5 +1,5 @@
 # Translate It!
-> The Ultimate Translation Ecosystem for Modern Web Browsers.
+> Translate the web, your way.
 
 <p align="center">
   <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
@@ -216,7 +216,7 @@ For more details, please see the [LICENSE](LICENSE) file.
 ---
 
 <p align="center">
-  <a href="https://www.star-history.com/#iSegaro/Translate-It&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=iSegaro/Translate-It&type=Date" />
+  <a href="https://www.star-history.com/#Translate-It-App/Translate-It&Date">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Translate-It-App/Translate-It&type=Date" />
   </a>
 </p>

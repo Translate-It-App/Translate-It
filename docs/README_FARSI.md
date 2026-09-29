@@ -1,5 +1,5 @@
 # Translate It!
-> پیشرفته‌ترین اکوسیستم ترجمه هوشمند برای مرورگرهای مدرن.
+> وب را به روش خودتان ترجمه کنید.
 
 <p align="center">
   <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
@@ -198,7 +198,7 @@
 ---
 
 <p align="center">
-  <a href="https://www.star-history.com/#iSegaro/Translate-It&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=iSegaro/Translate-It&type=Date" />
+  <a href="https://www.star-history.com/#Translate-It-App/Translate-It&Date">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Translate-It-App/Translate-It&type=Date" />
   </a>
 </p>

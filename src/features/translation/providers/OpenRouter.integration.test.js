@@ -77,7 +77,7 @@ describe('OpenRouter Internal Integration (Failover & Headers)', () => {
     
     // Verify mandatory OpenRouter headers
     const fetchOptions = proxyManager.fetch.mock.calls[0][1];
-    expect(fetchOptions.headers['HTTP-Referer']).toBe('https://github.com/Translate-It');
+    expect(fetchOptions.headers['HTTP-Referer']).toBe('https://github.com/Translate-It-App/Translate-It');
     expect(fetchOptions.headers['X-Title']).toBe('Translate-It Extension');
     expect(fetchOptions.headers['Authorization']).toBe('Bearer key-1');
   });

@@ -93,7 +93,7 @@ export class OpenRouterProvider extends BaseAIProvider {
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": "https://github.com/Translate-It", // Required by OpenRouter
+        "HTTP-Referer": "https://github.com/Translate-It-App/Translate-It", // Required by OpenRouter
         "X-Title": "Translate-It Extension",
       },
       body: JSON.stringify({

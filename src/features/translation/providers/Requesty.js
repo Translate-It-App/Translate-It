@@ -87,7 +87,7 @@ export class RequestyProvider extends BaseAIProvider {
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": "https://github.com/Translate-It",
+        "HTTP-Referer": "https://github.com/Translate-It-App/Translate-It",
         "X-Title": "Translate-It Extension",
       },
       body: JSON.stringify({

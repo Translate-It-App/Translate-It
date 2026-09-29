@@ -1,5 +1,5 @@
 # Translate It!
-> モダンブラウザ向けの究極の翻訳エコシステム。
+> ウェブを、あなたらしい方法で翻訳。
 
 <p align="center">
   <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
@@ -199,7 +199,7 @@ Vue 3、Pinia、Vite を使用した **フィーチャーベース・アーキ�
 ---
 
 <p align="center">
-  <a href="https://www.star-history.com/#iSegaro/Translate-It&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=iSegaro/Translate-It&type=Date" />
+  <a href="https://www.star-history.com/#Translate-It-App/Translate-It&Date">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Translate-It-App/Translate-It&type=Date" />
   </a>
 </p>

@@ -365,7 +365,7 @@ const canTranslate = computed(() => {
  * Includes structured template with technical metadata.
  */
 const reportUrl = computed(() => {
-  const baseUrl = 'https://github.com/iSegaro/Translate-It/issues/new';
+  const baseUrl = 'https://github.com/Translate-It-App/Translate-It/issues/new';
   const fileName = currentFile.value?.name || 'unknown.srt';
   const source = config.sourceLanguage || 'auto';
   const target = config.targetLanguage;

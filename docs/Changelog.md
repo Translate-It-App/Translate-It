@@ -15,9 +15,9 @@
 
 ##### Fixed
 
-- Fixed `Field` translation to translate and replace only the selected text instead of the entire field ([#201](https://github.com/iSegaro/Translate-It/issues/201)).
-- Fixed `Select Element` translation failures with OpenAI-compatible local LLM providers such as LM Studio ([#164](https://github.com/iSegaro/Translate-It/issues/164)).
-- Fixed Settings persistence issues, including Prompt Template selections not being saved correctly ([#202](https://github.com/iSegaro/Translate-It/issues/202)).
+- Fixed `Field` translation to translate and replace only the selected text instead of the entire field ([#201](https://github.com/Translate-It-App/Translate-It/issues/201)).
+- Fixed `Select Element` translation failures with OpenAI-compatible local LLM providers such as LM Studio ([#164](https://github.com/Translate-It-App/Translate-It/issues/164)).
+- Fixed Settings persistence issues, including Prompt Template selections not being saved correctly ([#202](https://github.com/Translate-It-App/Translate-It/issues/202)).
 
 ---
 
@@ -74,8 +74,8 @@
 
 ##### Fixed
 
-- Fixed an issue where the selected translation provider was not being saved correctly ([#133](https://github.com/iSegaro/Translate-It/issues/133))
-- Fixed an sidebar/popup compatibility issue that prevented parts of the extension UI from working correctly ([#140](https://github.com/iSegaro/Translate-It/issues/140))
+- Fixed an issue where the selected translation provider was not being saved correctly ([#133](https://github.com/Translate-It-App/Translate-It/issues/133))
+- Fixed an sidebar/popup compatibility issue that prevented parts of the extension UI from working correctly ([#140](https://github.com/Translate-It-App/Translate-It/issues/140))
 - Fixed `Vajehyab` dictionary lookups and related integration issues
 
 ---
@@ -97,8 +97,8 @@
 
 ##### Added
 
-- Added [Screen Capture (OCR)](#/ocr) to extract and translate text from any visual area, including images and videos, with full offline support ([#120](https://github.com/iSegaro/Translate-It/pull/120))
-- Added **Pin** and **Dock** capabilities with **Edge Snapping**: You can now pin the window to stay open or drag it to the screen edges to dock it as a persistent, resizable sidebar that updates instantly with new selections ([#121](https://github.com/iSegaro/Translate-It/pull/121))
+- Added [Screen Capture (OCR)](#/ocr) to extract and translate text from any visual area, including images and videos, with full offline support ([#120](https://github.com/Translate-It-App/Translate-It/pull/120))
+- Added **Pin** and **Dock** capabilities with **Edge Snapping**: You can now pin the window to stay open or drag it to the screen edges to dock it as a persistent, resizable sidebar that updates instantly with new selections ([#121](https://github.com/Translate-It-App/Translate-It/pull/121))
 
 ##### Changed
 
@@ -110,18 +110,18 @@
 
 ##### Added
 
-- Added Text-to-Speech support for original text and improved the mobile experience with better text selection and floating button interactions ([#116](https://github.com/iSegaro/Translate-It/issues/116))
+- Added Text-to-Speech support for original text and improved the mobile experience with better text selection and floating button interactions ([#116](https://github.com/Translate-It-App/Translate-It/issues/116))
 
 ##### Fixed
 
-- Fixed an issue where the translation window could close unexpectedly when dragging it quickly ([#113](https://github.com/iSegaro/Translate-It/issues/113))
-- Fixed issues with `Page Translation` and `Hover Original Previews` on large pages, while reducing unnecessary translations and token usage ([#114](https://github.com/iSegaro/Translate-It/issues/114))
-- Improved the mobile experience by preventing accidental text deselection, improving floating button interactions, and adding Text-to-Speech support for original text ([#115](https://github.com/iSegaro/Translate-It/issues/115))
-- Fixed issues where `Select Element` mode could accidentally open links instead of translating content on some websites (e.g. Twitter/X) ([#117](https://github.com/iSegaro/Translate-It/issues/117), [#119](https://github.com/iSegaro/Translate-It/issues/119))
+- Fixed an issue where the translation window could close unexpectedly when dragging it quickly ([#113](https://github.com/Translate-It-App/Translate-It/issues/113))
+- Fixed issues with `Page Translation` and `Hover Original Previews` on large pages, while reducing unnecessary translations and token usage ([#114](https://github.com/Translate-It-App/Translate-It/issues/114))
+- Improved the mobile experience by preventing accidental text deselection, improving floating button interactions, and adding Text-to-Speech support for original text ([#115](https://github.com/Translate-It-App/Translate-It/issues/115))
+- Fixed issues where `Select Element` mode could accidentally open links instead of translating content on some websites (e.g. Twitter/X) ([#117](https://github.com/Translate-It-App/Translate-It/issues/117), [#119](https://github.com/Translate-It-App/Translate-It/issues/119))
 
 ##### Changed
 
-- Improved translation filtering to reduce unnecessary token usage and better protect technical content such as links, emails, addresses, and code-related text ([#118](https://github.com/iSegaro/Translate-It/issues/118))
+- Improved translation filtering to reduce unnecessary token usage and better protect technical content such as links, emails, addresses, and code-related text ([#118](https://github.com/Translate-It-App/Translate-It/issues/118))
 
 ---
 
@@ -156,7 +156,7 @@
 
 ##### Fixed
 
-- **[#102](https://github.com/iSegaro/Translate-It/issues/102)**: Resolved timeout issues affecting popup, side panel, and window contexts
+- **[#102](https://github.com/Translate-It-App/Translate-It/issues/102)**: Resolved timeout issues affecting popup, side panel, and window contexts
 - Fixed Dictionary Mode for traditional providers (e.g., Google Translate)
 - Addressed various major and minor bugs
 
@@ -166,7 +166,7 @@
 
 ##### Fixed
 
-- **[#102](https://github.com/iSegaro/Translate-It/issues/102)**: Fixed translation issues in popup, side panel, and window contexts
+- **[#102](https://github.com/Translate-It-App/Translate-It/issues/102)**: Fixed translation issues in popup, side panel, and window contexts
 - Fixed minor bugs
 - Fixed dictionary issues for AI providers
 
@@ -292,7 +292,7 @@
 
 ##### Changed
 
-- **[#88](https://github.com/iSegaro/Translate-It/issues/88)**: Changed default macOS shortcut for Select Element to `Option+Shift+S`
+- **[#88](https://github.com/Translate-It-App/Translate-It/issues/88)**: Changed default macOS shortcut for Select Element to `Option+Shift+S`
 
 ---
 
@@ -300,7 +300,7 @@
 
 ##### Fixed
 
-- **[#87](https://github.com/iSegaro/Translate-It/issues/87)**: Fixed an issue where validation errors (like missing API keys) incorrectly triggered the circuit breaker, causing false quota exceeded errors for Gemini and other providers
+- **[#87](https://github.com/Translate-It-App/Translate-It/issues/87)**: Fixed an issue where validation errors (like missing API keys) incorrectly triggered the circuit breaker, causing false quota exceeded errors for Gemini and other providers
 
 ---
 
@@ -312,7 +312,7 @@
 
 ##### Fixed
 
-- **[#84](https://github.com/iSegaro/Translate-It/issues/84)**: Enhanced handling of unknown errors
+- **[#84](https://github.com/Translate-It-App/Translate-It/issues/84)**: Enhanced handling of unknown errors
 
 ##### Changed
 
@@ -370,7 +370,7 @@
 
 ##### Fixed
 
-- **[#71](https://github.com/iSegaro/Translate-It/issues/71)**: Fixed an issue with keyboard shortcuts support.
+- **[#71](https://github.com/Translate-It-App/Translate-It/issues/71)**: Fixed an issue with keyboard shortcuts support.
 - Fixed issues with context menu items (Useful Help and Keyboard Shortcut).
 
 ---
@@ -391,7 +391,7 @@
 
 ##### Fixed
 
-- **[#69](https://github.com/iSegaro/Translate-It/issues/69)**: Fixed an issue where the selected text could become deselected unexpectedly
+- **[#69](https://github.com/Translate-It-App/Translate-It/issues/69)**: Fixed an issue where the selected text could become deselected unexpectedly
 
 ---
 
@@ -404,7 +404,7 @@
 - Fixed text deselection issue when using `Shift+Click`
 - Fixed delay when clicking outside text fields to dismiss translation icon
 - Improved icon responsiveness for faster dismissal while keeping scroll behavior unchanged
-- **[#66](https://github.com/iSegaro/Translate-It/issues/66)**: Fixed text field deactivation issue
+- **[#66](https://github.com/Translate-It-App/Translate-It/issues/66)**: Fixed text field deactivation issue
 
 ---
 
@@ -452,7 +452,7 @@
 ##### Fixed
 
 - Fixed issue where translated text did not appear in the floating window when using dark theme
-- **[#66](https://github.com/iSegaro/Translate-It/issues/66)**: Fixed text field deactivation issue
+- **[#66](https://github.com/Translate-It-App/Translate-It/issues/66)**: Fixed text field deactivation issue
 
 ---
 
@@ -465,8 +465,8 @@
 ##### Fixed
 
 - **Translation Status Notification**: Fixed issue where `Translating...` notification would remain stuck when text field translation failed due to text extraction errors or background service failures
-- **[#59](https://github.com/iSegaro/Translate-It/issues/59)**: Fixed issue where prompt changes from the recent update were not being applied
-- **[#65](https://github.com/iSegaro/Translate-It/issues/65)**: Fixed icon display issue when selecting text in advanced fields via drag, and resolved CSS injection problem.
+- **[#59](https://github.com/Translate-It-App/Translate-It/issues/59)**: Fixed issue where prompt changes from the recent update were not being applied
+- **[#65](https://github.com/Translate-It-App/Translate-It/issues/65)**: Fixed icon display issue when selecting text in advanced fields via drag, and resolved CSS injection problem.
 
 ---
 
@@ -522,7 +522,7 @@
 ##### Fixed
 
 - Improved handling of user settings
-- [#55](https://github.com/iSegaro/Translate-It/issues/55) [#53](https://github.com/iSegaro/Translate-It/issues/53) Centralized icon management and improved icon cleanup, resolving `RESULT_CODE_KILLED_BAD_MESSAGE` errors and enhancing DOM organization.
+- [#55](https://github.com/Translate-It-App/Translate-It/issues/55) [#53](https://github.com/Translate-It-App/Translate-It/issues/53) Centralized icon management and improved icon cleanup, resolving `RESULT_CODE_KILLED_BAD_MESSAGE` errors and enhancing DOM organization.
 
 ---
 
