@@ -190,6 +190,15 @@ We follow a **Feature-Based Architecture** using Vue 3, Pinia, and Vite.
 
 ---
 
+## Support & Partnerships
+
+Translate It is free and open source. Sponsorship directly supports its continued development, testing, and maintenance.
+
+- **Sponsorship:** Support the project through [GitHub Sponsors](https://github.com/sponsors/Amm1rr). See [SPONSORSHIP.md](./SPONSORSHIP.md).
+- **Partnerships:** Technical, ecosystem, and commercial collaborations are handled separately. See [PARTNERSHIPS.md](./PARTNERSHIPS.md).
+
+---
+
 <p align="center">
   <a href="https://www.greptile.com/?utm_source=oss_badge&utm_medium=readme&utm_campaign=greptile_for_open_source">
     <img src="https://www.greptile.com/badge.svg" alt="Greptile: The War on Bugs">
