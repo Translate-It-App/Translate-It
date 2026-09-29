@@ -2,7 +2,7 @@
   "name": "translate-it",
   "version": "1.19.1",
   "type": "module",
-  "description": "Smart Translation Assistant",
+  "description": "Translate the web, your way.",
   "scripts": {
     "build": "node scripts/build/build-all.mjs --parallel",
     "build:sequential": "node scripts/build/build-all.mjs",

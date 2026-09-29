@@ -7,10 +7,10 @@
 ساده‌ترین راه برای نصب افزونه استفاده از فروشگاه‌های رسمی وب است:
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="../Store/Chrome-Store.png" alt="Chrome" height="60" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/firefox/addon/translate-it">
     <img src="../Store/Firefox-Store.png" alt="Firefox" height="60" />
   </a>
 </p>
@@ -23,7 +23,7 @@
 
 ### مرورگرهای کروم، اج، بریو (مبتنی بر Chromium)
 
-1. **دانلود:** [آخرین نسخه مخصوص کروم را از اینجا دانلود کنید](https://github.com/iSegaro/Translate-It/tree/main/dist/Publish/).
+1. **دانلود:** [آخرین نسخه مخصوص کروم را از اینجا دانلود کنید](https://github.com/Translate-It-App/Translate-It/tree/main/dist/Publish/).
 2. **استخراج:** فایل ZIP دانلود شده را از حالت فشرده خارج کنید.
 3. **صفحه افزونه‌ها:** مرورگر خود را باز کرده و به آدرس `chrome://extensions/` بروید.
 4. **حالت توسعه‌دهنده:** سوئیچ **Developer mode** را در گوشه سمت راست بالا فعال کنید.
@@ -34,7 +34,7 @@
 
 ### فایرفاکس (Firefox)
 
-1. **دانلود:** [آخرین نسخه مخصوص فایرفاکس را از اینجا دانلود کنید](https://github.com/iSegaro/Translate-It/tree/main/dist/Publish/).
+1. **دانلود:** [آخرین نسخه مخصوص فایرفاکس را از اینجا دانلود کنید](https://github.com/Translate-It-App/Translate-It/tree/main/dist/Publish/).
 2. **استخراج:** فایل ZIP دانلود شده را از حالت فشرده خارج کنید.
 3. **صفحه عیب‌یابی:** فایرفاکس را باز کرده و به آدرس `about:debugging#/runtime/this-firefox` بروید.
 4. **بارگذاری افزونه موقت:** روی دکمه **Load Temporary Add-on...** کلیک کنید.

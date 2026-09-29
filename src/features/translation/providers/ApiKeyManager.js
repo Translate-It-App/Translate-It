@@ -526,7 +526,7 @@ class ApiKeyManager {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${key}`,
-          'HTTP-Referer': 'https://github.com/iSegaro/Translate-It',
+          'HTTP-Referer': 'https://github.com/Translate-It-App/Translate-It',
           'X-Title': 'Translate-It Extension'
         }
       });
@@ -551,7 +551,7 @@ class ApiKeyManager {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${key}`,
-          'HTTP-Referer': 'https://github.com/iSegaro/Translate-It',
+          'HTTP-Referer': 'https://github.com/Translate-It-App/Translate-It',
           'X-Title': 'Translate-It Extension'
         }
       });

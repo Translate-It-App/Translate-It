@@ -11,7 +11,7 @@ Here is the simplest way to do it:
 ### 1. Clone the Repository
 First, clone the project to your local machine:
 ```bash
-git clone https://github.com/iSegar0/Translate-It.git
+git clone https://github.com/Translate-It-App/Translate-It.git
 ```
 
 ### 2. Find Your Language

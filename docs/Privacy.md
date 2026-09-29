@@ -37,4 +37,4 @@ I reserve the right to update this policy to reflect changes in browser requirem
 If you have questions about this Privacy Policy or the security of your data, you can reach out via:
 
 * **Email:** m.khani2810@gmail.com
-* **GitHub Issues:** [https://github.com/iSegaro/Translate-It/issues](https://github.com/iSegaro/Translate-It/issues)
+* **GitHub Issues:** [https://github.com/Translate-It-App/Translate-It/issues](https://github.com/Translate-It-App/Translate-It/issues)

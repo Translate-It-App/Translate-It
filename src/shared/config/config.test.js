@@ -71,6 +71,12 @@ describe('Config Module', () => {
       expect(CONFIG.APP_NAME).toBe('Translate It');
     });
 
+    it('should point to the current changelog', () => {
+      expect(CONFIG.CHANGELOG_URL).toBe(
+        'https://raw.githubusercontent.com/Translate-It-App/Translate-It/main/docs/Changelog.md'
+      );
+    });
+
     it('should default Live Dubbing to Gemini', () => {
       expect(CONFIG.LIVE_DUBBING_PROVIDER).toBe('gemini');
     });

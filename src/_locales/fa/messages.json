@@ -18,7 +18,7 @@
     "message": "Translate It"
   },
   "description": {
-    "message": "همه چیز رو ترجمه کنید، به سادگی."
+    "message": "وب را به روش خودتان ترجمه کنید."
   },
   "theme_section_title": {
     "message": "پوسته"
@@ -225,7 +225,7 @@
     "message": "دیگر نشان نده"
   },
   "options_description": {
-    "message": "همه چیز رو ترجمه کنید، به سادگی."
+    "message": "وب را به روش خودتان ترجمه کنید."
   },
   "options_changelog_loading": {
     "message": "در حال بارگذاری تغییرات..."

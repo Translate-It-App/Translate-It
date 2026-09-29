@@ -1,11 +1,11 @@
 # Translate It!
-> モダンブラウザ向けの究極の翻訳エコシステム。
+> ウェブを、あなたらしい方法で翻訳。
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="../docs/Store/Chrome-Store.png" alt="Chrome" height="60" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/firefox/addon/translate-it">
     <img src="../docs/Store/Firefox-Store.png" alt="Firefox" height="60" />
   </a>
 </p>
@@ -92,10 +92,10 @@ API キーが必要なプロバイダーと、設定なしで使えるプロバ�
 最適な体験のために、公式ストアからインストールしてください：
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="../docs/Store/Chrome-Store.png" alt="Chrome" height="50" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/firefox/addon/translate-it">
     <img src="../docs/Store/Firefox-Store.png" alt="Firefox" height="50" />
   </a>
 </p>
@@ -199,7 +199,7 @@ Vue 3、Pinia、Vite を使用した **フィーチャーベース・アーキ�
 ---
 
 <p align="center">
-  <a href="https://www.star-history.com/#iSegaro/Translate-It&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=iSegaro/Translate-It&type=Date" />
+  <a href="https://www.star-history.com/#Translate-It-App/Translate-It&Date">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Translate-It-App/Translate-It&type=Date" />
   </a>
 </p>

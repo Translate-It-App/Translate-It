@@ -18,7 +18,7 @@
     "message": "Translate It"
   },
   "description": {
-    "message": "Translate Everywhere. Simply."
+    "message": "Translate the web, your way."
   },
   "theme_section_title": {
     "message": "Theme"
@@ -225,7 +225,7 @@
     "message": "Don't show again"
   },
   "options_description": {
-    "message": "Translate Everywhere. Simply."
+    "message": "Translate the web, your way."
   },
   "options_changelog_loading": {
     "message": "Loading changelog..."

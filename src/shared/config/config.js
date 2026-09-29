@@ -89,7 +89,7 @@ export const CONFIG = {
   REPLACE_SPECIAL_SITES: true,
   TIMEOUT: 30000,
   TEXT_FIELD_SHORTCUT: 'Ctrl+/',
-  CHANGELOG_URL: "https://raw.githubusercontent.com/iSegaro/Translate-It/main/Changelog.md",
+  CHANGELOG_URL: "https://raw.githubusercontent.com/Translate-It-App/Translate-It/main/docs/Changelog.md",
 
   // --- Character Limits ---
   /** Maximum characters allowed for popup translation */

@@ -1,11 +1,11 @@
 # Translate It!
-> The Ultimate Translation Ecosystem for Modern Web Browsers.
+> Translate the web, your way.
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="./docs/Store/Chrome-Store.png" alt="Chrome" height="60" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/firefox/addon/translate-it">
     <img src="./docs/Store/Firefox-Store.png" alt="Firefox" height="60" />
   </a>
 </p>
@@ -92,10 +92,10 @@ Some providers require an API key, while others work without one.
 Install via the official stores for the best experience:
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="./docs/Store/Chrome-Store.png" alt="Chrome" height="50" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/firefox/addon/translate-it">
     <img src="./docs/Store/Firefox-Store.png" alt="Firefox" height="50" />
   </a>
 </p>
@@ -216,7 +216,7 @@ For more details, please see the [LICENSE](LICENSE) file.
 ---
 
 <p align="center">
-  <a href="https://www.star-history.com/#iSegaro/Translate-It&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=iSegaro/Translate-It&type=Date" />
+  <a href="https://www.star-history.com/#Translate-It-App/Translate-It&Date">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Translate-It-App/Translate-It&type=Date" />
   </a>
 </p>

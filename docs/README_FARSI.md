@@ -1,11 +1,11 @@
 # Translate It!
-> پیشرفته‌ترین اکوسیستم ترجمه هوشمند برای مرورگرهای مدرن.
+> وب را به روش خودتان ترجمه کنید.
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="./Store/Chrome-Store.png" alt="فروشگاه کروم" height="60" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/firefox/addon/translate-it">
     <img src="./Store/Firefox-Store.png" alt="فروشگاه فایرفاکس" height="60" />
   </a>
 </p>
@@ -91,10 +91,10 @@
 برای بهترین تجربه، از طریق فروشگاه‌های رسمی اقدام به نصب کنید:
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="./Store/Chrome-Store.png" alt="فروشگاه کروم" height="50" />
   </a>
-  <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
+  <a target="_blank" href="https://addons.mozilla.org/firefox/addon/translate-it">
     <img src="./Store/Firefox-Store.png" alt="فروشگاه فایرفاکس" height="50" />
   </a>
 </p>
@@ -198,7 +198,7 @@
 ---
 
 <p align="center">
-  <a href="https://www.star-history.com/#iSegaro/Translate-It&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=iSegaro/Translate-It&type=Date" />
+  <a href="https://www.star-history.com/#Translate-It-App/Translate-It&Date">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Translate-It-App/Translate-It&type=Date" />
   </a>
 </p>
