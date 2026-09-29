@@ -2,7 +2,7 @@
 > ウェブを、あなたらしい方法で翻訳。
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="../docs/Store/Chrome-Store.png" alt="Chrome" height="60" />
   </a>
   <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
@@ -92,7 +92,7 @@ API キーが必要なプロバイダーと、設定なしで使えるプロバ�
 最適な体験のために、公式ストアからインストールしてください：
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="../docs/Store/Chrome-Store.png" alt="Chrome" height="50" />
   </a>
   <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">

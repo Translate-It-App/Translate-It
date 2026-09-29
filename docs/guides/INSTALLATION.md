@@ -7,7 +7,7 @@ This document provides detailed instructions for installing the **Translate It!*
 The easiest way to install the extension is via the official web stores:
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="../Store/Chrome-Store.png" alt="Chrome" height="60" />
   </a>
   <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">

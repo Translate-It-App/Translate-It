@@ -2,7 +2,7 @@
 > وب را به روش خودتان ترجمه کنید.
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="./Store/Chrome-Store.png" alt="فروشگاه کروم" height="60" />
   </a>
   <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
@@ -91,7 +91,7 @@
 برای بهترین تجربه، از طریق فروشگاه‌های رسمی اقدام به نصب کنید:
 
 <p align="center">
-  <a target="_blank" href="https://chromewebstore.google.com/detail/AI%20Writing%20Companion%20for%20Chrome/jfkpmcnebiamnbbkpmmldomjijiahmbd/">
+  <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
     <img src="./Store/Chrome-Store.png" alt="فروشگاه کروم" height="50" />
   </a>
   <a target="_blank" href="https://addons.mozilla.org/en-GB/firefox/addon/ai-writing-companion/">
