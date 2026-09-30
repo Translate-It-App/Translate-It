@@ -4,27 +4,29 @@ This document is a high-level map of the current repository and runtime. It is n
 
 ## System overview
 
-The extension runs across browser UI pages, a background service worker, and content-script contexts. Browser runtime messaging connects these contexts; top-frame managers and the in-page Vue UI also communicate through frame-local events.
+```mermaid
+flowchart TB
+    subgraph CTX["Runtime communication contexts"]
+        U["Extension UI apps"] <-->|"browser runtime messaging"| BGC["Background service worker"]
+        C["Top-frame content runtime"] <-->|"browser runtime messaging"| BGC
+        F["Iframe content scripts"] <-->|"cross-frame messages for relevant interactions"| C
+        F -.->|"frame-ready via runtime messaging"| BGC
+        C <-->|"frame-local page event bus"| H["In-page Vue UI Host<br/>(top-frame Shadow DOM)"]
+    end
 
-```text
-UI apps ↔ browser runtime messaging ↔ Background service worker
-Top-frame content script ↔ browser runtime messaging ↔ Background service worker
-Iframe content scripts ↔ cross-frame messaging ↔ Top-frame content script
-Top-frame managers ↔ frame-local page event bus ↔ In-page UI Host (Shadow DOM)
+    subgraph FLOW["Standard TRANSLATE request/result flow"]
+        SRC["Feature / translation UI"] -->|"TRANSLATE request"| BGF["Background"]
+        BGF --> SVC["Translation services"]
+        SVC --> PROV["Selected provider"]
+        PROV -->|"result"| RES["Result"]
+        RES --> BGF
+        BGF -->|"delivered"| SRC
+    end
+
+    CTX ~~~ FLOW
 ```
 
-For the standard `TRANSLATE` action, requests from UI or content contexts enter the background `MessageHandler`. Its handler delegates through `handleTranslate` to `UnifiedTranslationService`, which coordinates mode-specific processing, translation execution, request lifecycle, and result delivery. Feature-specific actions can use their own background handlers and orchestration before invoking shared translation services.
-
-```text
-request context
-  → runtime message / background handler
-  → handleTranslate
-  → UnifiedTranslationService
-  → UnifiedModeCoordinator
-  → TranslationEngine / selected-provider execution
-  → validation and mode-specific result delivery
-  → requesting context or feature workflow
-```
+Feature-specific actions can use their own background handlers and orchestration before invoking shared translation services.
 
 Field mode returns through the request's direct-response path; other routed modes use `UnifiedResultDispatcher` and/or their feature workflow, with streaming used where applicable. The request tracker owns accepted terminal transitions, while `StreamingManager` handles stream transport. For runtime routing and terminal-state diagrams, see [Translation System](architecture/TRANSLATION_SYSTEM.md) and [Architecture Diagrams](architecture/DIAGRAMS.md).
 
