@@ -14,6 +14,22 @@ These sources answer different questions; they are not a precedence ranking:
 
 Check each accepted ADR's implementation/adoption status before comparing it with code and tests. Differences consistent with explicitly partial or deferred adoption are expected, not drift. If runtime behavior contradicts an implemented contract or guarantee, or an ADR decision that should already apply, report implementation/documentation drift requiring reconciliation; neither source automatically overrides the other. Never assume acceptance means full implementation.
 
+## Documentation navigation
+
+- Runtime structure and routing: [architecture overview](docs/technical/ARCHITECTURE.md) and [translation runtime guide](docs/technical/architecture/TRANSLATION_SYSTEM.md).
+- Guarantees and decisions: [contracts index](docs/technical/contracts/README.md) and [accepted ADRs](docs/adr/).
+- Feature and subsystem details: [technical documentation index](docs/technical/README.md), including its provider and infrastructure guides.
+
+## Repository tooling
+
+- Package manager, dependencies, and runnable scripts: [package.json](package.json); workspace configuration: [pnpm-workspace.yaml](pnpm-workspace.yaml); dependency lock: [pnpm-lock.yaml](pnpm-lock.yaml).
+- Test configuration: [tests/vitest.config.js](tests/vitest.config.js); JavaScript lint configuration: [config/eslint.config.js](config/eslint.config.js); style lint configuration: [config/.stylelintrc.json](config/.stylelintrc.json).
+- Vite/build configuration: [config/vite/](config/vite/); build scripts: [scripts/build/](scripts/build/); validation tooling: [scripts/validate/](scripts/validate/).
+
+Common commands: `pnpm test:run`, `pnpm lint`, `pnpm lint:styles`, `pnpm build`, `pnpm pre-submit`.
+
+`package.json` remains authoritative for available commands; verify specialized or changing commands there rather than relying on copied documentation. Do not copy package or tool versions into this file.
+
 ## Translation vocabulary
 
 - **Translation Operation** — execution-lifecycle boundary for translation work; distinct from feature mutation and presentation ([ADR-015](docs/adr/ADR-015-translation-outcome-semantics.md), [ADR-017](docs/adr/ADR-017-conversation-acceptance-lifecycle-ownership.md)).
@@ -36,19 +52,3 @@ Identity values belong to different scopes and are not interchangeable ([identit
 - **`unitId` / `requestIndex`** identify request-manifest membership and original position.
 - **Logical ID**, **Positional Wire ID**, and **V3 Member ID** identify different structured-response namespaces; numeric response IDs are positional only in a proven positional-wire context.
 - **`responseId`** is an identifier returned for an item in a structured provider response and matched to a request unit; the provider-assigned identity of an entire response/completion is a different scope ([ADR-016](docs/adr/ADR-016-provider-completion-contract.md)).
-
-## Documentation navigation
-
-- Runtime structure and routing: [architecture overview](docs/technical/ARCHITECTURE.md) and [translation runtime guide](docs/technical/architecture/TRANSLATION_SYSTEM.md).
-- Guarantees and decisions: [contracts index](docs/technical/contracts/README.md) and [accepted ADRs](docs/adr/).
-- Feature and subsystem details: [technical documentation index](docs/technical/README.md), including its provider and infrastructure guides.
-
-## Repository tooling
-
-- Package manager, dependencies, and runnable scripts: [package.json](package.json); workspace configuration: [pnpm-workspace.yaml](pnpm-workspace.yaml); dependency lock: [pnpm-lock.yaml](pnpm-lock.yaml).
-- Test configuration: [tests/vitest.config.js](tests/vitest.config.js); JavaScript lint configuration: [config/eslint.config.js](config/eslint.config.js); style lint configuration: [config/.stylelintrc.json](config/.stylelintrc.json).
-- Vite/build configuration: [config/vite/](config/vite/); build scripts: [scripts/build/](scripts/build/); validation tooling: [scripts/validate/](scripts/validate/).
-
-Common commands: `pnpm test:run`, `pnpm lint`, `pnpm lint:styles`, `pnpm build`.
-
-`package.json` remains authoritative for available commands; verify specialized or changing commands there rather than relying on copied documentation. Do not copy package or tool versions into this file.
