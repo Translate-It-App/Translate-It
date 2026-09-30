@@ -42,3 +42,13 @@ Identity values belong to different scopes and are not interchangeable ([identit
 - Runtime structure and routing: [architecture overview](docs/technical/ARCHITECTURE.md) and [translation runtime guide](docs/technical/architecture/TRANSLATION_SYSTEM.md).
 - Guarantees and decisions: [contracts index](docs/technical/contracts/README.md) and [accepted ADRs](docs/adr/).
 - Feature and subsystem details: [technical documentation index](docs/technical/README.md), including its provider and infrastructure guides.
+
+## Repository tooling
+
+- Package manager, dependencies, and runnable scripts: [package.json](package.json); workspace configuration: [pnpm-workspace.yaml](pnpm-workspace.yaml); dependency lock: [pnpm-lock.yaml](pnpm-lock.yaml).
+- Test configuration: [tests/vitest.config.js](tests/vitest.config.js); JavaScript lint configuration: [config/eslint.config.js](config/eslint.config.js); style lint configuration: [config/.stylelintrc.json](config/.stylelintrc.json).
+- Vite/build configuration: [config/vite/](config/vite/); build scripts: [scripts/build/](scripts/build/); validation tooling: [scripts/validate/](scripts/validate/).
+
+Common commands: `pnpm test:run`, `pnpm lint`, `pnpm lint:styles`, `pnpm build`.
+
+`package.json` remains authoritative for available commands; verify specialized or changing commands there rather than relying on copied documentation. Do not copy package or tool versions into this file.
