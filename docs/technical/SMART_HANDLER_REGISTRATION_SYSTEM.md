@@ -127,6 +127,12 @@ const { interactionCoordinator } = await import('./InteractionCoordinator.js');
 await interactionCoordinator.initialize();
 ```
 
+### Staged Startup and Feature Activation
+
+The allowed-runtime bootstrap in `ContentScriptCore` constructs `MainFeatureLoader`, loads `extensionContext`, initializes `InteractionCoordinator`, then starts staged startup. `MainFeatureLoader.startIntelligentLoading()` awaits the CRITICAL stage, schedules ESSENTIAL loading, and schedules LAZY_UI and ON_DEMAND through `requestIdleCallback` when available (with timer fallbacks). `MainFeatureLoader.loadFeature()` itself adds no delay: it deduplicates only concurrent in-flight requests and delegates to `ContentScriptCore.loadFeature()`.
+
+This startup schedule is separate from interaction-triggered activation. `InteractionCoordinator` synchronizes lightweight listeners against settings and exclusions, then asks `lazy-features.js` to load features when matching events occur. That module delegates permission checks and activation to `FeatureManager`; the startup loader is not the activation authority. Applicable whole-page auto-translate rules can also explicitly load `contentMessageHandler` and `pageTranslation` during bootstrap, so not every feature load waits for a user interaction.
+
 ---
 
 ## Feature Lifecycle & Exclusion Mapping
@@ -149,7 +155,7 @@ Select Element Escape support works even if user disabled field shortcuts.
 ---
 
 ## Benefits
-1. **Zero Impact on Startup** - No heavy features are loaded until the user actually interacts with the page.
+1. **Staged Startup** - Feature groups load in prioritized stages; interactions and applicable auto-translate rules can also request activation.
 2. **Robustness** - The system recovers from settings changes in real-time by re-syncing the Coordinator.
 3. **Clean Architecture** - Separation between "Event Detection" (Coordinator) and "Business Logic" (Handlers).
 4. **Reliable Revert** - User can always undo translations regardless of their current shortcut settings.

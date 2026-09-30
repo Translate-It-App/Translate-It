@@ -287,6 +287,8 @@ identity and fragment contract, see
 - **Frame-targeted streaming delivery** for Select Element requests, using the originating tab/frame
 - **Tab-specific routing** for context isolation
 
+`TranslationResultDispatcher.js` remains in-tree but has no consumer in the checked runtime source; `UnifiedTranslationService` uses `UnifiedResultDispatcher.js` for result delivery.
+
 ### Vue Composables
 **File**: `src/features/translation/composables/useUnifiedTranslation.js`
 - Unified reactive translation state management for both popup and sidepanel
