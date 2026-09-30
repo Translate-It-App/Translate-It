@@ -174,7 +174,7 @@ Separation:
 - **Physical provider-call stats** — `TranslationStatsManager` (`calls`, `chars`, `originalChars`, `errors`, per purpose).
 - **Queue retry diagnostics** — `QueueManager` item `attempts`/status.
 - **Feature progress counts** — feature counters (`.` `translated`/`failed`), defined in [FEATURE_CONTRACTS](FEATURE_CONTRACTS.md#17-diagnostics-and-progress).
-- **Structured recovery call purpose** — attributed as `STRUCTURED_RECOVERY`, not coalesced into primary.
+- **Recovery call purposes** — `STRUCTURED_RECOVERY` and `PARENT_RECOVERY` are attributed separately from primary and from each other.
 
 ---
 
@@ -185,9 +185,10 @@ Current purpose set (`TranslationCallPurpose`, frozen in `ProviderConstants.js`)
 ```text
 PRIMARY_TRANSLATION
 STRUCTURED_RECOVERY
+PARENT_RECOVERY
 ```
 
-Recovery calls are attributed separately and do not masquerade as primary calls. `ProviderRequestEngine.normalizeCallPurpose` maps unknown purposes to `PRIMARY_TRANSLATION`.
+`PRIMARY_TRANSLATION` is normal provider execution. `STRUCTURED_RECOVERY` is provider-local recovery after a structured-response contract violation. `PARENT_RECOVERY` is bounded logical-parent recovery initiated by structured-result orchestration when a reconstructed/fragmented parent fails parent-level validation; it is a distinct non-primary physical call purpose and does not participate in normal conversation history. Nested provider-local structured recovery during `PARENT_RECOVERY` retains `STRUCTURED_RECOVERY` as its physical call purpose. `ProviderRequestEngine.normalizeCallPurpose` maps unknown purposes to `PRIMARY_TRANSLATION`.
 
 ---
 
