@@ -1,9 +1,13 @@
-#### Unreleased
+#### v1.20.0 – Released on September 30, 2026
 
 ##### Added
 
-- Added **Live Dubbing** support for Chrome.
-- Added **Requesty** as a provider.
+- Added **Live Dubbing** to the Popup on Chrome with Gemini Live and OpenAI Realtime, including volume controls and bilingual subtitles.
+- Added [Requesty](#/providers?highlight=REQUESTY_API_KEY) as a translation provider.
+
+##### Fixed
+
+- Improved `Select Element` highlight targeting on nested and dynamic page content.
 
 ---
 
