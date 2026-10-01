@@ -178,9 +178,39 @@ describe('ci preflight decision script', () => {
     expect(deleted.status).toBe(1);
     const renamed = runPush({ change: repo => git(repo, 'mv', 'docs/Changelog.md', 'docs/History.md') });
     expect(renamed.status).toBe(1);
-    expectDecision(runPush({ change: repo => git(repo, 'mv', 'docs/Changelog.md', 'docs/History.md'), run: { forced: 'true' } }), 'true');
+    expectDecision(runPush({ change: repo => writeFileSync(join(repo, 'docs/update.md'), 'x\n'), run: { forced: 'true' } }), 'true');
+    for (const change of [
+      repo => rmSync(join(repo, 'docs/Changelog.md')),
+      repo => git(repo, 'mv', 'docs/Changelog.md', 'docs/History.md'),
+    ]) {
+      const forcedGone = runPush({ change, run: { forced: 'true' } });
+      expect(forcedGone.status).toBe(1);
+      expect(forcedGone.output).not.toContain('run_full=');
+    }
     expectDecision(runPush({ change: repo => git(repo, 'mv', 'src.js', 'docs/src.js') }), 'true');
     expectDecision(runPush({ change: repo => { writeFileSync(join(repo, 'docs/old.md'), 'x\n'); git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'add doc'); git(repo, 'mv', 'docs/old.md', 'docs/new.md'); } }), 'false');
+  });
+
+  it('shallow forced push with unavailable before still enforces Changelog invariant', () => {
+    const base = { shallow: true, run: { forced: 'true', before: 'a'.repeat(40) } };
+    expectDecision(runPush({ ...base, change: repo => writeFileSync(join(repo, 'docs/update.md'), 'x\n') }), 'true');
+    for (const change of [
+      repo => rmSync(join(repo, 'docs/Changelog.md')),
+      repo => git(repo, 'mv', 'docs/Changelog.md', 'docs/History.md'),
+    ]) {
+      const gone = runPush({ ...base, change });
+      expect(gone.status).toBe(1);
+      expect(gone.output).not.toContain('run_full=');
+    }
+  });
+
+  it('invalid before or failed fetch never skip the Changelog check', () => {
+    const del = repo => rmSync(join(repo, 'docs/Changelog.md'));
+    for (const run of [{ before: '0'.repeat(40) }, { before: 'not-a-sha' }, { failGit: 'fetch' }]) {
+      const gone = runPush({ change: del, run });
+      expect(gone.status).toBe(1);
+      expect(gone.output).not.toContain('run_full=');
+    }
   });
 
   it('push accepts merge commits and fails safely on invalid SHA, fetch, or diff', () => {

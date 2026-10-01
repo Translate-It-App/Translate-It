@@ -53,20 +53,28 @@ if [ "${GITHUB_EVENT_NAME:-}" = push ]; then
   before="${BEFORE_SHA:-}"
   after="${AFTER_SHA:-}"
   forced="${FORCED_PUSH:-}"
-  [[ "$before" =~ ^[[:xdigit:]]{40}$ ]] || fallback_full "Invalid push before SHA"
   [[ "$after" =~ ^[[:xdigit:]]{40}$ ]] || fallback_full "Invalid push after SHA"
-  [[ "$before" != 0000000000000000000000000000000000000000 && "$after" != 0000000000000000000000000000000000000000 ]] || fallback_full "Zero push SHA"
-  [[ "$forced" = false ]] || fallback_full "Missing or invalid forced-push flag"
+  [[ "$after" != 0000000000000000000000000000000000000000 ]] || fallback_full "Zero push after SHA"
   head_sha=""
   if ! head_sha="$(git rev-parse HEAD 2>/dev/null)" || [ "$head_sha" != "$after" ]; then
     fallback_full "Checkout does not match push after SHA"
   fi
+  if ! git cat-file -e "$after^{commit}" 2>/dev/null; then
+    fallback_full "Push commit is unavailable"
+  fi
+  if ! git cat-file -e "$after:docs/Changelog.md" 2>/dev/null; then
+    echo "::error::docs/Changelog.md is missing in the pushed commit. It is bundled into the extension and must exist."
+    exit 1
+  fi
+  [[ "$before" =~ ^[[:xdigit:]]{40}$ ]] || fallback_full "Invalid push before SHA"
+  [[ "$before" != 0000000000000000000000000000000000000000 ]] || fallback_full "Zero push before SHA"
   if ! git fetch --no-tags --depth=64 origin "$after" >/dev/null 2>&1; then
     fallback_full "Could not fetch push commits"
   fi
-  if ! git cat-file -e "$before^{commit}" 2>/dev/null || ! git cat-file -e "$after^{commit}" 2>/dev/null; then
+  if ! git cat-file -e "$before^{commit}" 2>/dev/null; then
     fallback_full "Push commit history is incomplete"
   fi
+  [[ "$forced" = false ]] || fallback_full "Missing or invalid forced-push flag"
   if ! git merge-base --is-ancestor "$before" "$after" >/dev/null 2>&1; then
     fallback_full "Push is not a verified fast-forward"
   fi
