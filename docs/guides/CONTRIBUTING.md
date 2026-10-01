@@ -120,6 +120,15 @@ pnpm run pre-submit
 
 This command runs linting (JS & Styles) and builds the extension.
 
+#### PR CI Behavior
+
+CI runs on every pull request when it is opened, reopened, or updated with new commits. A lightweight Preflight check runs first:
+
+- Docs/metadata-only changes skip full validation and finish quickly.
+- Code, config, runtime, or unrecognized changes run the full CI (lint, tests, build, validate).
+- If a PR cannot be classified (e.g. GitHub API trouble), Preflight falls back to full CI to be safe.
+- Do not delete or rename `docs/Changelog.md` — it is bundled into the extension, so Preflight fails the PR in that case.
+
 ### Packaging for Distribution
 
 When you are ready to create distributable packages, use the following commands.
