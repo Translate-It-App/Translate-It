@@ -129,6 +129,8 @@ CI runs on every pull request when it is opened, reopened, or updated with new c
 - If a PR cannot be classified (e.g. GitHub API trouble), Preflight falls back to full CI to be safe.
 - Do not delete or rename `docs/Changelog.md` — it is bundled into the extension, so Preflight fails the PR in that case.
 
+Preflight evaluates the PR's full set of changes against `main`, not only the latest commit. A docs-only push will still run full CI if the PR also contains code or configuration changes.
+
 ### Packaging for Distribution
 
 When you are ready to create distributable packages, use the following commands.
