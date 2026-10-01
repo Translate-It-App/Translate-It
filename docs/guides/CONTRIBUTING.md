@@ -131,6 +131,8 @@ CI runs on every pull request when it is opened, reopened, or updated with new c
 
 Preflight evaluates the PR's full set of changes against `main`, not only the latest commit. A docs-only push will still run full CI if the PR also contains code or configuration changes.
 
+Relevant pushes to `main` run the same lint, Stylelint, tests, build, and validation checks. Docs/metadata-only pushes run Preflight and skip full CI. Successful full builds on `main` expose temporary Chrome and Firefox development artifacts through GitHub Actions; these are not releases. Official GitHub Releases remain the authoritative source for attested packages.
+
 ### Packaging for Distribution
 
 When you are ready to create distributable packages, use the following commands.

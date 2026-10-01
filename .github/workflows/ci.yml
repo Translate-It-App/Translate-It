@@ -5,6 +5,9 @@ on:
     branches:
       - main
     types: [opened, reopened, synchronize]
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -12,7 +15,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'push' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,7 +27,7 @@ jobs:
       run_full: ${{ steps.decide.outputs.run_full }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
 
@@ -33,6 +36,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          FORCED_PUSH: ${{ github.event.forced }}
         run: bash scripts/ci/preflight.sh
 
   verify:
@@ -44,16 +50,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 12.3.4
           run_install: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
@@ -75,3 +81,27 @@ jobs:
 
       - name: Validate builds
         run: pnpm run validate
+
+      - name: Assert development browser ZIPs
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          chrome_zips=(dist/Publish/Translate-It-v*-for-Chrome.zip)
+          firefox_zips=(dist/Publish/Translate-It-v*-for-Firefox.zip)
+          [[ ${#chrome_zips[@]} -eq 1 ]] || { printf 'Expected exactly one Chrome ZIP, found %s\n' "${#chrome_zips[@]}" >&2; exit 1; }
+          [[ -f ${chrome_zips[0]} ]] || { printf 'Chrome ZIP is not a regular file: %s\n' "${chrome_zips[0]}" >&2; exit 1; }
+          [[ ${#firefox_zips[@]} -eq 1 ]] || { printf 'Expected exactly one Firefox ZIP, found %s\n' "${#firefox_zips[@]}" >&2; exit 1; }
+          [[ -f ${firefox_zips[0]} ]] || { printf 'Firefox ZIP is not a regular file: %s\n' "${firefox_zips[0]}" >&2; exit 1; }
+
+      - name: Upload development artifacts
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: translate-it-development-main
+          path: |
+            dist/Publish/Translate-It-v*-for-Chrome.zip
+            dist/Publish/Translate-It-v*-for-Firefox.zip
+          retention-days: 30
+          if-no-files-found: error
