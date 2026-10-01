@@ -6,7 +6,7 @@ Purpose: **behavioral invariants and runtime contracts.**
 
 - Documents stating invariants, policies, and guarantees that consumers may rely on.
 - Contracts enforced at runtime, independent of a specific provider or subsystem.
-- Future planned contracts (e.g. feature contracts) belong here.
+- Future planned contracts belong here.
 
 ## In this folder
 
