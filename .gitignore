@@ -7,6 +7,8 @@ dist/firefox/*
 # !dist/firefox/*.zip
 dist/*.zip
 dist/Publish/Source-*.zip
+dist/Publish/Translate-It-v*-for-Chrome.zip
+dist/Publish/Translate-It-v*-for-Firefox.zip
 temp/
 tests/coverage/
 .claude/

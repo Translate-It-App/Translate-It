@@ -23,7 +23,7 @@ If you prefer to install the extension manually or use a specific version, follo
 
 ### Chrome, Edge, Brave (Chromium-based)
 
-1. **Download:** [Download the latest Chrome version here](https://github.com/Translate-It-App/Translate-It/tree/main/dist/Publish/).
+1. **Download:** [Download the latest Chrome version here](https://github.com/Translate-It-App/Translate-It/releases).
 2. **Extract:** Unzip the downloaded file.
 3. **Open Extensions Page:** Open your browser and navigate to [`chrome://extensions/`](chrome://extensions/shortcuts).
 4. **Enable Developer Mode:** Toggle the **Developer mode** switch in the top right corner.
@@ -34,7 +34,7 @@ If you prefer to install the extension manually or use a specific version, follo
 
 ### Firefox
 
-1. **Download:** [Download the latest Firefox version here](https://github.com/Translate-It-App/Translate-It/tree/main/dist/Publish/).
+1. **Download:** [Download the latest Firefox version here](https://github.com/Translate-It-App/Translate-It/releases).
 2. **Extract:** Unzip the downloaded file.
 3. **Open Debugging Page:** Open Firefox and navigate to `about:debugging#/runtime/this-firefox`.
 4. **Load Temporary Add-on:** Click the **Load Temporary Add-on...** button.

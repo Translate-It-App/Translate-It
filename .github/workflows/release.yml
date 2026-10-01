@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build-release:
@@ -36,6 +38,13 @@ jobs:
 
       - name: Build release packages
         run: pnpm run publish
+
+      - name: Attest release ZIP files
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/Publish/Translate-It-v*-for-Chrome.zip
+            dist/Publish/Translate-It-v*-for-Firefox.zip
 
       - name: Upload ZIP files to release
         env:
