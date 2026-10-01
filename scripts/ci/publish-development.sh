@@ -84,6 +84,7 @@ current_run_attempt=0
 backup_dir=''
 backup_body=''
 backup_tag_sha=''
+backup_draft=''
 if [[ "$release_exists" == true ]]; then
   release_json=$(jq -c '[.[] | select(.tag_name == "development")][0]' <<<"$releases_json") || {
     printf 'Error: could not read the existing development release.\n' >&2
@@ -235,6 +236,7 @@ sync_assets() {
 capture_backup() {
   local assets_json chrome_asset_id firefox_asset_id
   backup_body=$release_body
+  backup_draft=$release_draft
   backup_tag_sha=$(gh api "repos/$repo/git/refs/tags/development" --jq .object.sha) || {
     printf 'Error: could not read the current development tag SHA; refusing to mutate.\n' >&2
     return 1
@@ -321,7 +323,7 @@ rollback_published() {
   }
   printf 'Notice: rollback restored the development tag.\n'
   gh api --method PATCH "repos/$repo/releases/$release_id" \
-    -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=false -f "body=$backup_body" || {
+    -f name='Development Build' -F prerelease=true -f make_latest=false -F "draft=$backup_draft" -f "body=$backup_body" || {
     printf 'Error: rollback/recovery failed restoring the release body; prior public state may not be restored.\n' >&2
     return 1
   }

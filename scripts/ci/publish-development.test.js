@@ -143,6 +143,7 @@ const publishingMarker = marker({ run_number: 20, run_attempt: 2, run_id: 300, s
 const publishedMarker = marker({ run_number: 20, run_attempt: 2, run_id: 300, sha: SHA, state: 'published' });
 const draftPatch = body => ['api', '--method', 'PATCH', 'repos/owner/repo/releases/123', '-f', 'name=Development Build', '-F', 'prerelease=true', '-f', 'make_latest=false', '-F', 'draft=true', '-f', `body=${body}`];
 const publishPatch = body => ['api', '--method', 'PATCH', 'repos/owner/repo/releases/123', '-f', 'name=Development Build', '-F', 'prerelease=true', '-f', 'make_latest=false', '-F', 'draft=false', '-f', `body=${body}`];
+const restorePatch = (body, draft) => ['api', '--method', 'PATCH', 'repos/owner/repo/releases/123', '-f', 'name=Development Build', '-F', 'prerelease=true', '-f', 'make_latest=false', '-F', `draft=${draft}`, '-f', `body=${body}`];
 const tagPatch = sha => ['api', '--include', '--method', 'PATCH', 'repos/owner/repo/git/refs/tags/development', '-f', `sha=${sha}`, '-F', 'force=true'];
 const uploadCalls = calls => calls.filter(args => args.some(a => String(a).startsWith('https://uploads.github.com/')));
 const restoredUploads = (calls, stableName, payload) => uploadCalls(calls).filter(args =>
@@ -228,9 +229,22 @@ describe('development workflow_run publisher', () => {
     expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(publishPatch(publishedMarker)))).toBe(false);
     expect(result.calls).toContainEqual(tagPatch(OLD_SHA));
     expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(tagPatch(SHA)))).toBe(false);
-    expect(result.calls).toContainEqual(publishPatch(OLD_MARKER));
+    expect(result.calls).toContainEqual(restorePatch(OLD_MARKER, false));
     expect(restoredUploads(result.calls, 'Translate-It-development-for-Chrome.zip', 'old-chrome-bytes')).toHaveLength(1);
     expect(restoredUploads(result.calls, 'Translate-It-development-for-Firefox.zip', 'old-firefox-bytes')).toHaveLength(1);
+    expect(result.stderr).not.toContain('rollback/recovery failed');
+    result.cleanup();
+  }, 30000);
+
+  it('restores a pre-existing draft release after a second-file upload failure', () => {
+    const result = run({ draft: 'true', body: marker({ state: 'published' }), fail: 'upload-second' });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+    expect(restoredUploads(result.calls, 'Translate-It-development-for-Chrome.zip', 'old-chrome-bytes')).toHaveLength(1);
+    expect(restoredUploads(result.calls, 'Translate-It-development-for-Firefox.zip', 'old-firefox-bytes')).toHaveLength(1);
+    expect(result.calls).toContainEqual(tagPatch(OLD_SHA));
+    expect(result.calls).toContainEqual(restorePatch(OLD_MARKER, true));
+    expect(result.calls.some(args => args[0] === 'api' && args.includes('--method') && args.includes('PATCH') && args.includes('-F') && args.includes('draft=false'))).toBe(false);
+    expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(publishPatch(publishedMarker)))).toBe(false);
     expect(result.stderr).not.toContain('rollback/recovery failed');
     result.cleanup();
   }, 30000);
