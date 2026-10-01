@@ -8,7 +8,7 @@ These sources answer different questions; they are not a precedence ranking:
 
 - **Current runtime behavior:** production code and tests.
 - **Intended guarantees and ownership boundaries:** [technical contracts](docs/technical/contracts/README.md).
-- **Accepted architectural decisions:** [accepted ADRs](docs/adr/).
+- **Accepted architectural decisions:** [accepted ADRs](docs/adr/README.md).
 - **System structure and runtime explanation:** [technical architecture overview](docs/technical/ARCHITECTURE.md) and [translation runtime guide](docs/technical/architecture/TRANSLATION_SYSTEM.md); for implementation details, consult the relevant guide in the [technical documentation index](docs/technical/README.md).
 - **Future intent only:** roadmap and proposal documents; they do not establish deployed behavior.
 
@@ -17,7 +17,7 @@ Check each accepted ADR's implementation/adoption status before comparing it wit
 ## Documentation navigation
 
 - Runtime structure and routing: [architecture overview](docs/technical/ARCHITECTURE.md) and [translation runtime guide](docs/technical/architecture/TRANSLATION_SYSTEM.md).
-- Guarantees and decisions: [contracts index](docs/technical/contracts/README.md) and [accepted ADRs](docs/adr/).
+- Guarantees and decisions: [contracts index](docs/technical/contracts/README.md) and [accepted ADRs](docs/adr/README.md).
 - Feature and subsystem details: [technical documentation index](docs/technical/README.md), including its provider and infrastructure guides.
 
 ## Repository tooling
