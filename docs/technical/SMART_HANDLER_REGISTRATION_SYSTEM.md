@@ -119,12 +119,15 @@ class FeatureManager extends ResourceTracker {
 
 ## Content Script Integration
 
-The main content script (`src/core/content-scripts/index-main.js`) is now extremely lean, delegating all listener management to the Coordinator:
+The main content script (`src/core/content-scripts/index-main.js`) stays lean: it creates `ContentScriptCore` and calls `initializeContentCore(contentScriptCore)`. `ContentScriptCore` owns allowed-runtime bootstrap and initializes `InteractionCoordinator`:
 
 ```javascript
 // index-main.js
-const { interactionCoordinator } = await import('./InteractionCoordinator.js');
-await interactionCoordinator.initialize();
+const { ContentScriptCore } = await import('./ContentScriptCore.js');
+const contentScriptCore = new ContentScriptCore();
+
+const { initializeContentCore } = await import('./contentStartup.js');
+await initializeContentCore(contentScriptCore);
 ```
 
 ### Staged Startup and Feature Activation
