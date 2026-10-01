@@ -12,7 +12,10 @@ const SOURCE = { SOURCE_RUN_ID: '300', SOURCE_RUN_NUMBER: '20', SOURCE_RUN_ATTEM
 const marker = ({ workflow_id = 900, run_number = 20, run_attempt = 1, run_id = 250, sha = 'b'.repeat(40), state = 'published' } = {}) =>
   `<!-- translate-it-development-source: {"workflow_id":${workflow_id},"run_number":${run_number},"run_attempt":${run_attempt},"run_id":${run_id},"sha":"${sha}","state":"${state}"} -->`;
 
-function run({ chrome = true, firefox = true, extraChrome = false, source = SOURCE, list = 'one', body = marker(), draft = 'false', compare = 'ahead', compares, tag = 'exists', fail = '', assets = 'both' } = {}) {
+const OLD_SHA = 'c'.repeat(40);
+const OLD_MARKER = marker();
+
+function run({ chrome = true, firefox = true, extraChrome = false, source = SOURCE, list = 'one', body = OLD_MARKER, draft = 'false', compare = 'ahead', compares, tag = 'exists', fail = '', assets = 'both', tagsha = 'ok', download = 'ok' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'publish-development-test-'));
   const publishDir = join(dir, 'development-artifacts');
   mkdirSync(publishDir, { recursive: true });
@@ -60,8 +63,20 @@ if (args[0] === 'api' && args.includes('--method') && args.includes('DELETE') &&
 if (args[0] === 'api' && args.includes('--method') && args.includes('POST') && endpoint.startsWith('https://uploads.github.com/')) {
   const n = calls.filter(call => call.some(a => a.startsWith('https://uploads.github.com/'))).length - 1;
   if (process.env.MOCK_FAIL === 'upload-second' && n === 1) process.exit(2);
+  if (process.env.MOCK_FAIL === 'upload-rollback') process.exit(2);
   if (process.env.MOCK_FAIL === 'upload') process.exit(2);
   process.exit(0);
+}
+if (args[0] === 'api' && endpoint === 'repos/owner/repo/git/refs/tags/development' && !args.includes('--method') && !args.includes('--include')) {
+  if (process.env.MOCK_TAG_SHA === 'fail') process.exit(2);
+  if (process.env.MOCK_TAG_SHA === 'bad') { process.stdout.write('not-a-sha'); process.exit(0); }
+  process.stdout.write('${OLD_SHA}'); process.exit(0);
+}
+if (args[0] === 'api' && endpoint.startsWith('repos/owner/repo/releases/assets/') && !args.includes('--method')) {
+  if (process.env.MOCK_DOWNLOAD === 'fail') process.exit(2);
+  if (process.env.MOCK_DOWNLOAD === 'empty') process.exit(0);
+  const assetId = endpoint.split('/').pop();
+  process.stdout.write(assetId === '11' ? 'old-chrome-bytes' : 'old-firefox-bytes'); process.exit(0);
 }
 if (args[0] === 'release' && args[1] === 'view') {
   process.stdout.write(JSON.stringify({ id: 'RE_kgDOGraphQLNodeId', databaseId: 123, body: process.env.MOCK_BODY }));
@@ -69,9 +84,19 @@ if (args[0] === 'release' && args[1] === 'view') {
 }
 if (args[0] === 'release' && args[1] === 'create' && process.env.MOCK_FAIL === 'create') process.exit(2);
 if (args[0] === 'release' && args[1] === 'upload') { process.stderr.write('tag-based upload helper must not be used'); process.exit(3); }
-if (args[0] === 'api' && endpoint.endsWith('/releases/123') && process.env.MOCK_FAIL === 'metadata') process.exit(2);
+if (args[0] === 'api' && endpoint.endsWith('/releases/123') && args.includes('--method') && args.includes('PATCH')) {
+  if (process.env.MOCK_FAIL === 'metadata') process.exit(2);
+  if (process.env.MOCK_FAIL === 'publish' && args.some(a => a.includes('draft=false'))) {
+    const p = calls.filter(call => call.some(a => a.includes('draft=false'))).length - 1;
+    if (p === 0) process.exit(2);
+  }
+}
 if (args[0] === 'api' && endpoint.endsWith('/git/refs/tags/development')) {
   if (process.env.MOCK_FAIL === 'tag') { process.stdout.write('HTTP/2 500 Server Error\\r\\n'); process.exit(1); }
+  if (process.env.MOCK_FAIL === 'tag-once') {
+    const t = calls.filter(call => call.some(a => a === 'repos/owner/repo/git/refs/tags/development') && call.includes('PATCH')).length - 1;
+    if (t === 0) { process.stdout.write('HTTP/2 500 Server Error\\r\\n'); process.exit(1); }
+  }
   if (process.env.MOCK_TAG === 'missing') { process.stdout.write('HTTP/2 404 Not Found\\r\\n'); process.exit(1); }
   process.stdout.write('HTTP/2 200 OK\\r\\n'); process.exit(0);
 }
@@ -94,6 +119,8 @@ if (args[0] === 'api' && endpoint.endsWith('/git/refs')) process.stdout.write('{
     MOCK_TAG: tag,
     MOCK_FAIL: fail,
     MOCK_ASSETS: assets,
+    MOCK_TAG_SHA: tagsha,
+    MOCK_DOWNLOAD: download,
   };
   const result = spawnSync('bash', [SCRIPT], { cwd: dir, env, encoding: 'utf8' });
   const calls = existsSync(callsFile) ? readFileSync(callsFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
@@ -116,6 +143,13 @@ const publishingMarker = marker({ run_number: 20, run_attempt: 2, run_id: 300, s
 const publishedMarker = marker({ run_number: 20, run_attempt: 2, run_id: 300, sha: SHA, state: 'published' });
 const draftPatch = body => ['api', '--method', 'PATCH', 'repos/owner/repo/releases/123', '-f', 'name=Development Build', '-F', 'prerelease=true', '-f', 'make_latest=false', '-F', 'draft=true', '-f', `body=${body}`];
 const publishPatch = body => ['api', '--method', 'PATCH', 'repos/owner/repo/releases/123', '-f', 'name=Development Build', '-F', 'prerelease=true', '-f', 'make_latest=false', '-F', 'draft=false', '-f', `body=${body}`];
+const tagPatch = sha => ['api', '--include', '--method', 'PATCH', 'repos/owner/repo/git/refs/tags/development', '-f', `sha=${sha}`, '-F', 'force=true'];
+const uploadCalls = calls => calls.filter(args => args.some(a => String(a).startsWith('https://uploads.github.com/')));
+const restoredUploads = (calls, stableName, payload) => uploadCalls(calls).filter(args =>
+  args.some(a => String(a).endsWith(`?name=${stableName}`)) && (() => {
+    const i = args.indexOf('--input');
+    return i >= 0 && readFileSync(args[i + 1], 'utf8') === payload;
+  })());
 
 describe('development workflow_run publisher', () => {
   it('drafts a published existing release before any asset or tag mutation', () => {
@@ -124,11 +158,24 @@ describe('development workflow_run publisher', () => {
     expect(result.calls).toContainEqual(draftPatch(publishingMarker));
     const draftIdx = result.calls.findIndex(args => JSON.stringify(args) === JSON.stringify(draftPatch(publishingMarker)));
     const firstAssetOrTag = result.calls.findIndex(args =>
-      (args.includes('DELETE') || args.some(a => String(a).startsWith('https://uploads.github.com/')) || args.includes('repos/owner/repo/git/refs/tags/development')));
+      (args.includes('DELETE') || args.some(a => String(a).startsWith('https://uploads.github.com/')) || (args.includes('repos/owner/repo/git/refs/tags/development') && (args.includes('--method') || args.includes('--include')))));
     expect(draftIdx).toBeGreaterThanOrEqual(0);
     expect(firstAssetOrTag).toBeGreaterThan(draftIdx);
     expect(result.calls.some(args => args[0] === 'release' && args[1] === 'view')).toBe(false);
     expect(result.calls.some(args => args[0] === 'release' && args[1] === 'upload')).toBe(false);
+    result.cleanup();
+  });
+
+  it('requests backup asset binaries with an explicit octet-stream Accept header', () => {
+    const result = run();
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const downloads = result.calls.filter(args =>
+      args[0] === 'api' && args.some(a => String(a).startsWith('repos/owner/repo/releases/assets/')) && !args.includes('--method'));
+    expect(downloads).toHaveLength(2);
+    for (const args of downloads) {
+      expect(args).toContain('-H');
+      expect(args).toContain('Accept: application/octet-stream');
+    }
     result.cleanup();
   });
 
@@ -138,7 +185,7 @@ describe('development workflow_run publisher', () => {
     const idx = wanted => result.calls.findIndex(args => JSON.stringify(args) === JSON.stringify(wanted));
     const draft = idx(draftPatch(publishingMarker));
     const uploads = result.calls.map((args, i) => ({ args, i })).filter(({ args }) => args.some(a => String(a).startsWith('https://uploads.github.com/'))).map(({ i }) => i);
-    const tag = result.calls.findIndex(args => args.includes('repos/owner/repo/git/refs/tags/development'));
+    const tag = idx(tagPatch(SHA));
     const publish = idx(publishPatch(publishedMarker));
     expect(draft).toBeGreaterThanOrEqual(0);
     expect(uploads).toHaveLength(2);
@@ -149,6 +196,13 @@ describe('development workflow_run publisher', () => {
     expect(result.calls).toContainEqual(['api', '--method', 'POST', 'https://uploads.github.com/repos/owner/repo/releases/123/assets?name=Translate-It-development-for-Chrome.zip', '-H', 'Content-Type: application/zip', '--input', result.files.chrome]);
     expect(result.calls).toContainEqual(['api', '--method', 'POST', 'https://uploads.github.com/repos/owner/repo/releases/123/assets?name=Translate-It-development-for-Firefox.zip', '-H', 'Content-Type: application/zip', '--input', result.files.firefox]);
     expect(result.calls.some(args => args.includes('--paginate') && args.includes('--slurp'))).toBe(true);
+    expect(result.calls).toContainEqual(['api', 'repos/owner/repo/git/refs/tags/development', '--jq', '.object.sha']);
+    expect(uploads).toHaveLength(2);
+    for (const i of uploads) {
+      const input = result.calls[i][result.calls[i].indexOf('--input') + 1];
+      expect([result.files.chrome, result.files.firefox]).toContain(input);
+    }
+    expect(result.stderr).not.toContain('rollback/recovery failed');
     result.cleanup();
   });
 
@@ -167,20 +221,71 @@ describe('development workflow_run publisher', () => {
     none.cleanup();
   }, 30000);
 
-  it('fails a second-file upload without publishing and leaves the draft marker', () => {
+  it('rolls back a second-file upload failure to the prior public state', () => {
     const result = run({ fail: 'upload-second' });
-    expect(result.status).not.toBe(0);
-    expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(publishPatch(publishedMarker)))).toBe(false);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
     expect(result.calls).toContainEqual(draftPatch(publishingMarker));
+    expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(publishPatch(publishedMarker)))).toBe(false);
+    expect(result.calls).toContainEqual(tagPatch(OLD_SHA));
+    expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(tagPatch(SHA)))).toBe(false);
+    expect(result.calls).toContainEqual(publishPatch(OLD_MARKER));
+    expect(restoredUploads(result.calls, 'Translate-It-development-for-Chrome.zip', 'old-chrome-bytes')).toHaveLength(1);
+    expect(restoredUploads(result.calls, 'Translate-It-development-for-Firefox.zip', 'old-firefox-bytes')).toHaveLength(1);
+    expect(result.stderr).not.toContain('rollback/recovery failed');
+    result.cleanup();
+  }, 30000);
+
+  it('rolls back when ancestry drifts after upload instead of moving the tag forward', () => {
+    const result = run({ compares: 'ahead,diverged' });
+    expect(result.status).not.toBe(0);
+    expect(result.calls).toContainEqual(draftPatch(publishingMarker));
+    expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(publishPatch(publishedMarker)))).toBe(false);
+    expect(result.calls).toContainEqual(tagPatch(OLD_SHA));
+    expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(tagPatch(SHA)))).toBe(false);
+    expect(result.calls).toContainEqual(publishPatch(OLD_MARKER));
+    result.cleanup();
+  }, 30000);
+
+  it('rolls back a tag-move failure and a final-publish failure', () => {
+    const tagFail = run({ fail: 'tag-once' });
+    expect(tagFail.status).not.toBe(0);
+    expect(tagFail.calls).toContainEqual(tagPatch(OLD_SHA));
+    expect(tagFail.calls).toContainEqual(publishPatch(OLD_MARKER));
+    expect(tagFail.calls.some(args => JSON.stringify(args) === JSON.stringify(publishPatch(publishedMarker)))).toBe(false);
+    expect(tagFail.stderr).not.toContain('rollback/recovery failed');
+    tagFail.cleanup();
+    const publishFail = run({ fail: 'publish' });
+    expect(publishFail.status).not.toBe(0);
+    expect(publishFail.calls).toContainEqual(tagPatch(SHA));
+    expect(publishFail.calls).toContainEqual(publishPatch(OLD_MARKER));
+    expect(publishFail.stderr).not.toContain('rollback/recovery failed');
+    publishFail.cleanup();
+  }, 30000);
+
+  it('fails backup capture before any mutation when downloads or tag SHA are unreadable', () => {
+    for (const options of [{ download: 'fail' }, { download: 'empty' }, { tagsha: 'fail' }, { tagsha: 'bad' }]) {
+      const result = run(options);
+      expect(result.status).not.toBe(0);
+      expect(mutations(result.calls)).toEqual([]);
+      result.cleanup();
+    }
+  }, 30000);
+
+  it('reports recovery failure when a rollback step itself fails', () => {
+    const result = run({ fail: 'upload-rollback' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('rollback/recovery failed');
+    expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(publishPatch(publishedMarker)))).toBe(false);
     result.cleanup();
   });
 
-  it('fails late ancestry without moving the tag or publishing', () => {
-    const result = run({ compares: 'ahead,diverged' });
+  it('attempts no rollback when first creation fails', () => {
+    const result = run({ list: 'create-first', body: '', fail: 'create' });
     expect(result.status).not.toBe(0);
-    expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs/tags/development'))).toBe(false);
-    expect(result.calls.some(args => args.some(a => String(a).includes('draft=false')))).toBe(false);
-    expect(result.calls).toContainEqual(draftPatch(publishingMarker));
+    expect(result.calls.some(args => args.includes('--method') && args.includes('PATCH') && args.some(a => String(a).includes('/releases/123')))).toBe(false);
+    expect(result.calls.some(args => args.includes('DELETE') || args.some(a => String(a).startsWith('https://uploads.github.com/')))).toBe(false);
+    expect(result.calls.some(args => args.includes('/git/refs/tags/development'))).toBe(false);
+    expect(result.stderr).not.toContain('rollback');
     result.cleanup();
   });
 
@@ -250,6 +355,7 @@ describe('development workflow_run publisher', () => {
     const failed = run({ fail: 'tag' });
     expect(failed.status).not.toBe(0);
     expect(failed.calls.some(args => args.includes('/git/refs') && args.includes('POST'))).toBe(false);
+    expect(failed.stderr).toContain('rollback/recovery failed');
     failed.cleanup();
   }, 30000);
 

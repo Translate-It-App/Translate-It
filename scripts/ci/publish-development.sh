@@ -77,8 +77,13 @@ release_exists=false
 
 release_id=''
 release_body=''
+release_draft=''
+marker_state=''
 current_run_number=0
 current_run_attempt=0
+backup_dir=''
+backup_body=''
+backup_tag_sha=''
 if [[ "$release_exists" == true ]]; then
   release_json=$(jq -c '[.[] | select(.tag_name == "development")][0]' <<<"$releases_json") || {
     printf 'Error: could not read the existing development release.\n' >&2
@@ -96,6 +101,7 @@ if [[ "$release_exists" == true ]]; then
     printf 'Error: existing development release has no readable draft flag.\n' >&2
     exit 1
   }
+  release_draft=$(jq -r '.draft' <<<"$release_json")
   marker_prefix='<!-- translate-it-development-source: '
   markers=()
   while IFS= read -r line; do
@@ -130,6 +136,7 @@ if [[ "$release_exists" == true ]]; then
     printf 'Error: existing development release source marker is not canonical.\n' >&2
     exit 1
   }
+  marker_state=$(jq -r '.state' <<<"$parsed_marker")
   marker_workflow_id=$(jq -r '.workflow_id' <<<"$parsed_marker")
   if [[ "$marker_workflow_id" != "$SOURCE_WORKFLOW_ID" ]]; then
     printf 'Error: development release marker belongs to workflow %s, not %s.\n' "$marker_workflow_id" "$SOURCE_WORKFLOW_ID" >&2
@@ -161,18 +168,22 @@ check_ancestry() {
   fi
 }
 
-ensure_tag() {
-  local tag_response
-  check_ancestry || return $?
-  if tag_response=$(gh api --include --method PATCH "$tag_endpoint" -f "sha=$SOURCE_SHA" -F force=true 2>&1); then
+move_tag_to() {
+  local sha=$1 recheck=$2 tag_response
+  if tag_response=$(gh api --include --method PATCH "$tag_endpoint" -f "sha=$sha" -F force=true 2>&1); then
     return 0
   elif [[ "$tag_response" =~ (^|$'\n')HTTP/[0-9.]+[[:space:]]+404([[:space:]]|$'\r'|$'\n') ]]; then
-    check_ancestry || return $?
-    gh api --method POST "repos/$repo/git/refs" -f ref=refs/tags/development -f "sha=$SOURCE_SHA"
+    if [[ "$recheck" == true ]]; then check_ancestry || return $?; fi
+    gh api --method POST "repos/$repo/git/refs" -f ref=refs/tags/development -f "sha=$sha"
   else
     printf 'Error: failed to move development tag; response was not a confirmed 404.\n%s\n' "$tag_response" >&2
     return 1
   fi
+}
+
+ensure_tag() {
+  check_ancestry || return $?
+  move_tag_to "$SOURCE_SHA" true
 }
 
 delete_assets_named() {
@@ -219,6 +230,104 @@ sync_assets() {
   verify_assets "$assets_json"
 }
 
+# Snapshot the currently public state before any mutation so a failed update
+# of a published release can be rolled back. Performs no mutations itself.
+capture_backup() {
+  local assets_json chrome_asset_id firefox_asset_id
+  backup_body=$release_body
+  backup_tag_sha=$(gh api "repos/$repo/git/refs/tags/development" --jq .object.sha) || {
+    printf 'Error: could not read the current development tag SHA; refusing to mutate.\n' >&2
+    return 1
+  }
+  [[ "$backup_tag_sha" =~ ^[0-9a-fA-F]{40}$ ]] || {
+    printf 'Error: current development tag SHA is unparseable; refusing to mutate.\n' >&2
+    return 1
+  }
+  backup_dir=$(mktemp -d) || return 1
+  assets_json=$(gh api "repos/$repo/releases/$release_id/assets") || {
+    printf 'Error: could not list release assets for backup.\n' >&2
+    return 1
+  }
+  verify_assets "$assets_json" || {
+    printf 'Error: stable development assets are not both present for backup; refusing to mutate.\n' >&2
+    return 1
+  }
+  chrome_asset_id=$(jq -er --arg name "$chrome_name" '[.[] | select(.name == $name) | .id | select(type == "number")] | if length == 1 then .[0] else empty end' <<<"$assets_json") || {
+    printf 'Error: could not resolve the backed-up Chrome asset ID.\n' >&2
+    return 1
+  }
+  firefox_asset_id=$(jq -er --arg name "$firefox_name" '[.[] | select(.name == $name) | .id | select(type == "number")] | if length == 1 then .[0] else empty end' <<<"$assets_json") || {
+    printf 'Error: could not resolve the backed-up Firefox asset ID.\n' >&2
+    return 1
+  }
+  gh api -H "Accept: application/octet-stream" "repos/$repo/releases/assets/$chrome_asset_id" >"$backup_dir/$chrome_name" || {
+    printf 'Error: could not download the backed-up Chrome asset.\n' >&2
+    return 1
+  }
+  gh api -H "Accept: application/octet-stream" "repos/$repo/releases/assets/$firefox_asset_id" >"$backup_dir/$firefox_name" || {
+    printf 'Error: could not download the backed-up Firefox asset.\n' >&2
+    return 1
+  }
+  if [[ ! -s "$backup_dir/$chrome_name" || ! -s "$backup_dir/$firefox_name" ]]; then
+    printf 'Error: backed-up assets are empty; refusing to mutate.\n' >&2
+    return 1
+  fi
+}
+
+# Restore the pre-publication public state after a failed update. Every step
+# is fail-closed: on any failure emit an explicit recovery-failed error and
+# return non-zero without claiming restoration.
+rollback_published() {
+  local assets_json
+  printf 'Notice: rolling back the failed development publication.\n'
+  gh api --method PATCH "repos/$repo/releases/$release_id" \
+    -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=true -f "body=$publishing_marker" || {
+    printf 'Error: rollback/recovery failed at re-draft step; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  printf 'Notice: rollback re-drafted the release.\n'
+  assets_json=$(gh api "repos/$repo/releases/$release_id/assets") || {
+    printf 'Error: rollback/recovery failed listing assets; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  delete_assets_named "$chrome_name" "$assets_json" || {
+    printf 'Error: rollback/recovery failed deleting assets; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  delete_assets_named "$firefox_name" "$assets_json" || {
+    printf 'Error: rollback/recovery failed deleting assets; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  upload_asset "$chrome_name" "$backup_dir/$chrome_name" || {
+    printf 'Error: rollback/recovery failed re-uploading the backed-up Chrome asset; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  upload_asset "$firefox_name" "$backup_dir/$firefox_name" || {
+    printf 'Error: rollback/recovery failed re-uploading the backed-up Firefox asset; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  printf 'Notice: rollback re-uploaded the backed-up assets.\n'
+  assets_json=$(gh api "repos/$repo/releases/$release_id/assets") || {
+    printf 'Error: rollback/recovery failed re-listing assets; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  verify_assets "$assets_json" || {
+    printf 'Error: rollback/recovery failed verifying assets; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  move_tag_to "$backup_tag_sha" false || {
+    printf 'Error: rollback/recovery failed moving the tag; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  printf 'Notice: rollback restored the development tag.\n'
+  gh api --method PATCH "repos/$repo/releases/$release_id" \
+    -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=false -f "body=$backup_body" || {
+    printf 'Error: rollback/recovery failed restoring the release body; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  printf 'Notice: rollback restored the prior public state.\n'
+}
+
 check_ancestry || {
   status=$?
   (( status == 2 )) && exit 0
@@ -226,6 +335,7 @@ check_ancestry || {
 }
 
 publishing_marker=$(make_marker publishing)
+need_backup=false
 if [[ "$release_exists" == false ]]; then
   gh release create development "$chrome_public" "$firefox_public" \
     --title 'Development Build' --prerelease --latest=false --target "$SOURCE_SHA" --draft --notes "$publishing_marker"
@@ -252,17 +362,32 @@ if [[ "$release_exists" == false ]]; then
   }
   verify_assets "$assets_json" || exit 1
 else
+  # A draft holding a publishing marker is an interrupted retry with no
+  # assumed prior public state; anything else has public state worth backup.
+  if [[ "$release_draft" != true || "$marker_state" != publishing ]]; then
+    need_backup=true
+  fi
+  if [[ "$need_backup" == true ]]; then
+    capture_backup || exit 1
+  fi
   gh api --method PATCH "repos/$repo/releases/$release_id" \
-    -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=true -f "body=$publishing_marker"
-  sync_assets || exit 1
+    -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=true -f "body=$publishing_marker" || exit 1
+  if ! sync_assets; then
+    if [[ "$need_backup" == true ]]; then rollback_published || true; fi
+    exit 1
+  fi
 fi
 
-ensure_tag || {
-  status=$?
-  (( status == 2 )) && exit 1
-  exit "$status"
-}
+if ! ensure_tag; then
+  if [[ "$need_backup" == true ]]; then rollback_published || true; fi
+  exit 1
+fi
 
 published_marker=$(make_marker published)
-gh api --method PATCH "repos/$repo/releases/$release_id" \
-  -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=false -f "body=$published_marker"
+if ! gh api --method PATCH "repos/$repo/releases/$release_id" \
+  -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=false -f "body=$published_marker"; then
+  if [[ "$need_backup" == true ]]; then rollback_published || true; fi
+  exit 1
+fi
+
+if [[ -n "$backup_dir" ]]; then rm -rf "$backup_dir"; fi
