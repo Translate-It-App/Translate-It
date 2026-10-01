@@ -21,7 +21,7 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: [resolve(__dirname, './setup.js')],
-    include: ['src/**/*.{test,spec}.{js,ts}'],
+    include: ['src/**/*.{test,spec}.{js,ts}', 'scripts/ci/*.test.js'],
     root: resolve(__dirname, '..'),
     coverage: {
       provider: 'v8',
