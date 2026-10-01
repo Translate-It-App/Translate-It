@@ -42,4 +42,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${{ github.event.release.tag_name }}" \
-            dist/Publish/*.zip
+            dist/Publish/Translate-It-v*-for-Chrome.zip \
+            dist/Publish/Translate-It-v*-for-Firefox.zip
