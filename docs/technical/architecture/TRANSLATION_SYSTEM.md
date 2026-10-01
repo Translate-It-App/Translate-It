@@ -2,7 +2,7 @@
 
 ## Purpose and scope
 
-This guide explains how translation work enters the background runtime, crosses shared execution boundaries, and reaches feature consumers. It describes current production structure, not a guarantee that every mode uses every component. Use the [contracts](../contracts/README.md) for behavior guarantees and ownership, and check implementation status before treating an accepted [ADR](../../adr/) as fully deployed.
+This guide explains how translation work enters the background runtime, crosses shared execution boundaries, and reaches feature consumers. It describes current production structure, not a guarantee that every mode uses every component. Use the [contracts](../contracts/README.md) for behavior guarantees and ownership, and check implementation/adoption status before treating an accepted [ADR](../../adr/) as fully deployed.
 
 For repository-wide context, see the [architecture overview](../ARCHITECTURE.md). For flow diagrams, see [DIAGRAMS.md](DIAGRAMS.md).
 

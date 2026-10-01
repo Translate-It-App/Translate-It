@@ -30,4 +30,4 @@ Flattened technical guides that cover standalone features and general engineerin
 ## See also
 
 - [pdf-translator/](./pdf-translator/README.md) — PDF viewer internals.
-- `docs/adr/` — architectural decision records.
+- [docs/adr/](../adr/README.md) — architectural decision records.
