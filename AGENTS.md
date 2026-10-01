@@ -6,7 +6,7 @@ Use [CONTEXT.md](CONTEXT.md) for project vocabulary and the detailed authority/n
 
 Production code and tests establish current behavior; contracts establish intended guarantees and ownership; accepted ADRs establish architectural decisions. These are different concerns, not a precedence ranking. See [CONTEXT.md](CONTEXT.md) for documentation navigation.
 
-Check an accepted ADR's implementation status before comparing it with runtime behavior; differences consistent with explicitly partial or deferred adoption are expected, not drift. If runtime behavior contradicts an implemented contract or guarantee, or an ADR decision that should already apply, report implementation/documentation drift requiring reconciliation. Never assume an accepted ADR is fully implemented or resolve conflicts by ranking sources.
+Check an accepted ADR's implementation/adoption status before comparing it with runtime behavior; differences consistent with explicitly partial or deferred adoption are expected, not drift. If runtime behavior contradicts an implemented contract or guarantee, or an ADR decision that should already apply, report implementation/documentation drift requiring reconciliation. Never assume an accepted ADR is fully implemented or resolve conflicts by ranking sources.
 
 ## Working rules
 
