@@ -45,23 +45,42 @@ cp -- "${firefox_inputs[0]}" "$firefox_public"
 
 repo=$GITHUB_REPOSITORY
 tag_endpoint="repos/$repo/git/refs/tags/development"
-release_endpoint="repos/$repo/releases/tags/development"
-release_json=''
-release_exists=true
-if release_json=$(gh api --include "$release_endpoint" 2>&1); then
-  :
-elif [[ "$release_json" =~ (^|$'\n')HTTP/[0-9.]+[[:space:]]+404([[:space:]]|$'\r'|$'\n') ]]; then
-  release_exists=false
-else
-  printf 'Error: could not determine whether the development release exists.\n%s\n' "$release_json" >&2
+chrome_name=${chrome_public##*/}
+firefox_name=${firefox_public##*/}
+
+# Tag-endpoint GET 404s for drafts, so discovery uses the authenticated release
+# listing and selects by tag name. Paginated output arrives as one JSON array
+# per page, so slurp the pages and flatten them before selecting.
+fetch_releases() {
+  local pages_json
+  pages_json=$(gh api --paginate --slurp "repos/$repo/releases") || return 1
+  if [[ -z "$pages_json" ]]; then
+    printf '[]'
+    return 0
+  fi
+  jq -c 'add // []' <<<"$pages_json"
+}
+releases_json=$(fetch_releases) || {
+  printf 'Error: could not list development releases.\n' >&2
+  exit 1
+}
+match_count=$(jq -er '[.[] | select(.tag_name == "development")] | length' <<<"$releases_json") || {
+  printf 'Error: could not parse development release listing.\n' >&2
+  exit 1
+}
+if (( match_count > 1 )); then
+  printf 'Error: found %s development releases; refusing to guess.\n' "$match_count" >&2
   exit 1
 fi
+release_exists=false
+(( match_count == 1 )) && release_exists=true
 
 release_id=''
+release_body=''
 current_run_number=0
 current_run_attempt=0
 if [[ "$release_exists" == true ]]; then
-  release_json=$(gh api "$release_endpoint") || {
+  release_json=$(jq -c '[.[] | select(.tag_name == "development")][0]' <<<"$releases_json") || {
     printf 'Error: could not read the existing development release.\n' >&2
     exit 1
   }
@@ -71,6 +90,10 @@ if [[ "$release_exists" == true ]]; then
   }
   release_body=$(jq -er '.body | select(type == "string")' <<<"$release_json") || {
     printf 'Error: existing development release has no readable source marker body.\n' >&2
+    exit 1
+  }
+  jq -e '.draft | type == "boolean"' <<<"$release_json" >/dev/null || {
+    printf 'Error: existing development release has no readable draft flag.\n' >&2
     exit 1
   }
   marker_prefix='<!-- translate-it-development-source: '
@@ -152,6 +175,50 @@ ensure_tag() {
   fi
 }
 
+delete_assets_named() {
+  local name=$1 assets_json=$2 ids id
+  ids=$(jq -r --arg name "$name" '.[] | select(.name == $name) | .id | select(type == "number")' <<<"$assets_json") || {
+    printf 'Error: could not parse release assets.\n' >&2
+    return 1
+  }
+  for id in $ids; do
+    gh api --method DELETE "repos/$repo/releases/assets/$id" || return 1
+  done
+}
+
+upload_asset() {
+  local name=$1 file=$2
+  gh api --method POST "https://uploads.github.com/repos/$repo/releases/$release_id/assets?name=$name" -H "Content-Type: application/zip" --input "$file"
+}
+
+verify_assets() {
+  local assets_json=$1
+  jq -e --arg chrome "$chrome_name" --arg firefox "$firefox_name" '
+    ([.[] | select(.name == $chrome)] | length == 1)
+    and ([.[] | select(.name == $firefox)] | length == 1)
+  ' <<<"$assets_json" >/dev/null || {
+    printf 'Error: stable development assets are not both present on the release.\n' >&2
+    return 1
+  }
+}
+
+sync_assets() {
+  local assets_json
+  assets_json=$(gh api "repos/$repo/releases/$release_id/assets") || {
+    printf 'Error: could not list release assets.\n' >&2
+    return 1
+  }
+  delete_assets_named "$chrome_name" "$assets_json" || return 1
+  delete_assets_named "$firefox_name" "$assets_json" || return 1
+  upload_asset "$chrome_name" "$chrome_public" || return 1
+  upload_asset "$firefox_name" "$firefox_public" || return 1
+  assets_json=$(gh api "repos/$repo/releases/$release_id/assets") || {
+    printf 'Error: could not re-list release assets.\n' >&2
+    return 1
+  }
+  verify_assets "$assets_json"
+}
+
 check_ancestry || {
   status=$?
   (( status == 2 )) && exit 0
@@ -161,19 +228,33 @@ check_ancestry || {
 publishing_marker=$(make_marker publishing)
 if [[ "$release_exists" == false ]]; then
   gh release create development "$chrome_public" "$firefox_public" \
-    --title 'Development Build' --prerelease --latest=false --target "$SOURCE_SHA" --notes "$publishing_marker"
-  release_json=$(gh api "$release_endpoint") || {
-    printf 'Error: could not read newly created development release ID.\n' >&2
+    --title 'Development Build' --prerelease --latest=false --target "$SOURCE_SHA" --draft --notes "$publishing_marker"
+  # Tag-endpoint GET 404s for drafts, so re-list to obtain the numeric REST ID.
+  releases_json=$(fetch_releases) || {
+    printf 'Error: could not re-list development releases after creation.\n' >&2
     exit 1
   }
-  release_id=$(jq -er '.id | select(type == "number" and . > 0 and floor == .)' <<<"$release_json") || {
+  match_count=$(jq -er '[.[] | select(.tag_name == "development")] | length' <<<"$releases_json") || {
+    printf 'Error: could not parse development release listing after creation.\n' >&2
+    exit 1
+  }
+  if (( match_count != 1 )); then
+    printf 'Error: expected exactly one development release after creation.\n' >&2
+    exit 1
+  fi
+  release_id=$(jq -er '[.[] | select(.tag_name == "development")][0] | .id | select(type == "number" and . > 0 and floor == .)' <<<"$releases_json") || {
     printf 'Error: invalid newly created development release ID.\n' >&2
     exit 1
   }
+  assets_json=$(gh api "repos/$repo/releases/$release_id/assets") || {
+    printf 'Error: could not list newly created release assets.\n' >&2
+    exit 1
+  }
+  verify_assets "$assets_json" || exit 1
 else
   gh api --method PATCH "repos/$repo/releases/$release_id" \
-    -f name='Development Build' -F prerelease=true -f make_latest=false -f "body=$publishing_marker"
-  gh release upload development "$chrome_public" "$firefox_public" --clobber
+    -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=true -f "body=$publishing_marker"
+  sync_assets || exit 1
 fi
 
 ensure_tag || {
@@ -184,4 +265,4 @@ ensure_tag || {
 
 published_marker=$(make_marker published)
 gh api --method PATCH "repos/$repo/releases/$release_id" \
-  -f name='Development Build' -F prerelease=true -f make_latest=false -f "body=$published_marker"
+  -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=false -f "body=$published_marker"
