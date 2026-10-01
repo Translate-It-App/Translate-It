@@ -45,6 +45,7 @@ cp -- "${firefox_inputs[0]}" "$firefox_public"
 
 repo=$GITHUB_REPOSITORY
 tag_endpoint="repos/$repo/git/refs/tags/development"
+tag_read_endpoint="repos/$repo/git/ref/tags/development"
 chrome_name=${chrome_public##*/}
 firefox_name=${firefox_public##*/}
 
@@ -171,13 +172,13 @@ check_ancestry() {
 
 move_tag_to() {
   local sha=$1 recheck=$2 tag_response
-  if tag_response=$(gh api --include --method PATCH "$tag_endpoint" -f "sha=$sha" -F force=true 2>&1); then
-    return 0
+  if tag_response=$(gh api --include "$tag_read_endpoint" 2>&1); then
+    gh api --method PATCH "$tag_endpoint" -f "sha=$sha" -F force=true
   elif [[ "$tag_response" =~ (^|$'\n')HTTP/[0-9.]+[[:space:]]+404([[:space:]]|$'\r'|$'\n') ]]; then
     if [[ "$recheck" == true ]]; then check_ancestry || return $?; fi
     gh api --method POST "repos/$repo/git/refs" -f ref=refs/tags/development -f "sha=$sha"
   else
-    printf 'Error: failed to move development tag; response was not a confirmed 404.\n%s\n' "$tag_response" >&2
+    printf 'Error: failed to read development tag; response was not a confirmed 404.\n%s\n' "$tag_response" >&2
     return 1
   fi
 }
@@ -237,7 +238,7 @@ capture_backup() {
   local assets_json chrome_asset_id firefox_asset_id
   backup_body=$release_body
   backup_draft=$release_draft
-  backup_tag_sha=$(gh api "repos/$repo/git/refs/tags/development" --jq .object.sha) || {
+  backup_tag_sha=$(gh api "$tag_read_endpoint" --jq .object.sha) || {
     printf 'Error: could not read the current development tag SHA; refusing to mutate.\n' >&2
     return 1
   }
