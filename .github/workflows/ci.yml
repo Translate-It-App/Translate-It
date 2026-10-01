@@ -4,19 +4,91 @@ on:
   pull_request:
     branches:
       - main
-    types: [opened, reopened]
+    types: [opened, reopened, synchronize]
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_full: ${{ steps.decide.outputs.run_full }}
+    steps:
+      - name: Decide if full CI is needed
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual run requested; full CI will run."
+            echo "run_full=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TOTAL="$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" -q '.changed_files')"
+          case "$TOTAL" in
+            ''|*[!0-9]*)
+              echo "Could not determine changed-file count; defaulting to full CI."
+              echo "run_full=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          if [ "$TOTAL" -gt 3000 ]; then
+            echo "PR touches $TOTAL files, exceeding the pull-request files API limit; running full CI."
+            echo "run_full=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED="$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate -q '.[] | [.filename, .status, (.previous_filename // "")] | @tsv')"
+          if [ -z "$CHANGED" ]; then
+            echo "No changed files detected; defaulting to full CI."
+            echo "run_full=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Changed files:"
+          echo "$CHANGED"
+          run_full="false"
+          changelog_gone="false"
+          while IFS="$(printf '\t')" read -r f status prev; do
+            [ -z "$f" ] && continue
+            if { [ "$f" = "docs/Changelog.md" ] && [ "$status" = "removed" ]; } || [ "$prev" = "docs/Changelog.md" ]; then
+              changelog_gone="true"
+            fi
+            for p in "$f" "$prev"; do
+              [ -z "$p" ] && continue
+              case "$p" in
+                docs/*|openspec/*|.github/ISSUE_TEMPLATE/*|.github/FUNDING.yml|README.md|PARTNERSHIPS.md|SPONSORSHIP.md|CONTEXT.md|AGENTS.md|LICENSE|NOTICE)
+                  ;;
+                *)
+                  run_full="true"
+                  break
+                  ;;
+              esac
+            done
+          done <<< "$CHANGED"
+          if [ "$changelog_gone" = "true" ]; then
+            echo "::error::docs/Changelog.md was deleted or renamed. It is bundled into the extension and must exist."
+            exit 1
+          fi
+          echo "run_full=$run_full" >> "$GITHUB_OUTPUT"
+          if [ "$run_full" = "true" ]; then
+            echo "CI-relevant changes detected; full CI will run."
+          else
+            echo "Only docs/metadata changes detected; skipping full CI."
+          fi
+
   verify:
     name: Lint, Test & Build
+    needs: preflight
+    if: needs.preflight.outputs.run_full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
