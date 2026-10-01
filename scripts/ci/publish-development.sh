@@ -69,25 +69,33 @@ match_count=$(jq -er '[.[] | select(.tag_name == "development")] | length' <<<"$
   printf 'Error: could not parse development release listing.\n' >&2
   exit 1
 }
-if (( match_count > 1 )); then
-  printf 'Error: found %s development releases; refusing to guess.\n' "$match_count" >&2
+synthetic_count=$(jq -er '[.[] | select(.name == "Development Build" and (.tag_name | type == "string" and test("^untagged-[0-9a-f]+$")))] | length' <<<"$releases_json") || {
+  printf 'Error: could not parse development release listing.\n' >&2
+  exit 1
+}
+if (( match_count > 1 || synthetic_count > 1 || (match_count == 1 && synthetic_count == 1) )); then
+  printf 'Error: found ambiguous development release candidates; refusing to guess.\n' >&2
   exit 1
 fi
 release_exists=false
-(( match_count == 1 )) && release_exists=true
+candidate_count=$((match_count + synthetic_count))
+(( candidate_count == 1 )) && release_exists=true
 
 release_id=''
+release_tag_name=''
 release_body=''
 release_draft=''
 marker_state=''
 current_run_number=0
 current_run_attempt=0
+stale_source=false
 backup_dir=''
 backup_body=''
+backup_tag_name=''
 backup_tag_sha=''
 backup_draft=''
 if [[ "$release_exists" == true ]]; then
-  release_json=$(jq -c '[.[] | select(.tag_name == "development")][0]' <<<"$releases_json") || {
+  release_json=$(jq -c '[.[] | select(.tag_name == "development" or (.name == "Development Build" and (.tag_name | type == "string" and test("^untagged-[0-9a-f]+$"))))][0]' <<<"$releases_json") || {
     printf 'Error: could not read the existing development release.\n' >&2
     exit 1
   }
@@ -104,6 +112,10 @@ if [[ "$release_exists" == true ]]; then
     exit 1
   }
   release_draft=$(jq -r '.draft' <<<"$release_json")
+  release_tag_name=$(jq -er '.tag_name | select(type == "string")' <<<"$release_json") || {
+    printf 'Error: existing development release has no readable tag name.\n' >&2
+    exit 1
+  }
   marker_prefix='<!-- translate-it-development-source: '
   markers=()
   while IFS= read -r line; do
@@ -139,6 +151,7 @@ if [[ "$release_exists" == true ]]; then
     exit 1
   }
   marker_state=$(jq -r '.state' <<<"$parsed_marker")
+  existing_marker_sha=$(jq -r '.sha' <<<"$parsed_marker")
   marker_workflow_id=$(jq -r '.workflow_id' <<<"$parsed_marker")
   if [[ "$marker_workflow_id" != "$SOURCE_WORKFLOW_ID" ]]; then
     printf 'Error: development release marker belongs to workflow %s, not %s.\n' "$marker_workflow_id" "$SOURCE_WORKFLOW_ID" >&2
@@ -147,8 +160,7 @@ if [[ "$release_exists" == true ]]; then
   current_run_number=$(jq -r '.run_number' <<<"$parsed_marker")
   current_run_attempt=$(jq -r '.run_attempt' <<<"$parsed_marker")
   if (( SOURCE_RUN_NUMBER < current_run_number )) || { (( SOURCE_RUN_NUMBER == current_run_number )) && (( SOURCE_RUN_ATTEMPT < current_run_attempt )); }; then
-    printf 'Notice: skipping older source run %s attempt %s; published high-water is %s attempt %s.\n' "$SOURCE_RUN_NUMBER" "$SOURCE_RUN_ATTEMPT" "$current_run_number" "$current_run_attempt"
-    exit 0
+    stale_source=true
   fi
 fi
 
@@ -236,8 +248,13 @@ sync_assets() {
 # of a published release can be rolled back. Performs no mutations itself.
 capture_backup() {
   local assets_json chrome_asset_id firefox_asset_id
+  if [[ "$release_tag_name" == untagged-* ]]; then
+    printf 'Error: refusing to back up a synthetic release tag association.\n' >&2
+    return 1
+  fi
   backup_body=$release_body
   backup_draft=$release_draft
+  backup_tag_name=$release_tag_name
   backup_tag_sha=$(gh api "$tag_read_endpoint" --jq .object.sha) || {
     printf 'Error: could not read the current development tag SHA; refusing to mutate.\n' >&2
     return 1
@@ -277,11 +294,69 @@ capture_backup() {
   fi
 }
 
+verify_release_binding() {
+  local expected_tag=$1 release_json
+  release_json=$(gh api "repos/$repo/releases/$release_id") || {
+    printf 'Error: could not verify development release tag binding.\n' >&2
+    return 1
+  }
+  jq -e --argjson id "$release_id" --arg tag "$expected_tag" \
+    '.id == $id and .tag_name == $tag and .draft == true' <<<"$release_json" >/dev/null || {
+    printf 'Error: development release tag binding or draft state did not verify.\n' >&2
+    return 1
+  }
+}
+
+bind_release_tag() {
+  local target_tag=$1
+  if [[ "$release_tag_name" != "$target_tag" ]]; then
+    gh api --method PATCH "repos/$repo/releases/$release_id" \
+      -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=true -f "tag_name=$target_tag" || {
+      printf 'Error: could not bind the development release to tag %s.\n' "$target_tag" >&2
+      return 1
+    }
+    release_tag_name=$target_tag
+  fi
+  verify_release_binding "$target_tag"
+}
+
+normalize_published_synthetic_release() {
+  local ref_sha release_json
+  ref_sha=$(gh api "$tag_read_endpoint" --jq .object.sha) || {
+    printf 'Error: could not verify the development ref before normalizing its release.\n' >&2
+    return 1
+  }
+  [[ "$ref_sha" =~ ^[[:xdigit:]]{40}$ ]] || {
+    printf 'Error: development ref SHA is invalid; refusing to normalize its release.\n' >&2
+    return 1
+  }
+  ref_sha=${ref_sha,,}
+  [[ "$ref_sha" == "$existing_marker_sha" ]] || {
+    printf 'Error: development ref does not match the published release marker; refusing to normalize.\n' >&2
+    return 1
+  }
+  gh api --method PATCH "repos/$repo/releases/$release_id" \
+    -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=false -f tag_name=development -f "body=$release_body" || {
+    printf 'Error: could not normalize the published development release tag.\n' >&2
+    return 1
+  }
+  release_json=$(gh api "repos/$repo/releases/$release_id") || {
+    printf 'Error: could not verify the normalized development release.\n' >&2
+    return 1
+  }
+  jq -e --argjson id "$release_id" --arg body "$release_body" \
+    '.id == $id and .tag_name == "development" and .draft == false and .body == $body' <<<"$release_json" >/dev/null || {
+    printf 'Error: normalized development release did not verify; refusing to continue.\n' >&2
+    return 1
+  }
+  release_tag_name=development
+}
+
 # Restore the pre-publication public state after a failed update. Every step
 # is fail-closed: on any failure emit an explicit recovery-failed error and
 # return non-zero without claiming restoration.
 rollback_published() {
-  local assets_json
+  local assets_json release_json remote_tag_name
   printf 'Notice: rolling back the failed development publication.\n'
   gh api --method PATCH "repos/$repo/releases/$release_id" \
     -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=true -f "body=$publishing_marker" || {
@@ -323,13 +398,61 @@ rollback_published() {
     return 1
   }
   printf 'Notice: rollback restored the development tag.\n'
+  release_json=$(gh api "repos/$repo/releases/$release_id") || {
+    printf 'Error: rollback/recovery failed reading the release tag association; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  remote_tag_name=$(jq -er --argjson id "$release_id" '. | select(.id == $id and .draft == true) | .tag_name | select(type == "string")' <<<"$release_json") || {
+    printf 'Error: rollback/recovery failed validating the draft release tag association; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  if [[ "$remote_tag_name" != "$backup_tag_name" ]]; then
+    gh api --method PATCH "repos/$repo/releases/$release_id" \
+      -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=true -f "tag_name=$backup_tag_name" || {
+      printf 'Error: rollback/recovery failed restoring the release tag association; prior public state may not be restored.\n' >&2
+      return 1
+    }
+    release_tag_name=$backup_tag_name
+  fi
+  verify_release_binding "$backup_tag_name" || {
+    printf 'Error: rollback/recovery failed verifying the release tag association; prior public state may not be restored.\n' >&2
+    return 1
+  }
   gh api --method PATCH "repos/$repo/releases/$release_id" \
-    -f name='Development Build' -F prerelease=true -f make_latest=false -F "draft=$backup_draft" -f "body=$backup_body" || {
+    -f name='Development Build' -F prerelease=true -f make_latest=false -F "draft=$backup_draft" -f "tag_name=$backup_tag_name" -f "body=$backup_body" || {
     printf 'Error: rollback/recovery failed restoring the release body; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  release_json=$(gh api "repos/$repo/releases/$release_id") || {
+    printf 'Error: rollback/recovery failed verifying the restored release; prior public state may not be restored.\n' >&2
+    return 1
+  }
+  jq -e --argjson id "$release_id" --arg tag "$backup_tag_name" --arg draft "$backup_draft" --arg body "$backup_body" \
+    '.id == $id and .tag_name == $tag and (.draft | tostring) == $draft and .body == $body' <<<"$release_json" >/dev/null || {
+    printf 'Error: rollback/recovery failed verifying the restored release state; prior public state may not be restored.\n' >&2
     return 1
   }
   printf 'Notice: rollback restored the prior public state.\n'
 }
+
+if [[ "$release_exists" == true && "$release_tag_name" == untagged-* ]]; then
+  if [[ "$release_draft" == true ]]; then
+    if [[ "$marker_state" != publishing ]]; then
+      printf 'Error: refusing to update a synthetic-tag draft without an interrupted publishing marker.\n' >&2
+      exit 1
+    fi
+  elif [[ "$marker_state" != published ]]; then
+    printf 'Error: refusing to normalize a synthetic-tag release without a published marker.\n' >&2
+    exit 1
+  else
+    normalize_published_synthetic_release || exit 1
+  fi
+fi
+
+if [[ "$stale_source" == true ]]; then
+  printf 'Notice: skipping older source run %s attempt %s; published high-water is %s attempt %s.\n' "$SOURCE_RUN_NUMBER" "$SOURCE_RUN_ATTEMPT" "$current_run_number" "$current_run_attempt"
+  exit 0
+fi
 
 check_ancestry || {
   status=$?
@@ -351,12 +474,23 @@ if [[ "$release_exists" == false ]]; then
     printf 'Error: could not parse development release listing after creation.\n' >&2
     exit 1
   }
-  if (( match_count != 1 )); then
+  synthetic_count=$(jq -er '[.[] | select(.name == "Development Build" and (.tag_name | type == "string" and test("^untagged-[0-9a-f]+$")))] | length' <<<"$releases_json") || {
+    printf 'Error: could not parse development release listing after creation.\n' >&2
+    exit 1
+  }
+  candidate_count=$((match_count + synthetic_count))
+  if (( candidate_count != 1 )); then
     printf 'Error: expected exactly one development release after creation.\n' >&2
     exit 1
   fi
-  release_id=$(jq -er '[.[] | select(.tag_name == "development")][0] | .id | select(type == "number" and . > 0 and floor == .)' <<<"$releases_json") || {
+  release_json=$(jq -c '[.[] | select(.tag_name == "development" or (.name == "Development Build" and (.tag_name | type == "string" and test("^untagged-[0-9a-f]+$"))))][0]' <<<"$releases_json") || exit 1
+  release_id=$(jq -er '.id | select(type == "number" and . > 0 and floor == .)' <<<"$release_json") || {
     printf 'Error: invalid newly created development release ID.\n' >&2
+    exit 1
+  }
+  release_tag_name=$(jq -er '.tag_name | select(type == "string")' <<<"$release_json") || exit 1
+  jq -e --arg body "$publishing_marker" '.name == "Development Build" and .draft == true and .body == $body' <<<"$release_json" >/dev/null || {
+    printf 'Error: newly created development release did not retain its draft publishing marker.\n' >&2
     exit 1
   }
   assets_json=$(gh api "repos/$repo/releases/$release_id/assets") || {
@@ -386,9 +520,14 @@ if ! ensure_tag; then
   exit 1
 fi
 
+if ! bind_release_tag development; then
+  if [[ "$need_backup" == true ]]; then rollback_published || true; fi
+  exit 1
+fi
+
 published_marker=$(make_marker published)
 if ! gh api --method PATCH "repos/$repo/releases/$release_id" \
-  -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=false -f "body=$published_marker"; then
+  -f name='Development Build' -F prerelease=true -f make_latest=false -F draft=false -F tag_name=development -f "body=$published_marker"; then
   if [[ "$need_backup" == true ]]; then rollback_published || true; fi
   exit 1
 fi
