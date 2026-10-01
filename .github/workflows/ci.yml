@@ -99,9 +99,9 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: translate-it-development-main
+          name: translate-it-development-transport-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             dist/Publish/Translate-It-v*-for-Chrome.zip
             dist/Publish/Translate-It-v*-for-Firefox.zip
-          retention-days: 30
+          retention-days: 1
           if-no-files-found: error
