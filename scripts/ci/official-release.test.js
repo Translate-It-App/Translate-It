@@ -22,7 +22,7 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
   checkoutSha = sha, checkoutFailure = false, tagShaSequence = [], tagFailOnRead = 0, zipVersion = tag,
   releaseDraft = true, releaseTagName = tag, releaseSha = sha, releasePrerelease = true,
   initialAssets = [], chrome = true, firefox = true, duplicateChrome = false, duplicateFirefox = false,
-  uploadFailure = '', publishFailure = false, finalTitleLie = false } = {}) {
+  uploadFailure = '', publishFailure = false, finalTitleLie = false, extraFinalAsset = '' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'official-release-test-'));
   const publishDir = join(dir, 'publish');
   mkdirSync(publishDir, { recursive: true });
@@ -105,7 +105,10 @@ if (args[0] === 'api' && endpoint === 'repos/owner/repo/git/ref/tags/' + process
   process.stdout.write(JSON.stringify({ object: { sha: state.refSha } })); process.exit(0);
 }
 if (args[0] === 'api' && endpoint === 'repos/owner/repo/releases/' + process.env.MOCK_RELEASE_ID + '/assets' && !method) {
-  process.stdout.write(JSON.stringify(state.assets)); process.exit(0);
+  const assets = state.assets.slice();
+  const uploaded = calls.some(call => call.some(value => String(value).startsWith('https://uploads.github.com/')));
+  if (process.env.MOCK_FINAL_EXTRA && uploaded) assets.push({ id: 999, name: process.env.MOCK_FINAL_EXTRA });
+  process.stdout.write(JSON.stringify(assets)); process.exit(0);
 }
 if (args[0] === 'api' && method === 'DELETE' && endpoint.startsWith('repos/owner/repo/releases/assets/')) {
   const id = Number(endpoint.split('/').pop());
@@ -166,6 +169,7 @@ process.stdout.write(process.env.MOCK_CHECKOUT_SHA);
     MOCK_LIST_FAILURE: listFailure,
     MOCK_UPLOAD_FAILURE: uploadFailure,
     MOCK_PUBLISH_FAILURE: publishFailure ? '1' : '',
+    MOCK_FINAL_EXTRA: extraFinalAsset,
     MOCK_FINAL_TITLE_LIE: finalTitleLie ? '1' : '',
     MOCK_CHECKOUT_SHA: checkoutSha,
     MOCK_GIT_FAILURE: checkoutFailure ? '1' : '',
@@ -261,7 +265,6 @@ describe('official release helper', () => {
   it('finalizes by uploading release-ID assets and publishes only after verification', () => {
     const result = run({ command: 'finalize', initialAssets: [
       { id: 10, name: chromeName },
-      { id: 11, name: 'unrelated.zip' },
       { id: 12, name: firefoxName },
     ] });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -276,7 +279,6 @@ describe('official release helper', () => {
     const publish = result.calls.findIndex(args => isReleasePatch(args));
     expect(result.calls).toContainEqual(['api', '--method', 'DELETE', 'repos/owner/repo/releases/assets/10']);
     expect(result.calls).toContainEqual(['api', '--method', 'DELETE', 'repos/owner/repo/releases/assets/12']);
-    expect(result.calls.some(args => args.includes('repos/owner/repo/releases/assets/11') && args.includes('--method') && args.includes('DELETE'))).toBe(false);
     for (const [assetId, name] of [[10, chromeName], [12, firefoxName]]) {
       const remove = result.calls.findIndex(args => args.includes(`repos/owner/repo/releases/assets/${assetId}`) && args.includes('DELETE'));
       const upload = uploads.find(({ args }) => args.some(value => String(value).endsWith(`?name=${name}`))).index;
@@ -290,10 +292,34 @@ describe('official release helper', () => {
     expect(result.calls[publish]).toEqual(['api', '--method', 'PATCH', 'repos/owner/repo/releases/77', '-f', `name=${releaseTitle}`, '-F', 'prerelease=false', '-f', 'make_latest=true', '-F', 'draft=false']);
     expect(result.calls.filter(args => args[0] === 'api' && args[1] === 'repos/owner/repo/releases/77' && !args.includes('--method'))).toHaveLength(2);
     expect(result.state.release).toMatchObject({ id: 77, tag_name: tag, draft: false, prerelease: false, name: releaseTitle });
-    expect(result.state.assets.map(asset => asset.name)).toEqual(['unrelated.zip', chromeName, firefoxName]);
+    expect(result.state.assets.map(asset => asset.name)).toEqual([chromeName, firefoxName]);
     expect(result.calls.some(args => args[0] === 'release' && ['upload', 'edit'].includes(args[1]))).toBe(false);
     expect(result.calls.some(args => args.some(value => String(value).includes('/releases/tags/')))).toBe(false);
     result.cleanup();
+  });
+
+  it('rejects a draft containing unexpected assets before any mutation', () => {
+    const result = run({ command: 'finalize', initialAssets: [
+      { id: 10, name: chromeName },
+      { id: 11, name: 'unrelated.zip' },
+      { id: 12, name: firefoxName },
+    ] });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+    expect(result.stderr).toContain('unexpected assets');
+    expect(result.calls.some(args => args.includes('--method') && ['DELETE', 'POST', 'PATCH'].includes(args[args.indexOf('--method') + 1]))).toBe(false);
+    result.cleanup();
+  });
+
+  it('requires exactly the two expected assets after upload before publishing', () => {
+    for (const extraFinalAsset of ['unrelated.zip', chromeName]) {
+      const result = run({ command: 'finalize', extraFinalAsset });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+      // Both expected ZIPs were uploaded, but publication must not happen.
+      expect(result.calls.filter(args => args.some(value => String(value).startsWith('https://uploads.github.com/')))).toHaveLength(2);
+      expect(result.calls.some(args => isReleasePatch(args))).toBe(false);
+      expect(result.state.release.draft).toBe(true);
+      result.cleanup();
+    }
   });
 
   it('rejects missing or duplicate browser ZIPs before any GitHub mutation', () => {

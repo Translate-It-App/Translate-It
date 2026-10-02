@@ -136,14 +136,27 @@ finalize() {
   verify_release "$json" true || fail 'release ID, tag, or draft state does not match.'
   verify_tag_sha
 
+  # A resumed draft may only carry the two expected browser ZIPs. Refuse to
+  # touch a release holding anything else; unknown assets are never deleted
+  # automatically and must never become public with this release.
+  listed=$(assets_json) || fail 'could not list current release assets.'
+  jq -e --arg chrome "$chrome_name" --arg firefox "$firefox_name" '
+    type == "array"
+    and ([.[] | select(.name != $chrome and .name != $firefox)] | length == 0)
+  ' <<<"$listed" >/dev/null || fail 'release contains unexpected assets; refusing to modify the release.'
+
   replace_asset "$chrome_name" "${chrome_inputs[0]}"
   replace_asset "$firefox_name" "${firefox_inputs[0]}"
   listed=$(assets_json) || fail 'could not verify uploaded release assets.'
+  # GitHub-generated source links are not normal release assets and are not
+  # part of this check; the published asset set must be exactly the two
+  # official browser ZIPs.
   jq -e --arg chrome "$chrome_name" --arg firefox "$firefox_name" '
     type == "array"
+    and length == 2
     and ([.[] | select(.name == $chrome)] | length == 1)
     and ([.[] | select(.name == $firefox)] | length == 1)
-  ' <<<"$listed" >/dev/null || fail 'expected exactly one Chrome and one Firefox release asset.'
+  ' <<<"$listed" >/dev/null || fail 'expected exactly the two official browser ZIPs on the release.'
 
   json=$(release_json) || fail 'could not recheck release before publishing.'
   verify_release "$json" true || fail 'release is no longer the expected draft.'
