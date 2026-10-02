@@ -26,7 +26,7 @@
 
 <br>
 
-**Translate It** is more than a translator; it's a modular translation ecosystem built around a "zero-pressure" philosophy. Designed to stay lightweight during everyday browsing, it brings text, page, document, image, subtitle, and live-audio translation into one extension across desktop, touch, and mobile environments.
+**Translate It** is more than a translator, it's a modular translation ecosystem built around a **zero-pressure** philosophy. Designed to stay lightweight during everyday browsing, it brings text, page, document, image, subtitle, and live-audio translation into one extension across desktop, touch, and mobile environments.
 
 Powered by **10+ translation providers**, Translate It focuses on privacy, flexibility, performance, and giving users control over how and where their translations are processed.
 
