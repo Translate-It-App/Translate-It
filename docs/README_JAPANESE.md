@@ -3,10 +3,10 @@
 
 <p align="center">
   <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
-    <img src="../docs/Store/Chrome-Store.png" alt="Chrome" height="60" />
+    <img src="./Store/Chrome-Store.png" alt="Chrome" height="60" />
   </a>
   <a target="_blank" href="https://addons.mozilla.org/firefox/addon/translate-it">
-    <img src="../docs/Store/Firefox-Store.png" alt="Firefox" height="60" />
+    <img src="./Store/Firefox-Store.png" alt="Firefox" height="60" />
   </a>
 </p>
 
@@ -19,18 +19,16 @@
 <div align="center">
   <strong>
     • <a href="../README.md">English</a> | 
-    • <a href="./README_FARSI.md">فارسی</a> | 
-    • 日本語
+    • 日本語 |
+    • <a href="./README_FARSI.md">فارسی</a>
   </strong>
 </div>
 
 <br>
 
-<p align="center">
-  <img src="./Images/Options_Japanese.jpg" alt="Translate It 拡張機能" height="400" />
-</p>
+**Translate It** は、単なる翻訳ツールではなく、「気軽に使える」ことを大切にしたモジュール型の翻訳エコシステムです。日々のブラウジングを軽快に保ちながら、テキスト、ページ、ドキュメント、画像、字幕、ライブ音声を、デスクトップ、タッチ端末、モバイルで使えるひとつの拡張機能にまとめています。
 
-**Translate It** は単なる翻訳ツールではありません。あらゆるデバイスで言語の壁を越えるために設計された、高性能でモジュール式のエコシステムです。「ゼロプレッシャー」の哲学に基づいて設計されており、数十のタブが開いている状態でも、システムリソースに負荷をかけたり RAM を膨張させたりすることなく、モダンブラウザでシームレスに動作するように最適化されています。**Vue.js 3** で構築され、**10 以上のプロバイダー**に対応。プライバシー、スピード、そしてコスト効率に重点を置いた、ウェブ翻訳への緻密なアプローチを提供します。
+**10 種類以上の翻訳プロバイダー**に対応し、プライバシー、柔軟性、パフォーマンスを重視。翻訳をどこで、どのように処理するかを自分で選べます。
 
 <br>
 
@@ -48,11 +46,10 @@
 
 ## 目標
 
-- **プライバシーと選択肢:** 翻訳をどのように処理するかは自分で選べます。対応している機能ではローカルやオフラインのプロバイダーを使うことも、好みのクラウドサービスを設定することもできます。
-- **プロバイダーを自由に選べる:** ひとつのサービスに縛られることなく、ローカル、無料、従来型、AI ベースのプロバイダーを用途に合わせて切り替えられます。
-- **さまざまな場面で使える:** 選択したテキストや入力欄だけでなく、ページ内の要素、ページ全体、PDF、字幕、OCR、マウスホバー、ライブ音声まで、ひとつの拡張機能で対応します。
-- **普段のブラウジングに合わせた設計:** 動的なページや長いコンテンツ、継続的な翻訳にも対応し、デスクトップでもモバイルでも快適に使えるよう設計されています。
-
+- **プライバシーと操作の自由:** 対応状況に応じて、ローカル、オフライン、無料、クラウド型のプロバイダーなど、翻訳の処理方法を選べます。
+- **自由に選べる:** ひとつのサービスに縛られず、従来型と AI ベースの翻訳プロバイダーを切り替えられます。
+- **さまざまな用途にひとつのツールで:** 選択したテキスト、入力欄、ページ内の要素、ページ全体、PDF、字幕、OCR による画像内テキスト、マウスホバー、ライブ音声を翻訳できます。
+- **日々のブラウジングに合わせた設計:** 動的なページや長いコンテンツ、継続的な翻訳に対応し、デスクトップ、タッチ端末、モバイルで使えます。
 
 ---
 
@@ -60,141 +57,156 @@
 
 | 機能 | 説明 |
 | :--- | :--- |
-| **テキスト選択** | テキストを選択した場所に翻訳アイコンやボックスを即座に表示。 |
-| **要素モード** | UI 要素をクリックして、レイアウトを維持したままインラインで翻訳。 |
-| **ページ全体翻訳** | 遅延読み込みとスマートなメモリ管理により、ページ全体を自動翻訳。 |
-| **PDF翻訳** | ローカル/オンラインのPDFファイルを対訳表示、スキャンPDF向けOCR、TXT/Markdown/HTMLへのエクスポートに対応して翻訳。 |
-| **マウスホバー翻訳** | テキストにマウスを合わせるだけで翻訳ツールチップを表示（単語/一文/コンテナの範囲指定に対応）。 |
-| **デスクトップ/モバイル FAB** | OCR、要素モード、即時設定にアクセスできる多目的フローティングハブ。 |
-| **入力欄翻訳 (Ctrl+/)** | 送信前にテキスト入力欄の内容をその場で翻訳。 |
-| **スマート辞書** | 定義、類義語、使用例をマルチアクセントの音声合成とともに表示。 |
-| **履歴とエクスポート** | 翻訳履歴を管理し、後で利用するためにエクスポート可能。 |
-| **リソーストッカー** | ブラウザを高速に保つための高度なメモリ管理システム。 |
+| **テキスト選択** | ページを離れずに、選択したテキストをすぐに翻訳できます。 |
+| **要素の選択** | 周囲のレイアウトを保ちながら、ページ内の特定の要素をその場で翻訳できます。 |
+| **ページ全体の翻訳** | 動的に読み込まれるコンテンツも含め、ページ全体を継続して翻訳します。 |
+| **ポップアップとサイドパネル** | 拡張機能のポップアップや常時表示できるサイドパネルから直接翻訳できます。 |
+| **Live Dubbing** | Gemini または OpenAI で、アクティブなタブの音声をリアルタイムに翻訳します。**Chrome のみ。** |
+| **PDF 翻訳** | ローカルおよびオンラインの PDF を、二言語表示、OCR、エクスポートに対応して翻訳できます。 |
+| **字幕 (SRT) 翻訳** | タイムスタンプと書式を保ったまま `.srt` ファイルを翻訳できます。 |
+| **画面キャプチャと OCR** | 画像、動画、PDF など、選択できないコンテンツのテキストをキャプチャして翻訳できます。 |
+| **マウスホバー翻訳** | 単語、文、テキストのまとまりを、マウスを重ねるだけで翻訳できます。 |
+| **デスクトップ・モバイル FAB** | ドラッグできるフローティングボタンから、翻訳ツールにすばやくアクセスできます。 |
+| **入力欄の翻訳 (Ctrl+/)** | 送信前に、編集可能な入力欄のテキストを直接翻訳できます。 |
+| **辞書と TTS** | 単語の意味を調べたり、原文や翻訳文を音声で聞いたりできます。 |
+| **履歴とエクスポート** | 翻訳履歴を保存し、後から使えるようにエクスポートできます。 |
 
 ---
 
 ## 対応プロバイダー
 
-Translate It は、一般的な翻訳サービス、AI、ローカル、辞書など、さまざまなプロバイダーに対応しています。
+従来型、AI、ローカル、専門的な翻訳プロバイダーから選べます。
 
-- **一般的な翻訳サービス:** [Google](https://translate.google.com/)、[Microsoft](https://www.microsoft.com/translator/)、[DeepL](https://www.deepl.com/translator)、[Yandex](https://translate.yandex.com/)、[Lingva](https://github.com/TheDavidDelta/lingva-translate)、[Bing](https://www.bing.com/translator)
+- **従来型:** [Google Translate](https://translate.google.com/)、[Microsoft Edge Translator](https://www.microsoft.com/translator/)、[DeepL](https://www.deepl.com/translator)、[Yandex](https://translate.yandex.com/)、[Lingva](https://github.com/TheDavidDelta/lingva-translate)、[Bing](https://www.bing.com/translator)
 - **AI:** [Gemini](https://ai.google.dev/)、[OpenAI](https://openai.com/api/)、[OpenRouter](https://openrouter.ai/)、[Requesty](https://www.requesty.ai/)、[DeepSeek](https://platform.deepseek.com/)
-- **カスタム・ローカル:** OpenAI Compatible、[WebAI-to-API](https://github.com/Amm1rr/WebAI-to-API/)、Browser Translation
+- **カスタム・ローカル:** OpenAI-Compatible APIs、[WebAI-to-API](https://github.com/Amm1rr/WebAI-to-API/)、Browser Translation
 - **辞書:** [Vajehyab](https://vajehyab.com/)
 
-API キーが必要なプロバイダーと、設定なしで使えるプロバイダーがあります。
+API キーが必要なプロバイダーもあれば、キーなしで使えるプロバイダーもあります。
+
+**Live Dubbing** は現在、Chrome で Gemini と OpenAI に対応しています。
+
+---
+
+## スクリーンショット
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="./Images/Popup-Text-Light.png" alt="テキスト翻訳" />
+      <br>
+      <b>テキスト翻訳</b>
+    </td>
+    <td align="center">
+      <img src="./Images/Popup-Dubbing-Dark.png" alt="Live Dubbing" />
+      <br>
+      <b>Live Dubbing</b>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="./Images/Select-Element.png" alt="要素の選択" />
+      <br>
+      <b>要素の選択</b>
+    </td>
+    <td align="center">
+      <img src="./Images/Desktop-FAB-Dark.png" alt="デスクトップ FAB" />
+      <br>
+      <b>デスクトップ FAB</b>
+    </td>
+  </tr>
+</table>
 
 ---
 
 ## はじめに
 
 ### 1. インストール
-最適な体験のために、公式ストアからインストールしてください：
+快適に利用するには、公式ストアからインストールしてください。
 
 <p align="center">
   <a target="_blank" href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd">
-    <img src="../docs/Store/Chrome-Store.png" alt="Chrome" height="50" />
+    <img src="./Store/Chrome-Store.png" alt="Chrome" height="50" />
   </a>
   <a target="_blank" href="https://addons.mozilla.org/firefox/addon/translate-it">
-    <img src="../docs/Store/Firefox-Store.png" alt="Firefox" height="50" />
+    <img src="./Store/Firefox-Store.png" alt="Firefox" height="50" />
   </a>
 </p>
 
-*手動でのインストールについては、[インストールガイド](./guides/INSTALLATION.md)をご覧ください。*
+*手動でインストールする場合は、[インストールガイド](./guides/INSTALLATION.md)をご覧ください。*
 
 ### 2. 設定
-ほとんどの AI プロバイダーには API キーが必要です。
-- [**API 設定ガイド**](./guides/API_GUIDE.md)に従って、Gemini や OpenAI などを設定してください。
-- *Google や Yandex などの無料プロバイダーは、設定なしですぐに使用できます。*
+API キーなしで使えるプロバイダーもありますが、AI など API を使うプロバイダーでは設定が必要な場合があります。
 
-### 3. ショートカットの活用
-[**ユーザーガイド**](./guides/USAGE.md)でショートカットを確認し、生産性を最大限に高めましょう。
+プロバイダーの設定や API キーについては、[**API 設定ガイド**](./guides/API_GUIDE.md)をご覧ください。
+
+### 3. 基本的な使い方
+機能やショートカット、基本設定については、[**ユーザーガイド**](./guides/USAGE.md)をご覧ください。
 
 ---
 
 ## 主な機能
 
-### 1. 高度な翻訳エンジン
-- **プログレッシブ・ストリーミング・エンジン:** 長い翻訳を待つ必要はありません！システムが長いテキストを最適化されたセグメントに分割し、準備ができたものからリアルタイムで表示します。すべてのプロバイダーでスムーズかつレスポンシブな体験を提供します。
-- **10 以上のプロバイダー:** 高度な AI モデル（LLM）と従来のプロバイダー（Google、Microsoft、DeepL）を瞬時に切り替え可能。
+### 1. 段階的な翻訳
+長い翻訳は小さな単位に分割され、結果が準備できたものから順に表示されます。
 
-<br>
+### 2. 要素の選択
+ページの特定部分をレイアウトを保ったままその場で翻訳でき、必要に応じて元の内容に戻せます。
 
-### 2. 精密な要素翻訳（ポイント＆クリック）
-- **視覚的ハイライト:** モードを有効にして、段落、ボタン、またはメニューにマウスを合わせると、リアルタイムでオレンジ色のハイライトが表示されます。クリックするだけで、その特定の要素を瞬時に翻訳します。
-- **レイアウトの維持:** ウェブサイトの構造内で直接テキストを翻訳します。ページのレイアウトは 100% 維持されます。
-- **ホバープレビュー:** 原文を確認したいですか？翻訳された要素にマウスを合わせるだけで、精密なツールチップで原文を表示します。
-<!-- ELEMENT_SELECTION_SCREENSHOT_PLACEHOLDER -->
+### 3. ページ全体の翻訳
+新しいコンテンツが表示されるたびにページを継続して翻訳します。ブラウジングやパフォーマンスに合わせて、Fluid と Translate-on-Scroll-Stop のモードを選べます。
 
-<br>
+### 4. Live Dubbing
+Gemini または OpenAI でアクティブなタブの音声をリアルタイムに翻訳し、元の音声と吹き替え音声を個別に操作できます。**Chrome のみ。**
 
-### 3. スマートなページ全体翻訳（遅延読み込み）
-- **無限スクロール対応:** スクロールするたびに新しいコンテンツを自動的に検出し、翻訳します。SNS や長文記事に最適です。
-- **2 つの実行モード:** 
-  - **流動モード (Fluid):** コンテンツがビューポートに入ると同時にリアルタイムで翻訳します。
-  - **停止時モード (On-Stop):** スクロールが終わるまで待機してから翻訳を開始し、API コストを節約し視覚的なノイズを軽減します。
-<!-- WHOLE_PAGE_SCREENSHOT_PLACEHOLDER -->
+### 5. PDF 翻訳
+ローカルまたはオンラインの PDF を、二言語表示、テキスト選択、スキャン文書の OCR に対応して翻訳し、TXT、Markdown、HTML でエクスポートできます。
 
-<br>
+### 6. 画面キャプチャと OCR
+ウェブページ上の任意の範囲をキャプチャし、画像、動画、PDF など選択できないコンテンツのテキストをローカル OCR で翻訳します。
 
-### 4. スクリーンキャプチャ & OCR（あらゆるものをテキストへ）
-- **ビジュアル翻訳:** 画像、動画、PDF、または選択不可能なウェブ領域からテキストをキャプチャして翻訳。
-- **オフラインエンジン:** Tesseract.js を搭載。ローカルモデルのキャッシュにより、「完全オフライン」のプライバシーを実現。
-<!-- OCR_SCREENSHOT_PLACEHOLDER -->
+### 7. 字幕 (SRT) 翻訳
+タイムスタンプと書式を保って字幕を翻訳し、翻訳の進行状況も確認できます。
 
-<br>
+### 8. デスクトップ、タッチ、モバイルでの使いやすさ
+ドラッグ可能な FAB とタッチ操作に最適化された画面を、デスクトップ、タッチ端末、対応するモバイルブラウザーで利用できます。
 
-### 5. PDF翻訳
-- **ローカル/オンラインのPDFファイル:** デバイス上のPDFファイルまたはURLからPDFを開けます。
-- **インテリジェントなページ翻訳:** ページを必要に応じて翻訳し、対訳表示または翻訳表示で読めます。
-- **ページ移動とテキスト選択:** ページ間を移動し、PDF内のテキストを選択できます。
-- **スキャンPDFのOCRとエクスポート:** OCRでテキストを抽出し、翻訳をTXT、Markdown、HTMLでエクスポートできます。
-<!-- PDF_TRANSLATOR_SCREENSHOT_PLACEHOLDER -->
-
-<br>
-
-### 6. 字幕翻訳 (SRT)
-- **かんたんファイル翻訳:** 映画や講義の字幕ファイル（.srt）をアップロードするだけで、好きな言語にすぐ翻訳できます。
-- **ズレない・壊れない:** 動画のタイミングや、斜体（イタリック）、太字などの装飾をそのまま維持します。ファイルが壊れる心配はありません。
-- **リアルタイム表示:** 翻訳の進み具合を一行ずつ確認でき、完了までの残り時間もひと目でわかります。
-- **長編動画もスムーズ:** 長い映画でも、一行も漏らすことなくスムーズに翻訳を完了させます。
-
-<br>
-
-### 7. スマート最適化スライダー（経済性 vs ターボ）
-API コストと UI スピードを **最適化レベル（1〜5）** で完全にコントロール：
-- **エコノミーモード（レベル 1）:** 1 回のリクエストで 70% 多くのテキストを処理。AI トークンの節約や、従来のプロバイダーでの IP バン防止に最適。
-- **ターボモード（レベル 5）:** 並列処理を最大化し、最速の UI レスポンスを実現。
-<!-- OPTIMIZATION_SLIDER_PLACEHOLDER -->
-
-<br>
-
-### 8. クロスプラットフォーム・エルゴノミクス
-- **モバイル・ボトムシート:** Android 版 Firefox、Kiwi、Lemur などのモバイルブラウザ向けに、ジェスチャー操作に対応した親指で操作しやすいネイティブライクなインターフェース.
-- **デスクトップ/モバイル FAB メニュー:** OCR、ページ翻訳、要素モード、および迅速な機能切り替え（インスタント TTS や直接翻訳モードなど）のための多目的ハブ。
-
-<br>
-
-### 9. マウスホバー翻訳 (インスタント・グランス)
-- **一瞬で翻訳:** 修飾キー（Ctrlなど）を押しながらテキストにマウスを合わせるだけで、目立たないツールチップに翻訳結果を即座に表示します。
-- **スマートな範囲指定:** 翻訳対象を自由に選択：**単語**、**一文**、または**コンテナ全体**を自動的に認識して翻訳します。
+### 9. マウスホバー翻訳
+別の翻訳画面を開かずに、ブラウジング中の単語、文、テキストのまとまりを翻訳できます。
 
 ---
 
 ## 開発と貢献
 
-Vue 3、Pinia、Vite を使用した **フィーチャーベース・アーキテクチャ** を採用しています。
-- **アーキテクチャ:** モジュール化されたシステムの詳細は [ARCHITECTURE.md](./technical/ARCHITECTURE.md) をご覧ください。
-- **貢献:** ローカルセットアップの手順については [CONTRIBUTING.md](./guides/CONTRIBUTING.md) をお読みください。
-- **ローカライゼーション:** [ローカライゼーションガイド](./guides/LOCALIZATION_GUIDE.md)に従って、翻訳の追加や更新にご協力ください。
+Vue 3、Pinia、Vite を使った **Feature-Based Architecture** を採用しています。
+- **アーキテクチャ:** モジュール構成については [ARCHITECTURE.md](./technical/ARCHITECTURE.md) をご覧ください。
+- **貢献:** 開発環境の準備については [CONTRIBUTING.md](./guides/CONTRIBUTING.md) をご覧ください。
+- **ローカライズ:** [ローカライズガイド](./guides/LOCALIZATION_GUIDE.md)に沿って、より多くの人に届けるための翻訳にご協力ください。
+
+---
+
+## サポートとパートナーシップ
+
+Translate It は無料のオープンソースソフトウェアです。ご支援は、開発、テスト、メンテナンスの継続に役立ちます。
+
+- **スポンサー:** [GitHub Sponsors](https://github.com/sponsors/Translate-It-App)からご支援いただけます。詳しくは [SPONSORSHIP.md](../SPONSORSHIP.md)をご覧ください。
+- **パートナーシップ:** 技術、エコシステム、事業に関する連携は個別に受け付けています。詳しくは [PARTNERSHIPS.md](../PARTNERSHIPS.md)をご覧ください。
+
+---
+
+<p align="center">
+  <a href="https://www.greptile.com/?utm_source=oss_badge&utm_medium=readme&utm_campaign=greptile_for_open_source">
+    <img src="https://www.greptile.com/badge.svg" alt="Greptile: The War on Bugs">
+  </a>
+</p>
 
 ---
 
 ## ライセンス
 
-このプロジェクトは **Apache License 2.0** の下でライセンスされています。
+このプロジェクトは **Apache License 2.0** のもとで公開されています。
 
-詳細は [LICENSE](../LICENSE) ファイルをご覧ください。
+詳しくは [LICENSE](../LICENSE) をご覧ください。
 
 ---
 
