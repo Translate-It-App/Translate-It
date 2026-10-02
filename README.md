@@ -136,12 +136,12 @@ Install via the official stores for the best experience:
 *For manual installation, see the [Installation Guide](./docs/guides/INSTALLATION.md).*
 
 ### 2. Configuration
-Most AI providers require an API key.
-- Follow the [**API Configuration Guide**](./docs/guides/API_GUIDE.md) to set up Gemini, OpenAI, etc.
-- *Free providers like Google and Yandex work out of the box.*
+Several providers work without an API key, while AI and other API-based providers may require configuration.
 
-### 3. Mastering Shortcuts
-Maximize your productivity with the [**User Guide**](./docs/guides/USAGE.md).
+See the [**API Configuration Guide**](./docs/guides/API_GUIDE.md) for provider setup and API key instructions.
+
+### 3. Learn the Basics
+See the [**User Guide**](./docs/guides/USAGE.md) for feature usage, shortcuts, and general setup.
 
 ---
 
