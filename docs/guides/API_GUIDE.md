@@ -1,6 +1,6 @@
 # API Configuration Guide
 
-To use AI-powered translation providers, you need a valid API key from the respective provider.
+Some API-based providers require a valid API key, while others — including local or custom configurations — can work without one depending on setup.
 
 ---
 
@@ -36,7 +36,7 @@ You can enter **multiple API keys** for each provider (one per line). The extens
 
 You can customize each provider's settings to balance quality and cost:
 
-- **Google Gemini:** Change the `API URL` to use different models (e.g., `gemini-3.8-flash`).
+- **Google Gemini:** Select the model from the Model selector. Use a custom `API URL` only when choosing Custom Model.
 - **OpenAI:** Enter specific model names like `gpt-6-luna` or `gpt-6-sol`.
 - **OpenRouter:** Support for a variety of models; use the model name from the [OpenRouter Docs](https://openrouter.ai/models).
 - **Requesty:** Access many models through one API; pick a curated model or enter any model ID (e.g., `openai/gpt-4o-mini`) from the [Requesty Docs](https://docs.requesty.ai).

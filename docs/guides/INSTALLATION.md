@@ -25,7 +25,7 @@ If you prefer to install the extension manually or use a specific version, follo
 
 1. **Download:** [Download the latest Chrome version here](https://github.com/Translate-It-App/Translate-It/releases).
 2. **Extract:** Unzip the downloaded file.
-3. **Open Extensions Page:** Open your browser and navigate to [`chrome://extensions/`](chrome://extensions/shortcuts).
+3. **Open Extensions Page:** Open your browser and navigate to [`chrome://extensions/`](chrome://extensions/).
 4. **Enable Developer Mode:** Toggle the **Developer mode** switch in the top right corner.
 5. **Install:** Drag and drop the extracted folder anywhere on the extensions page, or click **Load unpacked** and select the folder.
 6. **Done!** You can now pin the extension to your toolbar.
