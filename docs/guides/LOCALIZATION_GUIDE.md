@@ -15,8 +15,8 @@ git clone https://github.com/Translate-It-App/Translate-It.git
 ```
 
 ### 2. Find Your Language
-All translation files are located in the `_locales/` folder.
-- If your language already exists (e.g., `_locales/fa/` for Farsi), you can help by improving the existing translations.
+All translation files are located in the `src/_locales/` folder.
+- If your language already exists (e.g., `src/_locales/fa/` for Farsi), you can help by improving the existing translations.
 - If it doesn't exist, we can help you set it up!
 
 ### 3. Translating the Strings
