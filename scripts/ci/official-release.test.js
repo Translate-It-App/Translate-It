@@ -18,7 +18,7 @@ const chromeName = `Translate-It-${tag}-for-Chrome.zip`;
 const firefoxName = `Translate-It-${tag}-for-Firefox.zip`;
 
 function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expectedSha = sha,
-  tagExists = false, existingRelease = false, existingReleaseDraft = true, mainFailure = '', tagFailure = '', listFailure = '',
+  tagExists = false, existingRelease = false, existingReleaseDraft = true, existingReleaseTitle = releaseTag, duplicateRelease = false, createdReleaseId = '77', mainFailure = '', tagFailure = '', listFailure = '',
   checkoutSha = sha, checkoutFailure = false, tagShaSequence = [], tagFailOnRead = 0, zipVersion = tag,
   releaseDraft = true, releaseTagName = tag, releaseSha = sha, releasePrerelease = true,
   initialAssets = [], chrome = true, firefox = true, duplicateChrome = false, duplicateFirefox = false,
@@ -36,7 +36,8 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
   const stateFile = join(dir, 'state.json');
   writeFileSync(callsFile, '');
   writeFileSync(outputFile, '');
-  const releases = existingRelease ? [{ id: 66, tag_name: releaseTag, name: releaseTag, body: '', draft: existingReleaseDraft }] : [];
+  const releaseCandidate = { id: 66, tag_name: releaseTag, name: existingReleaseTitle, body: '', draft: existingReleaseDraft };
+  const releases = existingRelease ? [releaseCandidate, ...(duplicateRelease ? [{ ...releaseCandidate, id: 67 }] : [])] : [];
   const state = {
     tagExists,
     refSha: releaseSha,
@@ -87,12 +88,11 @@ if (args[0] === 'release' && args[1] === 'create') {
   const releaseTag = args[2];
   const title = args[args.indexOf('--title') + 1];
   const notes = args[args.indexOf('--notes') + 1];
-  state.release = { id: Number(process.env.MOCK_RELEASE_ID), tag_name: releaseTag, name: title, body: notes, draft: args.includes('--draft'), prerelease: true, created: true };
+  state.release = { id: Number(process.env.MOCK_CREATED_RELEASE_ID), tag_name: releaseTag, name: title, body: notes, draft: args.includes('--draft'), prerelease: true, created: true };
   save(); process.stdout.write('draft created'); process.exit(0);
 }
 if (args[0] === 'api' && endpoint === 'repos/owner/repo/releases/' + process.env.MOCK_RELEASE_ID && !method) {
-  const release = process.env.MOCK_FINAL_TITLE_LIE && !state.release.draft ? { ...state.release, name: 'unexpected release title' } : state.release;
-  process.stdout.write(JSON.stringify(release)); process.exit(0);
+  process.stdout.write(JSON.stringify(state.release)); process.exit(0);
 }
 if (args[0] === 'api' && endpoint === 'repos/owner/repo/git/ref/tags/' + process.env.MOCK_TAG && !method) {
   if (args.includes('--jq')) {
@@ -132,7 +132,9 @@ if (args[0] === 'api' && method === 'PATCH' && endpoint === 'repos/owner/repo/re
       if (key === 'tag_name') state.release.tag_name = value;
     }
   }
-  save(); process.exit(0);
+  save();
+  const response = process.env.MOCK_FINAL_TITLE_LIE ? { ...state.release, name: 'unexpected release title' } : state.release;
+  process.stdout.write(JSON.stringify(response)); process.exit(0);
 }
 process.stderr.write('unexpected gh call: ' + JSON.stringify(args)); process.exit(2);
 `, { mode: 0o755 });
@@ -158,6 +160,7 @@ process.stdout.write(process.env.MOCK_CHECKOUT_SHA);
     MOCK_CALLS: callsFile,
     MOCK_TAG: releaseTag,
     MOCK_RELEASE_ID: releaseId,
+    MOCK_CREATED_RELEASE_ID: createdReleaseId,
     MOCK_MAIN_FAILURE: mainFailure,
     MOCK_TAG_FAILURE: tagFailure,
     MOCK_LIST_FAILURE: listFailure,
@@ -199,9 +202,11 @@ describe('official release helper', () => {
 
   it('fails closed when a tag, release, or preparatory API request is unavailable', () => {
     for (const options of [
-      { tagExists: true },
       { existingRelease: true },
-      { existingRelease: true, existingReleaseDraft: false },
+      { tagExists: true, releaseSha: 'b'.repeat(40) },
+      { tagExists: true, existingRelease: true, existingReleaseDraft: false },
+      { tagExists: true, existingRelease: true, existingReleaseTitle: 'Wrong Title' },
+      { tagExists: true, existingRelease: true, duplicateRelease: true, existingReleaseTitle: releaseTitle },
       { tagFailure: '403' },
       { mainFailure: '500' },
       { listFailure: '500' },
@@ -213,6 +218,24 @@ describe('official release helper', () => {
       result.cleanup();
     }
   }, 30000);
+
+  it('recovers a pre-existing tag with no release by creating only the draft', () => {
+    const result = run({ tagExists: true, createdReleaseId: '66' });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
+    expect(releaseCreate(result.calls)).toEqual(['release', 'create', tag, '--draft', '--title', releaseTitle, '--target', sha, '--notes', `Official release ${tag}.`]);
+    expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=66\n`);
+    result.cleanup();
+  });
+
+  it('reuses a matching existing draft when both tag and release already exist', () => {
+    const result = run({ tagExists: true, existingRelease: true, existingReleaseTitle: releaseTitle });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=66\n`);
+    expect(releaseCreate(result.calls)).toBeUndefined();
+    expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
+    result.cleanup();
+  });
 
   it('does not create a tag when the checked-out main commit drifts or cannot be read', () => {
     for (const options of [{ checkoutSha: 'b'.repeat(40) }, { checkoutFailure: true }]) {
@@ -265,6 +288,7 @@ describe('official release helper', () => {
     expect(publish).toBeGreaterThan(lastUpload);
     expect(publish).toBeGreaterThan(draftRecheck);
     expect(result.calls[publish]).toEqual(['api', '--method', 'PATCH', 'repos/owner/repo/releases/77', '-f', `name=${releaseTitle}`, '-F', 'prerelease=false', '-f', 'make_latest=true', '-F', 'draft=false']);
+    expect(result.calls.filter(args => args[0] === 'api' && args[1] === 'repos/owner/repo/releases/77' && !args.includes('--method'))).toHaveLength(2);
     expect(result.state.release).toMatchObject({ id: 77, tag_name: tag, draft: false, prerelease: false, name: releaseTitle });
     expect(result.state.assets.map(asset => asset.name)).toEqual(['unrelated.zip', chromeName, firefoxName]);
     expect(result.calls.some(args => args[0] === 'release' && ['upload', 'edit'].includes(args[1]))).toBe(false);
@@ -302,14 +326,24 @@ describe('official release helper', () => {
     }
   }, 30000);
 
-  it('leaves the release draft if either upload or the publish PATCH fails', () => {
-    for (const options of [{ uploadFailure: 'first' }, { uploadFailure: 'second' }, { publishFailure: true }]) {
+  it('leaves the release draft if either upload fails', () => {
+    for (const options of [{ uploadFailure: 'first' }, { uploadFailure: 'second' }]) {
       const result = run({ ...options, command: 'finalize' });
       expect(result.status).not.toBe(0);
-      expect(result.calls.some(args => isReleasePatch(args))).toBe(Boolean(options.publishFailure));
+      expect(result.calls.some(args => isReleasePatch(args))).toBe(false);
       expect(result.state.release.draft).toBe(true);
       result.cleanup();
     }
+  }, 30000);
+
+  it('treats a failed publish PATCH as ambiguous and requires manual inspection', () => {
+    const result = run({ command: 'finalize', publishFailure: true });
+    expect(result.status).not.toBe(0);
+    expect(result.calls.some(args => isReleasePatch(args))).toBe(true);
+    expect(result.stderr).toContain('publication may already have succeeded');
+    expect(result.stderr).toContain('manual inspection');
+    expect(result.stderr).not.toContain('it remains a draft');
+    result.cleanup();
   }, 30000);
 
   it('fails final verification when GitHub persists the wrong release title', () => {
@@ -317,7 +351,8 @@ describe('official release helper', () => {
     expect(result.status).not.toBe(0);
     expect(result.calls.some(isReleasePatch)).toBe(true);
     expect(result.state.release.draft).toBe(false);
-    expect(result.stderr).toContain('published release state did not verify');
+    expect(result.stderr).toContain('publication may already have succeeded and manual inspection is required');
+    expect(result.calls.filter(args => args[0] === 'api' && args[1] === 'repos/owner/repo/releases/77' && !args.includes('--method')).length).toBe(2);
     result.cleanup();
   });
 

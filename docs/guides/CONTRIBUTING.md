@@ -168,7 +168,7 @@ Before starting a release:
 1. Bump `version` in `package.json` and add the matching `docs/Changelog.md` entry on `main` (the workflow requires the tag to match the packaged version).
 2. In the repository's **Actions** tab, run the **Official Release** workflow and provide the version tag, for example `v1.21.0`.
 
-The workflow fails closed: if validation, build, attestation, upload, or verification fails, the Release stays a draft and is never published. It will not overwrite an existing tag or Release.
+The workflow fails closed: if validation, build, attestation, upload, or verification fails before the final publication step, the Release stays a draft and is never published. It will not overwrite an existing tag or Release. The final publication request is the commit boundary: if that request itself fails ambiguously, check the Release state on GitHub manually. Re-running the workflow for the same version safely resumes an interrupted tag or draft instead of creating duplicates.
 
 ## Technical Documentation
 

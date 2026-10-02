@@ -27,7 +27,7 @@ fetch_releases() {
 }
 
 prepare() {
-  local tag=$RELEASE_TAG version sha tag_response releases_json match_count release_id output
+  local tag=$RELEASE_TAG version sha tag_response releases_json match_count release_id output tag_exists ref_sha release_json
   output=${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}
   [[ -w "$output" ]] || fail 'GITHUB_OUTPUT is not writable.'
   valid_tag "$tag" || fail 'RELEASE_TAG must match vMAJOR.MINOR.PATCH.'
@@ -41,21 +41,38 @@ prepare() {
   [[ "$checkout_sha" =~ ^[[:xdigit:]]{40}$ && "${checkout_sha,,}" == "$sha" ]] || fail 'checked out commit does not match the resolved main commit.'
 
   if tag_response=$(gh api --include "repos/$repo/git/ref/tags/$tag" 2>&1); then
-    fail "tag $tag already exists."
-  elif [[ ! "$tag_response" =~ (^|$'\n')HTTP/[0-9.]+[[:space:]]+404([[:space:]]|$'\r'|$'\n') ]]; then
+    tag_exists=true
+  elif [[ "$tag_response" =~ (^|$'\n')HTTP/[0-9.]+[[:space:]]+404([[:space:]]|$'\r'|$'\n') ]]; then
+    tag_exists=false
+  else
     printf 'Error: could not verify whether tag %s exists.\n%s\n' "$tag" "$tag_response" >&2
     exit 1
   fi
 
   releases_json=$(fetch_releases) || fail 'could not list releases.'
   match_count=$(jq -er --arg tag "$tag" '[.[] | select(.tag_name == $tag)] | length' <<<"$releases_json") || fail 'could not parse release listing.'
-  (( match_count == 0 )) || fail "a release for tag $tag already exists."
+  (( match_count <= 1 )) || fail "found multiple releases for tag $tag."
 
-  gh api --method POST "repos/$repo/git/refs" -f "ref=refs/tags/$tag" -f "sha=$sha" || fail "could not create tag $tag."
+  if [[ "$tag_exists" == true ]]; then
+    ref_sha=$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha) || fail "could not read existing tag $tag."
+    [[ "$ref_sha" =~ ^[[:xdigit:]]{40}$ && "${ref_sha,,}" == "$sha" ]] || fail "existing tag $tag does not point at the resolved main commit."
+    if (( match_count == 1 )); then
+      release_json=$(jq -c --arg tag "$tag" '[.[] | select(.tag_name == $tag)][0]' <<<"$releases_json") || fail 'could not read existing release.'
+      jq -e --arg title "$release_title" '.draft == true and .name == $title' <<<"$release_json" >/dev/null || fail "existing release for $tag is not the expected draft."
+      release_id=$(jq -er '.id | select(type == "number" and . > 0 and floor == .)' <<<"$release_json") || fail 'existing draft release has an invalid ID.'
+      printf 'tag=%s\nsha=%s\nrelease_id=%s\n' "$tag" "$sha" "$release_id" >>"$output"
+      return 0
+    fi
+  elif (( match_count > 0 )); then
+    fail "found an unexpected release for tag $tag without its Git ref."
+  else
+    gh api --method POST "repos/$repo/git/refs" -f "ref=refs/tags/$tag" -f "sha=$sha" || fail "could not create tag $tag."
+  fi
+
   gh release create "$tag" --draft --title "$release_title" --target "$sha" --notes "Official release $tag." || fail "could not create draft release $tag."
 
   releases_json=$(fetch_releases) || fail 'could not verify the created draft release.'
-  release_id=$(jq -er --arg tag "$tag" '[.[] | select(.tag_name == $tag and .draft == true)] | if length == 1 then .[0].id | select(type == "number" and . > 0 and floor == .) else empty end' <<<"$releases_json") || fail 'expected exactly one numeric draft release for the new tag.'
+  release_id=$(jq -er --arg tag "$tag" '[.[] | select(.tag_name == $tag)] | if length == 1 and .[0].draft == true then .[0].id | select(type == "number" and . > 0 and floor == .) else empty end' <<<"$releases_json") || fail 'expected exactly one numeric draft release for the new tag.'
   printf 'tag=%s\nsha=%s\nrelease_id=%s\n' "$tag" "$sha" "$release_id" >>"$output"
 }
 
@@ -94,7 +111,7 @@ replace_asset() {
 
 finalize() {
   local publish_dir=${PUBLISH_DIR:-dist/Publish} chrome_inputs firefox_inputs chrome_name firefox_name
-  local json listed
+  local json listed publish_response
   : "${RELEASE_TAG:?RELEASE_TAG is required}"
   : "${RELEASE_ID:?RELEASE_ID is required}"
   : "${EXPECTED_SHA:?EXPECTED_SHA is required}"
@@ -131,11 +148,10 @@ finalize() {
   json=$(release_json) || fail 'could not recheck release before publishing.'
   verify_release "$json" true || fail 'release is no longer the expected draft.'
   verify_tag_sha
-  gh api --method PATCH "repos/$repo/releases/$RELEASE_ID" \
-    -f "name=$release_title" -F prerelease=false -f make_latest=true -F draft=false || fail 'could not publish release.'
-  json=$(release_json) || fail 'could not verify published release.'
+  publish_response=$(gh api --method PATCH "repos/$repo/releases/$RELEASE_ID" \
+    -f "name=$release_title" -F prerelease=false -f make_latest=true -F draft=false) || fail 'could not confirm publication; publication may already have succeeded and manual inspection of the GitHub Release is required.'
   jq -e --argjson id "$RELEASE_ID" --arg tag "$RELEASE_TAG" --arg title "$release_title" \
-    '.id == $id and .tag_name == $tag and .name == $title and .draft == false and .prerelease == false' <<<"$json" >/dev/null || fail 'published release state did not verify.'
+    '.id == $id and .tag_name == $tag and .name == $title and .draft == false and .prerelease == false' <<<"$publish_response" >/dev/null || fail 'publish response did not verify; publication may already have succeeded and manual inspection is required.'
 }
 
 case "$command" in
