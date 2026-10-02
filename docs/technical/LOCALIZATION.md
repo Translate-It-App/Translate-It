@@ -9,7 +9,7 @@ This guide covers **UI localization only**. Runtime text language detection is d
 ## Architecture Components
 
 1.  **LocaleManifest (`src/shared/config/LocaleManifest.js`)**: The single source of truth for all supported UI languages.
-2.  **Chrome i18n Folders (`_locales/`)**: Standard browser extension localization folders (e.g., `_locales/en/messages.json`).
+2.  **Chrome i18n Folders (`src/_locales/`)**: Standard browser extension localization folders (e.g., `src/_locales/en/messages.json`).
 3.  **Automated Scripts**: Tools for keeping all language files in sync with the primary English (EN) reference.
 
 ---
@@ -38,10 +38,10 @@ Run the synchronization script to automatically create the new folder and popula
 ```bash
 pnpm i18n:sync:fix
 ```
-*This will create `_locales/de/messages.json` with all keys marked as `UNTRANSLATED`.*
+*This will create `src/_locales/de/messages.json` with all keys marked as `UNTRANSLATED`.*
 
 ### 3. Translate the Content
-Open `_locales/[code]/messages.json` and replace the English messages with your translations.
+Open `src/_locales/[code]/messages.json` and replace the English messages with your translations.
 
 *   **Variables**: Keep placeholders like `{appName}` or `{version}` intact.
 *   **Direction**: The extension automatically handles layout flipping (RTL/LTR) based on the `dir` property in the manifest.
@@ -59,10 +59,10 @@ pnpm i18n:purge de    # Replace 'de' with your language code
 ## Best Practices & Standards
 
 ### 1. The English Reference
-Always add new keys to `_locales/en/messages.json` first. The `i18n:sync` script uses English as the master template.
+Always add new keys to `src/_locales/en/messages.json` first. The `i18n:sync` script uses English as the master template.
 
 ### 2. UI Component Localization
-Never use hardcoded strings in Vue components. Always use the `useUnifiedI18n` composable:
+Do not hardcode user-facing strings when localization is required. Follow the existing localization pattern of the component or area you are working in. `useUnifiedI18n` is the shared bridge when unified/legacy behavior is needed; direct `useI18n` from `vue-i18n` is also used in current Vue components:
 
 ```javascript
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n';
@@ -78,14 +78,7 @@ Respect regional standards. For example:
 *   **Farsi/Arabic**: Ensure numbers and punctuation are suitable for RTL flow.
 
 ### 4. Protected Prefixes
-Our maintenance scripts automatically protect dynamic keys. Avoid using these prefixes for general UI strings as they are skipped during unused-key detection:
-*   `provider_` (Translation Providers)
-*   `api_` (API Settings)
-*   `font_` (Font Settings)
-*   `theme_` (Theme/UI)
-*   `optimization_level_` (AI & Traditional optimization levels)
-*   `whole_page_` (Whole Page Translation features)
-*   `ERRORS_`, `STATUS_`, `validation_`, `history_`, `SIDEPANEL_`, `popup_`, `window_`, `action_`
+Our maintenance scripts automatically protect dynamic keys. `scripts/localization/check-i18n.cjs` is the source of truth for protected/safe prefixes and keys — check it before adding or removing protected patterns. As examples, prefixes such as `provider_`, `api_`, and `theme_` are skipped during unused-key detection, so avoid using them for general UI strings.
 
 ---
 
@@ -101,4 +94,4 @@ Our maintenance scripts automatically protect dynamic keys. Avoid using these pr
 
 ---
 
-**Last Updated**: March 2026
+**Last Updated**: October 2026
