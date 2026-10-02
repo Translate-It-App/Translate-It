@@ -32,9 +32,11 @@ The extension is fully compatible with **touchscreen devices** and mobile browse
 - **Touch-Optimized:** All buttons and interaction areas are sized for easy touch access.
 
 ### 5. Revert Translations
-To undo translations and restore the original text:
-- Press the `ESC` key.
-- Click the **Revert** button in the extension popup/sidepanel.
+To undo completed Select Element translations and restore the original text:
+- Press `ESC` twice quickly.
+- Click the **Revert** button in the extension popup or side panel.
+
+A single `ESC` exits Select Element mode while selecting an element.
 
 ---
 
