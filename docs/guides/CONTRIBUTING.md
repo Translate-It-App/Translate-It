@@ -159,6 +159,17 @@ After running, the `dist/Publish` directory will contain:
 - `Translate-It-vX.X.X-for-Chrome.zip`
 - `Translate-It-vX.X.X-for-Firefox.zip`
 
+### Creating an Official Release (maintainers)
+
+Official releases are built and published by GitHub Actions, not by publishing a Release manually. The `Official Release` workflow is started manually and then runs in order: create the Git tag, create a **draft** Release, build and attest the Chrome/Firefox ZIPs, attach them to the draft, and only then publish the draft as the latest stable Release.
+
+Before starting a release:
+
+1. Bump `version` in `package.json` and add the matching `docs/Changelog.md` entry on `main` (the workflow requires the tag to match the packaged version).
+2. In the repository's **Actions** tab, run the **Official Release** workflow and provide the version tag, for example `v1.21.0`.
+
+The workflow fails closed: if validation, build, attestation, upload, or verification fails, the Release stays a draft and is never published. It will not overwrite an existing tag or Release.
+
 ## Technical Documentation
 
 For a deeper dive into the architecture and system design, please refer to:
