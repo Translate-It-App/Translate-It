@@ -340,6 +340,26 @@ describe('development workflow_run publisher', () => {
     publishFail.cleanup();
   }, 30000);
 
+  it('re-canonicalizes a re-drafted release when rollback sees a synthetic association', () => {
+    const rebound = 'untagged-rebound123';
+    const canonicalize = ['api', '--method', 'PATCH', 'repos/owner/repo/releases/123', '-f', 'name=Development Build', '-F', 'prerelease=true', '-f', 'make_latest=false', '-F', 'draft=true', '-f', 'tag_name=development'];
+    const result = run({ draftRebind: rebound, fail: 'publish' });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+    // Rollback detects the unexpected synthetic association and rebinds to the canonical tag.
+    expect(result.calls).toContainEqual(canonicalize);
+    expect(result.calls.some(args => args.some(value => String(value).startsWith('tag_name=untagged-')))).toBe(false);
+    // Prior assets, Git ref, body/marker, and public visibility are restored.
+    expect(result.calls).toContainEqual(tagPatch(OLD_SHA));
+    expect(restoredUploads(result.calls, 'Translate-It-development-for-Chrome.zip', 'old-chrome-bytes')).toHaveLength(1);
+    expect(restoredUploads(result.calls, 'Translate-It-development-for-Firefox.zip', 'old-firefox-bytes')).toHaveLength(1);
+    expect(result.calls).toContainEqual(restorePatch(OLD_MARKER, false));
+    const canonicalizeIndex = result.calls.findIndex(args => JSON.stringify(args) === JSON.stringify(canonicalize));
+    const restoreIndex = result.calls.findIndex(args => JSON.stringify(args) === JSON.stringify(restorePatch(OLD_MARKER, false)));
+    expect(restoreIndex).toBeGreaterThan(canonicalizeIndex);
+    expect(result.stderr).not.toContain('rollback/recovery failed');
+    result.cleanup();
+  }, 30000);
+
   it('creates a missing tag only after an exact-reference GET 404 and ancestry recheck', () => {
     const result = run({ tag: 'missing', draft: 'true', body: marker({ run_number: 20, run_attempt: 2, run_id: 300, sha: SHA, state: 'publishing' }) });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
