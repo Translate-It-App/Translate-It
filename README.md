@@ -86,6 +86,37 @@ Some providers require an API key, while others work without one.
 
 ---
 
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="./docs/Images/Popup-Text-Light.png" alt="Text Translation" />
+      <br>
+      <b>Text Translation</b>
+    </td>
+    <td align="center">
+      <img src="./docs/Images/Popup-Dubbing-Dark.png" alt="Live Dubbing" />
+      <br>
+      <b>Live Dubbing</b>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="./docs/Images/Select-Element.png" alt="Select Element Translation" />
+      <br>
+      <b>Select Element</b>
+    </td>
+    <td align="center">
+      <img src="./docs/Images/Desktop-FAB-Dark.png" alt="Desktop Floating Action Button" />
+      <br>
+      <b>Desktop FAB</b>
+    </td>
+  </tr>
+</table>
+
+---
+
 ## Getting Started
 
 ### 1. Installation
