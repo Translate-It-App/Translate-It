@@ -26,11 +26,9 @@
 
 <br>
 
-<p align="center">
-  <img src="./docs/Images/Options.jpg" alt="Translate It Extension" height="400" />
-</p>
+**Translate It** is more than a translator; it's a modular translation ecosystem built around a "zero-pressure" philosophy. Designed to stay lightweight during everyday browsing, it brings text, page, document, image, subtitle, and live-audio translation into one extension across desktop, touch, and mobile environments.
 
-**Translate It** is not just a translator; it's a high-performance, modular ecosystem designed to bridge the language gap across any device. Engineered with a "zero-pressure" philosophy, it is optimized to run seamlessly in modern browsers without taxing system resources or bloating RAM, even when dozens of tabs are active. Built with **Vue.js 3** and powered by **10+ Providers**, it offers a surgical approach to web translation with a focus on privacy, speed, and cost-efficiency.
+Powered by **10+ translation providers**, Translate It focuses on privacy, flexibility, performance, and giving users control over how and where their translations are processed.
 
 <br>
 
@@ -48,10 +46,10 @@
 
 ## Goals
 
-- **Privacy and control:** You decide how your translations are processed. Where supported, you can use local or offline providers, or configure the cloud service you prefer.
-- **Freedom to choose:** You’re not tied to a single provider. Switch between local, free, traditional, and AI-powered services whenever you need.
+- **Privacy and control:** Choose how your translations are processed, including local, offline, free, and cloud-based providers where supported.
+- **Freedom to choose:** Switch between traditional and AI-powered translation providers without being locked into a single service.
 - **One tool for different needs:** Translate selected text, input fields, page elements, full pages, PDFs, subtitles, images with OCR, text on hover, and live audio.
-- **Built for everyday browsing:** Designed to work smoothly with dynamic pages, long content, continuous translation, and both desktop and mobile browsers.
+- **Built for everyday browsing:** Designed for dynamic pages, long content, continuous translation, desktop, touch, and mobile environments.
 
 ---
 
@@ -59,30 +57,34 @@
 
 | Feature | Description |
 | :--- | :--- |
-| **Text Selection** | Instant translation icon/box right where you select text. |
-| **Element Mode** | Click any UI element to translate it inline while keeping the layout. |
-| **Whole Page** | Auto-translate entire pages with lazy-loading and smart memory management. |
-| **PDF Translator** | Translate local and online PDF documents with bilingual reading, OCR support for scanned PDFs, and TXT/Markdown/HTML export. |
-| **Mouse Hover** | Instant translation tooltip triggered by moving mouse over text (supports Word/Sentence/Container scopes). |
-| **Desktop/Mobile FAB** | Multipurpose draggable hub for instant OCR, Page Translation, Element Mode, and rapid feature toggles. |
-| **In-Field (Ctrl+/)** | Translate your input inside text fields before sending. |
-| **Smart Dictionary** | Definitions, synonyms, and usage examples with multi-accent TTS. |
-| **History & Export** | Keep track of your translations and export them for later use. |
-| **Resource Tracker** | Advanced memory management to keep your browser fast. |
+| **Text Selection** | Translate selected text instantly without leaving the page. |
+| **Select Element** | Translate specific page elements inline while preserving the surrounding layout. |
+| **Whole Page** | Translate full pages continuously, including dynamically loaded content. |
+| **Popup & Side Panel** | Translate text directly from the extension popup or persistent side panel. |
+| **Live Dubbing** | Translate active-tab audio in real time using Gemini or OpenAI. **Chrome only.** |
+| **PDF Translator** | Translate local and online PDFs with bilingual views, OCR, and export support. |
+| **Subtitle (SRT) Translator** | Translate `.srt` subtitle files while preserving timestamps and formatting. |
+| **Screen Capture & OCR** | Capture and translate text from images, videos, PDFs, or other non-selectable content. |
+| **Mouse Hover** | Translate words, sentences, or text containers directly on hover. |
+| **Desktop & Mobile FAB** | Quick access to translation tools through a draggable floating action button. |
+| **In-Field (Ctrl+/)** | Translate text directly inside editable fields before sending it. |
+| **Dictionary & TTS** | Look up words and listen to source or translated text. |
+| **History & Export** | Keep translation history and export it for later use. |
 
 ---
 
 ## Supported Providers
 
-Choose from traditional, AI, local, and specialized providers:
+Choose from traditional, AI-powered, local, and specialized translation providers:
 
-- **Traditional:** [Google](https://translate.google.com/), [Microsoft](https://www.microsoft.com/translator/), [DeepL](https://www.deepl.com/translator), [Yandex](https://translate.yandex.com/), [Lingva](https://github.com/TheDavidDelta/lingva-translate), [Bing](https://www.bing.com/translator)
+- **Traditional:** [Google Translate](https://translate.google.com/), [Microsoft Edge Translator](https://www.microsoft.com/translator/), [DeepL](https://www.deepl.com/translator), [Yandex](https://translate.yandex.com/), [Lingva](https://github.com/TheDavidDelta/lingva-translate), [Bing](https://www.bing.com/translator)
 - **AI:** [Gemini](https://ai.google.dev/), [OpenAI](https://openai.com/api/), [OpenRouter](https://openrouter.ai/), [Requesty](https://www.requesty.ai/), [DeepSeek](https://platform.deepseek.com/)
-- **Custom & Local:** OpenAI Compatible, [WebAI-to-API](https://github.com/Amm1rr/WebAI-to-API/), Browser Translation
+- **Custom & Local:** OpenAI-Compatible APIs, [WebAI-to-API](https://github.com/Amm1rr/WebAI-to-API/), Browser Translation
 - **Dictionary:** [Vajehyab](https://vajehyab.com/)
 
 Some providers require an API key, while others work without one.
 
+**Live Dubbing** currently supports Gemini and OpenAI on Chrome.
 
 ---
 
@@ -145,70 +147,32 @@ Maximize your productivity with the [**User Guide**](./docs/guides/USAGE.md).
 
 ## Key Features
 
-### 1. Advanced Translation Engines
-- **Progressive Streaming Engine:** Don't wait for large translations! The system splits long texts into optimized segments and renders them in real-time as they arrive, providing a fluid and responsive experience across all providers.
-- **10+ Providers:** Switch between advanced AI models (LLMs) and traditional providers (Google, Microsoft, DeepL) instantly.
+### 1. Progressive Translation
+Large translations are split into smaller units and displayed progressively as results become available.
 
-<br>
+### 2. Select Element
+Translate specific parts of a webpage inline while preserving the surrounding layout, with support for restoring the original content.
 
-### 2. Surgical Element Translation (Point-and-Click)
-- **Visual Highlight:** Activate the mode and hover over any paragraph, button, or menu to see a real-time orange highlight. Click to translate that specific element instantly.
-- **Layout Preservation:** Translate text directly inside the website's structure. Your page layout remains 100% intact.
-- **Hover Preview:** Need to see the source? Simply hover over any translated element to see the original text in a surgical tooltip.
-<!-- ELEMENT_SELECTION_SCREENSHOT_PLACEHOLDER -->
+### 3. Whole-Page Translation
+Continuously translate pages as content appears, with Fluid and Translate-on-Scroll-Stop modes for different browsing and performance needs.
 
-<br>
-
-### 3. Smart Whole-Page Translation (Lazy-Loading)
-- **Infinite Scrolling Support:** Automatically detects and translates new content as you scroll down. Perfect for social media and long-form articles.
-- **Dual Execution Modes:** 
-  - **Fluid Mode:** Translates content in real-time as it enters the viewport.
-  - **On-Stop Mode:** Waits for you to finish scrolling before initiating translation, saving API costs and reducing visual noise.
-<!-- WHOLE_PAGE_SCREENSHOT_PLACEHOLDER -->
-
-<br>
-
-### 4. Screen Capture & OCR (Anything-to-Text)
-- **Visual Translation:** Capture and translate text from images, videos, PDFs, or any non-selectable web area.
-- **Offline Engine:** Powered by Tesseract.js with local model caching for "True Offline" privacy.
-<!-- OCR_SCREENSHOT_PLACEHOLDER -->
-
-<br>
+### 4. Live Dubbing
+Translate active-tab audio in real time using Gemini or OpenAI, with independent controls for original and dubbed audio. **Chrome only.**
 
 ### 5. PDF Translator
-- **Local & Online Documents:** Open PDF files from your device or a URL.
-- **Bilingual & Translated Views:** Translate pages on demand and switch between bilingual and translated views.
-- **Navigate & Select:** Move between pages and select PDF text naturally.
-- **Scanned PDF OCR & Export:** Extract text from scanned PDFs with OCR, then export translations to TXT, Markdown, or HTML.
-<!-- PDF_TRANSLATOR_SCREENSHOT_PLACEHOLDER -->
+Translate local or online PDFs with bilingual views, text selection, OCR for scanned documents, and TXT, Markdown, or HTML export.
 
-<br>
+### 6. Screen Capture & OCR
+Capture any area of a webpage and translate text from images, videos, PDFs, or other non-selectable content using local OCR.
 
-### 6. Subtitle Translation (SRT)
-- **Easy File Translation:** Upload your movie or course subtitles (`.srt`) and translate them to any language in seconds.
-- **Perfect Timing & Style:** Your video timestamps, italics, and bold text stay exactly as they are. No broken files.
-- **Live Preview:** Watch the translation happen line-by-line with a clear progress bar and estimated time remaining.
-- **Fast & Reliable:** Built to handle even long movies smoothly without missing a single line.
+### 7. Subtitle (SRT) Translator
+Translate subtitle files while preserving timestamps and formatting, with progress tracking during translation.
 
-<br>
+### 8. Desktop, Touch & Mobile Experience
+Use draggable FAB controls and touch-optimized interfaces across desktop, touchscreen devices, and supported mobile browsers.
 
-### 7. Smart Optimization Slider (Economy vs. Turbo)
-Take full control over your API costs and UI speed with **Optimization Levels (1-5)**:
-- **Economy Mode (Level 1):** Packs 70% more text per request. Perfect for saving AI tokens and preventing IP bans on traditional providers.
-- **Turbo Mode (Level 5):** Maximizes concurrency for the fastest possible UI response.
-<!-- OPTIMIZATION_SLIDER_PLACEHOLDER -->
-
-<br>
-
-### 8. Cross-Platform Ergonomics
-- **Mobile Bottom Sheet:** A native-like, thumb-friendly interface for mobile browsers (Firefox Android, Kiwi, Lemur) with gesture support.
-- **Desktop/Mobile FAB Menu:** A draggable, persistent floating action button for instant access to OCR, Page Translation, Element Mode, and rapid feature toggles (like instant TTS or direct-translation mode).
-
-<br>
-
-### 9. Mouse on Hover (Instant Glance)
-- **Glance-to-Translate:** Move your mouse over any text while holding a modifier key (like Ctrl) to see an instant translation in a non-intrusive tooltip.
-- **Smart Scoping:** Choose your focus: translate a single **Word**, a full **Sentence**, or the entire **Container** block automatically.
+### 9. Mouse Hover Translation
+Translate a word, sentence, or container directly while browsing, without opening a separate translation interface.
 
 ---
 
