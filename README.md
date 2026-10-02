@@ -19,8 +19,8 @@
 <div align="center">
   <strong>
     • English | 
-    • <a href="./docs/README_FARSI.md">فارسی</a> | 
-    • <a href="./docs/README_JAPANESE.md">日本語</a>
+    • <a href="./docs/README_JAPANESE.md">日本語</a> | 
+    • <a href="./docs/README_FARSI.md">فارسی</a>
   </strong>
 </div>
 
