@@ -410,6 +410,27 @@
   "page_translation_auto_translate_inherited_label": {
     "message": "ترجمه خودکار توسط یک قاعدهٔ گسترده‌تر مدیریت می‌شود"
   },
+  "auto_translate_scope_this_page": {
+    "message": "این صفحه"
+  },
+  "auto_translate_scope_this_site": {
+    "message": "این سایت"
+  },
+  "auto_translate_scope_menu_label": {
+    "message": "محدوده ترجمه خودکار"
+  },
+  "auto_translate_managed_by_broader_rule": {
+    "message": "توسط یک قانون گسترده‌تر مدیریت می‌شود"
+  },
+  "auto_translate_manage_rules": {
+    "message": "مدیریت قوانین"
+  },
+  "mobile_auto_translate_active": {
+    "message": "روشن"
+  },
+  "mobile_auto_translate_inactive": {
+    "message": "خاموش"
+  },
   "configure_service_button": {
     "message": "تنظیم سرویس ⚙️"
   },

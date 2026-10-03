@@ -410,6 +410,27 @@
   "page_translation_auto_translate_inherited_label": {
     "message": "自動翻訳はより広いルールで管理されています"
   },
+  "auto_translate_scope_this_page": {
+    "message": "このページ"
+  },
+  "auto_translate_scope_this_site": {
+    "message": "このサイト"
+  },
+  "auto_translate_scope_menu_label": {
+    "message": "自動翻訳の範囲"
+  },
+  "auto_translate_managed_by_broader_rule": {
+    "message": "より広いルールによって管理されています"
+  },
+  "auto_translate_manage_rules": {
+    "message": "ルールを管理"
+  },
+  "mobile_auto_translate_active": {
+    "message": "オン"
+  },
+  "mobile_auto_translate_inactive": {
+    "message": "オフ"
+  },
   "configure_service_button": {
     "message": "サービスを設定 ⚙️"
   },

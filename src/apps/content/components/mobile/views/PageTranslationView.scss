@@ -337,6 +337,14 @@
   border-top: 1px solid var(--ti-mobile-header-border) !important;
 }
 
+.ti-m-auto-translate-row {
+  width: 100% !important;
+  border: 0 !important;
+  background: transparent !important;
+  text-align: start !important;
+  cursor: pointer !important;
+}
+
 .ti-m-setting-info {
   display: flex !important;
   flex-direction: column !important;

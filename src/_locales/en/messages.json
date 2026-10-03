@@ -410,6 +410,27 @@
   "page_translation_auto_translate_inherited_label": {
     "message": "Automatic translation is managed by a broader rule"
   },
+  "auto_translate_scope_this_page": {
+    "message": "This Page"
+  },
+  "auto_translate_scope_this_site": {
+    "message": "This Site"
+  },
+  "auto_translate_scope_menu_label": {
+    "message": "Auto-translate scope"
+  },
+  "auto_translate_managed_by_broader_rule": {
+    "message": "Managed by a broader rule"
+  },
+  "auto_translate_manage_rules": {
+    "message": "Manage Rules"
+  },
+  "mobile_auto_translate_active": {
+    "message": "On"
+  },
+  "mobile_auto_translate_inactive": {
+    "message": "Off"
+  },
   "configure_service_button": {
     "message": "Configure Service ⚙️"
   },

@@ -127,42 +127,37 @@
         </button>
       </div>
 
-      <!-- Settings Row (Exact Page Auto Translate) -->
-      <div 
-        v-if="isAutoTranslateToggleVisible"
-        class="ti-m-progress-settings-row"
-      >
-        <div class="ti-m-setting-info">
-          <span class="ti-m-setting-label">{{ t('mobile_page_auto_translate_label', 'Auto-Translate Page') }}</span>
-          <span class="ti-m-setting-desc">{{ autoTranslateToggleDesc }}</span>
-        </div>
-        <button 
-          class="ti-m-setting-star-btn"
-          :class="{ 
-            'is-active': isAutoTranslateToggleActive,
-            'is-disabled': isAutoTranslateToggleDisabled 
-          }"
-          :disabled="isAutoTranslateToggleDisabled"
-          :aria-label="autoTranslateToggleAria"
-          @click.stop="toggleAutoTranslateForCurrentPage"
+      <template v-if="isAutoTranslateToggleVisible">
+        <button
+          class="ti-m-progress-settings-row ti-m-auto-translate-row"
+          :aria-pressed="hasPageRule"
+          @click.stop="scopeActions.togglePageScope()"
         >
-          <svg
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            class="star-svg"
-          >
-            <path 
-              :fill="isAutoTranslateToggleActive ? 'currentColor' : 'none'" 
-              stroke="currentColor"
-              stroke-width="2.5"
-              stroke-linejoin="round"
-              stroke-linecap="round"
-              d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"
-            />
-          </svg>
+          <span class="ti-m-setting-label">{{ t('auto_translate_scope_this_page', 'This Page') }}</span>
+          <span class="ti-m-setting-label">{{ hasPageRule ? '✓' : '' }} {{ hasPageRule ? t('mobile_auto_translate_active', 'On') : t('mobile_auto_translate_inactive', 'Off') }}</span>
         </button>
-      </div>
+        <button
+          v-if="siteScopeAvailable"
+          class="ti-m-progress-settings-row ti-m-auto-translate-row"
+          :aria-pressed="hasSiteRule"
+          @click.stop="scopeActions.toggleSiteScope()"
+        >
+          <span class="ti-m-setting-label">{{ t('auto_translate_scope_this_site', 'This Site') }}</span>
+          <span class="ti-m-setting-label">{{ hasSiteRule ? '✓' : '' }} {{ hasSiteRule ? t('mobile_auto_translate_active', 'On') : t('mobile_auto_translate_inactive', 'Off') }}</span>
+        </button>
+        <div
+          v-if="showManageRules"
+          class="ti-m-progress-settings-row ti-m-managed-note"
+        >
+          <span class="ti-m-setting-desc">{{ t('auto_translate_managed_by_broader_rule', 'Managed by a broader rule') }}</span>
+          <button
+            class="ti-m-setting-label"
+            @click.stop="openManageRules"
+          >
+            {{ t('auto_translate_manage_rules', 'Manage Rules') }}
+          </button>
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -220,28 +215,13 @@ const currentUrl = computed(() => (typeof window !== 'undefined' ? window.locati
 
 const {
   isAutoTranslateToggleVisible,
-  isAutoTranslateToggleActive,
-  isAutoTranslateToggleDisabled,
-  toggleAutoTranslateForCurrentPage,
+  hasPageRule,
+  hasSiteRule,
+  siteScopeAvailable,
+  showManageRules,
+  scopeActions,
+  openManageRules,
 } = useAutoTranslateRules({ currentUrl });
-
-const autoTranslateToggleDesc = computed(() => {
-  if (isAutoTranslateToggleDisabled.value) {
-    return t('mobile_page_auto_translate_desc_inherited', 'Controlled by a broader rule in settings');
-  }
-  return isAutoTranslateToggleActive.value
-    ? t('mobile_page_auto_translate_desc_remove', 'This exact page will be auto-translated')
-    : t('mobile_page_auto_translate_desc_add', 'Automatically translate this exact page');
-});
-
-const autoTranslateToggleAria = computed(() => {
-  if (isAutoTranslateToggleDisabled.value) {
-    return t('mobile_page_auto_translate_aria_inherited', 'This page is controlled by a broader auto-translate rule');
-  }
-  return isAutoTranslateToggleActive.value
-    ? t('mobile_page_auto_translate_aria_remove', 'Remove this page from auto-translate rules')
-    : t('mobile_page_auto_translate_aria_add', 'Add this page to auto-translate rules');
-});
 
 const pageProvider = computed(() => {
   return settingsStore.getEffectiveProvider(TranslationMode.Page);

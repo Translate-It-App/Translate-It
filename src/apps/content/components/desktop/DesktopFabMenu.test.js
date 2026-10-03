@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
-import { reactive } from 'vue';
+import { reactive, ref } from 'vue';
 import DesktopFabMenu from './DesktopFabMenu.vue';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 
@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   },
+  autoRules: null,
 }));
 
 vi.mock('@/store/modules/mobile.js', () => ({
@@ -76,13 +77,7 @@ vi.mock('@/apps/content/composables/useFabSelection.js', () => ({
 }));
 
 vi.mock('@/features/page-translation/composables/useAutoTranslateRules.js', () => ({
-  useAutoTranslateRules: () => ({
-    isAutoTranslateToggleVisible: { value: false },
-    isAutoTranslateToggleActive: { value: false },
-    isAutoTranslateToggleDisabled: { value: false },
-    autoTranslateToggleTitle: { value: '' },
-    toggleAutoTranslateForCurrentPage: vi.fn(),
-  }),
+  useAutoTranslateRules: () => mocks.autoRules,
 }));
 
 vi.mock('@/features/exclusion/core/ExclusionChecker.js', () => ({
@@ -173,6 +168,14 @@ describe('DesktopFabMenu page command transport', () => {
       },
       getEffectiveProvider: () => 'google',
     });
+    mocks.autoRules = {
+      isAutoTranslateToggleVisible: ref(true), isActive: ref(false),
+      hasPageRule: ref(false), hasSiteRule: ref(false), siteScopeAvailable: ref(true),
+      showManageRules: ref(false),
+      normalizedPageUrl: ref('https://example.com/page'), siteRule: ref(null),
+      hasBroaderMatchingRule: ref(false), isFileUrl: ref(false),
+      scopeActions: { togglePageScope: vi.fn(), toggleSiteScope: vi.fn() }, openManageRules: vi.fn(),
+    };
   });
 
   it('sends PAGE_TRANSLATE through runtime with provider data', async () => {
@@ -209,5 +212,38 @@ describe('DesktopFabMenu page command transport', () => {
 
     expect(mocks.sendRegularMessage).toHaveBeenCalledWith({ action }, { returnFailureResponse: true });
     expect(mocks.pageEventBus.emit).not.toHaveBeenCalledWith(action);
+  });
+
+  it('opens scope choices from the page secondary action and routes toggles', async () => {
+    mocks.autoRules.hasPageRule.value = true;
+    const wrapper = mount(DesktopFabMenu);
+    wrapper.vm.isReady = true;
+    wrapper.vm.isMenuOpen = true;
+    await wrapper.vm.$nextTick();
+    await wrapper.get('.fab-menu-item-secondary-btn').trigger('click');
+    expect(wrapper.find('.fab-auto-translate-scopes').exists()).toBe(true);
+    expect(wrapper.get('.fab-menu-item-secondary-btn').attributes('aria-haspopup')).toBeUndefined();
+    expect(wrapper.get('.fab-menu-item-secondary-btn').attributes('aria-expanded')).toBe('true');
+    expect(wrapper.get('.fab-auto-translate-scopes').attributes('role')).toBe('group');
+    expect(wrapper.find('.fab-auto-translate-scopes button').attributes('aria-pressed')).toBe('true');
+    await wrapper.find('.fab-auto-translate-scopes button').trigger('click');
+    expect(mocks.autoRules.scopeActions.togglePageScope).toHaveBeenCalledOnce();
+  });
+
+  it('resets the scope disclosure when the FAB closes', async () => {
+    const wrapper = mount(DesktopFabMenu);
+    wrapper.vm.isReady = true;
+    wrapper.vm.isMenuOpen = true;
+    await wrapper.vm.$nextTick();
+    await wrapper.get('.fab-menu-item-secondary-btn').trigger('click');
+    expect(wrapper.find('.fab-auto-translate-scopes').exists()).toBe(true);
+
+    wrapper.vm.isMenuOpen = false;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.scopeMenuOpen).toBe(false);
+
+    wrapper.vm.isMenuOpen = true;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.fab-auto-translate-scopes').exists()).toBe(false);
   });
 });

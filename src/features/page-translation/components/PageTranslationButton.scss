@@ -340,3 +340,40 @@
     }
   }
 }
+
+/* ── Auto-Translate scope chooser ──────────────────────────────────── */
+:where(.page-translation-controls) .auto-translate-scope-menu {
+  position: absolute !important;
+  inset-inline-end: 0 !important;
+  bottom: 18px !important;
+  z-index: 200 !important;
+  min-width: 170px !important;
+  padding: 4px !important;
+  border: 1px solid var(--color-border, #d1d5db) !important;
+  border-radius: 6px !important;
+  background: var(--color-bg, #fff) !important;
+  box-shadow: 0 4px 12px #0002 !important;
+
+  button {
+    display: flex !important;
+    align-items: center !important;
+    gap: 7px !important;
+    width: 100% !important;
+    padding: 6px 8px !important;
+    border: 0 !important;
+    background: transparent !important;
+    color: inherit !important;
+    text-align: start !important;
+    cursor: pointer !important;
+  }
+
+  button span {
+    width: 14px !important;
+    flex: 0 0 14px !important;
+  }
+
+  .auto-translate-managed-note {
+    padding: 6px 8px !important;
+    font-size: 0.85em !important;
+  }
+}

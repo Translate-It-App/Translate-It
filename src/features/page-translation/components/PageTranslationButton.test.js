@@ -72,6 +72,17 @@ vi.mock("@/core/extensionContext.js", () => ({
 
 const mockUseAutoTranslateRules = {
   isAutoTranslateToggleVisible: ref(false),
+  isActive: ref(false),
+  hasPageRule: ref(false),
+  hasSiteRule: ref(false),
+  siteScopeAvailable: ref(true),
+  showManageRules: ref(false),
+  scopeActions: { togglePageScope: vi.fn(), toggleSiteScope: vi.fn() },
+  openManageRules: vi.fn(),
+  normalizedPageUrl: ref('https://example.com/page'),
+  siteRule: ref(null),
+  hasBroaderMatchingRule: ref(false),
+  isFileUrl: ref(false),
   isAutoTranslateToggleActive: ref(false),
   isAutoTranslateToggleDisabled: ref(false),
   autoTranslateToggleTitle: ref("Add to auto-translate rules"),
@@ -247,8 +258,15 @@ describe("PageTranslationButton.vue", () => {
   describe("Auto-Translate Star Toggle", () => {
     beforeEach(() => {
       mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = false;
-      mockUseAutoTranslateRules.isAutoTranslateToggleActive.value = false;
+      mockUseAutoTranslateRules.isActive.value = false;
       mockUseAutoTranslateRules.isAutoTranslateToggleDisabled.value = false;
+      mockUseAutoTranslateRules.hasPageRule.value = false;
+      mockUseAutoTranslateRules.hasSiteRule.value = false;
+      mockUseAutoTranslateRules.siteScopeAvailable.value = true;
+      mockUseAutoTranslateRules.showManageRules.value = false;
+      mockUseAutoTranslateRules.scopeActions.togglePageScope.mockClear();
+      mockUseAutoTranslateRules.scopeActions.toggleSiteScope.mockClear();
+      mockUseAutoTranslateRules.openManageRules.mockClear();
       mockUseAutoTranslateRules.autoTranslateToggleTitle.value =
         "Add to auto-translate rules";
       mockUseAutoTranslateRules.toggleAutoTranslateForCurrentPage.mockClear();
@@ -280,7 +298,7 @@ describe("PageTranslationButton.vue", () => {
 
     it("should bind classes and attributes correctly", () => {
       mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
-      mockUseAutoTranslateRules.isAutoTranslateToggleActive.value = true;
+      mockUseAutoTranslateRules.isActive.value = true;
       mockUseAutoTranslateRules.isAutoTranslateToggleDisabled.value = true;
       mockUseAutoTranslateRules.autoTranslateToggleTitle.value =
         "Broader rule match";
@@ -291,12 +309,10 @@ describe("PageTranslationButton.vue", () => {
 
       const btn = wrapper.find(".page-translate-star-btn");
       expect(btn.classes()).toContain("is-active");
-      expect(btn.classes()).toContain("is-disabled");
-      expect(btn.attributes("disabled")).toBeDefined();
-      expect(btn.attributes("title")).toBe("Broader rule match");
+      expect(btn.attributes("title")).toBe("auto_translate_scope_menu_label");
     });
 
-    it("should invoke toggleAutoTranslateForCurrentPage on click if not disabled", async () => {
+    it("opens the scope menu without translating", async () => {
       mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
       mockUseAutoTranslateRules.isAutoTranslateToggleDisabled.value = false;
 
@@ -305,9 +321,30 @@ describe("PageTranslationButton.vue", () => {
       });
 
       await wrapper.find(".page-translate-star-btn").trigger("click");
-      expect(
-        mockUseAutoTranslateRules.toggleAutoTranslateForCurrentPage,
-      ).toHaveBeenCalled();
+      expect(wrapper.find('[role="group"]').exists()).toBe(true);
+      expect(mockUsePageTranslation.translatePage).not.toHaveBeenCalled();
+    });
+
+    it("toggles page and site rules from menu items", async () => {
+      mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
+      const wrapper = mount(PageTranslationButton, { props: { showAutoTranslateToggle: true } });
+      await wrapper.find('.page-translate-star-btn').trigger('click');
+      await wrapper.findAll('.auto-translate-scope-menu button')[0].trigger('click');
+      await wrapper.findAll('.auto-translate-scope-menu button')[1].trigger('click');
+      expect(mockUseAutoTranslateRules.scopeActions.togglePageScope).toHaveBeenCalledOnce();
+      expect(mockUseAutoTranslateRules.scopeActions.toggleSiteScope).toHaveBeenCalledOnce();
+    });
+
+    it("hides site scope for file URLs and exposes broader-rule management", async () => {
+      mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
+      mockUseAutoTranslateRules.siteScopeAvailable.value = false;
+      mockUseAutoTranslateRules.showManageRules.value = true;
+      const wrapper = mount(PageTranslationButton, { props: { showAutoTranslateToggle: true } });
+      await wrapper.find('.page-translate-star-btn').trigger('click');
+      expect(wrapper.findAll('.auto-translate-scope-menu button')).toHaveLength(2);
+      expect(wrapper.text()).toContain('auto_translate_managed_by_broader_rule');
+      await wrapper.findAll('.auto-translate-scope-menu button')[1].trigger('click');
+      expect(mockUseAutoTranslateRules.openManageRules).toHaveBeenCalledOnce();
     });
 
     it("should not invoke toggleAutoTranslateForCurrentPage on click if disabled", async () => {
@@ -319,9 +356,7 @@ describe("PageTranslationButton.vue", () => {
       });
 
       await wrapper.find(".page-translate-star-btn").trigger("click");
-      expect(
-        mockUseAutoTranslateRules.toggleAutoTranslateForCurrentPage,
-      ).not.toHaveBeenCalled();
+      expect(wrapper.find('[role="group"]').exists()).toBe(true);
     });
 
     it("should not trigger page translation when star button is clicked", async () => {
@@ -336,85 +371,52 @@ describe("PageTranslationButton.vue", () => {
       expect(mockUsePageTranslation.translatePage).not.toHaveBeenCalled();
     });
 
-    it("should expose the enable action via aria-pressed and label when inactive", () => {
+    it("labels the star as a scope chooser and exposes scope states on its menu items", async () => {
       mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
-      mockUseAutoTranslateRules.isAutoTranslateToggleActive.value = false;
+      mockUseAutoTranslateRules.isActive.value = false;
+      mockUseAutoTranslateRules.hasPageRule.value = true;
 
       const wrapper = mount(PageTranslationButton, {
         props: { showAutoTranslateToggle: true },
       });
 
       const btn = wrapper.find(".page-translate-star-btn");
-      expect(btn.attributes("aria-pressed")).toBe("false");
-      expect(btn.attributes("aria-label")).toBe(
-        "page_translation_auto_translate_enable_label",
-      );
+      expect(btn.attributes("title")).toBe("auto_translate_scope_menu_label");
+      expect(btn.attributes("aria-label")).toBe("auto_translate_scope_menu_label");
+      expect(btn.attributes("aria-pressed")).toBeUndefined();
+      expect(btn.attributes("aria-haspopup")).toBeUndefined();
+      await btn.trigger('click');
+      const group = wrapper.find('[role="group"]');
+      expect(group.attributes('aria-label')).toBe('auto_translate_scope_menu_label');
+      expect(group.findAll('button')[0].attributes('aria-pressed')).toBe('true');
+      expect(wrapper.find('[role="menuitemcheckbox"]').exists()).toBe(false);
+      expect(wrapper.find('[role="menu"]').exists()).toBe(false);
     });
 
-    it("should expose the disable action via aria-pressed and label when active", () => {
+    it('closes on Escape and returns focus to the trigger', async () => {
       mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
-      mockUseAutoTranslateRules.isAutoTranslateToggleActive.value = true;
-
       const wrapper = mount(PageTranslationButton, {
         props: { showAutoTranslateToggle: true },
+        attachTo: document.body,
       });
+      const trigger = wrapper.get('.page-translate-star-btn');
+      await trigger.trigger('click');
+      expect(wrapper.get('[role="group"]').exists()).toBe(true);
 
-      const btn = wrapper.find(".page-translate-star-btn");
-      expect(btn.attributes("aria-pressed")).toBe("true");
-      expect(btn.attributes("aria-label")).toBe(
-        "page_translation_auto_translate_disable_label",
-      );
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('[role="group"]').exists()).toBe(false);
+      expect(document.activeElement).toBe(trigger.element);
+      wrapper.unmount();
     });
 
-    it("should expose the inherited state via aria-label when disabled by a broader rule", () => {
+    it('closes when pointerdown occurs outside the scope chooser', async () => {
       mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
-      mockUseAutoTranslateRules.isAutoTranslateToggleDisabled.value = true;
-      mockUseAutoTranslateRules.isAutoTranslateToggleActive.value = true;
-
-      const wrapper = mount(PageTranslationButton, {
-        props: { showAutoTranslateToggle: true },
-      });
-
-      const btn = wrapper.find(".page-translate-star-btn");
-      expect(btn.attributes("aria-label")).toBe(
-        "page_translation_auto_translate_inherited_label",
-      );
-      expect(btn.attributes("aria-pressed")).toBe("true");
-      expect(btn.attributes("disabled")).toBeDefined();
-    });
-
-    it("should expose the disable action when active via an exact (enabled) rule", () => {
-      mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
-      mockUseAutoTranslateRules.isAutoTranslateToggleDisabled.value = false;
-      mockUseAutoTranslateRules.isAutoTranslateToggleActive.value = true;
-
-      const wrapper = mount(PageTranslationButton, {
-        props: { showAutoTranslateToggle: true },
-      });
-
-      const btn = wrapper.find(".page-translate-star-btn");
-      expect(btn.attributes("aria-label")).toBe(
-        "page_translation_auto_translate_disable_label",
-      );
-      expect(btn.attributes("aria-pressed")).toBe("true");
-      expect(btn.attributes("disabled")).toBeUndefined();
-    });
-
-    it("should expose the enable action when inactive", () => {
-      mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
-      mockUseAutoTranslateRules.isAutoTranslateToggleDisabled.value = false;
-      mockUseAutoTranslateRules.isAutoTranslateToggleActive.value = false;
-
-      const wrapper = mount(PageTranslationButton, {
-        props: { showAutoTranslateToggle: true },
-      });
-
-      const btn = wrapper.find(".page-translate-star-btn");
-      expect(btn.attributes("aria-label")).toBe(
-        "page_translation_auto_translate_enable_label",
-      );
-      expect(btn.attributes("aria-pressed")).toBe("false");
-      expect(btn.attributes("disabled")).toBeUndefined();
+      const wrapper = mount(PageTranslationButton, { props: { showAutoTranslateToggle: true } });
+      await wrapper.get('.page-translate-star-btn').trigger('click');
+      document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('[role="group"]').exists()).toBe(false);
     });
 
     it("should define the inherited aria-label key in en/fa/ja locales", () => {

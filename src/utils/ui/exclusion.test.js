@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { matchesAutoTranslateRule } from './exclusion.js';
+import {
+  classifyAutoTranslateRule,
+  getAutoTranslateSiteRule,
+  isExactPageRule,
+  isSiteScopeRule,
+  matchesAutoTranslateRule,
+} from './exclusion.js';
 
 describe('exclusion matching utilities', () => {
   describe('matchesAutoTranslateRule', () => {
@@ -90,6 +96,66 @@ describe('exclusion matching utilities', () => {
       expect(matchesAutoTranslateRule(url, 'file:///home/user/document.html')).toBe(true);
       expect(matchesAutoTranslateRule(url, 'file:///home/user/other.html')).toBe(false);
       expect(matchesAutoTranslateRule('https://example.com', 'file:///home/user/document.html')).toBe(false);
+    });
+  });
+
+  describe('auto-translate rule classification helpers', () => {
+    it('creates a hostname-only site rule for HTTP(S) and rejects file or invalid URLs', () => {
+      expect(getAutoTranslateSiteRule('https://Docs.Example.com:8443/docs')).toBe('docs.example.com/*');
+      expect(getAutoTranslateSiteRule('file:///tmp/page.html')).toBe('');
+      expect(getAutoTranslateSiteRule('invalid-url')).toBe('');
+    });
+
+    it('classifies exact matcher-equivalent pages before site or broader rules', () => {
+      expect(isExactPageRule('https://example.com/docs', 'example.com/docs')).toBe(true);
+      expect(isExactPageRule('file:///tmp/page.html', 'file:///tmp/page.html')).toBe(true);
+      expect(isExactPageRule('https://example.com/docs', 'example.com/docs/*')).toBe(false);
+      expect(isSiteScopeRule('https://example.com/docs', 'example.com/*')).toBe(true);
+      expect(isSiteScopeRule('https://example.com/docs', '*.example.com/*')).toBe(false);
+      expect(classifyAutoTranslateRule('https://example.com/docs', 'example.com/docs')).toBe('page');
+      expect(classifyAutoTranslateRule('https://example.com/docs', 'example.com/*')).toBe('site');
+      expect(classifyAutoTranslateRule('https://example.com/docs', '*.example.com/*')).toBe('match');
+      expect(classifyAutoTranslateRule('https://example.com/docs', 'other.com/*')).toBe('none');
+    });
+
+    it('classifies equivalent host-wide rule forms as site scope, not broader matches', () => {
+      const url = 'https://example.com/docs/page';
+      for (const rule of [
+        'example.com/*',
+        'https://example.com/*',
+        'http://example.com/*',
+        'EXAMPLE.COM/*',
+        '  example.com/*  ',
+        'https://example.com:8443/*',
+        'https://example.com:9999/*',
+      ]) {
+        expect(isSiteScopeRule(url, rule), rule).toBe(true);
+        expect(classifyAutoTranslateRule(url, rule), rule).toBe('site');
+      }
+
+      for (const rule of [
+        'example.com/docs/*',
+        '*.example.com/*',
+        '*.example.com',
+        'sibling.example.com/*',
+        'example.com/other/*',
+      ]) {
+        expect(isSiteScopeRule(url, rule), rule).toBe(false);
+      }
+    });
+
+    it('ignores optional rule ports for pages with or without an explicit port', () => {
+      const portedUrl = 'https://example.com:8443/docs';
+      expect(isSiteScopeRule(portedUrl, 'https://example.com:9999/*')).toBe(true);
+      expect(classifyAutoTranslateRule(portedUrl, 'https://example.com:9999/*')).toBe('site');
+
+      const defaultPortUrl = 'https://example.com/docs';
+      expect(isSiteScopeRule(defaultPortUrl, 'https://example.com:8443/*')).toBe(true);
+      expect(classifyAutoTranslateRule(defaultPortUrl, 'https://example.com:8443/*')).toBe('site');
+
+      for (const rule of ['*.example.com/*', 'example.com/docs/*', 'sibling.example.com/*']) {
+        expect(isSiteScopeRule(portedUrl, rule), rule).toBe(false);
+      }
     });
   });
 });

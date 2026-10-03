@@ -1,13 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import PageTranslationView from './PageTranslationView.vue'
 import { pageEventBus } from '@/core/PageEventBus.js'
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js'
 import { sendRegularMessage } from '@/shared/messaging/core/UnifiedMessaging.js'
+import enMessages from '../../../../../_locales/en/messages.json'
+import faMessages from '../../../../../_locales/fa/messages.json'
+import jaMessages from '../../../../../_locales/ja/messages.json'
 
 let mobileStore
 let settingsStore
+let autoRules
 
 vi.mock('@/store/modules/mobile.js', () => ({
   useMobileStore: () => mobileStore,
@@ -30,11 +34,15 @@ vi.mock('@/features/translation/providers/ProviderManifest.js', () => ({
 }))
 
 vi.mock('@/features/page-translation/composables/useAutoTranslateRules.js', () => ({
-  useAutoTranslateRules: () => ({
-    isAutoTranslateToggleVisible: ref(false),
-    isAutoTranslateToggleActive: ref(false),
-    autoTranslateToggleDesc: '',
-    toggleAutoTranslateRule: vi.fn(),
+  useAutoTranslateRules: ({ currentUrl }) => ({
+    ...autoRules,
+    isAutoTranslateToggleVisible: computed(() => {
+      try {
+        return ['http:', 'https:', 'file:'].includes(new URL(currentUrl.value).protocol)
+      } catch {
+        return false
+      }
+    }),
   }),
 }))
 
@@ -77,6 +85,12 @@ describe('PageTranslationView page action', () => {
       settings: { MOBILE_PAGE_TRANSLATION_AUTO_CLOSE: false },
       getEffectiveProvider: () => 'google',
     })
+    autoRules = {
+      normalizedPageUrl: ref('https://example.com/page'), siteRule: ref(null),
+      hasPageRule: ref(false), hasSiteRule: ref(false), hasBroaderMatchingRule: ref(false),
+      isActive: ref(false), isFileUrl: ref(false), siteScopeAvailable: ref(true), showManageRules: ref(false),
+      scopeActions: { togglePageScope: vi.fn(), toggleSiteScope: vi.fn() }, openManageRules: vi.fn(),
+    }
   })
 
   it('uses the normal Start Translation action for terminal errors without committed content', () => {
@@ -193,5 +207,45 @@ describe('PageTranslationView page action', () => {
     const wrapper = mount(PageTranslationView)
 
     expect(wrapper.text()).toContain('Completed with some content untranslated')
+  })
+
+  it('shows both scope rows and routes the actions to the rules composable', async () => {
+    const wrapper = mount(PageTranslationView)
+    const rows = wrapper.findAll('.ti-m-auto-translate-row')
+    expect(rows).toHaveLength(2)
+    await rows[0].trigger('click')
+    await rows[1].trigger('click')
+    expect(autoRules.scopeActions.togglePageScope).toHaveBeenCalledOnce()
+    expect(autoRules.scopeActions.toggleSiteScope).toHaveBeenCalledOnce()
+  })
+
+  it('hides site scope for file URLs and offers broader-rule management', async () => {
+    autoRules.siteScopeAvailable.value = false
+    autoRules.showManageRules.value = true
+    const wrapper = mount(PageTranslationView)
+    expect(wrapper.findAll('.ti-m-auto-translate-row')).toHaveLength(1)
+    expect(wrapper.text()).toContain('Managed by a broader rule')
+    await wrapper.get('.ti-m-managed-note button').trigger('click')
+    expect(autoRules.openManageRules).toHaveBeenCalledOnce()
+  })
+
+  it('renders no scope controls for an invalid current URL', () => {
+    const originalWindow = window
+    vi.stubGlobal('window', { location: { href: 'not-a-url' } })
+    try {
+      const wrapper = mount(PageTranslationView)
+      expect(wrapper.findAll('.ti-m-auto-translate-row')).toHaveLength(0)
+      expect(wrapper.find('.ti-m-managed-note').exists()).toBe(false)
+    } finally {
+      vi.stubGlobal('window', originalWindow)
+    }
+  })
+
+  it('defines localized mobile scope states in all supported locales', () => {
+    for (const key of ['mobile_auto_translate_active', 'mobile_auto_translate_inactive']) {
+      for (const messages of [enMessages, faMessages, jaMessages]) {
+        expect(messages[key]?.message, key).toBeTruthy()
+      }
+    }
   })
 })

@@ -177,16 +177,15 @@
     <!-- Auto-Translate Star Toggle -->
     <button
       v-if="showAutoTranslateToggle && isAutoTranslateToggleVisible"
+      ref="scopeTrigger"
       class="page-translate-star-btn"
       :class="{ 
-        'is-active': isAutoTranslateToggleActive,
-        'is-disabled': isAutoTranslateToggleDisabled 
+        'is-active': isActive
       }"
-      :disabled="isAutoTranslateToggleDisabled"
-      :title="autoTranslateToggleTitle"
-      :aria-pressed="isAutoTranslateToggleActive"
-      :aria-label="autoTranslateToggleLabel"
-      @click.stop="toggleAutoTranslateForCurrentPage()"
+      :title="scopeMenuLabel"
+      :aria-expanded="scopeMenuOpen"
+      :aria-label="scopeMenuLabel"
+      @click.stop="toggleScopeMenu"
     >
       <svg 
         viewBox="0 0 24 24" 
@@ -195,7 +194,7 @@
         class="star-svg"
       >
         <path 
-          :fill="isAutoTranslateToggleActive ? 'currentColor' : 'none'" 
+          :fill="isActive ? 'currentColor' : 'none'" 
           stroke="currentColor"
           stroke-width="2.2"
           stroke-linejoin="round"
@@ -204,11 +203,43 @@
         />
       </svg>
     </button>
+    <div
+      v-if="scopeMenuOpen"
+      class="auto-translate-scope-menu"
+      role="group"
+      :aria-label="scopeMenuLabel"
+      @click.stop
+    >
+      <button
+        ref="firstScopeItem"
+        :aria-pressed="hasPageRule"
+        @click.stop="scopeActions.togglePageScope()"
+      >
+        <span aria-hidden="true">{{ hasPageRule ? '✓' : '' }}</span>{{ t('auto_translate_scope_this_page', 'This Page') }}
+      </button>
+      <button
+        v-if="siteScopeAvailable"
+        :aria-pressed="hasSiteRule"
+        @click.stop="scopeActions.toggleSiteScope()"
+      >
+        <span aria-hidden="true">{{ hasSiteRule ? '✓' : '' }}</span>{{ t('auto_translate_scope_this_site', 'This Site') }}
+      </button>
+      <template v-if="showManageRules">
+        <div class="auto-translate-managed-note">
+          {{ t('auto_translate_managed_by_broader_rule', 'Managed by a broader rule') }}
+        </div>
+        <button
+          @click.stop="openManageRules"
+        >
+          {{ t('auto_translate_manage_rules', 'Manage Rules') }}
+        </button>
+      </template>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import BaseButton from '@/components/base/BaseButton.vue';
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue';
 import { Icon } from '@iconify/vue';
@@ -259,25 +290,38 @@ const { activeTabUrl } = useActiveTabUrl({ enabled: computed(() => props.showAut
 
 const {
   isAutoTranslateToggleVisible,
-  isAutoTranslateToggleActive,
-  isAutoTranslateToggleDisabled,
-  autoTranslateToggleTitle,
-  toggleAutoTranslateForCurrentPage
+  isActive,
+  hasPageRule,
+  hasSiteRule,
+  siteScopeAvailable,
+  showManageRules,
+  scopeActions,
+  openManageRules,
 } = useAutoTranslateRules({ currentUrl: activeTabUrl });
-
-/**
- * Localized accessible label for the star toggle:
- * - inherited/disabled (managed by a broader rule): describes the managed state,
- * - active (exact rule): describes the disabling action,
- * - inactive: describes the enabling action.
- */
-const autoTranslateToggleLabel = computed(() => {
-  if (isAutoTranslateToggleDisabled.value) {
-    return t('page_translation_auto_translate_inherited_label', 'Automatic translation is managed by a broader rule');
+const scopeMenuLabel = computed(() => t('auto_translate_scope_menu_label', 'Auto-translate scope'));
+const scopeMenuOpen = ref(false);
+const scopeTrigger = ref(null);
+const firstScopeItem = ref(null);
+const toggleScopeMenu = async () => {
+  scopeMenuOpen.value = !scopeMenuOpen.value;
+  if (scopeMenuOpen.value) { await nextTick(); firstScopeItem.value?.focus(); }
+};
+const onScopeMenuKeydown = (event) => {
+  if (event.key === 'Escape' && scopeMenuOpen.value) {
+    scopeMenuOpen.value = false;
+    scopeTrigger.value?.focus();
   }
-  return isAutoTranslateToggleActive.value
-    ? t('page_translation_auto_translate_disable_label', 'Disable automatic page translation')
-    : t('page_translation_auto_translate_enable_label', 'Enable automatic page translation');
+};
+const onScopeMenuPointerdown = (event) => {
+  if (scopeMenuOpen.value && !event.target.closest('.page-translation-controls')) scopeMenuOpen.value = false;
+};
+onMounted(() => {
+  document.addEventListener('keydown', onScopeMenuKeydown);
+  document.addEventListener('pointerdown', onScopeMenuPointerdown);
+});
+onUnmounted(() => {
+  document.removeEventListener('keydown', onScopeMenuKeydown);
+  document.removeEventListener('pointerdown', onScopeMenuPointerdown);
 });
 
 const {
