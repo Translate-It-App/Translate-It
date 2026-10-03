@@ -356,8 +356,6 @@ export const AIConversationHelper = {
 
     const sourceName = capitalize(getLanguageNameFromCode(getCanonicalCode(actualSourceLang)) || actualSourceLang);
     const targetName = capitalize(getLanguageNameFromCode(getCanonicalCode(targetLang)) || targetLang);
-    const editableBase = await getEditableBasePrompt(effectiveTranslateMode, useAutoPrompt);
-
     let promptTemplate;
     const isDictionary = translateMode === TranslationMode.Dictionary_Translation;
 
@@ -380,6 +378,9 @@ export const AIConversationHelper = {
       isJsonMode ||
       isStructuredRecoveryFormat
     );
+    const editableBase = shouldUseBatchPrompt
+      ? null
+      : await getEditableBasePrompt(effectiveTranslateMode, useAutoPrompt);
     const customEditableBase = !shouldUseBatchPrompt
       && isCustomizedEditableBase(editableBase?.key, editableBase?.value);
     if (shouldUseBatchPrompt) {
@@ -438,9 +439,19 @@ export const AIConversationHelper = {
         .replace(/\$_{TARGET}/g, targetName);
     }
 
+    let repairInstructions = '';
+    let userPromptInstructions;
     if (metadata?.callPurpose === TranslationCallPurpose.STRUCTURED_RECOVERY && metadata.repairContext) {
-      const repairInstructions = `\n\nStructured recovery repair context:\n${JSON.stringify(metadata.repairContext)}\nRe-translate the affected source unit(s) and preserve their marker ownership.`;
-      promptInstructions += repairInstructions;
+      repairInstructions = `\n\nStructured recovery repair context:\n${JSON.stringify(metadata.repairContext)}\nRe-translate the affected source unit(s) and preserve their marker ownership.`;
+      if (customEditableBase && isScalarStructuredRecovery) {
+        userPromptInstructions = promptInstructions;
+      }
+      const customScalarRecoveryOmitsInstructions = customEditableBase
+        && isScalarStructuredRecovery
+        && !editableBase.value.includes('$_{PROMPT_INSTRUCTIONS}');
+      if (!customScalarRecoveryOmitsInstructions) {
+        promptInstructions += repairInstructions;
+      }
       if (isStructuredRecovery) promptTemplate += repairInstructions;
     }
 
@@ -535,14 +546,18 @@ export const AIConversationHelper = {
       userText = NewlineManager.protect(sourceText);
 
       if (customEditableBase) {
-        const renderCustomBase = (textSlot) => editableBase.value
+        const renderCustomBase = (textSlot, instructions = promptInstructions) => editableBase.value
           .replace(/\$_{SOURCE}/g, sourceName)
           .replace(/\$_{TARGET}/g, targetName)
-          .replace(/\$_{PROMPT_INSTRUCTIONS}/g, promptInstructions)
+          .replace(/\$_{PROMPT_INSTRUCTIONS}/g, instructions)
           .replace(/\$_{COUNT}/g, '1')
           .replace(/\$_{TEXT}/g, () => textSlot);
         systemPrompt = renderCustomBase(SOURCE_TEXT_REFERENCE);
-        userText = renderCustomBase(userText);
+        if (isScalarStructuredRecovery && repairInstructions
+            && !editableBase.value.includes('$_{PROMPT_INSTRUCTIONS}')) {
+          systemPrompt += repairInstructions;
+        }
+        userText = renderCustomBase(userText, userPromptInstructions);
         if (!editableBase.value.includes('$_{TEXT}')) {
           userText += `\n${NewlineManager.protect(sourceText)}`;
         }

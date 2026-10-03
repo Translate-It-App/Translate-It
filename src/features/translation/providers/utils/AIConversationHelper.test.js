@@ -201,6 +201,47 @@ describe('AIConversationHelper', () => {
     expect(primary.systemPrompt).not.toContain('Structured recovery repair context:');
   });
 
+  it.each([
+    ['<field>BEFORE $_{PROMPT_INSTRUCTIONS} AFTER $_{TEXT}</field>', true],
+    ['<field>BEFORE $_{TEXT} AFTER</field>', false],
+  ])('keeps scalar recovery repair context in a customized Field system prompt: %s', async (base, hasInstructionsSlot) => {
+    const config = await import('@/shared/config/config.js');
+    const getter = vi.spyOn(config, 'getPromptBASEFieldAsync').mockResolvedValue(base);
+    const source = 'recovered source must remain user-only';
+    const repairContext = { reason: 'EMPTY_INTERVAL', affectedUnits: [{ requestIndex: 0 }] };
+
+    try {
+      const result = await AIConversationHelper.preparePromptAndText(
+        [source], 'en', 'fa', config.TranslationMode.Select_Element, 'ai', null,
+        { callPurpose: TranslationCallPurpose.STRUCTURED_RECOVERY, expectedFormat: ResponseFormat.STRING, repairContext },
+      );
+
+      expect(result.systemPrompt).toContain('Structured recovery repair context:');
+      expect(result.systemPrompt.split('Structured recovery repair context:')).toHaveLength(2);
+      expect(result.systemPrompt).toContain(JSON.stringify(repairContext));
+      expect(result.userText).not.toContain('Structured recovery repair context:');
+      expect(`${result.systemPrompt}\n${result.userText}`.split('Structured recovery repair context:')).toHaveLength(2);
+      const renderedBase = base.replace('$_{TEXT}', '⟦SOURCE_TEXT_IN_USER_MESSAGE⟧');
+      if (hasInstructionsSlot) {
+        const beforeIndex = result.systemPrompt.indexOf('BEFORE');
+        const repairIndex = result.systemPrompt.indexOf('Structured recovery repair context:');
+        const afterIndex = result.systemPrompt.indexOf('AFTER');
+        expect(beforeIndex).toBeLessThan(repairIndex);
+        expect(repairIndex).toBeLessThan(afterIndex);
+        expect(result.userText).toMatch(/^<field>BEFORE .+ AFTER recovered source must remain user-only<\/field>$/s);
+      } else {
+        expect(result.systemPrompt.startsWith(renderedBase)).toBe(true);
+        expect(result.systemPrompt.indexOf('Structured recovery repair context:')).toBe(renderedBase.length + 2);
+        expect(result.userText).toBe('<field>BEFORE recovered source must remain user-only AFTER</field>');
+      }
+      expect(result.systemPrompt).not.toContain(source);
+      expect(result.userText).toContain(source);
+      expect(getter).toHaveBeenCalled();
+    } finally {
+      getter.mockRestore();
+    }
+  });
+
   it('uses scalar prompt contract for structured recovery in select-element mode', async () => {
     const { getPromptAsync, getPromptBASEAIBatchAsync } = await import('@/shared/config/config.js');
     getPromptAsync.mockResolvedValue('SCALAR $_{SOURCE} to $_{TARGET} $_{PROMPT_INSTRUCTIONS} $_{TEXT}');
@@ -312,6 +353,7 @@ describe('AIConversationHelper', () => {
     expect(result.userText).toBe(`<source>${source}</source> popup`);
     expect(result.originalCharCount).toBe(source.length);
     expect(result.originalCharCount).not.toBe(result.userText.length);
+    expect(config.getPromptPopupTranslateAsync).toHaveBeenCalled();
   });
 
   it.each([
@@ -332,9 +374,45 @@ describe('AIConversationHelper', () => {
       expect(result.userText).toBe(template.replace('$_{TEXT}', source));
       expect(result.originalCharCount).toBe(source.length);
       expect(result.originalCharCount).not.toBe(result.userText.length);
+      expect(getter).toHaveBeenCalled();
     } finally {
       getter.mockRestore();
       dictionary.mockRestore();
+    }
+  });
+
+  it('does not read editable-base settings for structured prompt preparation', async () => {
+    const config = await import('@/shared/config/config.js');
+    const editableGetters = [
+      vi.spyOn(config, 'getPromptBASEFieldAsync'),
+      vi.spyOn(config, 'getPromptBASEFieldAutoAsync'),
+      vi.spyOn(config, 'getPromptPopupTranslateAsync'),
+      vi.spyOn(config, 'getPromptDictionaryAsync'),
+    ];
+    const batchGetter = vi.spyOn(config, 'getPromptBASEAIBatchAsync')
+      .mockResolvedValue('batch $_{PROMPT_INSTRUCTIONS} $_{TEXT}');
+    const structuredCases = [
+      [config.TranslationMode.Select_Element, null],
+      [config.TranslationMode.Page, null],
+      [config.TranslationMode.PDF, null],
+      [config.TranslationMode.Subtitle, null],
+      [config.TranslationMode.Popup_Translate, {
+        callPurpose: TranslationCallPurpose.STRUCTURED_RECOVERY,
+        expectedFormat: ResponseFormat.JSON_ARRAY,
+      }],
+    ];
+
+    try {
+      for (const [mode, metadata] of structuredCases) {
+        await AIConversationHelper.preparePromptAndText(
+          ['structured source'], 'en', 'fa', mode, 'ai', null, metadata,
+        );
+      }
+
+      for (const getter of editableGetters) expect(getter).not.toHaveBeenCalled();
+      expect(batchGetter).toHaveBeenCalledTimes(structuredCases.length);
+    } finally {
+      [...editableGetters, batchGetter].forEach((getter) => getter.mockRestore());
     }
   });
 
