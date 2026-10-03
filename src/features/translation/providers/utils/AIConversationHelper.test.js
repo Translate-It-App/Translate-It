@@ -262,7 +262,7 @@ describe('AIConversationHelper', () => {
     expect(result.systemPrompt).not.toContain(source);
   });
 
-  it('renders customized editable base wrappers around protected source literally', async () => {
+  it('keeps customized editable base wrappers in system prompts around protected source literally', async () => {
     const config = await import('@/shared/config/config.js');
     config.getPromptAsync.mockResolvedValue('Translate $_{TEXT}');
     config.getPromptAutoAsync.mockResolvedValue('Translate automatically $_{TEXT}');
@@ -281,9 +281,9 @@ describe('AIConversationHelper', () => {
       const source = 'dollar $& source';
       const result = await AIConversationHelper.preparePromptAndText(source, 'en', 'fa', mode, 'ai');
 
-      expect(result.userText).toContain(`<source>${source}</source>`);
-      expect(result.systemPrompt).not.toContain(source);
-      expect(result.systemPrompt).toBe('Translate the text provided in the user message.');
+      expect(result.systemPrompt).toContain(`<source>${source}</source>`);
+      expect(result.userText).toBe('Translate the source text according to the system instructions.');
+      expect(result.userText).not.toContain(source);
     }
 
     const multiTemplate = '<$_{TEXT}> + <$_{TEXT}>';
@@ -292,7 +292,8 @@ describe('AIConversationHelper', () => {
     const multiple = await AIConversationHelper.preparePromptAndText(
       'repeat $&', 'en', 'fa', config.TranslationMode.Popup_Translate, 'ai'
     );
-    expect(multiple.userText).toBe('<repeat $&> + <repeat $&>');
+    expect(multiple.systemPrompt).toBe('<repeat $&> + <repeat $&>');
+    expect(multiple.userText).toBe('Translate the source text according to the system instructions.');
   });
 
   it('applies a customized Popup wrapper to array-shaped non-batch input', async () => {
@@ -302,9 +303,9 @@ describe('AIConversationHelper', () => {
       ['literal $& source'], 'en', 'fa', config.TranslationMode.Popup_Translate, 'ai'
     );
 
-    expect(result.userText).toBe('<source>literal $& source</source> popup');
-    expect(result.systemPrompt).toBe('Translate the text provided in the user message.');
-    expect(result.systemPrompt).not.toContain('literal $& source');
+    expect(result.systemPrompt).toBe('<source>literal $& source</source> popup');
+    expect(result.userText).toBe('Translate the source text according to the system instructions.');
+    expect(result.userText).not.toContain('literal $& source');
   });
 
   it.each(['content', 'selection-manager', 'mouse_hover', 'mobile-translate'])(
@@ -313,8 +314,8 @@ describe('AIConversationHelper', () => {
       config.getPromptBASEFieldAsync.mockResolvedValue('<field>$_{TEXT}</field>');
       const result = await AIConversationHelper.preparePromptAndText('source', 'en', 'fa', mode, 'ai');
 
-      expect(result.userText).toBe('<field>source</field>');
-      expect(result.systemPrompt).toBe('Translate the text provided in the user message.');
+      expect(result.systemPrompt).toBe('<field>source</field>');
+      expect(result.userText).toBe('Translate the source text according to the system instructions.');
     },
   );
 
@@ -332,8 +333,8 @@ describe('AIConversationHelper', () => {
       { callPurpose: TranslationCallPurpose.STRUCTURED_RECOVERY, expectedFormat: ResponseFormat.STRING },
     );
 
-    expect(result.systemPrompt).toBe('Translate the text provided in the user message.');
-    expect(result.userText).toBe(base.replace('$_{TEXT}', 'recovered source'));
+    expect(result.systemPrompt).toBe(base.replace('$_{TEXT}', 'recovered source'));
+    expect(result.userText).toBe('Translate the source text according to the system instructions.');
     expect(shouldUseAutoPromptAsync).toHaveBeenLastCalledWith('en', config.TranslationMode.Field);
     shouldUseAutoPromptAsync.mockResolvedValue(false);
   });

@@ -524,7 +524,7 @@ export const AIConversationHelper = {
         })
       });
     } else {
-      // Keep source text in the provider's user payload for all non-batch calls.
+      // Default bases keep source in the user message; customized bases are rendered below.
       const scalarText = Array.isArray(text) ? text[0] : text;
       const sourceText = typeof scalarText === 'object' && scalarText !== null
         ? (scalarText.t ?? scalarText.text ?? '')
@@ -532,18 +532,17 @@ export const AIConversationHelper = {
       userText = NewlineManager.protect(sourceText);
 
       if (customEditableBase) {
-        userText = editableBase.value
+        systemPrompt = editableBase.value
           .replace(/\$_{SOURCE}/g, sourceName)
           .replace(/\$_{TARGET}/g, targetName)
           .replace(/\$_{PROMPT_INSTRUCTIONS}/g, promptInstructions)
           .replace(/\$_{COUNT}/g, '1')
           .replace(/\$_{TEXT}/g, () => userText);
+        userText = 'Translate the source text according to the system instructions.';
       }
     }
 
-    let finalSystemPrompt = customEditableBase
-      ? 'Translate the text provided in the user message.'
-      : systemPrompt;
+    let finalSystemPrompt = systemPrompt;
 
     // Inject context only for DOM-related modes if enabled
     const contextSupportedMode = translateMode === TranslationMode.Select_Element ||

@@ -178,13 +178,13 @@ export function usePromptPreview(customLogger = null) {
           (typeof entry === 'string' ? entry : entry?.value) === promptBase
         ))
       if (isCustomizedEditableBase) {
-        const userText = promptBase
+        const renderedBase = promptBase
           .replace(/\$_{SOURCE}/g, sourceName)
           .replace(/\$_{TARGET}/g, targetName)
           .replace(/\$_{PROMPT_INSTRUCTIONS}/g, promptInstructions)
           .replace(/\$_{COUNT}/g, '1')
           .replace(/\$_{TEXT}/g, () => text)
-        return `[SYSTEM PROMPT]\nTranslate the text provided in the user message.\n\n[USER MESSAGE]\n${userText}`
+        return `[SYSTEM PROMPT]\n${renderedBase.trim()}\n\n[USER MESSAGE]\nTranslate the source text according to the system instructions.`
       }
       const systemPrompt = resolvedPrompt.replace(/\$_{TEXT}/g, 'the text provided in the user message')
       return `[SYSTEM PROMPT]\n${systemPrompt.trim()}\n\n[USER MESSAGE]\n${text}`

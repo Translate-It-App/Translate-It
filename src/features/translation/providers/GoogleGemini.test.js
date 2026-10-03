@@ -85,10 +85,11 @@ describe('GeminiProvider Error Handling', () => {
     await provider._callAI(systemPrompt, userText);
 
     const payload = JSON.parse(executeRequest.mock.calls[0][0].fetchOptions.body);
-    expect(payload.contents).toEqual([{ parts: [{ text: `<source>${source}</source> keep this wrapper` }] }]);
+    expect(payload.contents).toEqual([{ parts: [{ text: 'Translate the source text according to the system instructions.' }] }]);
     expect(payload.contents[0].parts[0].text).not.toBe('');
-    expect(payload.systemInstruction.parts[0].text).not.toContain(source);
-    expect((payload.contents[0].parts[0].text.match(/literal \$& source/g) || []).length).toBe(1);
+    expect(payload.systemInstruction.parts[0].text).toContain(`<source>${source}</source> keep this wrapper`);
+    expect(payload.systemInstruction.parts[0].text).toContain(source);
+    expect((payload.systemInstruction.parts[0].text.match(/literal \$& source/g) || []).length).toBe(1);
     customBase.mockRestore();
   });
 
@@ -100,8 +101,8 @@ describe('GeminiProvider Error Handling', () => {
       ['literal $& source'], 'en', 'fa', TranslationMode.Popup_Translate, null
     );
 
-    expect(userText).toBe('<source>literal $& source</source> provider boundary');
-    expect(systemPrompt).toBe('Translate the text provided in the user message.');
+    expect(systemPrompt).toBe('<source>literal $& source</source> provider boundary');
+    expect(userText).toBe('Translate the source text according to the system instructions.');
     customBase.mockRestore();
   });
 

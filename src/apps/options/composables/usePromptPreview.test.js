@@ -94,7 +94,7 @@ describe('usePromptPreview', () => {
   it.each([
     ['Field', 'getPromptBASEFieldAsync', 'PROMPT_BASE_FIELD', 'prompt_preview_mode_field', 'Hello, how are you today? This is a sample text for previewing translation prompts.'],
     ['Dictionary', 'getPromptDictionaryAsync', 'PROMPT_BASE_DICTIONARY', 'prompt_preview_mode_dictionary', 'Discovery'],
-  ])('shows customized %s base wrapper in the AI user message', async (_name, getterName, _key, mode) => {
+  ])('shows customized %s base wrapper in the AI system message', async (_name, getterName, _key, mode) => {
     const config = await import('@/shared/config/config.js')
     vi.mocked(config[getterName]).mockResolvedValueOnce('<custom>$_{PROMPT_INSTRUCTIONS} [$_{TEXT}]</custom>')
     const { promptExamples, generateExamples } = usePromptPreview()
@@ -108,9 +108,10 @@ describe('usePromptPreview', () => {
     })
 
     const example = promptExamples.value.find(item => item.mode === mode)
-    expect(example.prompt).toContain('[SYSTEM PROMPT]\nTranslate the text provided in the user message.')
-    expect(example.prompt).toContain(`[USER MESSAGE]\n<custom>Unsaved instruction [${_name === 'Field' ? 'Hello, how are you today? This is a sample text for previewing translation prompts.' : 'Discovery'}]</custom>`)
-    expect(example.prompt).not.toContain('FIELD: the text provided')
+    const sample = _name === 'Field' ? 'Hello, how are you today? This is a sample text for previewing translation prompts.' : 'Discovery'
+    expect(example.prompt).toContain(`[SYSTEM PROMPT]\n<custom>Unsaved instruction [${sample}]</custom>`)
+    expect(example.prompt).toContain('[USER MESSAGE]\nTranslate the source text according to the system instructions.')
+    expect(example.prompt.split(sample)).toHaveLength(2)
   })
 
   it('keeps Popup and Selection non-AI previews inline', async () => {
