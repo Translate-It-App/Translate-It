@@ -345,6 +345,11 @@
   cursor: pointer !important;
 }
 
+.ti-m-auto-translate-row:active {
+  transform: none !important;
+  opacity: 0.8 !important;
+}
+
 .ti-m-setting-info {
   display: flex !important;
   flex-direction: column !important;

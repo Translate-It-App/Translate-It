@@ -351,7 +351,8 @@
   padding: 4px !important;
   border: 1px solid var(--color-border, #d1d5db) !important;
   border-radius: 6px !important;
-  background: var(--color-bg, #fff) !important;
+  background: var(--bg-color) !important;
+  color: var(--color-text) !important;
   box-shadow: 0 4px 12px #0002 !important;
 
   button {
