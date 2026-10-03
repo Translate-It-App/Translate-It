@@ -198,7 +198,7 @@ export class CustomProvider extends BaseAIProvider {
       url: apiUrl,
       fetchOptions,
       charCount: fetchOptions.body.length,
-      originalCharCount: isBatch ? AITextProcessor.estimateOriginalChars(userText) : userText.length,
+      originalCharCount: options.originalCharCount ?? (isBatch ? AITextProcessor.estimateOriginalChars(userText) : userText.length),
       extractResponse: (data) => {
         if (data?.error) {
           throw new Error(`API_ERROR: ${data.error.message || 'Unknown Custom AI Error'}`);

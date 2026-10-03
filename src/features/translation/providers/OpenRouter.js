@@ -111,7 +111,7 @@ export class OpenRouterProvider extends BaseAIProvider {
       url: CONFIG.OPENROUTER_API_URL,
       fetchOptions,
       charCount: fetchOptions.body.length,
-      originalCharCount: isBatch ? AITextProcessor.estimateOriginalChars(userText) : userText.length,
+      originalCharCount: options.originalCharCount ?? (isBatch ? AITextProcessor.estimateOriginalChars(userText) : userText.length),
       extractResponse: (data) => {
         // Handle case where data might be a string (if parsing failed in engine but passed here)
         let parsed = data;

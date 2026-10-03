@@ -884,7 +884,7 @@ export class BaseAIProvider extends BaseProvider {
     conversationCommitCandidate = null,
     callPurpose = TranslationCallPurpose.PRIMARY_TRANSLATION,
   } = {}) {
-    const { systemPrompt, userText } = await this._preparePromptAndText(texts, sourceLang, targetLang, translateMode, contextMetadata, sessionId);
+    const { systemPrompt, userText, originalCharCount } = await this._preparePromptAndText(texts, sourceLang, targetLang, translateMode, contextMetadata, sessionId);
     logger.debugLazy(() => [`[${this.providerName}] Batch Prompt preparation complete`, {
       systemPrompt,
       userText: typeof userText === 'string' ? userText : JSON.parse(userText)
@@ -905,6 +905,7 @@ export class BaseAIProvider extends BaseProvider {
         expectedFormat: expectedFormat || ResponseFormat.JSON_ARRAY,
         executionContext: contextMetadata?.executionContext,
         callPurpose,
+        ...(originalCharCount !== undefined && { originalCharCount }),
         conversationParticipates: callPurpose === TranslationCallPurpose.PRIMARY_TRANSLATION
           && contextMetadata?.conversationParticipates === true,
         useParentConversationLifecycle: callPurpose === TranslationCallPurpose.PRIMARY_TRANSLATION
@@ -981,6 +982,8 @@ export class BaseAIProvider extends BaseProvider {
       
       const text = texts[i];
       const { systemPrompt, userText } = await this._preparePromptAndText(text, sourceLang, targetLang, translateMode, effectiveContextMetadata, sessionId);
+      const sourceText = getSourceText(text);
+      const originalCharCount = typeof sourceText === 'string' ? sourceText.length : userText.length;
       
       logger.debugLazy(() => [`[${this.providerName}] Traditional Prompt preparation complete`, { systemPrompt, userText }]);
       const chunkContext = `${context}-segment-${i + 1}/${texts.length}`;
@@ -1000,6 +1003,7 @@ export class BaseAIProvider extends BaseProvider {
             expectedFormat: effectiveExpectedFormat,
             executionContext: effectiveContextMetadata.executionContext,
             callPurpose,
+            originalCharCount,
             conversationParticipates,
             useParentConversationLifecycle: effectiveContextMetadata.useParentConversationLifecycle,
             providerMetadataRef,

@@ -131,6 +131,15 @@ describe('CustomProvider Error Handling', () => {
     expect(result).toBe('Custom AI Result');
   });
 
+  it('uses the supplied original source length instead of transformed userText length', async () => {
+    const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+    const transformedText = '<compatibility-wrapper>source</compatibility-wrapper>';
+
+    await provider._callAI('system', transformedText, { originalCharCount: 6 });
+
+    expect(executeRequest.mock.calls[0][0].originalCharCount).toBe(6);
+  });
+
   it.each([
     { label: 'top-level', body: { code: 'model_not_found' } },
     { label: 'nested', body: { error: { code: 'model_not_found' } } },

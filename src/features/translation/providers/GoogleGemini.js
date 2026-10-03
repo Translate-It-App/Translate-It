@@ -152,7 +152,7 @@ export class GeminiProvider extends BaseAIProvider {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requestBody),
     };
-    const originalCharCount = isBatch ? AITextProcessor.estimateOriginalChars(userText) : userText.length;
+    const originalCharCount = options.originalCharCount ?? (isBatch ? AITextProcessor.estimateOriginalChars(userText) : userText.length);
 
     const result = await this._executeRequest({
       url,

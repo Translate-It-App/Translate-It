@@ -142,6 +142,15 @@ describe('OpenAIProvider Error Handling', () => {
     expect(payload.model).toBe(CONFIG.OPENAI_API_MODEL);
   });
 
+  it('uses the supplied original source length instead of transformed userText length', async () => {
+    const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+    const transformedText = '<compatibility-wrapper>source</compatibility-wrapper>';
+
+    await provider._callAI('system', transformedText, { originalCharCount: 6 });
+
+    expect(executeRequest.mock.calls[0][0].originalCharCount).toBe(6);
+  });
+
   it('should handle successful translation', async () => {
     proxyManager.fetch.mockResolvedValue({
       ok: true,

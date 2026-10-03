@@ -32,6 +32,7 @@ import { TranslationCallPurpose } from '../ProviderConstants.js';
 import { HISTORICAL_PROMPT_DEFAULTS } from '@/shared/config/promptHistoricalDefaults.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.TRANSLATION, 'AIConversationHelper');
+const SOURCE_TEXT_REFERENCE = '⟦SOURCE_TEXT_IN_USER_MESSAGE⟧';
 
 const MARKER_PRESERVATION_INSTRUCTIONS = `- Preserve every segment marker that begins with @@TI_SEG_ and ends with @@ exactly as it appears. Example: @@TI_SEG_xxx_session_n5@@. Do not translate, remove, duplicate, reorder, or modify any character inside these markers.
 - Each segment marker is one complete boundary token, not an opening/closing pair. Do not add extra @@ around translated text.
@@ -503,6 +504,7 @@ export const AIConversationHelper = {
     const shouldWrap = shouldUseBatchPrompt && !isDictionary;
 
     let userText;
+    let originalCharCount;
     if (shouldWrap) {
       // Wrap into the structured JSON format expected by PROMPT_BASE_AI_BATCH
       // This ensures compatibility with strict AI models that expect 'translations' and 'id'
@@ -529,16 +531,21 @@ export const AIConversationHelper = {
       const sourceText = typeof scalarText === 'object' && scalarText !== null
         ? (scalarText.t ?? scalarText.text ?? '')
         : String(scalarText ?? '');
+      originalCharCount = typeof sourceText === 'string' ? sourceText.length : undefined;
       userText = NewlineManager.protect(sourceText);
 
       if (customEditableBase) {
-        systemPrompt = editableBase.value
+        const renderCustomBase = (textSlot) => editableBase.value
           .replace(/\$_{SOURCE}/g, sourceName)
           .replace(/\$_{TARGET}/g, targetName)
           .replace(/\$_{PROMPT_INSTRUCTIONS}/g, promptInstructions)
           .replace(/\$_{COUNT}/g, '1')
-          .replace(/\$_{TEXT}/g, () => userText);
-        userText = 'Translate the source text according to the system instructions.';
+          .replace(/\$_{TEXT}/g, () => textSlot);
+        systemPrompt = renderCustomBase(SOURCE_TEXT_REFERENCE);
+        userText = renderCustomBase(userText);
+        if (!editableBase.value.includes('$_{TEXT}')) {
+          userText += `\n${NewlineManager.protect(sourceText)}`;
+        }
       }
     }
 
@@ -566,7 +573,8 @@ export const AIConversationHelper = {
 
     return {
       systemPrompt: resultPrompt,
-      userText
+      userText,
+      ...(!shouldUseBatchPrompt && originalCharCount !== undefined && { originalCharCount }),
     };
   },
 

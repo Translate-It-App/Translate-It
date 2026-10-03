@@ -1,5 +1,8 @@
 import { ref } from 'vue'
 import { TranslationMode } from '@/shared/config/config.js'
+import { NewlineManager } from '@/features/translation/utils/NewlineManager.js'
+
+const SOURCE_TEXT_REFERENCE = '⟦SOURCE_TEXT_IN_USER_MESSAGE⟧'
 
 /**
  * Composable to manage prompt preview generation logic.
@@ -178,13 +181,17 @@ export function usePromptPreview(customLogger = null) {
           (typeof entry === 'string' ? entry : entry?.value) === promptBase
         ))
       if (isCustomizedEditableBase) {
-        const renderedBase = promptBase
+        const renderCustomBase = (sourceText) => promptBase
           .replace(/\$_{SOURCE}/g, sourceName)
           .replace(/\$_{TARGET}/g, targetName)
           .replace(/\$_{PROMPT_INSTRUCTIONS}/g, promptInstructions)
           .replace(/\$_{COUNT}/g, '1')
-          .replace(/\$_{TEXT}/g, () => text)
-        return `[SYSTEM PROMPT]\n${renderedBase.trim()}\n\n[USER MESSAGE]\nTranslate the source text according to the system instructions.`
+          .replace(/\$_{TEXT}/g, () => sourceText)
+        const sourceFreeBase = renderCustomBase(SOURCE_TEXT_REFERENCE)
+        const protectedText = NewlineManager.protect(text)
+        const userBase = renderCustomBase(protectedText)
+          + (promptBase.includes('$_{TEXT}') ? '' : `\n${protectedText}`)
+        return `[SYSTEM PROMPT]\n${sourceFreeBase.trim()}\n\n[USER MESSAGE]\n${userBase}`
       }
       const systemPrompt = resolvedPrompt.replace(/\$_{TEXT}/g, 'the text provided in the user message')
       return `[SYSTEM PROMPT]\n${systemPrompt.trim()}\n\n[USER MESSAGE]\n${text}`

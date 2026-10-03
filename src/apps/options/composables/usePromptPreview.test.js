@@ -109,9 +109,10 @@ describe('usePromptPreview', () => {
 
     const example = promptExamples.value.find(item => item.mode === mode)
     const sample = _name === 'Field' ? 'Hello, how are you today? This is a sample text for previewing translation prompts.' : 'Discovery'
-    expect(example.prompt).toContain(`[SYSTEM PROMPT]\n<custom>Unsaved instruction [${sample}]</custom>`)
-    expect(example.prompt).toContain('[USER MESSAGE]\nTranslate the source text according to the system instructions.')
+    expect(example.prompt).toContain('[SYSTEM PROMPT]\n<custom>Unsaved instruction [⟦SOURCE_TEXT_IN_USER_MESSAGE⟧]</custom>')
+    expect(example.prompt).toContain(`[USER MESSAGE]\n<custom>Unsaved instruction [${sample}]</custom>`)
     expect(example.prompt.split(sample)).toHaveLength(2)
+    expect(example.prompt.slice(0, example.prompt.indexOf('[USER MESSAGE]'))).not.toContain(sample)
   })
 
   it('keeps Popup and Selection non-AI previews inline', async () => {

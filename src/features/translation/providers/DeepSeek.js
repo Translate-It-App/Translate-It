@@ -131,7 +131,7 @@ export class DeepSeekProvider extends BaseAIProvider {
       url: apiUrl || "https://api.deepseek.com/chat/completions",
       fetchOptions,
       charCount: fetchOptions.body.length,
-      originalCharCount: isBatch ? AITextProcessor.estimateOriginalChars(userText) : userText.length,
+      originalCharCount: options.originalCharCount ?? (isBatch ? AITextProcessor.estimateOriginalChars(userText) : userText.length),
       extractResponse: (data) => {
         if (data?.error) {
           throw new Error(`API_ERROR: ${data.error.message || 'Unknown DeepSeek Error'}`);

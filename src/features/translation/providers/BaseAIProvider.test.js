@@ -38,6 +38,7 @@ vi.mock('@/shared/error-management/ErrorMatcher.js', () => ({
 
 import { BaseAIProvider } from './BaseAIProvider.js';
 import { ResponseFormat } from '@/shared/config/translationConstants.js';
+import { TranslationMode } from '@/shared/config/config.js';
 import { isCancellationError, isFatalError, isTransientError, matchErrorToType } from '@/shared/error-management/ErrorMatcher.js';
 import { createTranslationOperation, recordProviderCompletion } from '../ir/TranslationOperation.js';
 import { createCompletionRecord, CompletionTermination } from '../ir/CompletionContract.js';
@@ -227,6 +228,76 @@ beforeEach(() => {
       expect(provider._callAI).toHaveBeenCalledWith('Sys', expect.any(String), expect.objectContaining({
         callPurpose: TranslationCallPurpose.PRIMARY_TRANSLATION,
       }));
+    });
+
+    it.each(['short', 'a much longer source string'])('uses the pre-transformation source length for non-batch accounting (%s)', async (source) => {
+      provider._preparePromptAndText = vi.fn().mockResolvedValue({
+        systemPrompt: 'Sys',
+        userText: `<compatibility-wrapper>${source}</compatibility-wrapper>`,
+      });
+      provider._callAI = vi.fn().mockResolvedValue('translated');
+
+      await provider.executeSequentialBatch([source], 'en', 'fa', {
+        translateMode: 'selection',
+        expectedFormat: ResponseFormat.STRING,
+      });
+
+      expect(provider._callAI.mock.calls[0][2].originalCharCount).toBe(source.length);
+      expect(provider._callAI.mock.calls[0][1].length).toBeGreaterThan(source.length);
+    });
+
+    it.each([
+      ['customized Popup', TranslationMode.Popup_Translate, 'getPromptPopupTranslateAsync', '<popup>$_{TEXT}</popup>'],
+      ['customized Field', TranslationMode.Field, 'getPromptBASEFieldAsync', '<field>$_{TEXT}</field>'],
+      ['customized Selection', TranslationMode.Selection, 'getPromptBASEFieldAsync', '<selection>$_{TEXT}</selection>'],
+      ['customized Dictionary', TranslationMode.Dictionary_Translation, 'getPromptDictionaryAsync', '<dictionary>$_{TEXT}</dictionary>'],
+      ['scalar structured recovery using Field', TranslationMode.Select_Element, 'getPromptBASEFieldAsync', '<field>$_{TEXT}</field>', true],
+      ['default Popup', TranslationMode.Popup_Translate, 'getPromptPopupTranslateAsync', null],
+    ])('forwards preparation-owned source length through JSON-strategy %s', async (_label, mode, getterName, template, isRecovery = false) => {
+      const config = await import('@/shared/config/config.js');
+      const source = 'the exact original source';
+      const getterSpy = vi.spyOn(config, getterName).mockResolvedValue(
+        template || config.CONFIG.PROMPT_BASE_POPUP_TRANSLATE,
+      );
+      const dictionarySpy = vi.spyOn(config, 'getEnableDictionaryAsync').mockResolvedValue(true);
+      provider._preparePromptAndText = BaseAIProvider.prototype._preparePromptAndText.bind(provider);
+      provider._callAI = vi.fn().mockResolvedValue('translated');
+
+      try {
+        await provider._translateBatch([source], 'en', 'fa', mode, null, null, null, null,
+          isRecovery ? { callPurpose: TranslationCallPurpose.STRUCTURED_RECOVERY } : {},
+          isRecovery ? ResponseFormat.STRING : undefined);
+
+        const [, userText, options] = provider._callAI.mock.calls[0];
+        expect(options).toMatchObject({ isBatch: true, originalCharCount: source.length });
+        if (template) {
+          expect(userText).not.toBe(source);
+          expect(userText.length).not.toBe(source.length);
+        } else {
+          expect(userText).toBe(source);
+        }
+      } finally {
+        getterSpy.mockRestore();
+        dictionarySpy.mockRestore();
+      }
+    });
+
+    it('leaves structured Select Element batch accounting on the existing payload path', async () => {
+      const config = await import('@/shared/config/config.js');
+      const batchPrompt = vi.spyOn(config, 'getPromptBASEAIBatchAsync')
+        .mockResolvedValue('structured $_{PROMPT_INSTRUCTIONS} $_{TEXT}');
+      provider._preparePromptAndText = BaseAIProvider.prototype._preparePromptAndText.bind(provider);
+      provider._callAI = vi.fn().mockResolvedValue('structured');
+
+      try {
+        await provider._translateBatch(['source', 'another source'], 'en', 'fa', TranslationMode.Select_Element);
+
+        const [, , options] = provider._callAI.mock.calls[0];
+        expect(options.isBatch).toBe(true);
+        expect(options).not.toHaveProperty('originalCharCount');
+      } finally {
+        batchPrompt.mockRestore();
+      }
     });
 
     it('executeSequentialBatch preserves scalar and array transport results with supplied purpose', async () => {
