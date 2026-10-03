@@ -317,11 +317,15 @@ describe("PageTranslationButton.vue", () => {
       mockUseAutoTranslateRules.isAutoTranslateToggleDisabled.value = false;
 
       const wrapper = mount(PageTranslationButton, {
-        props: { showAutoTranslateToggle: true },
+        props: { showAutoTranslateToggle: true, compact: true },
+        attrs: { class: 'ti-page-translate-btn' },
       });
 
       await wrapper.find(".page-translate-star-btn").trigger("click");
       expect(wrapper.find('[role="group"]').exists()).toBe(true);
+      expect(wrapper.classes()).toContain('compact-wrapper');
+      expect(wrapper.classes()).toContain('ti-page-translate-btn');
+      expect(wrapper.find('.ti-page-translate-btn.compact-wrapper .auto-translate-scope-menu').exists()).toBe(true);
       expect(mockUsePageTranslation.translatePage).not.toHaveBeenCalled();
     });
 

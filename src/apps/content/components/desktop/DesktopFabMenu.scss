@@ -331,6 +331,7 @@
           color: inherit !important;
           text-align: start !important;
           cursor: pointer !important;
+          border-radius: 5px !important;
         }
 
         button span { width: 12px !important; }
@@ -347,13 +348,25 @@
       box-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.18), 0 12px 20px -8px rgba(0, 0, 0, 0.1) !important;
     }
     .fab-menu-divider { background-color: #000 !important; }
-    .fab-menu-item {
+      .fab-menu-item {
       &:hover, &.is-hovered {
         background-color: rgba(74, 144, 226, 0.1) !important;
         .menu-icon-wrapper { background-color: rgba(74, 144, 226, 0.15) !important; }
       }
       .menu-icon-wrapper { background-color: rgba(0, 0, 0, 0.03) !important; }
       .fab-menu-item-text { color: #1e293b !important; }
+      .fab-auto-translate-scopes {
+        color: #1e293b !important;
+
+        button {
+          color: #1e293b !important;
+
+          &:hover,
+          &:focus-visible {
+            background-color: rgba(74, 144, 226, 0.18) !important;
+          }
+        }
+      }
     }
     .fab-settings-badge, .fab-tts-badge {
       background-color: rgba(255, 255, 255, 0.9) !important;
@@ -377,6 +390,18 @@
       .menu-icon-wrapper { background-color: rgba(255, 255, 255, 0.05) !important; }
       .fab-menu-item-text { color: #f8fafc !important; }
       .fab-menu-icon:not(.is-colored) { filter: brightness(0) invert(1) !important; }
+      .fab-auto-translate-scopes {
+        color: #f8fafc !important;
+
+        button {
+          color: #f8fafc !important;
+
+          &:hover,
+          &:focus-visible {
+            background-color: rgba(255, 255, 255, 0.16) !important;
+          }
+        }
+      }
 
       .fab-menu-item-secondary-btn {
         color: rgba(255, 255, 255, 0.45) !important;

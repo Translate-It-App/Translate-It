@@ -225,6 +225,7 @@ describe('DesktopFabMenu page command transport', () => {
     expect(wrapper.get('.fab-menu-item-secondary-btn').attributes('aria-haspopup')).toBeUndefined();
     expect(wrapper.get('.fab-menu-item-secondary-btn').attributes('aria-expanded')).toBe('true');
     expect(wrapper.get('.fab-auto-translate-scopes').attributes('role')).toBe('group');
+    expect(wrapper.findAll('.fab-auto-translate-scopes button')).toHaveLength(2);
     expect(wrapper.find('.fab-auto-translate-scopes button').attributes('aria-pressed')).toBe('true');
     await wrapper.find('.fab-auto-translate-scopes button').trigger('click');
     expect(mocks.autoRules.scopeActions.togglePageScope).toHaveBeenCalledOnce();

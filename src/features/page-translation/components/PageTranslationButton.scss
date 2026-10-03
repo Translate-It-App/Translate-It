@@ -377,3 +377,10 @@
     font-size: 0.85em !important;
   }
 }
+
+:where(.page-translation-controls).ti-page-translate-btn.compact-wrapper .auto-translate-scope-menu {
+  inset-block-start: calc(100% + 4px) !important;
+  inset-block-end: auto !important;
+  inset-inline-start: 0 !important;
+  inset-inline-end: auto !important;
+}
