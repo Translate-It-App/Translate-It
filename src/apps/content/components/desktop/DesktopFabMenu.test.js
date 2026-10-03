@@ -216,12 +216,13 @@ describe('DesktopFabMenu page command transport', () => {
 
   it('opens scope choices from the page secondary action and routes toggles', async () => {
     mocks.autoRules.hasPageRule.value = true;
-    const wrapper = mount(DesktopFabMenu);
+    const wrapper = mount(DesktopFabMenu, { attachTo: document.body });
     wrapper.vm.isReady = true;
     wrapper.vm.isMenuOpen = true;
     await wrapper.vm.$nextTick();
     await wrapper.get('.fab-menu-item-secondary-btn').trigger('click');
     expect(wrapper.find('.fab-auto-translate-scopes').exists()).toBe(true);
+    expect(document.activeElement).toBe(wrapper.get('.fab-auto-translate-scopes button').element);
     expect(wrapper.get('.fab-menu-item-secondary-btn').attributes('aria-haspopup')).toBeUndefined();
     expect(wrapper.get('.fab-menu-item-secondary-btn').attributes('aria-expanded')).toBe('true');
     expect(wrapper.get('.fab-auto-translate-scopes').attributes('role')).toBe('group');
@@ -229,6 +230,13 @@ describe('DesktopFabMenu page command transport', () => {
     expect(wrapper.find('.fab-auto-translate-scopes button').attributes('aria-pressed')).toBe('true');
     await wrapper.find('.fab-auto-translate-scopes button').trigger('click');
     expect(mocks.autoRules.scopeActions.togglePageScope).toHaveBeenCalledOnce();
+
+    await wrapper.get('.fab-auto-translate-scopes').trigger('keydown', { key: 'Escape' });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.fab-auto-translate-scopes').exists()).toBe(false);
+    expect(document.activeElement).toBe(wrapper.get('.fab-menu-item-secondary-btn').element);
+    expect(wrapper.vm.isMenuOpen).toBe(true);
+    wrapper.unmount();
   });
 
   it('resets the scope disclosure when the FAB closes', async () => {

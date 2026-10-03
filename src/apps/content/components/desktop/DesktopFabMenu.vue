@@ -105,6 +105,7 @@
             <!-- Secondary Action (Auto-Translate Star Toggle) -->
             <button
               v-if="item.secondaryAction"
+              ref="scopeTrigger"
               class="fab-menu-item-secondary-btn"
               :class="{ 
                 'is-active': item.secondaryAction.active,
@@ -113,7 +114,7 @@
               :title="item.secondaryAction.title"
               :aria-label="item.secondaryAction.title"
               :aria-expanded="scopeMenuOpen"
-              @click.stop="scopeMenuOpen = !scopeMenuOpen"
+              @click.stop="toggleScopeDisclosure"
             >
               <svg 
                 viewBox="0 0 24 24" 
@@ -137,8 +138,10 @@
               role="group"
               :aria-label="t('auto_translate_scope_menu_label', 'Auto-translate scope')"
               @click.stop
+              @keydown.escape.stop="onScopeGroupKeydown"
             >
               <button
+                ref="firstScopeAction"
                 :aria-pressed="hasPageRule"
                 @click.stop="scopeActions.togglePageScope()"
               >
@@ -296,7 +299,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { injectStylesToShadowRoot } from '@/utils/ui/styleInjector.js';
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
@@ -531,6 +534,24 @@ const {
   openManageRules,
 } = useAutoTranslateRules({ currentUrl: currentUrlStr });
 const scopeMenuOpen = ref(false);
+const scopeTrigger = ref(null);
+const firstScopeAction = ref(null);
+const focusRefTarget = (templateRef) => {
+  const target = Array.isArray(templateRef.value) ? templateRef.value[0] : templateRef.value;
+  target?.focus();
+};
+const toggleScopeDisclosure = async () => {
+  scopeMenuOpen.value = !scopeMenuOpen.value;
+  if (scopeMenuOpen.value) {
+    await nextTick();
+    focusRefTarget(firstScopeAction);
+  }
+};
+const onScopeGroupKeydown = () => {
+  if (!scopeMenuOpen.value) return;
+  scopeMenuOpen.value = false;
+  focusRefTarget(scopeTrigger);
+};
 watch(isMenuOpen, (open) => {
   if (!open) scopeMenuOpen.value = false;
 });
