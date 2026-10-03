@@ -25,6 +25,10 @@ vi.mock('@/shared/config/config.js', () => ({
     Page: 'page',
     PDF: 'pdf-translation',
     Subtitle: 'subtitle',
+    Popup_Translate: 'popup',
+    Sidepanel_Translate: 'sidepanel',
+    Selection: 'selection-manager',
+    ScreenCapture: 'capture-manager',
   }
 }));
 
@@ -192,10 +196,40 @@ describe('AIConversationHelper', () => {
       { callPurpose: TranslationCallPurpose.STRUCTURED_RECOVERY, expectedFormat: ResponseFormat.STRING },
     );
 
-    expect(result.systemPrompt).toContain('The');
+    expect(result.systemPrompt).not.toContain('The');
     expect(result.systemPrompt).not.toContain('translations');
     expect(result.userText).toBe('The');
   });
+
+  it.each(['popup', 'sidepanel'])(
+    'sends %s source text only as userText', async (mode) => {
+      const { getPromptAsync } = await import('@/shared/config/config.js');
+      getPromptAsync.mockResolvedValue('Translate $_{TEXT} from $_{SOURCE} to $_{TARGET}');
+
+      const { systemPrompt, userText } = await AIConversationHelper.preparePromptAndText(
+        'Who are you?', 'en', 'fa', mode, 'ai'
+      );
+
+      expect(userText).toBe('Who are you?');
+      expect(systemPrompt).toContain('English');
+      expect(systemPrompt).toContain('Persian');
+      expect(systemPrompt).not.toContain('Who are you?');
+    },
+  );
+
+  it.each(['content', 'selection-manager', 'capture-manager', 'dictionary'])(
+    'sends %s source text as userText', async (mode) => {
+      const { getPromptAsync } = await import('@/shared/config/config.js');
+      getPromptAsync.mockResolvedValue('Translate $_{TEXT}');
+
+      const { systemPrompt, userText } = await AIConversationHelper.preparePromptAndText(
+        'source', 'en', 'fa', mode, 'ai'
+      );
+
+      expect(userText).toBe('source');
+      expect(systemPrompt).not.toContain('source');
+    },
+  );
 
   it.each([ResponseFormat.JSON_OBJECT, ResponseFormat.JSON_ARRAY])(
     'uses structured batch prompt for full recovery format %s',

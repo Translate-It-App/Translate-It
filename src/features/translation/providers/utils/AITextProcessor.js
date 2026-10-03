@@ -526,7 +526,14 @@ export const AITextProcessor = {
    */
   estimateOriginalChars(jsonInput) {
     if (!jsonInput) return 0;
-    let data = typeof jsonInput === 'string' ? JSON.parse(jsonInput) : jsonInput;
+    let data = jsonInput;
+    if (typeof jsonInput === 'string') {
+      try {
+        data = JSON.parse(jsonInput);
+      } catch {
+        return jsonInput.length;
+      }
+    }
     
     // Handle wrapped AI batch format {"translations": [...]}
     if (typeof data === 'object' && data !== null && Array.isArray(data.translations)) {

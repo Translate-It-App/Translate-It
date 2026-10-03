@@ -21,6 +21,10 @@ vi.mock('@/shared/logging/logger.js', () => ({
 }));
 
 describe('AITextProcessor', () => {
+  it('estimates source length when a structured request carries scalar text', () => {
+    expect(AITextProcessor.estimateOriginalChars('Who are you?')).toBe(12);
+  });
+
   describe('calculateTextComplexity', () => {
     it('should calculate higher complexity for long and structured text', () => {
       const simple = 'Hello world.';

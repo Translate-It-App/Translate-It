@@ -376,6 +376,7 @@ export const AIConversationHelper = {
         targetLang,
         isScalarStructuredRecovery ? TranslationMode.Field : translateMode,
         providerType,
+        { instructionsOnly: true },
       );
     }
 
@@ -457,8 +458,7 @@ export const AIConversationHelper = {
         .replace(/\$_{BATCH_INSTRUCTION}/g, processedBatchInstruction)
         .replace(/\$_{COUNT}/g, String(textsCount));
     } else {
-      // For non-batch prompts (from buildPrompt), the text is already injected
-      // We only need to replace language placeholders if they haven't been replaced yet
+      // Non-batch prompts carry source text in the provider's user message.
       systemPrompt = promptTemplate
         .replace(/\$_{SOURCE}/g, sourceName)
         .replace(/\$_{TARGET}/g, targetName)
@@ -491,14 +491,12 @@ export const AIConversationHelper = {
         })
       });
     } else {
-      // For non-batch prompts, the text is already injected into systemPrompt via buildPrompt
-      // Scalar structured recovery sends source text as the provider user payload.
+      // Keep source text in the provider's user payload for all non-batch calls.
       const scalarText = Array.isArray(text) ? text[0] : text;
-       userText = isScalarStructuredRecovery
-        ? (typeof scalarText === 'object' && scalarText !== null
-          ? (scalarText.t ?? scalarText.text ?? '')
-          : String(scalarText ?? ''))
-        : "";
+      const sourceText = typeof scalarText === 'object' && scalarText !== null
+        ? (scalarText.t ?? scalarText.text ?? '')
+        : String(scalarText ?? '');
+      userText = NewlineManager.protect(sourceText);
     }
 
     let finalSystemPrompt = systemPrompt;
@@ -513,7 +511,7 @@ export const AIConversationHelper = {
     }
 
     // Replace text placeholder according to project standard $_{TEXT} with global regex
-    // Only for batch prompts - non-batch prompts already have text injected via buildPrompt
+    // Only for batch prompts; non-batch source text is sent separately as userText.
     let resultPrompt;
     if (shouldUseBatchPrompt) {
       resultPrompt = finalSystemPrompt

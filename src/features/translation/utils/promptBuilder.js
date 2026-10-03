@@ -60,7 +60,8 @@ export async function buildPrompt(
   sourceLang,
   targetLang,
   translateMode = TranslationMode.Field,
-  providerType = 'translate'
+  providerType = 'translate',
+  { instructionsOnly = false } = {},
 ) {
   let isJsonMode = false;
   try {
@@ -173,6 +174,10 @@ export async function buildPrompt(
     .replace(/\$_{TARGET}/g, targetName)
     .replace(/\$_{PROMPT_INSTRUCTIONS}/g, promptInstructions)
     .replace(/\$_{COUNT}/g, '1');
+
+  if (instructionsOnly) {
+    return finalPromptWithInstructions.replace(/\$_{TEXT}/g, 'the text provided in the user message');
+  }
 
   // Inject the actual text to be translated.
   // $_{TEXT} is now required in the prompt template, so we can safely replace it.
