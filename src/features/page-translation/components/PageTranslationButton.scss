@@ -366,6 +366,17 @@
     color: inherit !important;
     text-align: start !important;
     cursor: pointer !important;
+    border-radius: 5px !important;
+    transition: background-color 140ms ease !important;
+
+    &:hover {
+      background-color: var(--ti-action-hover-bg) !important;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--color-primary, #1976d2) !important;
+      outline-offset: 1px !important;
+    }
   }
 
   button span {
