@@ -8,6 +8,10 @@
 
 - Fixed Gemini translation in `Popup`, `Sidepanel`, and `Text Selection`.
 
+##### Changed
+
+- The Auto Page Translation star in `Popup`, Desktop FAB, and Mobile now lets you choose between **This Page** and **This Site** ([#156](https://github.com/Translate-It-App/Translate-It/issues/156)).
+
 ---
 
 #### v1.20.0 – Released on September 30, 2026

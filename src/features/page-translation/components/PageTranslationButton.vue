@@ -194,7 +194,7 @@
         class="star-svg"
       >
         <path 
-          :fill="isActive ? 'currentColor' : 'none'" 
+          :fill="isActive ? 'currentColor' : 'none'"
           stroke="currentColor"
           stroke-width="2.2"
           stroke-linejoin="round"
