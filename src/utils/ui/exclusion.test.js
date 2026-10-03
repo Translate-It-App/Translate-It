@@ -118,6 +118,12 @@ describe('exclusion matching utilities', () => {
       expect(classifyAutoTranslateRule('https://example.com/docs', 'other.com/*')).toBe('none');
     });
 
+    it('matches file page rules after stripping URL query and hash', () => {
+      const url = 'file:///tmp/page.html?x=1#frag';
+      expect(isExactPageRule(url, 'file:///tmp/page.html')).toBe(true);
+      expect(isExactPageRule(url, 'file:///tmp/other.html')).toBe(false);
+    });
+
     it('classifies equivalent host-wide rule forms as site scope, not broader matches', () => {
       const url = 'https://example.com/docs/page';
       for (const rule of [
@@ -156,6 +162,13 @@ describe('exclusion matching utilities', () => {
       for (const rule of ['*.example.com/*', 'example.com/docs/*', 'sibling.example.com/*']) {
         expect(isSiteScopeRule(portedUrl, rule), rule).toBe(false);
       }
+    });
+
+    it('canonicalizes Unicode and punycode rule hostnames', () => {
+      expect(isSiteScopeRule('https://bücher.de/path', 'bücher.de/*')).toBe(true);
+      expect(isSiteScopeRule('https://bücher.de/path', 'xn--bcher-kva.de/*')).toBe(true);
+      expect(isSiteScopeRule('https://xn--bcher-kva.de/path', 'bücher.de/*')).toBe(true);
+      expect(classifyAutoTranslateRule('https://bücher.de/path', 'bücher.de/*')).toBe('site');
     });
   });
 });

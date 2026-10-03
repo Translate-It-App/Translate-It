@@ -143,6 +143,7 @@ export function useHighlightManager() {
       if (id.startsWith('DICTIONARY_')) return 'dictionary';
       if (id.startsWith('BILINGUAL_')) return 'bilingual';
       if (id.startsWith('FAB_')) return 'fab';
+      if (id === 'WHOLE_PAGE_AUTO_TRANSLATE_RULES') return 'wholePageRules';
       if (id.startsWith('AI_OPT_')) return 'ai';
       
       return null;

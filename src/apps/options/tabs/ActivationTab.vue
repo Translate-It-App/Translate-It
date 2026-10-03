@@ -324,7 +324,7 @@
 
       <div
         class="sub-options-group"
-        :class="{ open: wholePageEnabled }"
+        :class="{ open: wholePageEnabled || revealWholePageRules }"
       >
         <div class="sub-options-inner">
           <div
@@ -946,6 +946,7 @@ const enhancedTripleClickDrag = createSetting('ENHANCED_TRIPLE_CLICK_DRAG', fals
 
 // Whole Page
 const wholePageEnabled = createSetting('WHOLE_PAGE_TRANSLATION_ENABLED', true)
+const revealWholePageRules = ref(false)
 const showPageTranslationInContextMenu = computed({
   get: () => contextMenuVisibility.value?.PAGE_CONTEXT_PAGE_TRANSLATION ?? true,
   set: (val) => {
@@ -1112,13 +1113,19 @@ const handleValidationFeedback = (e) => {
   }
 };
 
+const handleHighlightReveal = (event) => {
+  if (event.detail === 'wholePageRules') revealWholePageRules.value = true;
+};
+
 onMounted(async () => {
   window.addEventListener('options-trigger-validation-feedback', handleValidationFeedback);
+  window.addEventListener('options-reveal-accordion', handleHighlightReveal);
   window.addEventListener('keydown', handleKeyDown);
 })
 
 onUnmounted(() => {
   window.removeEventListener('options-trigger-validation-feedback', handleValidationFeedback);
+  window.removeEventListener('options-reveal-accordion', handleHighlightReveal);
   window.removeEventListener('keydown', handleKeyDown);
 })
 

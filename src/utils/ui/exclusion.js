@@ -273,7 +273,19 @@ export function getAutoTranslateSiteRule(url) {
 
 /** Whether a rule is an exact page rule for the given URL. */
 export function isExactPageRule(url, rule) {
-  return typeof rule === 'string' && !rule.includes('*') && matchesAutoTranslateRule(url, rule);
+  if (typeof rule !== 'string' || rule.includes('*')) return false;
+  const normalizedRule = rule.trim();
+
+  try {
+    if (new URL(url).protocol === 'file:') {
+      const normalizedUrl = normalizeAutoTranslateRuleUrl(url);
+      return !!normalizedUrl && normalizedUrl === normalizedRule;
+    }
+  } catch {
+    return false;
+  }
+
+  return matchesAutoTranslateRule(url, rule);
 }
 
 /** Whether a rule is the exact host-wide scope for the current URL. */
@@ -282,21 +294,18 @@ export function isSiteScopeRule(url, rule) {
   const siteRule = getAutoTranslateSiteRule(url);
   if (!siteRule) return false;
 
-  let targetUrl;
-  try {
-    targetUrl = new URL(url);
-  } catch {
-    return false;
-  }
-
-  const match = rule.trim().match(/^(?:https?:\/\/)?([^/?#*]+)\/\*$/i);
+  const match = rule.trim().match(/^(?:https?:\/\/)?([^/?#]+)\/\*$/i);
   if (!match) return false;
 
   const authority = match[1];
-  const ruleHostname = authority.startsWith('[')
-    ? authority.match(/^(\[[^\]]+\])(?::\d+)?$/)?.[1]
-    : authority.replace(/:\d+$/, '');
-  return !!ruleHostname && ruleHostname.toLowerCase() === targetUrl.hostname.toLowerCase();
+  if (authority.includes('*') || authority.includes('@')) return false;
+
+  try {
+    const ruleHostname = new URL(`https://${authority}`).hostname.toLowerCase();
+    return ruleHostname === siteRule.slice(0, -2);
+  } catch {
+    return false;
+  }
 }
 
 /** Classify how a configured rule applies to the current URL. */

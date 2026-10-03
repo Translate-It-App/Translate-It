@@ -42,6 +42,13 @@ describe('useAutoTranslateRules', () => {
     expect(harness.store.settings.WHOLE_PAGE_AUTO_TRANSLATE_RULES).toEqual(['example.com/*']);
   });
 
+  it('recognizes and removes a file page rule despite current query and hash', async () => {
+    const { rulesApi } = setup('file:///tmp/page.html?x=1#frag', ['file:///tmp/page.html']);
+    expect(rulesApi.hasPageRule.value).toBe(true);
+    await rulesApi.scopeActions.togglePageScope();
+    expect(harness.store.settings.WHOLE_PAGE_AUTO_TRANSLATE_RULES).toEqual([]);
+  });
+
   it('adds and removes the current hostname site rule', async () => {
     const { rulesApi } = setup('https://docs.example.com/page');
     expect(rulesApi.siteRule.value).toBe('docs.example.com/*');
@@ -74,6 +81,17 @@ describe('useAutoTranslateRules', () => {
 
   it('removes a site rule with a different port without adding a portless duplicate', async () => {
     const { rulesApi } = setup('https://example.com:8443/docs', ['https://example.com:9999/*']);
+    expect(rulesApi.hasSiteRule.value).toBe(true);
+    expect(rulesApi.hasBroaderMatchingRule.value).toBe(false);
+
+    await rulesApi.scopeActions.toggleSiteScope();
+
+    expect(harness.store.settings.WHOLE_PAGE_AUTO_TRANSLATE_RULES).toEqual([]);
+  });
+
+  it('removes a Unicode IDN site rule without adding its punycode canonical form', async () => {
+    const { rulesApi } = setup('https://bücher.de/path', ['bücher.de/*']);
+    expect(rulesApi.siteRule.value).toBe('xn--bcher-kva.de/*');
     expect(rulesApi.hasSiteRule.value).toBe(true);
     expect(rulesApi.hasBroaderMatchingRule.value).toBe(false);
 
