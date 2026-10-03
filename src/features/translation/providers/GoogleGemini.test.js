@@ -72,6 +72,39 @@ describe('GeminiProvider Error Handling', () => {
     expect(payload.systemInstruction.parts[0].text).not.toContain('Who are you?');
   });
 
+  it('sends a customized Popup base as non-empty Gemini user content without duplicating source', async () => {
+    const config = await import('@/shared/config/config.js');
+    const customBase = vi.spyOn(config, 'getPromptPopupTranslateAsync')
+      .mockResolvedValue('<source>$_{TEXT}</source> keep this wrapper');
+    const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+    const source = 'literal $& source';
+    const { systemPrompt, userText } = await AIConversationHelper.preparePromptAndText(
+      source, 'en', 'fa', TranslationMode.Popup_Translate, 'ai'
+    );
+
+    await provider._callAI(systemPrompt, userText);
+
+    const payload = JSON.parse(executeRequest.mock.calls[0][0].fetchOptions.body);
+    expect(payload.contents).toEqual([{ parts: [{ text: `<source>${source}</source> keep this wrapper` }] }]);
+    expect(payload.contents[0].parts[0].text).not.toBe('');
+    expect(payload.systemInstruction.parts[0].text).not.toContain(source);
+    expect((payload.contents[0].parts[0].text.match(/literal \$& source/g) || []).length).toBe(1);
+    customBase.mockRestore();
+  });
+
+  it('keeps customized Popup wrapping through the provider array prompt-preparation boundary', async () => {
+    const config = await import('@/shared/config/config.js');
+    const customBase = vi.spyOn(config, 'getPromptPopupTranslateAsync')
+      .mockResolvedValue('<source>$_{TEXT}</source> provider boundary');
+    const { systemPrompt, userText } = await provider._preparePromptAndText(
+      ['literal $& source'], 'en', 'fa', TranslationMode.Popup_Translate, null
+    );
+
+    expect(userText).toBe('<source>literal $& source</source> provider boundary');
+    expect(systemPrompt).toBe('Translate the text provided in the user message.');
+    customBase.mockRestore();
+  });
+
   it.each([ResponseFormat.JSON_OBJECT, ResponseFormat.JSON_ARRAY])('uses REST JSON MIME field for %s', async (expectedFormat) => {
     const { getGeminiModelAsync } = await import('@/shared/config/config.js');
     getGeminiModelAsync.mockResolvedValue('gemini-3.5-flash-lite');

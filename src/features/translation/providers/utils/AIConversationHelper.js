@@ -15,6 +15,12 @@ import {
   getPromptBASEAIBatchAutoAsync,
   getPromptBASEAIFollowupAsync, 
   getPromptBASEAIFollowupAutoAsync,
+  getPromptBASEFieldAsync,
+  getPromptBASEFieldAutoAsync,
+  getPromptPopupTranslateAsync,
+  getPromptDictionaryAsync,
+  getEnableDictionaryAsync,
+  CONFIG,
   TranslationMode,
   getAIContextTranslationEnabledAsync,
   getAIConversationHistoryEnabledAsync
@@ -23,12 +29,35 @@ import { NewlineManager } from '@/features/translation/utils/NewlineManager.js';
 import { shouldUseAutoPromptAsync } from '@/features/translation/utils/bilingualPromptHelper.js';
 import { buildSemanticInstructions } from './SemanticPromptBuilder.js';
 import { TranslationCallPurpose } from '../ProviderConstants.js';
+import { HISTORICAL_PROMPT_DEFAULTS } from '@/shared/config/promptHistoricalDefaults.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.TRANSLATION, 'AIConversationHelper');
 
 const MARKER_PRESERVATION_INSTRUCTIONS = `- Preserve every segment marker that begins with @@TI_SEG_ and ends with @@ exactly as it appears. Example: @@TI_SEG_xxx_session_n5@@. Do not translate, remove, duplicate, reorder, or modify any character inside these markers.
 - Each segment marker is one complete boundary token, not an opening/closing pair. Do not add extra @@ around translated text.
 - Preserve every @@TI_ESC_...@@ escape token exactly as it appears. Do not translate, remove, or modify it.`;
+
+async function getEditableBasePrompt(translateMode, useAutoPrompt) {
+  if (translateMode === TranslationMode.Popup_Translate || translateMode === TranslationMode.Sidepanel_Translate) {
+    return { key: 'PROMPT_BASE_POPUP_TRANSLATE', value: await getPromptPopupTranslateAsync() };
+  }
+  if (translateMode === TranslationMode.Dictionary_Translation && await getEnableDictionaryAsync()) {
+    return { key: 'PROMPT_BASE_DICTIONARY', value: await getPromptDictionaryAsync() };
+  }
+  if (translateMode !== TranslationMode.ScreenCapture) {
+    const key = useAutoPrompt ? 'PROMPT_BASE_FIELD_AUTO' : 'PROMPT_BASE_FIELD';
+    const value = useAutoPrompt ? await getPromptBASEFieldAutoAsync() : await getPromptBASEFieldAsync();
+    return { key, value };
+  }
+  return null;
+}
+
+function isCustomizedEditableBase(key, value) {
+  if (!key || typeof value !== 'string') return false;
+  return value !== CONFIG[key] && !(HISTORICAL_PROMPT_DEFAULTS[key] || []).some((entry) => (
+    (typeof entry === 'string' ? entry : entry?.value) === value
+  ));
+}
 
 function hasCommittedConversationPair(session) {
   const history = session?.history;
@@ -314,7 +343,10 @@ export const AIConversationHelper = {
     
     // Use consistent language name logic with capitalization (matches promptBuilder.js)
     const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-    const useAutoPrompt = await shouldUseAutoPromptAsync(sourceLang, translateMode);
+    const isStructuredRecovery = metadata?.callPurpose === TranslationCallPurpose.STRUCTURED_RECOVERY;
+    const isScalarStructuredRecovery = isStructuredRecovery && metadata?.expectedFormat === ResponseFormat.STRING;
+    const effectiveTranslateMode = isScalarStructuredRecovery ? TranslationMode.Field : translateMode;
+    const useAutoPrompt = await shouldUseAutoPromptAsync(sourceLang, effectiveTranslateMode);
     
     let actualSourceLang = sourceLang === 'auto' ? await getSourceLanguageAsync() : sourceLang;
     if (actualSourceLang === 'auto') {
@@ -323,6 +355,7 @@ export const AIConversationHelper = {
 
     const sourceName = capitalize(getLanguageNameFromCode(getCanonicalCode(actualSourceLang)) || actualSourceLang);
     const targetName = capitalize(getLanguageNameFromCode(getCanonicalCode(targetLang)) || targetLang);
+    const editableBase = await getEditableBasePrompt(effectiveTranslateMode, useAutoPrompt);
 
     let promptTemplate;
     const isDictionary = translateMode === TranslationMode.Dictionary_Translation;
@@ -336,8 +369,6 @@ export const AIConversationHelper = {
 
     // Determine if we should use AI batch prompt
     // Use batch prompt for structured batch modes OR when input is in JSON format
-    const isStructuredRecovery = metadata?.callPurpose === TranslationCallPurpose.STRUCTURED_RECOVERY;
-    const isScalarStructuredRecovery = isStructuredRecovery && metadata?.expectedFormat === ResponseFormat.STRING;
     const isStructuredRecoveryFormat = isStructuredRecovery
       && (metadata?.expectedFormat === ResponseFormat.JSON_OBJECT || metadata?.expectedFormat === ResponseFormat.JSON_ARRAY);
     const shouldUseBatchPrompt = !isDictionary && !isScalarStructuredRecovery && (
@@ -348,6 +379,8 @@ export const AIConversationHelper = {
       isJsonMode ||
       isStructuredRecoveryFormat
     );
+    const customEditableBase = !shouldUseBatchPrompt
+      && isCustomizedEditableBase(editableBase?.key, editableBase?.value);
     if (shouldUseBatchPrompt) {
       const useFollowup = !firstTurn && historyEnabled && translateMode === TranslationMode.Select_Element;
 
@@ -497,9 +530,20 @@ export const AIConversationHelper = {
         ? (scalarText.t ?? scalarText.text ?? '')
         : String(scalarText ?? '');
       userText = NewlineManager.protect(sourceText);
+
+      if (customEditableBase) {
+        userText = editableBase.value
+          .replace(/\$_{SOURCE}/g, sourceName)
+          .replace(/\$_{TARGET}/g, targetName)
+          .replace(/\$_{PROMPT_INSTRUCTIONS}/g, promptInstructions)
+          .replace(/\$_{COUNT}/g, '1')
+          .replace(/\$_{TEXT}/g, () => userText);
+      }
     }
 
-    let finalSystemPrompt = systemPrompt;
+    let finalSystemPrompt = customEditableBase
+      ? 'Translate the text provided in the user message.'
+      : systemPrompt;
 
     // Inject context only for DOM-related modes if enabled
     const contextSupportedMode = translateMode === TranslationMode.Select_Element ||

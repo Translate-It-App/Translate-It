@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@/shared/config/config.js', () => ({
+  CONFIG: {
+    PROMPT_BASE_FIELD: 'field $_{PROMPT_INSTRUCTIONS} $_{TEXT}',
+    PROMPT_BASE_FIELD_AUTO: 'field-auto $_{PROMPT_INSTRUCTIONS} $_{TEXT}',
+    PROMPT_BASE_POPUP_TRANSLATE: 'popup $_{PROMPT_INSTRUCTIONS} $_{TEXT}',
+    PROMPT_BASE_DICTIONARY: 'dictionary $_{PROMPT_INSTRUCTIONS} $_{TEXT}',
+  },
   getPromptAsync: vi.fn(),
   getPromptAutoAsync: vi.fn(),
   getPromptBASEAIBatchAsync: vi.fn(),
@@ -11,10 +17,10 @@ vi.mock('@/shared/config/config.js', () => ({
   getPromptPopupTranslateAsync: vi.fn().mockResolvedValue('popup $_{PROMPT_INSTRUCTIONS} $_{TEXT}'),
   getPromptBASEFieldAsync: vi.fn().mockResolvedValue('field $_{PROMPT_INSTRUCTIONS} $_{TEXT}'),
   getPromptBASEFieldAutoAsync: vi.fn().mockResolvedValue('field-auto $_{PROMPT_INSTRUCTIONS} $_{TEXT}'),
+  getPromptDictionaryAsync: vi.fn().mockResolvedValue('dictionary $_{PROMPT_INSTRUCTIONS} $_{TEXT}'),
   getPromptBASEBatchAsync: vi.fn().mockResolvedValue('batch $_{PROMPT_INSTRUCTIONS} $_{TEXT}'),
   getPromptBASEScreenCaptureAsync: vi.fn().mockResolvedValue('screen $_{PROMPT_INSTRUCTIONS} $_{TEXT}'),
   getEnableDictionaryAsync: vi.fn().mockResolvedValue(false),
-  getPromptDictionaryAsync: vi.fn().mockResolvedValue('dictionary $_{PROMPT_INSTRUCTIONS} $_{TEXT}'),
   getAIContextTranslationEnabledAsync: vi.fn().mockResolvedValue(false),
   getAIConversationHistoryEnabledAsync: vi.fn().mockResolvedValue(false),
   getSourceLanguageAsync: vi.fn().mockResolvedValue('auto'),
@@ -28,6 +34,8 @@ vi.mock('@/shared/config/config.js', () => ({
     Popup_Translate: 'popup',
     Sidepanel_Translate: 'sidepanel',
     Selection: 'selection-manager',
+    MouseHover: 'mouse_hover',
+    Mobile_Translate: 'mobile-translate',
     ScreenCapture: 'capture-manager',
   }
 }));
@@ -56,9 +64,16 @@ import { TranslationCallPurpose } from '../ProviderConstants.js';
 import { ResponseFormat } from '@/shared/config/translationConstants.js';
 
 describe('AIConversationHelper', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     translationSessionManager.sessions.clear();
+    const config = await import('@/shared/config/config.js');
+    config.getPromptPopupTranslateAsync.mockResolvedValue('popup $_{PROMPT_INSTRUCTIONS} $_{TEXT}');
+    config.getPromptBASEFieldAsync.mockResolvedValue('field $_{PROMPT_INSTRUCTIONS} $_{TEXT}');
+    config.getPromptBASEFieldAutoAsync.mockResolvedValue('field-auto $_{PROMPT_INSTRUCTIONS} $_{TEXT}');
+    config.getPromptDictionaryAsync.mockResolvedValue('dictionary $_{PROMPT_INSTRUCTIONS} $_{TEXT}');
+    const { shouldUseAutoPromptAsync } = await import('@/features/translation/utils/bilingualPromptHelper.js');
+    shouldUseAutoPromptAsync.mockResolvedValue(false);
   });
 
   describe('committed-history eligibility', () => {
@@ -230,6 +245,98 @@ describe('AIConversationHelper', () => {
       expect(systemPrompt).not.toContain('source');
     },
   );
+
+  it('keeps the default Popup wrapper in the system prompt and source only in userText', async () => {
+    const { getPromptPopupTranslateAsync, CONFIG, TranslationMode } = await import('@/shared/config/config.js');
+    getPromptPopupTranslateAsync.mockResolvedValue(CONFIG.PROMPT_BASE_POPUP_TRANSLATE);
+    const { getPromptAsync } = await import('@/shared/config/config.js');
+    getPromptAsync.mockResolvedValue('Translate $_{TEXT}');
+    const source = 'popup source';
+
+    const result = await AIConversationHelper.preparePromptAndText(
+      source, 'en', 'fa', TranslationMode.Popup_Translate, 'ai'
+    );
+
+    expect(result.userText).toBe(source);
+    expect(result.systemPrompt).toContain('the text provided in the user message');
+    expect(result.systemPrompt).not.toContain(source);
+  });
+
+  it('renders customized editable base wrappers around protected source literally', async () => {
+    const config = await import('@/shared/config/config.js');
+    config.getPromptAsync.mockResolvedValue('Translate $_{TEXT}');
+    config.getPromptAutoAsync.mockResolvedValue('Translate automatically $_{TEXT}');
+    const { shouldUseAutoPromptAsync } = await import('@/features/translation/utils/bilingualPromptHelper.js');
+    const cases = [
+      [config.TranslationMode.Popup_Translate, config.getPromptPopupTranslateAsync, '<source>$_{TEXT}</source> popup', false],
+      [config.TranslationMode.Field, config.getPromptBASEFieldAsync, '<source>$_{TEXT}</source> field', false],
+      [config.TranslationMode.Field, config.getPromptBASEFieldAutoAsync, '<source>$_{TEXT}</source> auto field', true],
+      [config.TranslationMode.Dictionary_Translation, config.getPromptDictionaryAsync, '<source>$_{TEXT}</source> dictionary', false],
+    ];
+
+    for (const [mode, getter, template, auto] of cases) {
+      getter.mockResolvedValue(template);
+      config.getEnableDictionaryAsync.mockResolvedValue(true);
+      shouldUseAutoPromptAsync.mockResolvedValue(auto);
+      const source = 'dollar $& source';
+      const result = await AIConversationHelper.preparePromptAndText(source, 'en', 'fa', mode, 'ai');
+
+      expect(result.userText).toContain(`<source>${source}</source>`);
+      expect(result.systemPrompt).not.toContain(source);
+      expect(result.systemPrompt).toBe('Translate the text provided in the user message.');
+    }
+
+    const multiTemplate = '<$_{TEXT}> + <$_{TEXT}>';
+    config.getPromptPopupTranslateAsync.mockResolvedValue(multiTemplate);
+    shouldUseAutoPromptAsync.mockResolvedValue(false);
+    const multiple = await AIConversationHelper.preparePromptAndText(
+      'repeat $&', 'en', 'fa', config.TranslationMode.Popup_Translate, 'ai'
+    );
+    expect(multiple.userText).toBe('<repeat $&> + <repeat $&>');
+  });
+
+  it('applies a customized Popup wrapper to array-shaped non-batch input', async () => {
+    const config = await import('@/shared/config/config.js');
+    config.getPromptPopupTranslateAsync.mockResolvedValue('<source>$_{TEXT}</source> popup');
+    const result = await AIConversationHelper.preparePromptAndText(
+      ['literal $& source'], 'en', 'fa', config.TranslationMode.Popup_Translate, 'ai'
+    );
+
+    expect(result.userText).toBe('<source>literal $& source</source> popup');
+    expect(result.systemPrompt).toBe('Translate the text provided in the user message.');
+    expect(result.systemPrompt).not.toContain('literal $& source');
+  });
+
+  it.each(['content', 'selection-manager', 'mouse_hover', 'mobile-translate'])(
+    'uses the customized Field base for effective Field mode %s', async (mode) => {
+      const config = await import('@/shared/config/config.js');
+      config.getPromptBASEFieldAsync.mockResolvedValue('<field>$_{TEXT}</field>');
+      const result = await AIConversationHelper.preparePromptAndText('source', 'en', 'fa', mode, 'ai');
+
+      expect(result.userText).toBe('<field>source</field>');
+      expect(result.systemPrompt).toBe('Translate the text provided in the user message.');
+    },
+  );
+
+  it.each([
+    ['PROMPT_BASE_FIELD', 'custom field $_{TEXT}', false],
+    ['PROMPT_BASE_FIELD_AUTO', 'custom auto field $_{TEXT}', true],
+  ])('uses effective Field base for scalar Select Element recovery (%s)', async (key, base, auto) => {
+    const config = await import('@/shared/config/config.js');
+    const { shouldUseAutoPromptAsync } = await import('@/features/translation/utils/bilingualPromptHelper.js');
+    shouldUseAutoPromptAsync.mockResolvedValue(auto);
+    (auto ? config.getPromptBASEFieldAutoAsync : config.getPromptBASEFieldAsync).mockResolvedValue(base);
+
+    const result = await AIConversationHelper.preparePromptAndText(
+      ['recovered source'], 'en', 'fa', config.TranslationMode.Select_Element, 'ai', null,
+      { callPurpose: TranslationCallPurpose.STRUCTURED_RECOVERY, expectedFormat: ResponseFormat.STRING },
+    );
+
+    expect(result.systemPrompt).toBe('Translate the text provided in the user message.');
+    expect(result.userText).toBe(base.replace('$_{TEXT}', 'recovered source'));
+    expect(shouldUseAutoPromptAsync).toHaveBeenLastCalledWith('en', config.TranslationMode.Field);
+    shouldUseAutoPromptAsync.mockResolvedValue(false);
+  });
 
   it.each([ResponseFormat.JSON_OBJECT, ResponseFormat.JSON_ARRAY])(
     'uses structured batch prompt for full recovery format %s',
