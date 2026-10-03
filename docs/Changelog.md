@@ -1,9 +1,21 @@
+#### Unreleased
+
+##### Added
+
+- Added whole-page translation to the context menu. (by [@H4M4CHi-ttr](https://github.com/H4M4CHi-ttr))
+
+##### Fixed
+
+- Fixed Gemini translation in `Popup`, `Sidepanel`, and `Text Selection`.
+
+---
+
 #### v1.20.0 – Released on September 30, 2026
 
 ##### Added
 
 - Added **Live Dubbing** to the Popup on Chrome with Gemini Live and OpenAI Realtime, including volume controls and bilingual subtitles.
-- Added [**Requesty.ai**](#/providers?highlight=REQUESTY_API_KEY) as a translation provider.
+- Added [**Requesty.ai**](#/providers?highlight=REQUESTY_API_KEY) as a translation provider. (by [@Thibaultjaigu](https://github.com/Thibaultjaigu))
 
 ##### Fixed
 
@@ -239,7 +251,7 @@
 - Added `Sync Page Translation` and `Sync Select Element` toggles to the provider dropdown for ephemeral synchronization
 - Added `History Export` feature to the side panel (anki, csv, json)
 - Added a `Provider Selector` to floating translation windows for switching providers
-- Added Japanese UI support (thanks to [@monta-gh](https://github.com/monta-gh))
+- Added Japanese UI support (by [@monta-gh](https://github.com/monta-gh))
 
 ##### Fixed
 
