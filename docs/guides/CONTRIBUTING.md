@@ -161,12 +161,11 @@ After running, the `dist/Publish` directory will contain:
 
 ### Creating an Official Release (maintainers)
 
-Official release artifacts are prepared by GitHub Actions. The manually started `Official Release` workflow prepares or resumes the version tag and **draft** Release, builds and attests the Chrome/Firefox ZIPs, attaches them, and verifies the tag, Release, and exact asset set. It leaves the verified Release as a draft; the maintainer should then:
+Official release artifacts are prepared by GitHub Actions. The manually started `Official Release` workflow prepares or resumes the version tag and **draft** Release, builds and attests the Chrome/Firefox ZIPs, attaches them, and verifies the tag, Release, and exact asset set. For a new Draft, it automatically prepares complete release notes from the exact matching `docs/Changelog.md` entry (including its date) plus GitHub-generated release notes. It leaves the verified Release as a draft; the maintainer should then:
 
-1. Inspect the Draft Release and attached Chrome/Firefox artifacts.
-2. Review and update the release notes as needed.
-3. Publish it as a normal stable release.
-4. Ensure it is **not** marked as a prerelease and **is** marked as the latest release.
+1. Inspect the Draft Release, review its automatically prepared notes, and inspect both attached browser artifacts (Chrome and Firefox).
+2. Optionally edit the release notes.
+3. Manually publish it as a stable release, ensuring it is **not** marked as a prerelease and **is** marked as the latest release.
 
 Before starting a release:
 

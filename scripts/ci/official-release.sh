@@ -27,7 +27,7 @@ fetch_releases() {
 }
 
 prepare() {
-  local tag=$RELEASE_TAG version sha tag_response releases_json match_count release_id output tag_exists ref_sha release_json
+  local tag=$RELEASE_TAG version sha tag_response releases_json match_count release_id output tag_exists ref_sha release_json custom_notes generated_json generated_notes body
   output=${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}
   [[ -w "$output" ]] || fail 'GITHUB_OUTPUT is not writable.'
   valid_tag "$tag" || fail 'RELEASE_TAG must match vMAJOR.MINOR.PATCH.'
@@ -65,15 +65,24 @@ prepare() {
     fi
   elif (( match_count > 0 )); then
     fail "found an unexpected release for tag $tag without its Git ref."
-  else
+  fi
+
+  custom_notes=$(node "$(dirname "${BASH_SOURCE[0]}")/release-notes.mjs" "$tag" docs/Changelog.md) || fail "could not parse release notes for $tag."
+
+  if [[ "$tag_exists" != true ]]; then
     gh api --method POST "repos/$repo/git/refs" -f "ref=refs/tags/$tag" -f "sha=$sha" || fail "could not create tag $tag."
   fi
+
+  generated_json=$(gh api --method POST "repos/$repo/releases/generate-notes" -f "tag_name=$tag" -f "target_commitish=$sha") || fail "could not generate release notes for $tag."
+  generated_notes=$(jq -er '.body | select(type == "string" and test("\\S"))' <<<"$generated_json") || fail 'generated release notes are empty or invalid.'
+  body=$(printf '%s\n\n%s' "$custom_notes" "$generated_notes")
+  [[ "$body" =~ [^[:space:]] ]] || fail 'composed release notes are empty.'
 
   release_json=$(gh api --method POST "repos/$repo/releases" \
     -f "tag_name=$tag" \
     -f "name=$release_title" \
     -f "target_commitish=$sha" \
-    -f "body=Official release $tag." \
+    -f "body=$body" \
     -F "draft=true") || fail "could not create draft release $tag."
   release_id=$(jq -er --arg tag "$tag" --arg title "$release_title" '
     select(.tag_name == $tag and .draft == true and .name == $title)

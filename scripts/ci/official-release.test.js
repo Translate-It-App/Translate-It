@@ -22,8 +22,15 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
   checkoutSha = sha, checkoutFailure = false, tagShaSequence = [], tagFailOnRead = 0, zipVersion = tag,
   releaseDraft = true, releaseTagName = tag, releaseName = releaseTitle, releaseSha = sha, releasePrerelease = true,
   initialAssets = [], chrome = true, firefox = true, duplicateChrome = false, duplicateFirefox = false,
-  uploadFailure = '', publishFailure = false, finalTitleLie = false, extraFinalAsset = '', createResponse = '' } = {}) {
+  uploadFailure = '', publishFailure = false, finalTitleLie = false, extraFinalAsset = '', createResponse = '',
+  changelog, generatedBody = '## GitHub changes', generatedResponse = 'valid', generatedFailure = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'official-release-test-'));
+  const cwd = changelog === undefined ? root : dir;
+  if (changelog !== undefined) {
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ version }));
+    writeFileSync(join(dir, 'docs/Changelog.md'), changelog);
+  }
   const publishDir = join(dir, 'publish');
   mkdirSync(publishDir, { recursive: true });
   if (chrome) writeFileSync(join(publishDir, `Translate-It-${zipVersion}-for-Chrome.zip`), 'chrome package');
@@ -36,7 +43,7 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
   const stateFile = join(dir, 'state.json');
   writeFileSync(callsFile, '');
   writeFileSync(outputFile, '');
-  const releaseCandidate = { id: 66, tag_name: releaseTag, name: existingReleaseTitle, body: '', draft: existingReleaseDraft };
+  const releaseCandidate = { id: 66, tag_name: releaseTag, name: existingReleaseTitle, body: 'Maintainer-edited draft body', draft: existingReleaseDraft };
   const releases = existingRelease ? [releaseCandidate, ...(duplicateRelease ? [{ ...releaseCandidate, id: 67 }] : [])] : [];
   const state = {
     tagExists,
@@ -48,6 +55,9 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
     releases,
     assets: initialAssets,
     nextAssetId: 100,
+    generatedBody,
+    generatedResponse,
+    generatedFailure,
   };
   writeFileSync(stateFile, JSON.stringify(state));
 
@@ -83,6 +93,13 @@ if (args[0] === 'api' && endpoint === 'repos/owner/repo/git/refs' && method === 
   const shaArg = args.find(value => value.startsWith('sha='));
   state.refSha = shaArg.slice(4);
   save(); process.stdout.write('{}'); process.exit(0);
+}
+if (args[0] === 'api' && endpoint === 'repos/owner/repo/releases/generate-notes' && method === 'POST') {
+  if (state.generatedFailure) { process.stderr.write('generate notes failed'); process.exit(1); }
+  if (state.generatedResponse === 'empty') process.stdout.write(JSON.stringify({ body: '' }));
+  else if (state.generatedResponse === 'malformed') process.stdout.write(JSON.stringify({ body: 42 }));
+  else process.stdout.write(JSON.stringify({ body: state.generatedBody }));
+  process.exit(0);
 }
 if (args[0] === 'api' && method === 'POST' && endpoint === 'repos/owner/repo/releases') {
   const fields = {};
@@ -190,9 +207,12 @@ process.stdout.write(process.env.MOCK_CHECKOUT_SHA);
     MOCK_GIT_FAILURE: checkoutFailure ? '1' : '',
     MOCK_REF_FAIL_ON_READ: String(tagFailOnRead),
     MOCK_CREATE_RESPONSE_LIE: createResponse,
+    MOCK_GENERATED_BODY: generatedBody,
   };
+  env.MOCK_GENERATED_FAILURE = generatedFailure ? '1' : '';
+  env.MOCK_GENERATED_RESPONSE = generatedResponse;
   env.MOCK_REF_SHA_SEQUENCE = tagShaSequence.join(',');
-  const result = spawnSync('bash', [script, command], { cwd: root, env, encoding: 'utf8' });
+  const result = spawnSync('bash', [script, command], { cwd, env, encoding: 'utf8' });
   const calls = readFileSync(callsFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
   return {
     status: result.status ?? 1,
@@ -207,6 +227,14 @@ process.stdout.write(process.env.MOCK_CHECKOUT_SHA);
 
 const isReleasePatch = args => args[0] === 'api' && args.includes('--method') && args.includes('PATCH') && args.includes('repos/owner/repo/releases/77');
 const releaseCreate = calls => calls.find(args => args[0] === 'api' && args.includes('--method') && args.includes('POST') && args.includes('repos/owner/repo/releases'));
+const releaseBody = calls => releaseCreate(calls)?.find(value => value.startsWith('body='))?.slice('body='.length);
+const expectedReleaseCreate = (calls, expectedTag = tag, expectedSha = sha) => [
+  'api', '--method', 'POST', 'repos/owner/repo/releases', '-f', `tag_name=${expectedTag}`,
+  '-f', `name=Translate It! ${expectedTag}`, '-f', `target_commitish=${expectedSha}`,
+  '-f', `body=${releaseBody(calls)}`, '-F', 'draft=true',
+];
+const generatedNotesCall = calls => calls.find(args => args[0] === 'api' && args.includes('--method') && args.includes('POST') && args.includes('repos/owner/repo/releases/generate-notes'));
+const changelogEntry = (items = '- Added a fixture feature.') => `#### ${tag} – Released on October 04, 2026\n\n##### Added\n\n${items}\n\n---\n\n#### v0.0.1 – Released on January 01, 2000\n\n- OLD_ENTRY_MUST_NOT_APPEAR\n`;
 const mutations = calls => calls.filter(args => args[0] === 'api' && args.includes('--method') && ['POST', 'PATCH', 'DELETE'].includes(args[args.indexOf('--method') + 1])
   || args[0] === 'release' && args[1] === 'create');
 
@@ -243,7 +271,7 @@ describe('official release helper', () => {
     const result = run({ tagExists: true, createdReleaseId: '66' });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
-    expect(releaseCreate(result.calls)).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases', '-f', `tag_name=${tag}`, '-f', `name=${releaseTitle}`, '-f', `target_commitish=${sha}`, '-f', `body=Official release ${tag}.`, '-F', 'draft=true']);
+    expect(releaseCreate(result.calls)).toEqual(expectedReleaseCreate(result.calls));
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=66\n`);
     result.cleanup();
   });
@@ -253,7 +281,10 @@ describe('official release helper', () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=66\n`);
     expect(releaseCreate(result.calls)).toBeUndefined();
+    expect(generatedNotesCall(result.calls)).toBeUndefined();
+    expect(result.calls.some(args => args[0] === 'api' && args.includes('--method') && args.includes('PATCH'))).toBe(false);
     expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
+    expect(result.state.releases[0].body).toBe('Maintainer-edited draft body');
     result.cleanup();
   });
 
@@ -271,11 +302,100 @@ describe('official release helper', () => {
     const result = run();
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.calls).toContainEqual(['api', '--method', 'POST', 'repos/owner/repo/git/refs', `-f`, `ref=refs/tags/${tag}`, `-f`, `sha=${sha}`]);
-    expect(releaseCreate(result.calls)).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases', '-f', `tag_name=${tag}`, '-f', `name=${releaseTitle}`, '-f', `target_commitish=${sha}`, '-f', `body=Official release ${tag}.`, '-F', 'draft=true']);
+    expect(releaseCreate(result.calls)).toEqual(expectedReleaseCreate(result.calls));
     expect(result.state.release.name).toBe(releaseTitle);
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=77\n`);
     expect(result.calls.some(isReleasePatch)).toBe(false);
+    const generatedCall = generatedNotesCall(result.calls);
+    const tagCreateIndex = result.calls.findIndex(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'));
+    const generatedIndex = result.calls.indexOf(generatedCall);
+    const createIndex = result.calls.indexOf(releaseCreate(result.calls));
+    expect(generatedCall).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases/generate-notes', '-f', `tag_name=${tag}`, '-f', `target_commitish=${sha}`]);
+    expect(generatedIndex).toBeGreaterThan(tagCreateIndex);
+    expect(createIndex).toBeGreaterThan(generatedIndex);
+    expect(releaseBody(result.calls)).toContain('## GitHub changes');
     result.cleanup();
+  });
+
+  it('builds the custom changelog section with links and badges before generated notes, stopping at the separator', () => {
+    const customItem = '- Added [fixture feature](https://example.test/feature) with [@maintainer](https://github.com/maintainer).';
+    const result = run({ changelog: changelogEntry(customItem), generatedBody: 'GENERATED_NOTES' });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const body = releaseBody(result.calls);
+    expect(body).toContain(`#### 🌍 Translate It ${tag} – Released on 04 October 2026`);
+    expect(body).toContain('<div align="center">');
+    const badgeUrls = [
+      `https://img.shields.io/badge/version-${version}-blue.svg`,
+      'https://img.shields.io/badge/Chrome%20&%20Firefox-Supported-brightgreen',
+      'https://img.shields.io/badge/Bundled%20with-Webpack-8dd6f9',
+      'https://img.shields.io/badge/i18n-Multi--Language-blueviolet',
+      'https://img.shields.io/badge/Vue.js-3.5.31-4FC08D?logo=vue.js&logoColor=4FC08D',
+    ];
+    for (const badgeUrl of badgeUrls) expect(body).toContain(`<img src="${badgeUrl}"`);
+    expect(body).not.toContain(`version-${tag}-blue.svg`);
+    expect(body.match(/<img src="https:\/\/img\.shields\.io\/badge\//g)).toHaveLength(5);
+    expect(body).toContain('https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd');
+    expect(body).toContain('https://addons.mozilla.org/firefox/addon/translate-it');
+    expect(body).toContain('https://github.com/Translate-It-App/Translate-It/raw/refs/heads/main/docs/Store/Chrome-Store.png');
+    expect(body).toContain('https://github.com/Translate-It-App/Translate-It/raw/refs/heads/main/docs/Store/Firefox-Store.png');
+    expect(body).toContain(customItem);
+    expect(body).not.toContain('OLD_ENTRY_MUST_NOT_APPEAR');
+    expect(body.indexOf('Released on 04 October 2026')).toBeLessThan(body.indexOf(badgeUrls[0]));
+    expect(body.indexOf(customItem)).toBeLessThan(body.indexOf('### 🧩 Install Now'));
+    expect(body.indexOf('### 🧩 Install Now')).toBeLessThan(body.indexOf('Chrome-Store.png'));
+    expect(body.indexOf('Firefox-Store.png')).toBeLessThan(body.indexOf('GENERATED_NOTES'));
+    expect(body.indexOf(customItem)).toBeLessThan(body.indexOf('GENERATED_NOTES'));
+    expect(generatedNotesCall(result.calls)).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases/generate-notes', '-f', `tag_name=${tag}`, '-f', `target_commitish=${sha}`]);
+    result.cleanup();
+  });
+
+  it('preserves changelog categories, links, bold, and code while converting app links', () => {
+    const itemAdded = '- Added [external link](https://example.test) and [Settings [advanced]](#/providers) with **bold** and `code`.';
+    const changelog = `#### ${tag} – Released on October 04, 2026\n\n##### Added\n\n${itemAdded}\n\n##### Fixed\n\n- Fixed a fixture issue.\n\n##### Changed\n\n- Changed a fixture behavior.\n\n---\n`;
+    const result = run({ changelog });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const body = releaseBody(result.calls);
+    expect(body).toContain(itemAdded.replace('[Settings [advanced]](#/providers)', 'Settings [advanced]'));
+    expect(body).toContain('##### Fixed\n\n- Fixed a fixture issue.');
+    expect(body).toContain('##### Changed\n\n- Changed a fixture behavior.');
+    expect(body).toContain('[external link](https://example.test)');
+    expect(body).toContain('**bold**');
+    expect(body).toContain('`code`');
+    result.cleanup();
+  });
+
+  it('rejects missing, duplicate, malformed-heading, and invalid-date changelog entries before creating a Draft', () => {
+    const cases = [
+      '#### v0.0.1 – Released on January 01, 2000\n\n- No matching tag.\n',
+      `${changelogEntry()}\n${changelogEntry()}`,
+      `${changelogEntry()}\n#### ${tag}: duplicate\n\n- Duplicate malformed heading.\n`,
+      changelogEntry().replace(`#### ${tag} – Released on October 04, 2026`, `#### ${tag} – Released`),
+      changelogEntry().replace('October 04, 2026', 'October 99, 2026'),
+      `#### ${tag} – Released on October 04, 2026\n\n##### Added\n\n---\n`,
+    ];
+    for (const changelog of cases) {
+      const result = run({ changelog });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+      expect(releaseCreate(result.calls)).toBeUndefined();
+      expect(result.output).toBe('');
+      result.cleanup();
+    }
+  });
+
+  it('fails closed when GitHub-generated notes fail or return an empty or malformed body', () => {
+    for (const options of [
+      { generatedFailure: true },
+      { generatedResponse: 'empty' },
+      { generatedResponse: 'malformed' },
+      { generatedBody: ' \n\t ' },
+    ]) {
+      const result = run(options);
+      expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+      expect(generatedNotesCall(result.calls)).toBeTruthy();
+      expect(releaseCreate(result.calls)).toBeUndefined();
+      expect(result.output).toBe('');
+      result.cleanup();
+    }
   });
 
   it('retries an existing valid Draft by replacing and verifying both official ZIPs', () => {
@@ -393,7 +513,7 @@ describe('official release helper', () => {
     const result = run();
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.calls.filter(args => args[0] === 'api' && args.includes('--paginate') && args.includes('--slurp') && args.includes('repos/owner/repo/releases'))).toHaveLength(1);
-    expect(releaseCreate(result.calls)).toBeTruthy();
+    expect(releaseCreate(result.calls)).toEqual(expectedReleaseCreate(result.calls));
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=77\n`);
     result.cleanup();
   });
