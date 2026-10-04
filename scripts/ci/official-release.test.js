@@ -22,7 +22,7 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
   checkoutSha = sha, checkoutFailure = false, tagShaSequence = [], tagFailOnRead = 0, zipVersion = tag,
   releaseDraft = true, releaseTagName = tag, releaseName = releaseTitle, releaseSha = sha, releasePrerelease = true,
   initialAssets = [], chrome = true, firefox = true, duplicateChrome = false, duplicateFirefox = false,
-  uploadFailure = '', publishFailure = false, finalTitleLie = false, extraFinalAsset = '' } = {}) {
+  uploadFailure = '', publishFailure = false, finalTitleLie = false, extraFinalAsset = '', createResponse = '' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'official-release-test-'));
   const publishDir = join(dir, 'publish');
   mkdirSync(publishDir, { recursive: true });
@@ -84,12 +84,27 @@ if (args[0] === 'api' && endpoint === 'repos/owner/repo/git/refs' && method === 
   state.refSha = shaArg.slice(4);
   save(); process.stdout.write('{}'); process.exit(0);
 }
-if (args[0] === 'release' && args[1] === 'create') {
-  const releaseTag = args[2];
-  const title = args[args.indexOf('--title') + 1];
-  const notes = args[args.indexOf('--notes') + 1];
-  state.release = { id: Number(process.env.MOCK_CREATED_RELEASE_ID), tag_name: releaseTag, name: title, body: notes, draft: args.includes('--draft'), prerelease: true, created: true };
-  save(); process.stdout.write('draft created'); process.exit(0);
+if (args[0] === 'api' && method === 'POST' && endpoint === 'repos/owner/repo/releases') {
+  const fields = {};
+  for (let i = 0; i < args.length - 1; i++) {
+    if ((args[i] === '-f' || args[i] === '-F') && args[i + 1].includes('=')) {
+      const [key, ...rest] = args[i + 1].split('=');
+      fields[key] = rest.join('=');
+    }
+  }
+  const releaseTag = fields.tag_name;
+  const title = fields.name;
+  const body = fields.body;
+  const draft = fields.draft === 'true';
+  state.release = { id: Number(process.env.MOCK_CREATED_RELEASE_ID), tag_name: releaseTag, name: title, body, draft, prerelease: false, created: true };
+  save();
+  const lie = process.env.MOCK_CREATE_RESPONSE_LIE;
+  let response = state.release;
+  if (lie === 'invalidId') response = { ...response, id: 'not-a-number' };
+  if (lie === 'wrongTag') response = { ...response, tag_name: 'v9.9.9' };
+  if (lie === 'notDraft') response = { ...response, draft: false };
+  if (lie === 'wrongTitle') response = { ...response, name: 'Unexpected Title' };
+  process.stdout.write(JSON.stringify(response)); process.exit(0);
 }
 if (args[0] === 'api' && endpoint === 'repos/owner/repo/releases/' + process.env.MOCK_RELEASE_ID && !method) {
   process.stdout.write(JSON.stringify(state.release)); process.exit(0);
@@ -174,6 +189,7 @@ process.stdout.write(process.env.MOCK_CHECKOUT_SHA);
     MOCK_CHECKOUT_SHA: checkoutSha,
     MOCK_GIT_FAILURE: checkoutFailure ? '1' : '',
     MOCK_REF_FAIL_ON_READ: String(tagFailOnRead),
+    MOCK_CREATE_RESPONSE_LIE: createResponse,
   };
   env.MOCK_REF_SHA_SEQUENCE = tagShaSequence.join(',');
   const result = spawnSync('bash', [script, command], { cwd: root, env, encoding: 'utf8' });
@@ -190,9 +206,9 @@ process.stdout.write(process.env.MOCK_CHECKOUT_SHA);
 }
 
 const isReleasePatch = args => args[0] === 'api' && args.includes('--method') && args.includes('PATCH') && args.includes('repos/owner/repo/releases/77');
-const releaseCreate = calls => calls.find(args => args[0] === 'release' && args[1] === 'create');
-const mutations = calls => calls.filter(args => args[0] === 'release' && args[1] === 'create'
-  || args[0] === 'api' && args.includes('--method') && ['POST', 'PATCH', 'DELETE'].includes(args[args.indexOf('--method') + 1]));
+const releaseCreate = calls => calls.find(args => args[0] === 'api' && args.includes('--method') && args.includes('POST') && args.includes('repos/owner/repo/releases'));
+const mutations = calls => calls.filter(args => args[0] === 'api' && args.includes('--method') && ['POST', 'PATCH', 'DELETE'].includes(args[args.indexOf('--method') + 1])
+  || args[0] === 'release' && args[1] === 'create');
 
 describe('official release helper', () => {
   it('rejects invalid tags and package-version mismatches before mutation', () => {
@@ -227,7 +243,7 @@ describe('official release helper', () => {
     const result = run({ tagExists: true, createdReleaseId: '66' });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
-    expect(releaseCreate(result.calls)).toEqual(['release', 'create', tag, '--draft', '--title', releaseTitle, '--target', sha, '--notes', `Official release ${tag}.`]);
+    expect(releaseCreate(result.calls)).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases', '-f', `tag_name=${tag}`, '-f', `name=${releaseTitle}`, '-f', `target_commitish=${sha}`, '-f', `body=Official release ${tag}.`, '-F', 'draft=true']);
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=66\n`);
     result.cleanup();
   });
@@ -255,7 +271,7 @@ describe('official release helper', () => {
     const result = run();
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.calls).toContainEqual(['api', '--method', 'POST', 'repos/owner/repo/git/refs', `-f`, `ref=refs/tags/${tag}`, `-f`, `sha=${sha}`]);
-    expect(releaseCreate(result.calls)).toEqual(['release', 'create', tag, '--draft', '--title', releaseTitle, '--target', sha, '--notes', `Official release ${tag}.`]);
+    expect(releaseCreate(result.calls)).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases', '-f', `tag_name=${tag}`, '-f', `name=${releaseTitle}`, '-f', `target_commitish=${sha}`, '-f', `body=Official release ${tag}.`, '-F', 'draft=true']);
     expect(result.state.release.name).toBe(releaseTitle);
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=77\n`);
     expect(result.calls.some(isReleasePatch)).toBe(false);
@@ -360,6 +376,25 @@ describe('official release helper', () => {
     expect(result.calls.some(isReleasePatch)).toBe(false);
     expect(result.calls.filter(args => args.some(value => String(value).startsWith('https://uploads.github.com/')))).toHaveLength(0);
     expect(result.state.release.draft).toBe(true);
+    result.cleanup();
+  });
+
+  it('rejects a malformed draft creation response without exporting anything', () => {
+    for (const createResponse of ['invalidId', 'wrongTag', 'notDraft', 'wrongTitle']) {
+      const result = run({ createResponse });
+      expect(result.status).not.toBe(0);
+      expect(result.output).toBe('');
+      expect(result.calls.some(isReleasePatch)).toBe(false);
+      result.cleanup();
+    }
+  });
+
+  it('lists releases only once when creating a new draft from scratch', () => {
+    const result = run();
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.calls.filter(args => args[0] === 'api' && args.includes('--paginate') && args.includes('--slurp') && args.includes('repos/owner/repo/releases'))).toHaveLength(1);
+    expect(releaseCreate(result.calls)).toBeTruthy();
+    expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=77\n`);
     result.cleanup();
   });
 

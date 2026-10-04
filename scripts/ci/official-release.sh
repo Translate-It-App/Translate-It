@@ -69,10 +69,16 @@ prepare() {
     gh api --method POST "repos/$repo/git/refs" -f "ref=refs/tags/$tag" -f "sha=$sha" || fail "could not create tag $tag."
   fi
 
-  gh release create "$tag" --draft --title "$release_title" --target "$sha" --notes "Official release $tag." || fail "could not create draft release $tag."
-
-  releases_json=$(fetch_releases) || fail 'could not verify the created draft release.'
-  release_id=$(jq -er --arg tag "$tag" '[.[] | select(.tag_name == $tag)] | if length == 1 and .[0].draft == true then .[0].id | select(type == "number" and . > 0 and floor == .) else empty end' <<<"$releases_json") || fail 'expected exactly one numeric draft release for the new tag.'
+  release_json=$(gh api --method POST "repos/$repo/releases" \
+    -f "tag_name=$tag" \
+    -f "name=$release_title" \
+    -f "target_commitish=$sha" \
+    -f "body=Official release $tag." \
+    -F "draft=true") || fail "could not create draft release $tag."
+  release_id=$(jq -er --arg tag "$tag" --arg title "$release_title" '
+    select(.tag_name == $tag and .draft == true and .name == $title)
+    | .id | select(type == "number" and . > 0 and floor == .)
+  ' <<<"$release_json") || fail 'draft creation response does not match expected ID, tag, title, or draft state.'
   printf 'tag=%s\nsha=%s\nrelease_id=%s\n' "$tag" "$sha" "$release_id" >>"$output"
 }
 
