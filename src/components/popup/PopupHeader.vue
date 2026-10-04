@@ -72,6 +72,7 @@
             <span>{{ t('pdf_app_title') || 'PDF' }}</span>
           </button>
           <button
+            v-if="!IsMobile"
             type="button"
             role="menuitem"
             class="ti-header-menu-item"

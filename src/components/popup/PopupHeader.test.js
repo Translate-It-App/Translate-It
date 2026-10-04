@@ -12,6 +12,7 @@ let sidebarToggle
 let sidebarOpen
 let sessionSet
 let sessionRemove
+let isMobile
 
 const { mockSelectModeHolder, mockToggleSelectElement, mockToggleMouseHover, mockSendMessage, mockFindProviderById } = vi.hoisted(() => ({
   mockSelectModeHolder: { ref: null },
@@ -64,7 +65,7 @@ vi.mock('@/features/translation/providers/ProviderManifest.js', () => ({
 }))
 
 vi.mock('@/utils/browser/compatibility.js', () => ({
-  getBrowserInfoSync: () => ({ isMobile: false })
+  getBrowserInfoSync: () => ({ isMobile })
 }))
 
 vi.mock('@/shared/logging/logger.js', () => ({
@@ -152,6 +153,7 @@ vi.mock('@/features/page-translation/components/PageTranslationButton.vue', () =
 
 describe('PopupHeader', () => {
   beforeEach(() => {
+    isMobile = false
     if (mockSelectModeHolder.ref) mockSelectModeHolder.ref.value = false
     mockT.mockClear()
     mockToggleSelectElement.mockClear()
@@ -473,6 +475,24 @@ describe('PopupHeader', () => {
     for (const selector of ['.ti-btn-mouse-hover', '.ti-btn-capture', '.ti-btn-sidepanel']) {
       expect(wrapper.find(selector).classes()).toContain('ti-header-toolbar-button--narrow-hide')
     }
+  })
+
+  it('hides History and Side Panel actions on mobile while keeping desktop actions visible', async () => {
+    const desktop = mount(PopupHeader)
+    await desktop.vm.$nextTick()
+    expect(desktop.find('.ti-btn-sidepanel').exists()).toBe(true)
+    const desktopMenu = await openMoreMenu(desktop)
+    expect(desktopMenu.text()).toContain('Translation History')
+    expect(desktopMenu.find('.ti-header-menu-item--narrow-only').exists()).toBe(true)
+
+    isMobile = true
+    const mobile = mount(PopupHeader)
+    await mobile.vm.$nextTick()
+    expect(mobile.find('.ti-btn-sidepanel').exists()).toBe(false)
+    const mobileMenu = await openMoreMenu(mobile)
+    expect(mobileMenu.text()).not.toContain('Translation History')
+    expect(mobileMenu.findAllComponents(MaskIcon).some((icon) => icon.props('src').includes('side-panel.png'))).toBe(false)
+    expect(mobileMenu.findAll('[role="menuitem"]')).toHaveLength(5)
   })
 
   it('renders direct toolbar actions in IconButton mask mode', async () => {
