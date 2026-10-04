@@ -73,6 +73,7 @@
           </button>
           <button
             v-if="!IsMobile"
+            :disabled="!isHistoryPanelReady"
             type="button"
             role="menuitem"
             class="ti-header-menu-item"
@@ -296,7 +297,7 @@ const props = defineProps({
 
 // Refs
 const sidePanelButton = ref(null)
-let activeTabForSidePanel = null
+const activeTabForSidePanel = ref(null)
 
 // Stores
 const settingsStore = useSettingsStore()
@@ -325,6 +326,11 @@ const menuIcon = (name) => ExtensionContextManager.safeGetURL(`icons/ui/${name}`
 // Computed
 const IsMobile = computed(() => {
   return getBrowserInfoSync().isMobile
+})
+
+const isHistoryPanelReady = computed(() => {
+  const activeTab = activeTabForSidePanel.value
+  return Boolean(activeTab?.id) && activeTab?.windowId !== undefined && activeTab?.windowId !== null
 })
 
 const isExtensionEnabledGlobal = computed(() => {
@@ -483,7 +489,7 @@ const handleExcludeToggle = async () => {
 onMounted(async () => {
   try {
     const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true })
-    activeTabForSidePanel = activeTab || null
+    activeTabForSidePanel.value = activeTab || null
     if (activeTab) {
       const response = await sendMessage({
         action: MessageActions.IS_Current_Page_Excluded,
@@ -526,8 +532,10 @@ const handleOpenSidePanelNative = async (event) => {
 }
 
 const handleOpenHistoryInSidePanel = async () => {
+  if (!isHistoryPanelReady.value) return
+
   const session = browser.storage?.session
-  const activeTab = activeTabForSidePanel
+  const activeTab = activeTabForSidePanel.value
   const windowId = activeTab?.windowId
   const key = windowId == null ? null : `__translateItSidepanelPendingIntent:${windowId}`
 

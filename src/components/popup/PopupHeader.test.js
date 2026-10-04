@@ -590,6 +590,36 @@ describe('PopupHeader', () => {
     expect(closePopup).toHaveBeenCalledOnce()
   })
 
+  it('disables History until the initialization tab query resolves, then opens normally', async () => {
+    let resolveTabQuery
+    globalThis.browser.tabs.query.mockReturnValue(new Promise((resolve) => { resolveTabQuery = resolve }))
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+
+    let panel = await openMoreMenu(wrapper)
+    let historyItem = panel.findAll('[role="menuitem"]')[2]
+    expect(historyItem.attributes('disabled')).toBeDefined()
+    await historyItem.trigger('click')
+    await flushMicrotasks(wrapper)
+    expect(sessionSet).not.toHaveBeenCalled()
+    expect(sidebarOpen).not.toHaveBeenCalled()
+    expect(closePopup).not.toHaveBeenCalled()
+
+    resolveTabQuery([{ id: 1, windowId: 7, url: 'https://example.com/' }])
+    await flushMicrotasks(wrapper)
+    if (!wrapper.find('.toolbar-menu-panel-stub').exists()) panel = await openMoreMenu(wrapper)
+    historyItem = panel.findAll('[role="menuitem"]')[2]
+    expect(historyItem.attributes('disabled')).toBeUndefined()
+    await historyItem.trigger('click')
+    await flushMicrotasks(wrapper)
+
+    expect(sessionSet).toHaveBeenCalledWith({
+      '__translateItSidepanelPendingIntent:7': { action: 'open-history' }
+    })
+    expect(sidebarOpen).toHaveBeenCalledOnce()
+    expect(closePopup).toHaveBeenCalledOnce()
+  })
+
   it('opens Side Panel to History when session storage is unavailable', async () => {
     globalThis.browser.storage.session = undefined
     const wrapper = mount(PopupHeader)
