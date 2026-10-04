@@ -1,8 +1,8 @@
 {
   "name": "translate-it",
-  "version": "1.20.0",
+  "version": "1.20.1",
   "type": "module",
-  "description": "Translate the web, your way.",
+  "description": "Translator for selected text, web pages, PDFs, subtitles, images, and live dubbing, with traditional and AI providers.",
   "scripts": {
     "build": "node scripts/build/build-all.mjs --parallel",
     "build:sequential": "node scripts/build/build-all.mjs",

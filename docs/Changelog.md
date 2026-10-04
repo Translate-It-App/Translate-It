@@ -1,4 +1,4 @@
-#### Unreleased
+#### v1.20.1 – Released on October 04, 2026
 
 ##### Added
 
@@ -10,7 +10,7 @@
 
 ##### Changed
 
-- The Auto Page Translation star in `Popup`, Desktop FAB, and Mobile now lets you choose between **This Page** and **This Site** ([#156](https://github.com/Translate-It-App/Translate-It/issues/156)).
+- The Auto Page Translation star in `Popup`, `Desktop FAB`, and `Mobile` now lets you choose between **This Page** and **This Site** ([#156](https://github.com/Translate-It-App/Translate-It/issues/156)).
 
 ---
 
