@@ -349,13 +349,17 @@ describe('official release helper', () => {
       `https://img.shields.io/badge/version-${version}-blue.svg`,
       'https://img.shields.io/badge/Chrome%20&%20Firefox-Supported-brightgreen',
       'https://img.shields.io/badge/Bundled%20with-Vite-646CFF?logo=vite&logoColor=white',
-      'https://img.shields.io/badge/i18n-Multi--Language-blueviolet',
       `https://img.shields.io/badge/Vue.js-${vueVersion}-4FC08D?logo=vue.js&logoColor=4FC08D`,
     ];
     for (const badgeUrl of badgeUrls) expect(body).toContain(`<img src="${badgeUrl}"`);
-    expect(body).toContain(`<img src="https://img.shields.io/badge/Vue.js-${vueVersion}-4FC08D?logo=vue.js&logoColor=4FC08D"`);
-    expect(body).toContain(`alt="Vue.js ${vueVersion}"`);
-    expect(body).toContain('alt="Bundled with Vite"');
+    for (const img of body.match(/<img[^>]*>/g)) expect(img.endsWith(' />')).toBe(true);
+    expect(body.match(/<img src="https:\/\/img\.shields\.io\/badge\//g)).toHaveLength(4);
+    expect(body).not.toContain('i18n-Multi--Language');
+    expect(body).toContain(`<img src="https://img.shields.io/badge/version-${version}-blue.svg" alt="Version" />`);
+    expect(body).toContain('<img src="https://img.shields.io/badge/Chrome%20&%20Firefox-Supported-brightgreen" alt="Browser Support" />');
+    expect(body).toContain('<img src="https://img.shields.io/badge/Bundled%20with-Vite-646CFF?logo=vite&logoColor=white" alt="Vite" />');
+    expect(body).toContain(`<img src="https://img.shields.io/badge/Vue.js-${vueVersion}-4FC08D?logo=vue.js&logoColor=4FC08D" alt="Vue.js ${vueVersion}" />`);
+    expect(body).toContain(`<div align="center">\n\n<a href="https://github.com/Translate-It-App/Translate-It/releases">\n  <img src="https://img.shields.io/badge/version-${version}-blue.svg" alt="Version" />\n</a>`);
     expect(body).not.toContain('webpack.js.org');
     expect(body).not.toContain('Bundled%20with-Webpack');
     expect(body).not.toContain('Bundled with Webpack');
@@ -363,11 +367,12 @@ describe('official release helper', () => {
     expect(body).not.toContain(`Vue.js-${packageJson.dependencies.vue}`);
     expect(result.pnpmCalls).toEqual([['list', 'vue', '--depth=0', '--json', '--lockfile-only']]);
     expect(body).not.toContain(`version-${tag}-blue.svg`);
-    expect(body.match(/<img src="https:\/\/img\.shields\.io\/badge\//g)).toHaveLength(5);
     expect(body).toContain('https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd');
     expect(body).toContain('https://addons.mozilla.org/firefox/addon/translate-it');
     expect(body).toContain('https://github.com/Translate-It-App/Translate-It/raw/refs/heads/main/docs/Store/Chrome-Store.png');
     expect(body).toContain('https://github.com/Translate-It-App/Translate-It/raw/refs/heads/main/docs/Store/Firefox-Store.png');
+    expect(body).toContain(`<a href="https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd/" target="_blank">\n  <img src="https://github.com/Translate-It-App/Translate-It/raw/refs/heads/main/docs/Store/Chrome-Store.png" alt="Install on Chrome" height="60" />\n</a>`);
+    expect(body).toContain(`<a href="https://addons.mozilla.org/firefox/addon/translate-it/" target="_blank">\n  <img src="https://github.com/Translate-It-App/Translate-It/raw/refs/heads/main/docs/Store/Firefox-Store.png" alt="Install on Firefox" height="60" />\n</a>`);
     expect(body).toContain(customItem);
     expect(body).not.toContain('OLD_ENTRY_MUST_NOT_APPEAR');
     expect(body.indexOf('Released on 04 October 2026')).toBeLessThan(body.indexOf(badgeUrls[0]));
