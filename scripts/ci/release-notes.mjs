@@ -67,7 +67,7 @@ const customNotes = [
   '<div align="center">',
   `  <a href="${repository}/releases"><img src="https://img.shields.io/badge/version-${version}-blue.svg" alt="Version ${version}"></a>`,
   `  <a href="${repository}"><img src="https://img.shields.io/badge/Chrome%20&%20Firefox-Supported-brightgreen" alt="Chrome & Firefox Supported"></a>`,
-  '  <a href="https://webpack.js.org/"><img src="https://img.shields.io/badge/Bundled%20with-Webpack-8dd6f9" alt="Bundled with Webpack"></a>',
+  '  <a href="https://vite.dev/"><img src="https://img.shields.io/badge/Bundled%20with-Vite-646CFF?logo=vite&logoColor=white" alt="Bundled with Vite"></a>',
   `  <a href="${repository}"><img src="https://img.shields.io/badge/i18n-Multi--Language-blueviolet" alt="i18n Multi-Language"></a>`,
   `  <a href="${repository}"><img src="https://img.shields.io/badge/Vue.js-${vueVersion}-4FC08D?logo=vue.js&logoColor=4FC08D" alt="Vue.js ${vueVersion}"></a>`,
   '</div>',

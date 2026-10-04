@@ -348,13 +348,17 @@ describe('official release helper', () => {
     const badgeUrls = [
       `https://img.shields.io/badge/version-${version}-blue.svg`,
       'https://img.shields.io/badge/Chrome%20&%20Firefox-Supported-brightgreen',
-      'https://img.shields.io/badge/Bundled%20with-Webpack-8dd6f9',
+      'https://img.shields.io/badge/Bundled%20with-Vite-646CFF?logo=vite&logoColor=white',
       'https://img.shields.io/badge/i18n-Multi--Language-blueviolet',
       `https://img.shields.io/badge/Vue.js-${vueVersion}-4FC08D?logo=vue.js&logoColor=4FC08D`,
     ];
     for (const badgeUrl of badgeUrls) expect(body).toContain(`<img src="${badgeUrl}"`);
     expect(body).toContain(`<img src="https://img.shields.io/badge/Vue.js-${vueVersion}-4FC08D?logo=vue.js&logoColor=4FC08D"`);
     expect(body).toContain(`alt="Vue.js ${vueVersion}"`);
+    expect(body).toContain('alt="Bundled with Vite"');
+    expect(body).not.toContain('webpack.js.org');
+    expect(body).not.toContain('Bundled%20with-Webpack');
+    expect(body).not.toContain('Bundled with Webpack');
     expect(body).not.toContain('Vue.js-^');
     expect(body).not.toContain(`Vue.js-${packageJson.dependencies.vue}`);
     expect(result.pnpmCalls).toEqual([['list', 'vue', '--depth=0', '--json', '--lockfile-only']]);
