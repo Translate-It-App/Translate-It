@@ -9,6 +9,9 @@ import { MessageActions } from '@/shared/messaging/core/MessageActions.js'
 let settings
 let closePopup
 let sidebarToggle
+let sidebarOpen
+let sessionSet
+let sessionRemove
 
 const { mockSelectModeHolder, mockToggleSelectElement, mockToggleMouseHover, mockSendMessage, mockFindProviderById } = vi.hoisted(() => ({
   mockSelectModeHolder: { ref: null },
@@ -160,9 +163,13 @@ describe('PopupHeader', () => {
     vi.mocked(openExtensionApp).mockClear()
     vi.mocked(openExtensionApp).mockResolvedValue({ success: true })
     closePopup = vi.spyOn(window, 'close').mockImplementation(() => {})
-    globalThis.browser.tabs.query.mockResolvedValue([{ id: 1, url: 'https://example.com/' }])
+    globalThis.browser.tabs.query.mockResolvedValue([{ id: 1, windowId: 7, url: 'https://example.com/' }])
+    sessionSet = vi.fn().mockResolvedValue(undefined)
+    sessionRemove = vi.fn().mockResolvedValue(undefined)
+    globalThis.browser.storage.session = { set: sessionSet, remove: sessionRemove }
     sidebarToggle = vi.fn()
-    globalThis.browser.sidebarAction = { toggle: sidebarToggle }
+    sidebarOpen = vi.fn().mockResolvedValue(undefined)
+    globalThis.browser.sidebarAction = { toggle: sidebarToggle, open: sidebarOpen }
     settings = {
       EXTENSION_ENABLED: true,
       TRANSLATE_WITH_SELECT_ELEMENT: true,
@@ -176,6 +183,7 @@ describe('PopupHeader', () => {
   afterEach(() => {
     closePopup.mockRestore()
     delete globalThis.browser.sidebarAction
+    delete globalThis.browser.sidePanel
   })
 
   const openMoreMenu = async (wrapper) => {
@@ -184,6 +192,12 @@ describe('PopupHeader', () => {
   }
 
   const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0))
+  const flushMicrotasks = async (wrapper) => {
+    await Promise.resolve()
+    await Promise.resolve()
+    await wrapper.vm.$nextTick()
+    await Promise.resolve()
+  }
 
   it('renders left and actions groups without the action scroller', async () => {
     const wrapper = mount(PopupHeader)
@@ -417,7 +431,7 @@ describe('PopupHeader', () => {
     expect(wrapper.find('.toolbar-menu-panel-stub').exists()).toBe(false)
   })
 
-  it('opens the More menu with Subtitle, PDF, Exclude plus narrow-only duplicates', async () => {
+  it('opens the More menu with Subtitle, PDF, History, Exclude plus narrow-only duplicates', async () => {
     const wrapper = mount(PopupHeader)
     await wrapper.vm.$nextTick()
 
@@ -427,13 +441,14 @@ describe('PopupHeader', () => {
     expect(panel.exists()).toBe(true)
 
     const items = panel.findAll('[role="menuitem"]')
-    // Structurally six: the three always-visible items plus the narrow-only
+    // Structurally seven: the four always-visible items plus the narrow-only
     // duplicates (CSS-hidden at normal widths — see PopupHeader.scss
     // breakpoint ownership). JSDOM does not apply CSS, so assert existence.
-    expect(items).toHaveLength(6)
+    expect(items).toHaveLength(7)
     const icons = panel.findAll('.ti-header-menu-item img').map((img) => img.attributes('src'))
     expect(icons.some((src) => src.includes('subtitle.png'))).toBe(true)
     expect(icons.some((src) => src.includes('pdf.png'))).toBe(true)
+    expect(icons.some((src) => src.includes('history.svg'))).toBe(true)
     // Monochrome menu icons render via MaskIcon (currentColor), not <img>.
     const maskSrcs = panel.findAllComponents(MaskIcon).map((icon) => icon.props('src'))
     const maskOrImgSrcs = [...icons, ...maskSrcs]
@@ -443,6 +458,8 @@ describe('PopupHeader', () => {
     // Capture is fully off the image path: no <img> anywhere in the menu.
     expect(icons.some((src) => src.includes('capture'))).toBe(false)
     expect(panel.text()).toContain('Disable on this site')
+    expect(panel.text()).toContain('Translation History')
+    expect(mockT).toHaveBeenCalledWith('SIDEPANEL_HISTORY_TOOLTIP', 'Translation History')
 
     // Breakpoint contract classes: direct buttons hide at narrow widths,
     // narrow-only duplicates show there instead.
@@ -527,6 +544,109 @@ describe('PopupHeader', () => {
     expect(openExtensionApp.mock.invocationCallOrder[1]).toBeLessThan(closePopup.mock.invocationCallOrder[1])
     // Menu closes after the action.
     expect(wrapper.find('.toolbar-menu-panel-stub').exists()).toBe(false)
+  })
+
+  it('opens Firefox Side Panel directly to History without querying again on click', async () => {
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+    await flushMicrotasks(wrapper)
+    const queryCountBeforeClick = globalThis.browser.tabs.query.mock.calls.length
+
+    const panel = await openMoreMenu(wrapper)
+    await panel.findAll('[role="menuitem"]')[2].trigger('click')
+    await flushMicrotasks(wrapper)
+
+    expect(sessionSet).toHaveBeenCalledWith({
+      '__translateItSidepanelPendingIntent:7': { action: 'open-history' }
+    })
+    expect(sidebarOpen).toHaveBeenCalledOnce()
+    expect(globalThis.browser.tabs.query).toHaveBeenCalledTimes(queryCountBeforeClick)
+    expect(sidebarToggle).not.toHaveBeenCalled()
+    expect(closePopup).toHaveBeenCalledOnce()
+  })
+
+  it('opens Side Panel to History when session storage is unavailable', async () => {
+    globalThis.browser.storage.session = undefined
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+
+    const panel = await openMoreMenu(wrapper)
+    await panel.findAll('[role="menuitem"]')[2].trigger('click')
+    await flushMicrotasks(wrapper)
+
+    expect(sidebarOpen).toHaveBeenCalledOnce()
+    expect(closePopup).toHaveBeenCalledOnce()
+    expect(sessionSet).not.toHaveBeenCalled()
+  })
+
+  it('opens Chrome Side Panel synchronously and closes only after open and intent write settle', async () => {
+    let resolveWrite
+    sessionSet.mockImplementation(() => new Promise((resolve) => { resolveWrite = resolve }))
+    delete globalThis.browser.sidebarAction
+    let resolveOpen
+    const sidePanelOpen = vi.fn(() => new Promise((resolve) => { resolveOpen = resolve }))
+    globalThis.browser.sidePanel = { open: sidePanelOpen }
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+    await flushMicrotasks(wrapper)
+    const queryCountBeforeClick = globalThis.browser.tabs.query.mock.calls.length
+
+    const panel = await openMoreMenu(wrapper)
+    await panel.findAll('[role="menuitem"]')[2].trigger('click')
+
+    expect(globalThis.browser.tabs.query).toHaveBeenCalledTimes(queryCountBeforeClick)
+    expect(sidePanelOpen).toHaveBeenCalledWith({ tabId: 1 })
+    expect(sessionSet).toHaveBeenCalledWith({
+      '__translateItSidepanelPendingIntent:7': { action: 'open-history' }
+    })
+    expect(closePopup).not.toHaveBeenCalled()
+
+    resolveOpen()
+    await flushMicrotasks(wrapper)
+    expect(closePopup).not.toHaveBeenCalled()
+    resolveWrite()
+    await flushMicrotasks(wrapper)
+    expect(closePopup).toHaveBeenCalledOnce()
+  })
+
+  it('removes the window-scoped intent when opening the Side Panel fails', async () => {
+    delete globalThis.browser.sidebarAction
+    const sidePanelOpen = vi.fn().mockRejectedValue(new Error('open failed'))
+    globalThis.browser.sidePanel = { open: sidePanelOpen }
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+
+    const panel = await openMoreMenu(wrapper)
+    await panel.findAll('[role="menuitem"]')[2].trigger('click')
+    await flushMicrotasks(wrapper)
+
+    expect(sessionSet).toHaveBeenCalledWith({
+      '__translateItSidepanelPendingIntent:7': { action: 'open-history' }
+    })
+    expect(sessionRemove).toHaveBeenCalledWith('__translateItSidepanelPendingIntent:7')
+    expect(closePopup).not.toHaveBeenCalled()
+  })
+
+  it('does not show History on a later normal Side Panel open after failure', async () => {
+    delete globalThis.browser.sidebarAction
+    const sidePanelOpen = vi.fn()
+      .mockRejectedValueOnce(new Error('open failed'))
+      .mockResolvedValueOnce(undefined)
+    globalThis.browser.sidePanel = { open: sidePanelOpen }
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+
+    let panel = await openMoreMenu(wrapper)
+    await panel.findAll('[role="menuitem"]')[2].trigger('click')
+    await flushMicrotasks(wrapper)
+    expect(sessionRemove).toHaveBeenCalledWith('__translateItSidepanelPendingIntent:7')
+
+    await wrapper.find('.ti-btn-sidepanel').trigger('click')
+    await flushMicrotasks(wrapper)
+
+    expect(sidePanelOpen).toHaveBeenNthCalledWith(2, { tabId: 1 })
+    expect(sessionSet).toHaveBeenCalledTimes(1)
+    expect(sessionRemove).toHaveBeenCalledTimes(1)
   })
 
   it('keeps Popup open when an extension app launch fails', async () => {
@@ -657,6 +777,23 @@ describe('PopupHeader', () => {
     await flushPromises()
 
     expect(sidebarToggle).toHaveBeenCalled()
+    expect(sessionSet).not.toHaveBeenCalled()
+    expect(closePopup).toHaveBeenCalled()
+  })
+
+  it('keeps the normal Chrome Side Panel action unchanged', async () => {
+    delete globalThis.browser.sidebarAction
+    const sidePanelOpen = vi.fn().mockResolvedValue(undefined)
+    globalThis.browser.sidePanel = { open: sidePanelOpen }
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('.ti-btn-sidepanel').trigger('click')
+    await flushPromises()
+
+    expect(sidePanelOpen).toHaveBeenCalledWith({ tabId: 1 })
+    expect(sessionSet).not.toHaveBeenCalled()
     expect(closePopup).toHaveBeenCalled()
   })
 
@@ -703,8 +840,8 @@ describe('PopupHeader', () => {
 
     const panel = await openMoreMenu(wrapper)
     // Capture duplicate follows its setting (v-if); hover + sidepanel
-    // duplicates stay structural: subtitle, pdf, exclude, hover, sidepanel.
-    expect(panel.findAll('[role="menuitem"]')).toHaveLength(5)
+    // duplicates stay structural: subtitle, pdf, history, hover, sidepanel, exclude.
+    expect(panel.findAll('[role="menuitem"]')).toHaveLength(6)
     expect(panel.find('.ti-header-menu-item--very-narrow-only').exists()).toBe(true)
     expect(panel.findAll('.ti-header-menu-item--narrow-only')).toHaveLength(1)
   })
@@ -757,30 +894,34 @@ describe('PopupHeader', () => {
 
   // ── More menu modernization ─────────────────────────────────────────
 
-  it('orders the menu: Subtitle, PDF, responsive duplicates, then the site action last', async () => {
+  it('orders the menu: Subtitle, PDF, History, responsive duplicates, then the site action last', async () => {
     const wrapper = mount(PopupHeader)
     await wrapper.vm.$nextTick()
 
     const panel = await openMoreMenu(wrapper)
     const items = panel.findAll('[role="menuitem"]')
-    expect(items).toHaveLength(6)
+    expect(items).toHaveLength(7)
 
     // 1-2: branded launchers unchanged (first two positions, same assets).
     expect(items[0].find('img').attributes('src')).toContain('subtitle.png')
     expect(items[1].find('img').attributes('src')).toContain('pdf.png')
 
-    // 3-5: responsive-only duplicates keep their existing classes
+    // 3: permanent History action precedes responsive-only duplicates.
+    expect(items[2].text()).toContain('Translation History')
+    expect(items[2].find('img').attributes('src')).toContain('history.svg')
+
+    // 4-6: responsive-only duplicates keep their existing classes
     // (conditions themselves covered by the dedicated tests above).
-    expect(items[2].classes()).toContain('ti-header-menu-item--very-narrow-only')
-    expect(items[3].classes()).toContain('ti-header-menu-item--narrow-only')
+    expect(items[3].classes()).toContain('ti-header-menu-item--very-narrow-only')
     expect(items[4].classes()).toContain('ti-header-menu-item--narrow-only')
-    expect(items[4].findComponent(MaskIcon).props('src')).toContain('side-panel.png')
+    expect(items[5].classes()).toContain('ti-header-menu-item--narrow-only')
+    expect(items[5].findComponent(MaskIcon).props('src')).toContain('side-panel.png')
 
     // 6: site action is the FINAL menu action and never breakpoint-gated —
     // final at every viewport width.
-    expect(items[5].text()).toContain('Disable on this site')
-    expect(items[5].classes()).not.toContain('ti-header-menu-item--narrow-only')
-    expect(items[5].classes()).not.toContain('ti-header-menu-item--very-narrow-only')
+    expect(items[6].text()).toContain('Disable on this site')
+    expect(items[6].classes()).not.toContain('ti-header-menu-item--narrow-only')
+    expect(items[6].classes()).not.toContain('ti-header-menu-item--very-narrow-only')
   })
 
   it('renders a separator immediately before the final site action', async () => {
@@ -794,10 +935,10 @@ describe('PopupHeader', () => {
 
     const items = panel.findAll('[role="menuitem"]')
     // Immediately after the last responsive duplicate (sidepanel)…
-    expect(separator.element.previousElementSibling).toBe(items[4].element)
+    expect(separator.element.previousElementSibling).toBe(items[5].element)
     // …and immediately before the site action.
-    expect(separator.element.nextElementSibling).toBe(items[5].element)
-    expect(items[5].text()).toContain('Disable on this site')
+    expect(separator.element.nextElementSibling).toBe(items[6].element)
+    expect(items[6].text()).toContain('Disable on this site')
   })
 
   it('replaces the Unicode checkbox with a decorative, non-interactive CSS indicator', async () => {

@@ -42,6 +42,7 @@ import SidepanelMainContent from './components/SidepanelMainContent.vue';
 import SidepanelToolbar from './components/SidepanelToolbar.vue';
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
+import browser from 'webextension-polyfill';
 
 const logger = getScopedLogger(LOG_COMPONENTS.UI, 'SidepanelLayout');
 
@@ -59,6 +60,29 @@ const mainContentRef = ref(null);
 const isHistoryVisible = ref(false)
 const globalProvider = ref('')
 const manualProvider = ref('')
+let pendingHistoryIntentKey = null
+let isStorageListenerRegistered = false
+let isComponentMounted = true
+
+const consumePendingHistoryIntent = async () => {
+  try {
+    const session = browser.storage?.session
+    if (!isComponentMounted || !session || !pendingHistoryIntentKey) return
+    const stored = await session.get(pendingHistoryIntentKey)
+    if (stored?.[pendingHistoryIntentKey]?.action !== 'open-history') return
+    await session.remove(pendingHistoryIntentKey)
+    isHistoryVisible.value = true
+    openHistoryPanel()
+  } catch (error) {
+    logger.warn('[SidepanelLayout] Could not consume pending history intent:', error)
+  }
+}
+
+const handleStorageChanged = (changes, areaName) => {
+  if (areaName === 'session' && changes?.[pendingHistoryIntentKey]?.newValue?.action === 'open-history') {
+    void consumePendingHistoryIntent()
+  }
+}
 
 // Ensure history panel is closed on mount and initialize providers
 onMounted(async () => {
@@ -69,6 +93,21 @@ onMounted(async () => {
   if (!settingsStore.isInitialized) {
     await settingsStore.loadSettings()
   }
+
+  try {
+    const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true })
+    if (isComponentMounted && activeTab?.windowId != null) {
+      pendingHistoryIntentKey = `__translateItSidepanelPendingIntent:${activeTab.windowId}`
+      if (browser.storage?.onChanged?.addListener) {
+        browser.storage.onChanged.addListener(handleStorageChanged)
+        isStorageListenerRegistered = true
+      }
+    }
+  } catch (error) {
+    logger.warn('[SidepanelLayout] Could not determine the side panel window:', error)
+  }
+
+  await consumePendingHistoryIntent()
 
   // Initialize providers from settings
   const defaultProvider = settingsStore.settings.TRANSLATION_API || 'googlev2'
@@ -162,7 +201,10 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  // Event listener cleanup is now handled automatically by useResourceTracker
-  // No manual cleanup needed!
+  isComponentMounted = false
+  if (isStorageListenerRegistered) {
+    browser.storage?.onChanged?.removeListener?.(handleStorageChanged)
+    isStorageListenerRegistered = false
+  }
 })
 </script>
