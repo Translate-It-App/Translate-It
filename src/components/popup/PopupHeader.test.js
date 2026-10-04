@@ -448,10 +448,15 @@ describe('PopupHeader', () => {
     const icons = panel.findAll('.ti-header-menu-item img').map((img) => img.attributes('src'))
     expect(icons.some((src) => src.includes('subtitle.png'))).toBe(true)
     expect(icons.some((src) => src.includes('pdf.png'))).toBe(true)
-    expect(icons.some((src) => src.includes('history.svg'))).toBe(true)
+    expect(icons.some((src) => src.includes('history.svg'))).toBe(false)
     // Monochrome menu icons render via MaskIcon (currentColor), not <img>.
     const maskSrcs = panel.findAllComponents(MaskIcon).map((icon) => icon.props('src'))
     const maskOrImgSrcs = [...icons, ...maskSrcs]
+    const historyIcon = panel.findAllComponents(MaskIcon).find((icon) => icon.props('src').includes('history.svg'))
+    expect(historyIcon).toBeDefined()
+    expect(historyIcon.props('size')).toBe(18)
+    expect(icons.some((src) => src.includes('subtitle.png'))).toBe(true)
+    expect(icons.some((src) => src.includes('pdf.png'))).toBe(true)
     expect(maskOrImgSrcs.some((src) => src.includes('mouse-hover.png'))).toBe(true)
     expect(maskOrImgSrcs.some((src) => src.includes('capture.svg'))).toBe(true)
     expect(maskOrImgSrcs.some((src) => src.includes('side-panel.png'))).toBe(true)
@@ -908,7 +913,8 @@ describe('PopupHeader', () => {
 
     // 3: permanent History action precedes responsive-only duplicates.
     expect(items[2].text()).toContain('Translation History')
-    expect(items[2].find('img').attributes('src')).toContain('history.svg')
+    expect(items[2].find('img').exists()).toBe(false)
+    expect(items[2].findComponent(MaskIcon).props('src')).toContain('history.svg')
 
     // 4-6: responsive-only duplicates keep their existing classes
     // (conditions themselves covered by the dedicated tests above).

@@ -77,11 +77,10 @@
             class="ti-header-menu-item"
             @click="close(); handleOpenHistoryInSidePanel()"
           >
-            <img
+            <MaskIcon
               :src="menuIcon('history.svg')"
-              alt=""
-              aria-hidden="true"
-            >
+              :size="18"
+            />
             <span>{{ t('SIDEPANEL_HISTORY_TOOLTIP', 'Translation History') }}</span>
           </button>
           <!-- Narrow-width duplicates: hidden at normal widths via
