@@ -27,7 +27,7 @@ fetch_releases() {
 }
 
 prepare() {
-  local tag=$RELEASE_TAG version sha tag_response releases_json match_count release_id output tag_exists ref_sha release_json custom_notes generated_json generated_notes body vue_version
+  local tag=$RELEASE_TAG version sha tag_response releases_json match_count release_id output tag_exists ref_sha release_json custom_notes generated_json generated_notes body vue_version generated_details changed_section change_entries metadata nc_prefix fc_prefix probe
   output=${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}
   [[ -w "$output" ]] || fail 'GITHUB_OUTPUT is not writable.'
   valid_tag "$tag" || fail 'RELEASE_TAG must match vMAJOR.MINOR.PATCH.'
@@ -77,7 +77,31 @@ prepare() {
 
   generated_json=$(gh api --method POST "repos/$repo/releases/generate-notes" -f "tag_name=$tag" -f "target_commitish=$sha") || fail "could not generate release notes for $tag."
   generated_notes=$(jq -er '.body | select(type == "string" and test("\\S"))' <<<"$generated_json") || fail 'generated release notes are empty or invalid.'
-  body=$(printf '%s\n\n%s' "$custom_notes" "$generated_notes")
+  [[ "${generated_notes%%$'\n'*}" == "## What's Changed" ]] || fail "generated release notes do not start with '## What's Changed'."
+  generated_details=${generated_notes#"## What's Changed"}
+  while [[ "$generated_details" == $'\n'* ]]; do generated_details=${generated_details#$'\n'}; done
+  while [[ "$generated_details" == *$'\n' ]]; do generated_details=${generated_details%$'\n'}; done
+  [[ -n "$generated_details" ]] || fail 'generated release notes contain no changes after the heading.'
+  change_entries=$generated_details
+  metadata=''
+  probe=$'\n'"$generated_details"
+  nc_prefix=${probe%%$'\n## New Contributors'*}
+  fc_prefix=${probe%%$'\n**Full Changelog**:'*}
+  if [[ "$nc_prefix" != "$probe" && ( "$fc_prefix" == "$probe" || ${#nc_prefix} -le ${#fc_prefix} ) ]]; then
+    change_entries=${nc_prefix#$'\n'}
+    metadata="### New Contributors"${probe#*$'\n## New Contributors'}
+  elif [[ "$fc_prefix" != "$probe" ]]; then
+    change_entries=${fc_prefix#$'\n'}
+    metadata="**Full Changelog**:"${probe#*$'\n**Full Changelog**:'}
+  fi
+  while [[ "$change_entries" == *$'\n' ]]; do change_entries=${change_entries%$'\n'}; done
+  [[ -n "$change_entries" ]] || fail 'generated release notes contain no changes after the heading.'
+  changed_section=$(printf -- "---\n\n<details>\n<summary><h4>What's Changed</h4></summary>\n\n%s\n\n</details>" "$change_entries")
+  if [[ -n "$metadata" ]]; then
+    body=$(printf '%s\n\n%s\n\n%s' "$custom_notes" "$changed_section" "$metadata")
+  else
+    body=$(printf '%s\n\n%s' "$custom_notes" "$changed_section")
+  fi
   [[ "$body" =~ [^[:space:]] ]] || fail 'composed release notes are empty.'
 
   release_json=$(gh api --method POST "repos/$repo/releases" \

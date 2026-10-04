@@ -18,6 +18,7 @@ const releaseTitle = `Translate It! ${tag}`;
 const sha = 'a'.repeat(40);
 const chromeName = `Translate-It-${tag}-for-Chrome.zip`;
 const firefoxName = `Translate-It-${tag}-for-Firefox.zip`;
+const generatedChanges = `## What's Changed\n\n* ci: fixture change\n* fix: fixture fix\n\n## New Contributors\n* @octocat made their first contribution in https://github.com/owner/repo/pull/1\n\n**Full Changelog**: https://github.com/owner/repo/compare/v1.19.0...${tag}`;
 
 function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expectedSha = sha,
   tagExists = false, existingRelease = false, existingReleaseDraft = true, existingReleaseTitle = releaseTag, duplicateRelease = false, createdReleaseId = '77', mainFailure = '', tagFailure = '', listFailure = '',
@@ -25,7 +26,7 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
   releaseDraft = true, releaseTagName = tag, releaseName = releaseTitle, releaseSha = sha, releasePrerelease = true,
   initialAssets = [], chrome = true, firefox = true, duplicateChrome = false, duplicateFirefox = false,
   uploadFailure = '', publishFailure = false, finalTitleLie = false, extraFinalAsset = '', createResponse = '',
-  changelog, generatedBody = '## GitHub changes', generatedResponse = 'valid', generatedFailure = false,
+  changelog, generatedBody = generatedChanges, generatedResponse = 'valid', generatedFailure = false,
   vueJson = '[{"dependencies":{"vue":{"version":"3.5.31"}}}]', vueFailure = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'official-release-test-'));
   const cwd = changelog === undefined ? root : dir;
@@ -333,14 +334,14 @@ describe('official release helper', () => {
     expect(generatedCall).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases/generate-notes', '-f', `tag_name=${tag}`, '-f', `target_commitish=${sha}`]);
     expect(generatedIndex).toBeGreaterThan(tagCreateIndex);
     expect(createIndex).toBeGreaterThan(generatedIndex);
-    expect(releaseBody(result.calls)).toContain('## GitHub changes');
+    expect(releaseBody(result.calls)).toContain("<summary><h4>What's Changed</h4></summary>");
     result.cleanup();
   });
 
   it('builds the custom changelog section with links and badges before generated notes, stopping at the separator', () => {
     const customItem = '- Added [fixture feature](https://example.test/feature) with [@maintainer](https://github.com/maintainer).';
     const vueVersion = '9.9.9';
-    const result = run({ changelog: changelogEntry(customItem), generatedBody: 'GENERATED_NOTES', vueJson: JSON.stringify([{ dependencies: { vue: { version: vueVersion } } }]) });
+    const result = run({ changelog: changelogEntry(customItem), generatedBody: generatedChanges, vueJson: JSON.stringify([{ dependencies: { vue: { version: vueVersion } } }]) });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     const body = releaseBody(result.calls);
     expect(body).toContain(`#### 🌍 Translate It ${tag} – Released on 04 October 2026`);
@@ -378,11 +379,78 @@ describe('official release helper', () => {
     expect(body.indexOf('Released on 04 October 2026')).toBeLessThan(body.indexOf(badgeUrls[0]));
     expect(body.indexOf(customItem)).toBeLessThan(body.indexOf('### 🧩 Install Now'));
     expect(body.indexOf('### 🧩 Install Now')).toBeLessThan(body.indexOf('Chrome-Store.png'));
-    expect(body.indexOf('Firefox-Store.png')).toBeLessThan(body.indexOf('GENERATED_NOTES'));
-    expect(body.indexOf(customItem)).toBeLessThan(body.indexOf('GENERATED_NOTES'));
+    expect(body.indexOf('Firefox-Store.png')).toBeLessThan(body.indexOf('* ci: fixture change'));
+    expect(body.indexOf(customItem)).toBeLessThan(body.indexOf('* ci: fixture change'));
     expect(generatedNotesCall(result.calls)).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases/generate-notes', '-f', `tag_name=${tag}`, '-f', `target_commitish=${sha}`]);
     result.cleanup();
   });
+
+  it("uses the What's Changed title as the collapsed summary and keeps metadata outside", () => {
+    const result = run({});
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const body = releaseBody(result.calls);
+    const lines = body.split('\n');
+    expect(body).toContain("<summary><h4>What's Changed</h4></summary>");
+    expect(body).not.toContain('View changes');
+    expect(body).not.toContain("<h3>What's Changed</h3>");
+    expect(lines).not.toContain("## What's Changed");
+    expect(lines).not.toContain("### What's Changed");
+    expect(body).toContain('---\n\n<details>');
+    expect(body.match(/---\n\n<details>/g)).toHaveLength(1);
+    expect(body).toContain('<details>');
+    expect(body).not.toContain('<details open');
+    expect(body).toContain("<summary><h4>What's Changed</h4></summary>\n\n* ci: fixture change");
+    expect(body).toContain('* fix: fixture fix');
+    expect(lines).toContain('### New Contributors');
+    expect(lines).not.toContain('## New Contributors');
+    expect(body).toContain('@octocat made their first contribution');
+    expect(body).toContain(`**Full Changelog**: https://github.com/owner/repo/compare/v1.19.0...${tag}`);
+    expect(body.indexOf('* fix: fixture fix')).toBeLessThan(body.indexOf('</details>'));
+    expect(body.indexOf('</details>')).toBeLessThan(body.indexOf('### New Contributors'));
+    expect(body.indexOf('### New Contributors')).toBeLessThan(body.indexOf('**Full Changelog**'));
+    expect(body.indexOf('**Full Changelog**')).toBeGreaterThan(body.indexOf('</details>'));
+    expect(body.trimEnd().endsWith(`**Full Changelog**: https://github.com/owner/repo/compare/v1.19.0...${tag}`)).toBe(true);
+    result.cleanup();
+  });
+
+  it('keeps GitHub metadata outside the collapse and handles bodies without New Contributors or without metadata', () => {
+    const cases = [
+      {
+        generatedBody: "## What's Changed\n\n* only change\n\n**Full Changelog**: https://example.test/compare",
+        metadata: '**Full Changelog**: https://example.test/compare',
+        inside: '* only change',
+      },
+      {
+        generatedBody: "## What's Changed\n\n* change one\n\n## New Contributors\n* @dev",
+        metadata: '### New Contributors',
+        inside: '* change one',
+      },
+      {
+        generatedBody: "## What's Changed\n\n* lone change\n* another change",
+        metadata: null,
+        inside: '* lone change',
+      },
+    ];
+    for (const { generatedBody, metadata, inside } of cases) {
+      const result = run({ generatedBody });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      const body = releaseBody(result.calls);
+      expect(body).toContain('---\n\n<details>');
+      expect(body).toContain(`<summary><h4>What's Changed</h4></summary>\n\n${inside}`);
+      const closeIndex = body.indexOf('</details>');
+      expect(closeIndex).toBeGreaterThan(-1);
+      expect(body.indexOf(inside)).toBeLessThan(closeIndex);
+      if (metadata) {
+        expect(body).toContain(metadata);
+        expect(body.indexOf(metadata)).toBeGreaterThan(closeIndex);
+      } else {
+        expect(body).not.toContain('**Full Changelog**');
+        expect(body).not.toContain('New Contributors');
+        expect(body.trimEnd().endsWith('</details>')).toBe(true);
+      }
+      result.cleanup();
+    }
+  }, 30000);
 
   it('keeps Vue version discovery dynamic and fails closed on invalid pnpm results before Draft creation', () => {
     expect(releaseNotesSource.includes('3.5.31')).toBe(false);
@@ -444,6 +512,10 @@ describe('official release helper', () => {
       { generatedResponse: 'empty' },
       { generatedResponse: 'malformed' },
       { generatedBody: ' \n\t ' },
+      { generatedBody: '## Wrong Heading\n\n* unexpected' },
+      { generatedBody: 'No heading at all' },
+      { generatedBody: "## What's Changed" },
+      { generatedBody: "## What's Changed\n\n## New Contributors\n* @dev" },
     ]) {
       const result = run(options);
       expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
