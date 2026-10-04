@@ -109,9 +109,9 @@ replace_asset() {
     -H 'Content-Type: application/zip' --input "$file" || fail "could not upload asset $name."
 }
 
-finalize() {
+finalize_draft() {
   local publish_dir=${PUBLISH_DIR:-dist/Publish} chrome_inputs firefox_inputs chrome_name firefox_name
-  local json listed publish_response
+  local json listed
   : "${RELEASE_TAG:?RELEASE_TAG is required}"
   : "${RELEASE_ID:?RELEASE_ID is required}"
   : "${EXPECTED_SHA:?EXPECTED_SHA is required}"
@@ -158,17 +158,13 @@ finalize() {
     and ([.[] | select(.name == $firefox)] | length == 1)
   ' <<<"$listed" >/dev/null || fail 'expected exactly the two official browser ZIPs on the release.'
 
-  json=$(release_json) || fail 'could not recheck release before publishing.'
+  json=$(release_json) || fail 'could not recheck release draft.'
   verify_release "$json" true || fail 'release is no longer the expected draft.'
   verify_tag_sha
-  publish_response=$(gh api --method PATCH "repos/$repo/releases/$RELEASE_ID" \
-    -f "name=$release_title" -F prerelease=false -f make_latest=true -F draft=false) || fail 'could not confirm publication; publication may already have succeeded and manual inspection of the GitHub Release is required.'
-  jq -e --argjson id "$RELEASE_ID" --arg tag "$RELEASE_TAG" --arg title "$release_title" \
-    '.id == $id and .tag_name == $tag and .name == $title and .draft == false and .prerelease == false' <<<"$publish_response" >/dev/null || fail 'publish response did not verify; publication may already have succeeded and manual inspection is required.'
 }
 
 case "$command" in
   prepare) prepare ;;
-  finalize) finalize ;;
-  *) fail 'usage: official-release.sh {prepare|finalize}.' ;;
+  finalize-draft) finalize_draft ;;
+  *) fail 'usage: official-release.sh {prepare|finalize-draft}.' ;;
 esac

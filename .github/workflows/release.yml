@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   release:
-    name: Build and Publish Official Release
+    name: Build and Prepare Official Release Draft
     runs-on: ubuntu-26.04
     timeout-minutes: 30
 
@@ -93,11 +93,11 @@ jobs:
             dist/Publish/Translate-It-${{ steps.prepare.outputs.tag }}-for-Chrome.zip
             dist/Publish/Translate-It-${{ steps.prepare.outputs.tag }}-for-Firefox.zip
 
-      - name: Finalize and publish release
+      - name: Attach and verify Draft release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.prepare.outputs.tag }}
           RELEASE_ID: ${{ steps.prepare.outputs.release_id }}
           EXPECTED_SHA: ${{ steps.prepare.outputs.sha }}
           PUBLISH_DIR: dist/Publish
-        run: bash scripts/ci/official-release.sh finalize
+        run: bash scripts/ci/official-release.sh finalize-draft

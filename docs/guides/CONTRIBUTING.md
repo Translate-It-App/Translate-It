@@ -161,14 +161,14 @@ After running, the `dist/Publish` directory will contain:
 
 ### Creating an Official Release (maintainers)
 
-Official releases are built and published by GitHub Actions, not by publishing a Release manually. The `Official Release` workflow is started manually and then runs in order: prepare or safely resume the version tag plus **draft** Release, build and attest the Chrome/Firefox ZIPs, attach them to the draft, verify tag/Release/assets, and only then publish the draft as the latest stable Release.
+Official release artifacts are prepared by GitHub Actions, not by uploading a Release manually. The `Official Release` workflow is started manually and then runs in order: prepare or safely resume the version tag plus **draft** Release, build and attest the Chrome/Firefox ZIPs, attach them to the draft, and verify the tag, Release, and exact asset set. The workflow leaves the verified Release as a draft for maintainers to publish separately.
 
 Before starting a release:
 
 1. Bump `version` in `package.json` and add the matching `docs/Changelog.md` entry on `main` (the workflow requires the tag to match the packaged version).
 2. In the repository's **Actions** tab, run the **Official Release** workflow and provide the version tag, for example `v1.21.0`.
 
-The workflow fails closed: failures before the final publication step leave the Release as a draft. Existing version tags are never moved or overwritten, but a verified interrupted Draft for the same version may be resumed instead of duplicated. Conflicting or unexpected state fails closed. The final publication request is the commit boundary: if that request itself fails ambiguously, check the Release state on GitHub manually.
+The workflow fails closed: failures leave the Release as a draft. Existing version tags are never moved or overwritten, but a verified interrupted Draft for the same version may be resumed instead of duplicated. Conflicting or unexpected state fails closed.
 
 ## Technical Documentation
 

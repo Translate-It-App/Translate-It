@@ -262,8 +262,8 @@ describe('official release helper', () => {
     result.cleanup();
   });
 
-  it('finalizes by uploading release-ID assets and publishes only after verification', () => {
-    const result = run({ command: 'finalize', initialAssets: [
+  it('retries an existing valid Draft by replacing and verifying both official ZIPs', () => {
+    const result = run({ command: 'finalize-draft', initialAssets: [
       { id: 10, name: chromeName },
       { id: 12, name: firefoxName },
     ] });
@@ -276,7 +276,6 @@ describe('official release helper', () => {
       expect(args).toContain('--input');
     }
     const lastUpload = Math.max(...uploads.map(({ index }) => index));
-    const publish = result.calls.findIndex(args => isReleasePatch(args));
     expect(result.calls).toContainEqual(['api', '--method', 'DELETE', 'repos/owner/repo/releases/assets/10']);
     expect(result.calls).toContainEqual(['api', '--method', 'DELETE', 'repos/owner/repo/releases/assets/12']);
     for (const [assetId, name] of [[10, chromeName], [12, firefoxName]]) {
@@ -284,22 +283,23 @@ describe('official release helper', () => {
       const upload = uploads.find(({ args }) => args.some(value => String(value).endsWith(`?name=${name}`))).index;
       expect(upload).toBeGreaterThan(remove);
     }
-    const draftRecheck = result.calls.map((args, index) => ({ args, index }))
-      .filter(({ args, index }) => index < publish && args[0] === 'api' && args[1] === 'repos/owner/repo/releases/77' && !args.includes('--method'))
-      .at(-1).index;
-    expect(publish).toBeGreaterThan(lastUpload);
-    expect(publish).toBeGreaterThan(draftRecheck);
-    expect(result.calls[publish]).toEqual(['api', '--method', 'PATCH', 'repos/owner/repo/releases/77', '-f', `name=${releaseTitle}`, '-F', 'prerelease=false', '-f', 'make_latest=true', '-F', 'draft=false']);
+    expect(lastUpload).toBeGreaterThan(-1);
     expect(result.calls.filter(args => args[0] === 'api' && args[1] === 'repos/owner/repo/releases/77' && !args.includes('--method'))).toHaveLength(2);
-    expect(result.state.release).toMatchObject({ id: 77, tag_name: tag, draft: false, prerelease: false, name: releaseTitle });
+    expect(result.calls.some(args => args.some(value => value === 'draft=false' || value === 'make_latest=true'))).toBe(false);
+    expect(result.calls.some(isReleasePatch)).toBe(false);
+    expect(result.state.release).toMatchObject({ id: 77, tag_name: tag, draft: true });
     expect(result.state.assets.map(asset => asset.name)).toEqual([chromeName, firefoxName]);
+    const assetChecks = result.calls.map((args, index) => ({ args, index }))
+      .filter(({ args }) => args[0] === 'api' && args[1] === 'repos/owner/repo/releases/77/assets' && !args.includes('--method'));
+    expect(assetChecks).toHaveLength(4);
+    expect(assetChecks.at(-1).index).toBeGreaterThan(lastUpload);
     expect(result.calls.some(args => args[0] === 'release' && ['upload', 'edit'].includes(args[1]))).toBe(false);
     expect(result.calls.some(args => args.some(value => String(value).includes('/releases/tags/')))).toBe(false);
     result.cleanup();
   });
 
   it('rejects a draft containing unexpected assets before any mutation', () => {
-    const result = run({ command: 'finalize', initialAssets: [
+    const result = run({ command: 'finalize-draft', initialAssets: [
       { id: 10, name: chromeName },
       { id: 11, name: 'unrelated.zip' },
       { id: 12, name: firefoxName },
@@ -310,11 +310,11 @@ describe('official release helper', () => {
     result.cleanup();
   });
 
-  it('requires exactly the two expected assets after upload before publishing', () => {
+  it('requires exactly the two expected assets after upload before succeeding', () => {
     for (const extraFinalAsset of ['unrelated.zip', chromeName]) {
-      const result = run({ command: 'finalize', extraFinalAsset });
+      const result = run({ command: 'finalize-draft', extraFinalAsset });
       expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
-      // Both expected ZIPs were uploaded, but publication must not happen.
+      // Both expected ZIPs were uploaded, but verification must fail closed.
       expect(result.calls.filter(args => args.some(value => String(value).startsWith('https://uploads.github.com/')))).toHaveLength(2);
       expect(result.calls.some(args => isReleasePatch(args))).toBe(false);
       expect(result.state.release.draft).toBe(true);
@@ -324,7 +324,7 @@ describe('official release helper', () => {
 
   it('rejects missing or duplicate browser ZIPs before any GitHub mutation', () => {
     for (const options of [{ chrome: false }, { firefox: false }, { duplicateChrome: true }, { duplicateFirefox: true }]) {
-      const result = run({ ...options, command: 'finalize' });
+      const result = run({ ...options, command: 'finalize-draft' });
       expect(result.status).not.toBe(0);
       expect(result.calls).toEqual([]);
       result.cleanup();
@@ -332,7 +332,7 @@ describe('official release helper', () => {
   });
 
   it('rejects browser ZIPs whose version does not match RELEASE_TAG before any GitHub mutation', () => {
-    const result = run({ command: 'finalize', zipVersion: 'v9.0.0' });
+    const result = run({ command: 'finalize-draft', zipVersion: 'v9.0.0' });
     expect(result.status).not.toBe(0);
     expect(result.calls).toEqual([]);
     result.cleanup();
@@ -344,7 +344,7 @@ describe('official release helper', () => {
       { releaseDraft: false },
       { releaseTagName: 'v9.9.9' },
     ]) {
-      const result = run({ ...options, command: 'finalize' });
+      const result = run({ ...options, command: 'finalize-draft' });
       expect(result.status).not.toBe(0);
       expect(result.calls.some(args => args.some(value => String(value).startsWith('https://uploads.github.com/')))).toBe(false);
       expect(result.calls.some(isReleasePatch)).toBe(false);
@@ -354,7 +354,7 @@ describe('official release helper', () => {
 
   it('leaves the release draft if either upload fails', () => {
     for (const options of [{ uploadFailure: 'first' }, { uploadFailure: 'second' }]) {
-      const result = run({ ...options, command: 'finalize' });
+      const result = run({ ...options, command: 'finalize-draft' });
       expect(result.status).not.toBe(0);
       expect(result.calls.some(args => isReleasePatch(args))).toBe(false);
       expect(result.state.release.draft).toBe(true);
@@ -362,32 +362,12 @@ describe('official release helper', () => {
     }
   }, 30000);
 
-  it('treats a failed publish PATCH as ambiguous and requires manual inspection', () => {
-    const result = run({ command: 'finalize', publishFailure: true });
-    expect(result.status).not.toBe(0);
-    expect(result.calls.some(args => isReleasePatch(args))).toBe(true);
-    expect(result.stderr).toContain('publication may already have succeeded');
-    expect(result.stderr).toContain('manual inspection');
-    expect(result.stderr).not.toContain('it remains a draft');
-    result.cleanup();
-  }, 30000);
-
-  it('fails final verification when GitHub persists the wrong release title', () => {
-    const result = run({ command: 'finalize', finalTitleLie: true });
-    expect(result.status).not.toBe(0);
-    expect(result.calls.some(isReleasePatch)).toBe(true);
-    expect(result.state.release.draft).toBe(false);
-    expect(result.stderr).toContain('publication may already have succeeded and manual inspection is required');
-    expect(result.calls.filter(args => args[0] === 'api' && args[1] === 'repos/owner/repo/releases/77' && !args.includes('--method')).length).toBe(2);
-    result.cleanup();
-  });
-
-  it('rechecks the tag ref after uploads and refuses to publish if it drifts or becomes unreadable', () => {
+  it('rechecks the tag ref after uploads and fails if it drifts or becomes unreadable', () => {
     for (const options of [
       { tagShaSequence: [sha, 'b'.repeat(40)] },
       { tagFailOnRead: 2 },
     ]) {
-      const result = run({ ...options, command: 'finalize' });
+      const result = run({ ...options, command: 'finalize-draft' });
       expect(result.status).not.toBe(0);
       expect(result.calls.filter(args => args.includes(`repos/owner/repo/git/ref/tags/${tag}`) && args.includes('--jq'))).toHaveLength(2);
       expect(result.calls.filter(args => args.some(value => String(value).startsWith('https://uploads.github.com/')))).toHaveLength(2);
@@ -399,6 +379,8 @@ describe('official release helper', () => {
 
   it('preserves workflow permissions, pinned actions, build/attest/finalize ordering, and development trigger', () => {
     expect(workflow).toMatch(/workflow_dispatch:[\s\S]*?inputs:[\s\S]*?version:[\s\S]*?required:\s*true/);
+    expect(workflow).toContain('name: Build and Prepare Official Release Draft');
+    expect(workflow).not.toContain('Build and Publish Official Release');
     for (const permission of ['contents: write', 'id-token: write', 'attestations: write']) expect(workflow).toContain(permission);
     for (const pin of [
       'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
@@ -414,7 +396,7 @@ describe('official release helper', () => {
       'pnpm run publish',
       'name: Assert official browser ZIPs',
       'name: Attest release ZIP files',
-      'name: Finalize and publish release',
+      'name: Attach and verify Draft release',
     ].map(value => workflow.indexOf(value));
     expect(order.every(index => index >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
@@ -422,7 +404,7 @@ describe('official release helper', () => {
     expect(workflow).toContain('Translate-It-${RELEASE_TAG}-for-Chrome.zip');
     expect(workflow).toContain('Translate-It-${RELEASE_TAG}-for-Firefox.zip');
     expect(workflow).toContain('subject-path: |\n            dist/Publish/Translate-It-${{ steps.prepare.outputs.tag }}-for-Chrome.zip\n            dist/Publish/Translate-It-${{ steps.prepare.outputs.tag }}-for-Firefox.zip');
-    expect(workflow.trimEnd().endsWith('run: bash scripts/ci/official-release.sh finalize')).toBe(true);
+    expect(workflow.trimEnd().endsWith('run: bash scripts/ci/official-release.sh finalize-draft')).toBe(true);
     expect(workflow).not.toContain('translate-it-development-transport');
     expect(workflow).not.toMatch(/PATCH[^\n]*untagged-/);
     expect(developmentWorkflow).toContain('workflow_run:');
