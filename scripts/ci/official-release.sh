@@ -71,10 +71,6 @@ prepare() {
   vue_version=$(jq -er 'select(type == "array" and length == 1) | .[0].dependencies.vue.version | select(type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' <<<"$vue_version") || fail 'resolved Vue version is missing, ambiguous, or not a concrete semantic version.'
   custom_notes=$(node "$(dirname "${BASH_SOURCE[0]}")/release-notes.mjs" "$tag" docs/Changelog.md "$vue_version") || fail "could not parse release notes for $tag."
 
-  if [[ "$tag_exists" != true ]]; then
-    gh api --method POST "repos/$repo/git/refs" -f "ref=refs/tags/$tag" -f "sha=$sha" || fail "could not create tag $tag."
-  fi
-
   generated_json=$(gh api --method POST "repos/$repo/releases/generate-notes" -f "tag_name=$tag" -f "target_commitish=$sha") || fail "could not generate release notes for $tag."
   generated_notes=$(jq -er '.body | select(type == "string" and test("\\S"))' <<<"$generated_json") || fail 'generated release notes are empty or invalid.'
   [[ "${generated_notes%%$'\n'*}" == "## What's Changed" ]] || fail "generated release notes do not start with '## What's Changed'."
@@ -103,6 +99,10 @@ prepare() {
     body=$(printf '%s\n\n%s' "$custom_notes" "$changed_section")
   fi
   [[ "$body" =~ [^[:space:]] ]] || fail 'composed release notes are empty.'
+
+  if [[ "$tag_exists" != true ]]; then
+    gh api --method POST "repos/$repo/git/refs" -f "ref=refs/tags/$tag" -f "sha=$sha" || fail "could not create tag $tag."
+  fi
 
   release_json=$(gh api --method POST "repos/$repo/releases" \
     -f "tag_name=$tag" \

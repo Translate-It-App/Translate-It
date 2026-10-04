@@ -290,6 +290,10 @@ describe('official release helper', () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
     expect(releaseCreate(result.calls)).toEqual(expectedReleaseCreate(result.calls));
+    const generatedIndex = result.calls.indexOf(generatedNotesCall(result.calls));
+    const createIndex = result.calls.indexOf(releaseCreate(result.calls));
+    expect(generatedIndex).toBeGreaterThan(-1);
+    expect(generatedIndex).toBeLessThan(createIndex);
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=66\n`);
     result.cleanup();
   });
@@ -332,11 +336,38 @@ describe('official release helper', () => {
     const generatedIndex = result.calls.indexOf(generatedCall);
     const createIndex = result.calls.indexOf(releaseCreate(result.calls));
     expect(generatedCall).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases/generate-notes', '-f', `tag_name=${tag}`, '-f', `target_commitish=${sha}`]);
-    expect(generatedIndex).toBeGreaterThan(tagCreateIndex);
-    expect(createIndex).toBeGreaterThan(generatedIndex);
+    expect(generatedIndex).toBeLessThan(tagCreateIndex);
+    expect(tagCreateIndex).toBeLessThan(createIndex);
     expect(releaseBody(result.calls)).toContain("<summary><h4>What's Changed</h4></summary>");
     result.cleanup();
   });
+
+  it('retrieves and validates generated notes before creating the missing tag, and creates no tag when they fail', () => {
+    const success = run();
+    expect(success.status, `${success.stdout}\n${success.stderr}`).toBe(0);
+    const generatedIndex = success.calls.indexOf(generatedNotesCall(success.calls));
+    const tagCreateIndex = success.calls.findIndex(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'));
+    const createIndex = success.calls.indexOf(releaseCreate(success.calls));
+    expect(generatedIndex).toBeGreaterThan(-1);
+    expect(generatedIndex).toBeLessThan(tagCreateIndex);
+    expect(tagCreateIndex).toBeLessThan(createIndex);
+    success.cleanup();
+
+    for (const options of [
+      { generatedFailure: true },
+      { generatedResponse: 'empty' },
+      { generatedResponse: 'malformed' },
+      { generatedBody: "## What's Changed\n\n## New Contributors\n* @dev" },
+    ]) {
+      const result = run(options);
+      expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+      expect(generatedNotesCall(result.calls)).toBeTruthy();
+      expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
+      expect(releaseCreate(result.calls)).toBeUndefined();
+      expect(result.output).toBe('');
+      result.cleanup();
+    }
+  }, 30000);
 
   it('builds the custom changelog section with links and badges before generated notes, stopping at the separator', () => {
     const customItem = '- Added [fixture feature](https://example.test/feature) with [@maintainer](https://github.com/maintainer).';
@@ -468,6 +499,7 @@ describe('official release helper', () => {
       expect(result.pnpmCalls).toEqual([['list', 'vue', '--depth=0', '--json', '--lockfile-only']]);
       expect(generatedNotesCall(result.calls)).toBeUndefined();
       expect(releaseCreate(result.calls)).toBeUndefined();
+      expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
       expect(result.output).toBe('');
       result.cleanup();
     }
@@ -501,6 +533,7 @@ describe('official release helper', () => {
       const result = run({ changelog });
       expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
       expect(releaseCreate(result.calls)).toBeUndefined();
+      expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
       expect(result.output).toBe('');
       result.cleanup();
     }
@@ -521,6 +554,7 @@ describe('official release helper', () => {
       expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
       expect(generatedNotesCall(result.calls)).toBeTruthy();
       expect(releaseCreate(result.calls)).toBeUndefined();
+      expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
       expect(result.output).toBe('');
       result.cleanup();
     }
