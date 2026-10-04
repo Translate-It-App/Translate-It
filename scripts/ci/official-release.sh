@@ -93,8 +93,8 @@ verify_tag_sha() {
 
 verify_release() {
   local json=$1 draft=$2
-  jq -e --argjson id "$RELEASE_ID" --arg tag "$RELEASE_TAG" --argjson draft "$draft" \
-    '.id == $id and .tag_name == $tag and .draft == $draft' <<<"$json" >/dev/null
+  jq -e --argjson id "$RELEASE_ID" --arg tag "$RELEASE_TAG" --argjson draft "$draft" --arg expected_title "$release_title" \
+    '.id == $id and .tag_name == $tag and .draft == $draft and .name == $expected_title' <<<"$json" >/dev/null
 }
 
 replace_asset() {

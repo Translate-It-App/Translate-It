@@ -20,7 +20,7 @@ const firefoxName = `Translate-It-${tag}-for-Firefox.zip`;
 function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expectedSha = sha,
   tagExists = false, existingRelease = false, existingReleaseDraft = true, existingReleaseTitle = releaseTag, duplicateRelease = false, createdReleaseId = '77', mainFailure = '', tagFailure = '', listFailure = '',
   checkoutSha = sha, checkoutFailure = false, tagShaSequence = [], tagFailOnRead = 0, zipVersion = tag,
-  releaseDraft = true, releaseTagName = tag, releaseSha = sha, releasePrerelease = true,
+  releaseDraft = true, releaseTagName = tag, releaseName = releaseTitle, releaseSha = sha, releasePrerelease = true,
   initialAssets = [], chrome = true, firefox = true, duplicateChrome = false, duplicateFirefox = false,
   uploadFailure = '', publishFailure = false, finalTitleLie = false, extraFinalAsset = '' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'official-release-test-'));
@@ -44,7 +44,7 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
     refShaSequence: tagShaSequence,
     refReadCount: 0,
     mainSha: sha,
-    release: { id: Number(releaseId), tag_name: releaseTagName, draft: releaseDraft, prerelease: releasePrerelease, name: releaseTagName, body: 'release notes' },
+    release: { id: Number(releaseId), tag_name: releaseTagName, draft: releaseDraft, prerelease: releasePrerelease, name: releaseName, body: 'release notes' },
     releases,
     assets: initialAssets,
     nextAssetId: 100,
@@ -343,14 +343,25 @@ describe('official release helper', () => {
       { releaseSha: 'b'.repeat(40) },
       { releaseDraft: false },
       { releaseTagName: 'v9.9.9' },
+      { releaseName: 'Wrong Title' },
     ]) {
       const result = run({ ...options, command: 'finalize-draft' });
       expect(result.status).not.toBe(0);
       expect(result.calls.some(args => args.some(value => String(value).startsWith('https://uploads.github.com/')))).toBe(false);
       expect(result.calls.some(isReleasePatch)).toBe(false);
+      if (options.releaseName) expect(result.state.release.draft).toBe(true);
       result.cleanup();
     }
   }, 30000);
+
+  it('fails closed on a wrong release title without publishing or mutating the draft', () => {
+    const result = run({ command: 'finalize-draft', releaseName: 'Wrong Title' });
+    expect(result.status).not.toBe(0);
+    expect(result.calls.some(isReleasePatch)).toBe(false);
+    expect(result.calls.filter(args => args.some(value => String(value).startsWith('https://uploads.github.com/')))).toHaveLength(0);
+    expect(result.state.release.draft).toBe(true);
+    result.cleanup();
+  });
 
   it('leaves the release draft if either upload fails', () => {
     for (const options of [{ uploadFailure: 'first' }, { uploadFailure: 'second' }]) {
