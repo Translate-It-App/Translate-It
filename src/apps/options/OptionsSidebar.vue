@@ -21,7 +21,7 @@
           <h1>{{ t('name') }}</h1>
           <span>{{ manifestVersion }}</span>
         </a>
-        <p>{{ t('description') }}</p>
+        <p>{{ t('options_description', 'Translate the web, your way.') }}</p>
       </div>
       
       <div class="sidebar-section theme-controls">
