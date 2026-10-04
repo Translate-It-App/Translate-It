@@ -1,5 +1,7 @@
 name: Official Release
 
+run-name: "Translate It! ${{ inputs.version }}"
+
 on:
   workflow_dispatch:
     inputs:

@@ -675,6 +675,10 @@ describe('official release helper', () => {
     expect(workflow).toMatch(/workflow_dispatch:[\s\S]*?inputs:[\s\S]*?version:[\s\S]*?required:\s*true/);
     expect(workflow).toContain('name: Build and Prepare Official Release Draft');
     expect(workflow).not.toContain('Build and Publish Official Release');
+    expect(workflow).toContain('name: Official Release');
+    expect(workflow).toContain('run-name: "Translate It! ${{ inputs.version }}"');
+    expect(workflow).toMatch(/run-name:\s*"Translate It! \$\{\{ inputs\.version \}\}"/);
+    expect(workflow).not.toMatch(/run-name:[^\n]*v\d+\.\d+\.\d+/);
     for (const permission of ['contents: write', 'id-token: write', 'attestations: write']) expect(workflow).toContain(permission);
     for (const pin of [
       'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
