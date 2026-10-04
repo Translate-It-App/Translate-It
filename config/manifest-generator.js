@@ -173,6 +173,7 @@ function generateFirefoxManifest(baseManifest) {
     ...baseManifest,
     manifest_version: 3,
     name: '__MSG_nameFirefox__',
+    description: '__MSG_descriptionFirefox__',
     
     // Firefox MV3 background configuration
     background: {

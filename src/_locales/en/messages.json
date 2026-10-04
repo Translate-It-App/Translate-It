@@ -20,6 +20,9 @@
   "description": {
     "message": "Translator for selected text, web pages, PDFs, subtitles, images, and live dubbing, with traditional and AI providers."
   },
+  "descriptionFirefox": {
+    "message": "Translator for selected text, web pages, PDFs, subtitles, and images, with traditional and AI providers."
+  },
   "theme_section_title": {
     "message": "Theme"
   },

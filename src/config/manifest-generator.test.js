@@ -28,4 +28,12 @@ describe('live dubbing manifest capability', () => {
     expect(resources).not.toContain('src/html/offscreen.html');
     expect(resources).not.toContain('src/html/offscreen.js');
   });
+
+  it('uses the live-dubbing description on Chrome and a dubbing-free description on Firefox', () => {
+    const chromeManifest = generateManifest('chrome');
+    const firefoxManifest = generateManifest('firefox');
+
+    expect(chromeManifest.description).toBe('__MSG_description__');
+    expect(firefoxManifest.description).toBe('__MSG_descriptionFirefox__');
+  });
 });

@@ -20,6 +20,9 @@
   "description": {
     "message": "選択したテキスト、Webページ、PDF、字幕、画像を翻訳し、ライブ吹き替えにも対応。従来型とAIベースの翻訳プロバイダーを利用できます。"
   },
+  "descriptionFirefox": {
+    "message": "選択したテキスト、Webページ、PDF、字幕、画像を翻訳。従来型とAIベースの翻訳プロバイダーを利用できます。"
+  },
   "theme_section_title": {
     "message": "テーマ"
   },
