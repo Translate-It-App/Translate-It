@@ -27,7 +27,7 @@ fetch_releases() {
 }
 
 prepare() {
-  local tag=$RELEASE_TAG version sha tag_response releases_json match_count release_id output tag_exists ref_sha release_json custom_notes generated_json generated_notes body
+  local tag=$RELEASE_TAG version sha tag_response releases_json match_count release_id output tag_exists ref_sha release_json custom_notes generated_json generated_notes body vue_version
   output=${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}
   [[ -w "$output" ]] || fail 'GITHUB_OUTPUT is not writable.'
   valid_tag "$tag" || fail 'RELEASE_TAG must match vMAJOR.MINOR.PATCH.'
@@ -67,7 +67,9 @@ prepare() {
     fail "found an unexpected release for tag $tag without its Git ref."
   fi
 
-  custom_notes=$(node "$(dirname "${BASH_SOURCE[0]}")/release-notes.mjs" "$tag" docs/Changelog.md) || fail "could not parse release notes for $tag."
+  vue_version=$(pnpm list vue --depth=0 --json --lockfile-only) || fail 'could not resolve Vue version from the pnpm lockfile.'
+  vue_version=$(jq -er 'select(type == "array" and length == 1) | .[0].dependencies.vue.version | select(type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' <<<"$vue_version") || fail 'resolved Vue version is missing, ambiguous, or not a concrete semantic version.'
+  custom_notes=$(node "$(dirname "${BASH_SOURCE[0]}")/release-notes.mjs" "$tag" docs/Changelog.md "$vue_version") || fail "could not parse release notes for $tag."
 
   if [[ "$tag_exists" != true ]]; then
     gh api --method POST "repos/$repo/git/refs" -f "ref=refs/tags/$tag" -f "sha=$sha" || fail "could not create tag $tag."

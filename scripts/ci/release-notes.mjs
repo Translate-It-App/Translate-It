@@ -11,10 +11,11 @@ function fail(message) {
   process.exit(1);
 }
 
-const [tag, changelogPath] = process.argv.slice(2);
-if (!tag || !/^v\d+\.\d+\.\d+$/.test(tag) || !changelogPath || process.argv.length !== 4) {
-  fail('usage: release-notes.mjs vMAJOR.MINOR.PATCH docs/Changelog.md');
+const [tag, changelogPath, vueVersion] = process.argv.slice(2);
+if (!tag || !/^v\d+\.\d+\.\d+$/.test(tag) || !changelogPath || process.argv.length !== 5) {
+  fail('usage: release-notes.mjs vMAJOR.MINOR.PATCH docs/Changelog.md VUE_VERSION');
 }
+if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(vueVersion)) fail('VUE_VERSION must be a concrete semantic version');
 
 let changelog;
 try {
@@ -68,7 +69,7 @@ const customNotes = [
   `  <a href="${repository}"><img src="https://img.shields.io/badge/Chrome%20&%20Firefox-Supported-brightgreen" alt="Chrome & Firefox Supported"></a>`,
   '  <a href="https://webpack.js.org/"><img src="https://img.shields.io/badge/Bundled%20with-Webpack-8dd6f9" alt="Bundled with Webpack"></a>',
   `  <a href="${repository}"><img src="https://img.shields.io/badge/i18n-Multi--Language-blueviolet" alt="i18n Multi-Language"></a>`,
-  `  <a href="${repository}"><img src="https://img.shields.io/badge/Vue.js-3.5.31-4FC08D?logo=vue.js&logoColor=4FC08D" alt="Vue.js 3.5.31"></a>`,
+  `  <a href="${repository}"><img src="https://img.shields.io/badge/Vue.js-${vueVersion}-4FC08D?logo=vue.js&logoColor=4FC08D" alt="Vue.js ${vueVersion}"></a>`,
   '</div>',
   '',
   '---',

@@ -10,7 +10,9 @@ const script = join(root, 'scripts/ci/official-release.sh');
 const workflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
 const developmentWorkflow = readFileSync(join(root, '.github/workflows/development-release.yml'), 'utf8');
 const scriptSource = readFileSync(script, 'utf8');
-const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+const releaseNotesSource = readFileSync(join(root, 'scripts/ci/release-notes.mjs'), 'utf8');
+const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const version = packageJson.version;
 const tag = `v${version}`;
 const releaseTitle = `Translate It! ${tag}`;
 const sha = 'a'.repeat(40);
@@ -23,12 +25,13 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
   releaseDraft = true, releaseTagName = tag, releaseName = releaseTitle, releaseSha = sha, releasePrerelease = true,
   initialAssets = [], chrome = true, firefox = true, duplicateChrome = false, duplicateFirefox = false,
   uploadFailure = '', publishFailure = false, finalTitleLie = false, extraFinalAsset = '', createResponse = '',
-  changelog, generatedBody = '## GitHub changes', generatedResponse = 'valid', generatedFailure = false } = {}) {
+  changelog, generatedBody = '## GitHub changes', generatedResponse = 'valid', generatedFailure = false,
+  vueJson = '[{"dependencies":{"vue":{"version":"3.5.31"}}}]', vueFailure = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'official-release-test-'));
   const cwd = changelog === undefined ? root : dir;
   if (changelog !== undefined) {
     mkdirSync(join(dir, 'docs'), { recursive: true });
-    writeFileSync(join(dir, 'package.json'), JSON.stringify({ version }));
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ version, dependencies: { vue: packageJson.dependencies.vue } }));
     writeFileSync(join(dir, 'docs/Changelog.md'), changelog);
   }
   const publishDir = join(dir, 'publish');
@@ -41,8 +44,10 @@ function run({ command = 'prepare', releaseTag = tag, releaseId = '77', expected
   const callsFile = join(dir, 'calls.jsonl');
   const outputFile = join(dir, 'github-output');
   const stateFile = join(dir, 'state.json');
+  const pnpmCallsFile = join(dir, 'pnpm-calls.jsonl');
   writeFileSync(callsFile, '');
   writeFileSync(outputFile, '');
+  writeFileSync(pnpmCallsFile, '');
   const releaseCandidate = { id: 66, tag_name: releaseTag, name: existingReleaseTitle, body: 'Maintainer-edited draft body', draft: existingReleaseDraft };
   const releases = existingRelease ? [releaseCandidate, ...(duplicateRelease ? [{ ...releaseCandidate, id: 67 }] : [])] : [];
   const state = {
@@ -181,6 +186,14 @@ if (process.env.MOCK_GIT_FAILURE) { process.stderr.write('git failed'); process.
 process.stdout.write(process.env.MOCK_CHECKOUT_SHA);
 `, { mode: 0o755 });
 
+  const pnpm = join(dir, 'pnpm');
+  writeFileSync(pnpm, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.appendFileSync(process.env.MOCK_PNPM_CALLS, JSON.stringify(process.argv.slice(2)) + '\\n');
+if (process.env.MOCK_VUE_FAILURE) { process.stderr.write('vue resolution failed'); process.exit(1); }
+process.stdout.write(process.env.MOCK_VUE_JSON);
+`, { mode: 0o755 });
+
   const env = {
     ...process.env,
     PATH: `${dir}${delimiter}${process.env.PATH}`,
@@ -193,6 +206,9 @@ process.stdout.write(process.env.MOCK_CHECKOUT_SHA);
     GITHUB_OUTPUT: outputFile,
     MOCK_STATE: stateFile,
     MOCK_CALLS: callsFile,
+    MOCK_PNPM_CALLS: pnpmCallsFile,
+    MOCK_VUE_JSON: vueJson,
+    MOCK_VUE_FAILURE: vueFailure ? '1' : '',
     MOCK_TAG: releaseTag,
     MOCK_RELEASE_ID: releaseId,
     MOCK_CREATED_RELEASE_ID: createdReleaseId,
@@ -219,6 +235,7 @@ process.stdout.write(process.env.MOCK_CHECKOUT_SHA);
     stdout: result.stdout,
     stderr: result.stderr,
     calls,
+    pnpmCalls: readFileSync(pnpmCallsFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)),
     state: JSON.parse(readFileSync(stateFile, 'utf8')),
     output: readFileSync(outputFile, 'utf8'),
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
@@ -284,6 +301,7 @@ describe('official release helper', () => {
     expect(generatedNotesCall(result.calls)).toBeUndefined();
     expect(result.calls.some(args => args[0] === 'api' && args.includes('--method') && args.includes('PATCH'))).toBe(false);
     expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
+    expect(result.pnpmCalls).toEqual([]);
     expect(result.state.releases[0].body).toBe('Maintainer-edited draft body');
     result.cleanup();
   });
@@ -306,6 +324,8 @@ describe('official release helper', () => {
     expect(result.state.release.name).toBe(releaseTitle);
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=77\n`);
     expect(result.calls.some(isReleasePatch)).toBe(false);
+    expect(result.state.release.draft).toBe(true);
+    expect(result.calls.some(args => args[0] === 'api' && args.includes('--method') && args.includes('PATCH'))).toBe(false);
     const generatedCall = generatedNotesCall(result.calls);
     const tagCreateIndex = result.calls.findIndex(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'));
     const generatedIndex = result.calls.indexOf(generatedCall);
@@ -319,7 +339,8 @@ describe('official release helper', () => {
 
   it('builds the custom changelog section with links and badges before generated notes, stopping at the separator', () => {
     const customItem = '- Added [fixture feature](https://example.test/feature) with [@maintainer](https://github.com/maintainer).';
-    const result = run({ changelog: changelogEntry(customItem), generatedBody: 'GENERATED_NOTES' });
+    const vueVersion = '9.9.9';
+    const result = run({ changelog: changelogEntry(customItem), generatedBody: 'GENERATED_NOTES', vueJson: JSON.stringify([{ dependencies: { vue: { version: vueVersion } } }]) });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     const body = releaseBody(result.calls);
     expect(body).toContain(`#### 🌍 Translate It ${tag} – Released on 04 October 2026`);
@@ -329,9 +350,14 @@ describe('official release helper', () => {
       'https://img.shields.io/badge/Chrome%20&%20Firefox-Supported-brightgreen',
       'https://img.shields.io/badge/Bundled%20with-Webpack-8dd6f9',
       'https://img.shields.io/badge/i18n-Multi--Language-blueviolet',
-      'https://img.shields.io/badge/Vue.js-3.5.31-4FC08D?logo=vue.js&logoColor=4FC08D',
+      `https://img.shields.io/badge/Vue.js-${vueVersion}-4FC08D?logo=vue.js&logoColor=4FC08D`,
     ];
     for (const badgeUrl of badgeUrls) expect(body).toContain(`<img src="${badgeUrl}"`);
+    expect(body).toContain(`<img src="https://img.shields.io/badge/Vue.js-${vueVersion}-4FC08D?logo=vue.js&logoColor=4FC08D"`);
+    expect(body).toContain(`alt="Vue.js ${vueVersion}"`);
+    expect(body).not.toContain('Vue.js-^');
+    expect(body).not.toContain(`Vue.js-${packageJson.dependencies.vue}`);
+    expect(result.pnpmCalls).toEqual([['list', 'vue', '--depth=0', '--json', '--lockfile-only']]);
     expect(body).not.toContain(`version-${tag}-blue.svg`);
     expect(body.match(/<img src="https:\/\/img\.shields\.io\/badge\//g)).toHaveLength(5);
     expect(body).toContain('https://chromewebstore.google.com/detail/translate-it/jfkpmcnebiamnbbkpmmldomjijiahmbd');
@@ -348,6 +374,27 @@ describe('official release helper', () => {
     expect(generatedNotesCall(result.calls)).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases/generate-notes', '-f', `tag_name=${tag}`, '-f', `target_commitish=${sha}`]);
     result.cleanup();
   });
+
+  it('keeps Vue version discovery dynamic and fails closed on invalid pnpm results before Draft creation', () => {
+    expect(releaseNotesSource.includes('3.5.31')).toBe(false);
+    const invalidResults = [
+      { vueJson: '' },
+      { vueJson: 'not json' },
+      { vueJson: '[{"dependencies":{"vue":{"version":"9.9.9"}}},{"dependencies":{"vue":{"version":"8.8.8"}}}]' },
+      { vueJson: '[{"dependencies":{"vue":{"version":"^3.5.31"}}}]' },
+      { vueJson: '[{"dependencies":{"vue":{"version":"3.5.31-beta"}}}]' },
+      { vueFailure: true },
+    ];
+    for (const options of invalidResults) {
+      const result = run(options);
+      expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+      expect(result.pnpmCalls).toEqual([['list', 'vue', '--depth=0', '--json', '--lockfile-only']]);
+      expect(generatedNotesCall(result.calls)).toBeUndefined();
+      expect(releaseCreate(result.calls)).toBeUndefined();
+      expect(result.output).toBe('');
+      result.cleanup();
+    }
+  }, 30000);
 
   it('preserves changelog categories, links, bold, and code while converting app links', () => {
     const itemAdded = '- Added [external link](https://example.test) and [Settings [advanced]](#/providers) with **bold** and `code`.';
@@ -380,7 +427,7 @@ describe('official release helper', () => {
       expect(result.output).toBe('');
       result.cleanup();
     }
-  });
+  }, 30000);
 
   it('fails closed when GitHub-generated notes fail or return an empty or malformed body', () => {
     for (const options of [
@@ -396,7 +443,7 @@ describe('official release helper', () => {
       expect(result.output).toBe('');
       result.cleanup();
     }
-  });
+  }, 30000);
 
   it('retries an existing valid Draft by replacing and verifying both official ZIPs', () => {
     const result = run({ command: 'finalize-draft', initialAssets: [
@@ -507,7 +554,7 @@ describe('official release helper', () => {
       expect(result.calls.some(isReleasePatch)).toBe(false);
       result.cleanup();
     }
-  });
+  }, 30000);
 
   it('lists releases only once when creating a new draft from scratch', () => {
     const result = run();
