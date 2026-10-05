@@ -65,7 +65,7 @@
     </button>
 
     <button
-      v-if="showTTS"
+      v-if="showTts"
       class="ti-icon-btn"
       :class="ttsClasses"
       :title="ttsTitle"
@@ -134,7 +134,7 @@ const props = defineProps({
     type: Boolean,
     default: true
   },
-  showTTS: {
+  showTts: {
     type: Boolean,
     default: true
   },

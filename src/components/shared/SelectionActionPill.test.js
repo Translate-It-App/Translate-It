@@ -8,7 +8,7 @@ describe('SelectionActionPill.vue', () => {
     const wrapper = mount(SelectionActionPill, {
       props: {
         showTranslate: true,
-        showTTS: true,
+        showTts: true,
         translateTitle: 'Translate selected text',
         translateAriaLabel: 'Translate selected text',
         ttsTitle: 'Speak text',
@@ -29,7 +29,7 @@ describe('SelectionActionPill.vue', () => {
     const wrapper = mount(SelectionActionPill, {
       props: {
         showTranslate: true,
-        showTTS: true,
+        showTts: true,
         translateTitle: 'Translate selected text',
         translateAriaLabel: 'Translate selected text',
         ttsTitle: 'Speak text',
@@ -44,6 +44,43 @@ describe('SelectionActionPill.vue', () => {
 
     expect(wrapper.emitted('translate')).toEqual([[]])
     expect(wrapper.emitted('tts')).toEqual([[]])
+  })
+
+  it('renders only the Translate button when showTts is false', () => {
+    const wrapper = mount(SelectionActionPill, {
+      props: {
+        showTranslate: true,
+        showTts: false
+      }
+    })
+
+    const buttons = wrapper.findAll('button')
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0].classes()).toContain('ti-icon-btn--translate')
+  })
+
+  it('renders only the TTS button when showTranslate is false', () => {
+    const wrapper = mount(SelectionActionPill, {
+      props: {
+        showTranslate: false,
+        showTts: true
+      }
+    })
+
+    const buttons = wrapper.findAll('button')
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0].classes()).not.toContain('ti-icon-btn--translate')
+  })
+
+  it('honors the kebab-cased show-tts attribute used by consumers', () => {
+    const wrapper = mount(SelectionActionPill, {
+      props: {
+        showTranslate: true,
+        'show-tts': false
+      }
+    })
+
+    expect(wrapper.findAll('button')).toHaveLength(1)
   })
 
   it('does not import the WindowsManager stack', () => {
