@@ -374,6 +374,46 @@
           font-size: 0.85em !important;
           margin-inline-start: calc(var(--menu-icon-box) + var(--menu-gap)) !important;
         }
+
+        /* informational group above the note: native divider + muted note +
+           small text link. Class-scoped so the primary This Page/This Site
+           buttons keep their existing look. Divider takes the panel's own
+           text color (currentcolor) so both themes stay in sync; the note's
+           #5b6472 keeps >4.5:1 on the 0.92-white menu over a dark page. */
+        .fab-scope-separator {
+          height: 1px !important;
+          border: none !important;
+          margin: 6px 4px 2px calc(var(--menu-icon-box) + var(--menu-gap)) !important;
+          background-color: currentcolor !important;
+          opacity: 0.12 !important;
+        }
+
+        .fab-scope-note {
+          color: #5b6472 !important;
+          overflow-wrap: anywhere !important;
+        }
+
+        .fab-scope-link {
+          font-size: 0.85em !important;
+          font-weight: 600 !important;
+          padding: 4px !important;
+
+          /* content-sized action, not a full-row pill: flex-start makes the
+             box hug the label so the focus ring surrounds the link only;
+             max-width = row content minus the shared button indent (34px, from
+             the generic button rule) keeps long localized action labels
+             wrapping inside the column instead of overflowing. */
+          align-self: flex-start !important;
+          min-width: 0 !important;
+          max-width: calc(100% - var(--menu-icon-box) - var(--menu-gap)) !important;
+          overflow-wrap: anywhere !important;
+
+          /* explicit focus ring in both themes (dark recolors below) */
+          &:focus-visible {
+            outline: 2px solid #1a5fb4 !important;
+            outline-offset: 1px !important;
+          }
+        }
       }
     }
   }
@@ -402,6 +442,17 @@
           &:hover,
           &:focus-visible {
             background-color: rgba(74, 144, 226, 0.18) !important;
+          }
+        }
+
+        /* text-link affordance instead of the full-row pill */
+        .fab-scope-link {
+          color: #1a5fb4 !important;
+
+          &:hover {
+            background-color: transparent !important;
+            color: #1a5fb4 !important;
+            text-decoration: underline !important;
           }
         }
       }
@@ -438,6 +489,22 @@
           &:focus-visible {
             background-color: rgba(255, 255, 255, 0.16) !important;
           }
+        }
+
+        /* 0.6 white keeps the 11.9px note >4.5:1 on the 0.95-dark menu
+           over both light and dark pages behind the translucent panel */
+        .fab-scope-note { color: rgba(255, 255, 255, 0.6) !important; }
+
+        .fab-scope-link {
+          color: #60a5fa !important;
+
+          &:hover {
+            background-color: transparent !important;
+            color: #60a5fa !important;
+            text-decoration: underline !important;
+          }
+
+          &:focus-visible { outline-color: #60a5fa !important; }
         }
       }
 

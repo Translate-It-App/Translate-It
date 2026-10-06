@@ -422,6 +422,9 @@
   "auto_translate_scope_menu_label": {
     "message": "ترجمه خودکار در بازدیدهای بعدی"
   },
+  "auto_translate_scope_covered_note": {
+    "message": "از قبل تحت پوشش یک قانون گسترده‌تر است"
+  },
   "auto_translate_managed_by_broader_rule": {
     "message": "توسط یک قانون گسترده‌تر مدیریت می‌شود"
   },

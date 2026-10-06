@@ -70,7 +70,7 @@ describe('DesktopFabMenu SCSS layout contract', () => {
     expect(availableWidth).toMatch(/100vw/);
 
     const scopes = block(/\.fab-auto-translate-scopes\s*\{/);
-    const panelDeclarations = scopes.slice(0, scopes.indexOf('button'));
+    const panelDeclarations = scopes.slice(0, scopes.indexOf('{'));
     expect(declaration(panelDeclarations, 'contain')).toBe('inline-size !important');
     expect(declaration(panelDeclarations, 'width')).toBe('100% !important');
     expect(declaration(panelDeclarations, 'flex')).toBe('0 0 100% !important');
@@ -81,6 +81,59 @@ describe('DesktopFabMenu SCSS layout contract', () => {
     const labelColumnIndent = /calc\(var\(--menu-icon-box\)\s*\+\s*var\(--menu-gap\)\)/;
     expect(declaration(scopeButton, 'margin-inline-start')).toMatch(labelColumnIndent);
     expect(declaration(scopeButton, 'width')).toBe('auto !important');
+    expect(declaration(scopeInfo, 'font-size')).toBe('0.85em !important');
     expect(declaration(scopeInfo, 'margin-inline-start')).toMatch(labelColumnIndent);
+
+    const separator = block(/\.fab-auto-translate-scopes\s*\{[\s\S]*?\.fab-scope-separator\s*\{/);
+    const separatorOpacity = Number.parseFloat(declaration(separator, 'opacity'));
+    const separatorAlpha = Number.parseFloat(
+      declaration(separator, 'border-color')?.match(/,\s*(0?\.\d+)\s*\)/)?.[1],
+    );
+    expect(separatorOpacity <= 0.5 || separatorAlpha <= 0.5).toBe(true);
+    expect(declaration(separator, 'margin') ?? declaration(separator, 'margin-inline-start'))
+      .toMatch(labelColumnIndent);
+
+    const note = block(/\.fab-auto-translate-scopes\s*\{[\s\S]*?\.fab-scope-note\s*\{/);
+    expect(declaration(note, 'color')).toBe('#5b6472 !important');
+    expect(declaration(note, 'overflow-wrap')).toMatch(/anywhere/);
+    expect(declaration(note, 'margin-inline-start')).toBeUndefined();
+    expect(declaration(note, 'font-size')).toBeUndefined();
+    const darkNote = block(/&\.theme-dark\s*\{[\s\S]*?\.fab-scope-note\s*\{/);
+    expect(declaration(darkNote, 'color')).toBe('rgba(255, 255, 255, 0.6) !important');
+
+    const manageLink = block(/\.fab-auto-translate-scopes\s*\{[\s\S]*?\.fab-scope-link\s*\{/);
+    const linkFontSize = declaration(manageLink, 'font-size') ?? '';
+    const linkPadding = declaration(manageLink, 'padding') ?? '';
+    const fontSizeValue = Number.parseFloat(linkFontSize);
+    const compactFont = (linkFontSize.endsWith('px') && fontSizeValue < 13)
+      || ((linkFontSize.endsWith('em') || linkFontSize.endsWith('rem')) && fontSizeValue < 1);
+    const paddingValue = Number.parseFloat(linkPadding);
+    expect(compactFont || paddingValue < 5).toBe(true);
+    const focusVisible = block(/\.fab-scope-link\s*\{[\s\S]*?&:focus-visible\s*\{/);
+    expect(declaration(focusVisible, 'outline')).toMatch(/\S/);
+    expect(declaration(manageLink, 'margin-inline-start')).toBeUndefined();
+
+    const lightLink = block(/&\.theme-light\s*\{[\s\S]*?\.fab-scope-link\s*\{/);
+    const darkLink = block(/&\.theme-dark\s*\{[\s\S]*?\.fab-scope-link\s*\{/);
+    const lightIdleColor = declaration(manageLink, 'color') ?? declaration(lightLink, 'color');
+    expect(lightIdleColor).toBe('#1a5fb4 !important');
+    expect(declaration(darkLink, 'color')).toMatch(/(?:#60a5fa|rgb\(96,\s*165,\s*250\))\s*!important/);
+    expect(lightIdleColor).not.toBe(declaration(note, 'color'));
+    expect(declaration(darkLink, 'color')).not.toBe(declaration(darkNote, 'color'));
+
+    const linkAlignment = declaration(manageLink, 'align-self') ?? '';
+    const linkWidth = declaration(manageLink, 'width') ?? declaration(manageLink, 'inline-size') ?? '';
+    const linkFlex = declaration(manageLink, 'flex') ?? '';
+    expect(/(?:flex-start|start)/.test(linkAlignment)
+      || /(?:fit-content|max-content)/.test(linkWidth)
+      || /0\s+0\s+auto/.test(linkFlex)).toBe(true);
+    expect(declaration(manageLink, 'min-width')).toBe('0 !important');
+    expect(declaration(manageLink, 'overflow-wrap')).toBe('anywhere !important');
+    const linkMaxWidth = declaration(manageLink, 'max-width')
+      ?? declaration(manageLink, 'max-inline-size')
+      ?? '';
+    expect(linkMaxWidth).toMatch(/calc\(/);
+    expect(/--menu-icon-box/.test(linkMaxWidth) && /--menu-gap/.test(linkMaxWidth)
+      || /var\(--menu-(?:label-)?indent/.test(linkMaxWidth)).toBe(true);
   });
 });

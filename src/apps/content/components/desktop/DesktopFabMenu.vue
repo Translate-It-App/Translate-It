@@ -155,7 +155,14 @@
                 <span>{{ hasSiteRule ? '✓' : '' }}</span>{{ t('auto_translate_scope_this_site', 'This Site') }}
               </button>
               <template v-if="showManageRules">
-                <div>{{ t('auto_translate_managed_by_broader_rule', 'Managed by a broader rule') }}</div><button @click.stop="openManageRules">
+                <hr class="fab-scope-separator">
+                <div class="fab-scope-note">
+                  {{ t('auto_translate_scope_covered_note', 'Already covered by a broader rule') }}
+                </div>
+                <button
+                  class="fab-scope-link"
+                  @click.stop="openManageRules"
+                >
                   {{ t('auto_translate_manage_rules', 'Manage Rules') }}
                 </button>
               </template>

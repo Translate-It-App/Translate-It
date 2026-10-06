@@ -422,6 +422,9 @@
   "auto_translate_scope_menu_label": {
     "message": "Auto-translate on future visits"
   },
+  "auto_translate_scope_covered_note": {
+    "message": "Already covered by a broader rule"
+  },
   "auto_translate_managed_by_broader_rule": {
     "message": "Managed by a broader rule"
   },

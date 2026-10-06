@@ -226,6 +226,9 @@ describe('DesktopFabMenu page command transport', () => {
     await wrapper.vm.$nextTick();
     await wrapper.get('.fab-menu-item-secondary-btn').trigger('click');
     expect(wrapper.find('.fab-auto-translate-scopes').exists()).toBe(true);
+    expect(wrapper.find('.fab-scope-separator').exists()).toBe(false);
+    expect(wrapper.find('.fab-scope-note').exists()).toBe(false);
+    expect(wrapper.find('.fab-scope-link').exists()).toBe(false);
     expect(document.activeElement).toBe(wrapper.get('.fab-auto-translate-scopes button').element);
     expect(wrapper.get('.fab-menu-item-secondary-btn').attributes('aria-haspopup')).toBeUndefined();
     expect(wrapper.get('.fab-menu-item-secondary-btn').attributes('aria-expanded')).toBe('true');
@@ -240,6 +243,34 @@ describe('DesktopFabMenu page command transport', () => {
     expect(wrapper.find('.fab-auto-translate-scopes').exists()).toBe(false);
     expect(document.activeElement).toBe(wrapper.get('.fab-menu-item-secondary-btn').element);
     expect(wrapper.vm.isMenuOpen).toBe(true);
+    wrapper.unmount();
+  });
+
+  it('shows broader-rule guidance and returns focus to the star on Escape', async () => {
+    mocks.autoRules.showManageRules.value = true;
+    const wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    wrapper.vm.isReady = true;
+    wrapper.vm.isMenuOpen = true;
+    await wrapper.vm.$nextTick();
+    const star = wrapper.get('.fab-menu-item-secondary-btn');
+    await star.trigger('click');
+
+    const separator = wrapper.get('.fab-auto-translate-scopes .fab-scope-separator');
+    const note = wrapper.get('.fab-auto-translate-scopes .fab-scope-note');
+    const manageRules = wrapper.get('.fab-auto-translate-scopes .fab-scope-link');
+    expect(separator.element.tagName).toBe('HR');
+    expect(note.element.tagName).toBe('DIV');
+    expect(note.element.tagName).not.toBe('BUTTON');
+    expect(note.text()).toContain('auto_translate_scope_covered_note');
+    expect(manageRules.element.tagName).toBe('BUTTON');
+    expect(manageRules.text()).toContain('auto_translate_manage_rules');
+
+    await manageRules.trigger('click');
+    expect(mocks.autoRules.openManageRules).toHaveBeenCalledOnce();
+    await manageRules.trigger('keydown', { key: 'Escape' });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.fab-auto-translate-scopes').exists()).toBe(false);
+    expect(document.activeElement).toBe(star.element);
     wrapper.unmount();
   });
 
