@@ -84,15 +84,15 @@ Add the appropriate input or toggle in the relevant tab component (under `src/co
 
 ## Highlighting & Spotlight System
 
-The Options page features a robust **Spotlight System** designed to direct user attention to specific settings or sections via deep-linking. This is particularly useful for linking from the `Changelog` or `Help` pages directly to a relevant configuration.
+The Options page features a **Spotlight System** designed to direct user attention to specific settings or sections via deep-linking. This is particularly useful for linking from the `Changelog` or `Help` pages directly to a relevant configuration.
 
 ### How it Works
-The system is managed centrally and follows a 5-step sequence:
+The system is managed centrally and follows this sequence:
 1.  **Detection**: The `OptionsLayout.vue` watches for a `highlight` query parameter in the URL (e.g., `#/languages?highlight=BILINGUAL_SECTION`).
-2.  **Reveal**: If the target element is hidden inside an accordion or a collapsed section, the `useHighlightManager` triggers a "reveal" action to make it visible.
-3.  **Scroll**: The page performs a smooth scroll to position the target element at the center of the viewport.
-4.  **Pulse Animation**: A non-intrusive CSS animation (`ti-highlight-pulse`) is applied to the element, creating a spotlight effect with professional spacing around the content.
-5.  **Cleanup**: The `highlight` parameter is automatically removed from the URL after the animation starts to keep the browser history clean.
+2.  **Reveal**: Exact highlight targets may have declarative reveal descriptors for an accordion or generic non-accordion UI. The manager emits `options-reveal-intent` with the string intent as its detail for generic UI; the owning tab/component handles that intent and opens its own drawer, modal, or panel. Existing accordions continue to use `options-reveal-accordion` with a raw string detail.
+3.  **Target ready**: After the reveal, the manager waits up to 1500ms for the target to become available.
+4.  **Scroll and highlight**: The page smoothly scrolls the target to the center of the viewport and applies the `ti-highlight-pulse` animation.
+5.  **Cleanup**: The `highlight` parameter is automatically removed from the URL as the target-ready/scroll/highlight pipeline completes, keeping the browser history clean.
 
 ### Developer Guide: Highlighting an Element
 
@@ -110,19 +110,23 @@ Add a unique `id` attribute to the target Vue component or HTML element.
 />
 ```
 
-#### 2. Configure Reveal Logic (For Accordions)
-If the element is inside a `BaseAccordion`, ensure the following:
+#### 2. Configure Reveal Logic (When Needed)
+If the element needs a reveal before it can be highlighted, provide a declarative reveal descriptor for its exact target. For an element inside a `BaseAccordion`, ensure the following:
 -   **Global Rules**: Add a rule to the `globalReveal` function in `src/apps/options/composables/useHighlightManager.js` so the system knows which accordion to open based on the ID prefix.
--   **Tab Listener**: Ensure the Tab component has a listener for the `options-reveal-accordion` event in its `onMounted` hook to update its internal `activeAccordion` state.
+-   **Tab Listener**: Ensure the Tab component listens for `options-reveal-accordion` and updates its internal `activeAccordion` state. This event retains its raw string detail for existing accordion handling.
+
+For a generic non-accordion UI such as a drawer, modal, or panel, use an intent descriptor and have the owning tab/component listen for `options-reveal-intent` and open that UI itself. Its detail is the intent string.
 
 ```javascript
-// Example reveal rule in useHighlightManager.js
+// Example accordion reveal rule in useHighlightManager.js
 if (id.startsWith('MY_PREFIX_')) return 'my-accordion-name';
 ```
 
 #### 3. Create the Link
 Use the following URL structure to trigger the highlight:
 `options.html#/{tab_name}?highlight={element_id}`
+
+For example, `options.html#/activation?highlight=WHOLE_PAGE_AUTO_TRANSLATE_RULES` reveals the existing rules accordion and highlights its target. `options.html#/activation?highlight=WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER` opens the rules drawer through its owning component and highlights that target. Both use the existing `highlight` parameter and target-ready/scroll/highlight/query-cleanup pipeline.
 
 ---
 

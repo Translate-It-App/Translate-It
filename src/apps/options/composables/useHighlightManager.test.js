@@ -118,6 +118,71 @@ describe('useHighlightManager - readiness detection', () => {
     expect(el.classList.contains('is-highlighting')).toBe(true);
   });
 
+  it('reveals the legacy whole-page rules target with only the accordion event', async () => {
+    const accordion = vi.fn();
+    const intent = vi.fn();
+    window.addEventListener('options-reveal-accordion', accordion);
+    window.addEventListener('options-reveal-intent', intent);
+    const el = addTarget('WHOLE_PAGE_AUTO_TRANSLATE_RULES');
+    routerMocks.query = { highlight: 'WHOLE_PAGE_AUTO_TRANSLATE_RULES', keep: '1' };
+
+    const pending = useHighlightManager().checkAndHighlight();
+    await vi.advanceTimersByTimeAsync(300);
+    await pending;
+    window.removeEventListener('options-reveal-accordion', accordion);
+    window.removeEventListener('options-reveal-intent', intent);
+
+    expect(accordion).toHaveBeenCalledTimes(1);
+    expect(accordion.mock.calls[0][0].detail).toBe('wholePageRules');
+    expect(intent).not.toHaveBeenCalled();
+    expect(routerMocks.replace).toHaveBeenCalledWith({ query: { keep: '1' } });
+    vi.advanceTimersByTime(500);
+    expect(el.classList.contains('is-highlighting')).toBe(true);
+  });
+
+  it('emits the drawer intent and highlights its target after it mounts', async () => {
+    const events = [];
+    const onAccordion = (event) => events.push(`accordion:${event.detail}`);
+    const onIntent = (event) => {
+      events.push(`intent:${event.detail}`);
+      addTarget('WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER');
+    };
+    window.addEventListener('options-reveal-accordion', onAccordion);
+    window.addEventListener('options-reveal-intent', onIntent, { once: true });
+    routerMocks.query = { highlight: 'WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER', keep: '1', other: '2' };
+
+    const pending = useHighlightManager().checkAndHighlight();
+    await vi.advanceTimersByTimeAsync(300);
+    await pending;
+    window.removeEventListener('options-reveal-accordion', onAccordion);
+    window.removeEventListener('options-reveal-intent', onIntent);
+
+    expect(events).toEqual(['accordion:wholePageRules', 'intent:wholePageRulesDrawer']);
+    expect(routerMocks.replace).toHaveBeenCalledWith({ query: { keep: '1', other: '2' } });
+    expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+    const el = document.getElementById('WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER');
+    vi.advanceTimersByTime(500);
+    expect(el.classList.contains('is-highlighting')).toBe(true);
+  });
+
+  it('does not emit the drawer intent or clean the query if the accordion event makes the run stale', async () => {
+    const intent = vi.fn();
+    const onAccordion = () => {
+      routerMocks.query.highlight = 'NEWER_TARGET';
+    };
+    window.addEventListener('options-reveal-accordion', onAccordion, { once: true });
+    window.addEventListener('options-reveal-intent', intent);
+    routerMocks.query = { highlight: 'WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER', keep: '1' };
+
+    await useHighlightManager().checkAndHighlight();
+
+    window.removeEventListener('options-reveal-accordion', onAccordion);
+    window.removeEventListener('options-reveal-intent', intent);
+    expect(intent).not.toHaveBeenCalled();
+    expect(routerMocks.replace).not.toHaveBeenCalled();
+    expect(routerMocks.query).toEqual({ highlight: 'NEWER_TARGET', keep: '1' });
+  });
+
   it('does nothing when no highlight is requested', async () => {
     routerMocks.query = {};
 

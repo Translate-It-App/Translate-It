@@ -739,6 +739,7 @@
     <Transition name="drawer-slide">
       <div 
         v-if="isRulesDrawerOpen" 
+        id="WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER"
         class="drawer-container"
         :class="{ 'rtl': isRTL }"
       >
@@ -1117,15 +1118,21 @@ const handleHighlightReveal = (event) => {
   if (event.detail === 'wholePageRules') revealWholePageRules.value = true;
 };
 
+const handleRevealIntent = (event) => {
+  if (event.detail === 'wholePageRulesDrawer') openRulesDrawer();
+};
+
 onMounted(async () => {
   window.addEventListener('options-trigger-validation-feedback', handleValidationFeedback);
   window.addEventListener('options-reveal-accordion', handleHighlightReveal);
+  window.addEventListener('options-reveal-intent', handleRevealIntent);
   window.addEventListener('keydown', handleKeyDown);
 })
 
 onUnmounted(() => {
   window.removeEventListener('options-trigger-validation-feedback', handleValidationFeedback);
   window.removeEventListener('options-reveal-accordion', handleHighlightReveal);
+  window.removeEventListener('options-reveal-intent', handleRevealIntent);
   window.removeEventListener('keydown', handleKeyDown);
 })
 

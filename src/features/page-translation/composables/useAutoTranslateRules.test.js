@@ -153,7 +153,7 @@ describe('useAutoTranslateRules', () => {
     await rulesApi.scopeActions.togglePageScope();
     expect(harness.store.settings.WHOLE_PAGE_AUTO_TRANSLATE_RULES).toEqual([rule, 'https://example.com/docs']);
     await rulesApi.openManageRules();
-    expect(harness.openOptionsPage).toHaveBeenCalledWith('/activation?highlight=WHOLE_PAGE_AUTO_TRANSLATE_RULES');
+    expect(harness.openOptionsPage).toHaveBeenCalledWith('/activation?highlight=WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER');
   });
 
   it('retains backward-compatible computed aliases', () => {

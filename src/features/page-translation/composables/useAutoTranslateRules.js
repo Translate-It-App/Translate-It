@@ -61,7 +61,7 @@ export function useAutoTranslateRules({ currentUrl }) {
   };
   const togglePageScope = () => toggleScope('page');
   const toggleSiteScope = () => toggleScope('site');
-  const openManageRules = () => openOptionsPage('/activation?highlight=WHOLE_PAGE_AUTO_TRANSLATE_RULES');
+  const openManageRules = () => openOptionsPage('/activation?highlight=WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER');
 
   return {
     normalizedPageUrl,

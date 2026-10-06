@@ -5,6 +5,14 @@ import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.UI, 'HighlightManager');
 
+const exactRevealTargets = {
+  WHOLE_PAGE_AUTO_TRANSLATE_RULES: { accordion: 'wholePageRules' },
+  WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER: {
+    accordion: 'wholePageRules',
+    intent: 'wholePageRulesDrawer'
+  }
+};
+
 /**
  * Route-driven run ownership. Every checkAndHighlight() takes the next
  * generation; a run that finds itself stale after ANY async boundary goes
@@ -137,27 +145,31 @@ export function useHighlightManager() {
     if (!isCurrentRun()) return;
 
     // Unified Reveal Logic
+    const revealTarget = exactRevealTargets[targetId];
     const globalReveal = (id) => {
       if (id.startsWith('PROXY_')) return 'proxy';
       if (id === 'DEBUG_MODE' || id.startsWith('LOG_LEVEL_')) return 'debug';
       if (id.startsWith('DICTIONARY_')) return 'dictionary';
       if (id.startsWith('BILINGUAL_')) return 'bilingual';
       if (id.startsWith('FAB_')) return 'fab';
-      if (id === 'WHOLE_PAGE_AUTO_TRANSLATE_RULES') return 'wholePageRules';
       if (id.startsWith('AI_OPT_')) return 'ai';
-      
       return null;
     };
-
-    const accordionToOpen = globalReveal(targetId);
+    const accordionToOpen = revealTarget ? revealTarget.accordion : globalReveal(targetId);
     
-    if (accordionToOpen || typeof options.revealAction === 'function') {
+    if (accordionToOpen || revealTarget?.intent || typeof options.revealAction === 'function') {
       logger.debug(`Attempting to reveal: ${targetId}`);
       
       if (typeof options.revealAction === 'function') {
         options.revealAction(targetId);
-      } else if (accordionToOpen) {
-        window.dispatchEvent(new CustomEvent('options-reveal-accordion', { detail: accordionToOpen }));
+      } else {
+        if (accordionToOpen) {
+          window.dispatchEvent(new CustomEvent('options-reveal-accordion', { detail: accordionToOpen }));
+          if (!isCurrentRun()) return;
+        }
+        if (revealTarget?.intent) {
+          window.dispatchEvent(new CustomEvent('options-reveal-intent', { detail: revealTarget.intent }));
+        }
       }
 
       await nextTick();
