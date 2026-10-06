@@ -387,7 +387,45 @@
   .auto-translate-managed-note {
     padding: 6px 8px !important;
     font-size: 0.85em !important;
+    color: var(--color-text-secondary, #5b6472) !important;
+    overflow-wrap: anywhere !important;
   }
+
+  /* Informational group above the action: subtle divider + muted note +
+     compact blue link (mirrors the desktop FAB scope panel). The menu is
+     display:block, so the link is content-sized with fit-content against
+     the generic width:100% — no align-self (inert outside flex). */
+  .auto-translate-scope-separator {
+    height: 1px !important;
+    border: none !important;
+    margin-block: 6px 2px !important;
+    margin-inline: 8px !important;
+    background-color: currentcolor !important;
+    opacity: 0.12 !important;
+  }
+
+  .auto-translate-manage-link {
+    width: fit-content !important;
+    max-width: 100% !important;
+    overflow-wrap: anywhere !important;
+    padding: 4px 8px !important;
+    font-size: 0.85em !important;
+    font-weight: 600 !important;
+    color: #1a5fb4 !important;
+
+    &:hover {
+      background-color: transparent !important;
+      text-decoration: underline !important;
+    }
+  }
+}
+
+/* dark idle color for the action link; pairs .theme-dark (set by applyTheme
+   on <html>) with the retained .ti-dark-mode hook — same dual-selector
+   contract as the star dark overrides above */
+.theme-dark :where(.page-translation-controls) .auto-translate-scope-menu .auto-translate-manage-link,
+.ti-dark-mode :where(.page-translation-controls) .auto-translate-scope-menu .auto-translate-manage-link {
+  color: #60a5fa !important;
 }
 
 :where(.page-translation-controls).ti-page-translate-btn.compact-wrapper .auto-translate-scope-menu {

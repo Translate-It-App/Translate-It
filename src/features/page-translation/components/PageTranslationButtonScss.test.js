@@ -637,3 +637,62 @@ describe('PageTranslationButton.scss compact disabled override', () => {
     expect(overrideSpec[1]).toBeGreaterThan(baseSpec[1])
   })
 })
+
+/* ── Auto-Translate broader-rule section ───────────────────────────── */
+
+describe('PageTranslationButton.scss broader-rule scope section', () => {
+  const css = compile().css.replace(/\/\*[\s\S]*?\*\//g, '')
+  const rule = (selectorPattern) => {
+    const match = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .find(([, selector]) => selectorPattern.test(selector.trim()))
+    expect(match, `missing compiled rule: ${selectorPattern}`).toBeTruthy()
+    return { selector: match[1].trim(), declarations: match[2] }
+  }
+
+  it('keeps the divider subtle inside the scope menu', () => {
+    const { selector, declarations } = rule(/:where\(\.page-translation-controls\) \.auto-translate-scope-menu \.auto-translate-scope-separator$/)
+    expect(selector).toContain(':where(.page-translation-controls) .auto-translate-scope-menu')
+    const opacity = Number.parseFloat(declarations.match(/opacity:\s*([\d.]+)/)?.[1])
+    const borderColor = declarations.match(/border-(?:top-)?color:\s*([^;]+)/)?.[1] ?? ''
+    const borderAlpha = Number.parseFloat(borderColor.match(/,\s*(0?\.\d+)\s*\)/)?.[1])
+    expect(opacity < 1 || /--color-(?:border|muted|text-secondary)/i.test(borderColor) || borderAlpha <= 0.5).toBe(true)
+  })
+
+  it('uses a muted token for the noninteractive note and wraps long text', () => {
+    const { declarations } = rule(/:where\(\.page-translation-controls\) \.auto-translate-scope-menu \.auto-translate-managed-note$/)
+    expect(declarations).toMatch(/color:\s*var\(--color-(?:text-secondary|text-muted|muted)\b/i)
+    expect(declarations).toMatch(/overflow-wrap:\s*anywhere/)
+  })
+
+  it('keeps the Manage Rules link content-sized, wrapping, and blue in each theme', () => {
+    const light = rule(/:where\(\.page-translation-controls\) \.auto-translate-scope-menu \.auto-translate-manage-link$/)
+    expect(light.declarations).toMatch(/width:\s*fit-content/)
+    expect(light.declarations).toMatch(/max-width:\s*100%/)
+    expect(light.declarations).toMatch(/overflow-wrap:\s*anywhere/)
+    expect(light.declarations).toMatch(/color:\s*#1a5fb4/i)
+    expect(specificity(light.selector)).toEqual([0, 2, 0])
+
+    const darkRules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, selectors]) => selectors.split(',').some((selector) =>
+        /^\.(?:theme-dark|ti-dark-mode)\s+:where\(\.page-translation-controls\) \.auto-translate-scope-menu \.auto-translate-manage-link$/.test(selector.trim()),
+      ))
+    for (const hook of ['theme-dark', 'ti-dark-mode']) {
+      const dark = darkRules.find(([, selectors]) => selectors.split(',').some((selector) =>
+        selector.trim().startsWith(`.${hook} `),
+      ))
+      expect(dark, `missing ${hook} Manage Rules selector`).toBeTruthy()
+      expect(dark[2]).toMatch(/color:\s*#60a5fa/i)
+      const themedSelector = dark[1].split(',').map((selector) => selector.trim())
+        .find((selector) => selector.startsWith(`.${hook} `))
+      expect(specificity(themedSelector)[1]).toBeGreaterThan(specificity(light.selector)[1])
+    }
+
+    const hover = rule(/:where\(\.page-translation-controls\) \.auto-translate-scope-menu \.auto-translate-manage-link:hover$/)
+    expect(hover.declarations).toMatch(/text-decoration:\s*underline/)
+  })
+
+  it('retains the shared visible focus outline for scope-menu buttons', () => {
+    const { declarations } = rule(/:where\(\.page-translation-controls\) \.auto-translate-scope-menu button:focus-visible$/)
+    expect(declarations).toMatch(/outline:\s*2px solid/)
+  })
+})

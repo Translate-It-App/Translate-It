@@ -225,10 +225,12 @@
         <span aria-hidden="true">{{ hasSiteRule ? '✓' : '' }}</span>{{ t('auto_translate_scope_this_site', 'This Site') }}
       </button>
       <template v-if="showManageRules">
+        <hr class="auto-translate-scope-separator">
         <div class="auto-translate-managed-note">
-          {{ t('auto_translate_managed_by_broader_rule', 'Managed by a broader rule') }}
+          {{ t('auto_translate_scope_covered_note', 'Already covered by a broader rule') }}
         </div>
         <button
+          class="auto-translate-manage-link"
           @click.stop="openManageRules"
         >
           {{ t('auto_translate_manage_rules', 'Manage Rules') }}

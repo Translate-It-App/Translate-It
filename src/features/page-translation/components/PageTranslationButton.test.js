@@ -342,12 +342,25 @@ describe("PageTranslationButton.vue", () => {
     it("hides site scope for file URLs and exposes broader-rule management", async () => {
       mockUseAutoTranslateRules.isAutoTranslateToggleVisible.value = true;
       mockUseAutoTranslateRules.siteScopeAvailable.value = false;
-      mockUseAutoTranslateRules.showManageRules.value = true;
+      mockUseAutoTranslateRules.showManageRules.value = false;
       const wrapper = mount(PageTranslationButton, { props: { showAutoTranslateToggle: true } });
       await wrapper.find('.page-translate-star-btn').trigger('click');
+
+      expect(wrapper.find('.auto-translate-scope-separator').exists()).toBe(false);
+      expect(wrapper.find('.auto-translate-managed-note').exists()).toBe(false);
+      expect(wrapper.find('.auto-translate-manage-link').exists()).toBe(false);
+
+      mockUseAutoTranslateRules.showManageRules.value = true;
+      await wrapper.vm.$nextTick();
       expect(wrapper.findAll('.auto-translate-scope-menu button')).toHaveLength(2);
-      expect(wrapper.text()).toContain('auto_translate_managed_by_broader_rule');
-      await wrapper.findAll('.auto-translate-scope-menu button')[1].trigger('click');
+      expect(wrapper.get('.auto-translate-scope-separator').element.tagName).toBe('HR');
+      const note = wrapper.get('.auto-translate-managed-note');
+      expect(note.element.tagName).toBe('DIV');
+      expect(note.element.tagName).not.toBe('BUTTON');
+      expect(note.text()).toContain('auto_translate_scope_covered_note');
+      const manageLink = wrapper.get('.auto-translate-manage-link');
+      expect(manageLink.element.tagName).toBe('BUTTON');
+      await manageLink.trigger('click');
       expect(mockUseAutoTranslateRules.openManageRules).toHaveBeenCalledOnce();
     });
 
