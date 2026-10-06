@@ -1119,7 +1119,7 @@ const handleHighlightReveal = (event) => {
 };
 
 const handleRevealIntent = (event) => {
-  if (event.detail === 'wholePageRulesDrawer') openRulesDrawer();
+  if (event.detail === 'wholePageRulesDrawer' && !isRulesDrawerOpen.value) openRulesDrawer();
 };
 
 onMounted(async () => {

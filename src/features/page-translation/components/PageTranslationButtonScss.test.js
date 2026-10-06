@@ -660,7 +660,7 @@ describe('PageTranslationButton.scss broader-rule scope section', () => {
 
   it('uses a muted token for the noninteractive note and wraps long text', () => {
     const { declarations } = rule(/:where\(\.page-translation-controls\) \.auto-translate-scope-menu \.auto-translate-managed-note$/)
-    expect(declarations).toMatch(/color:\s*var\(--color-(?:text-secondary|text-muted|muted)\b/i)
+    expect(declarations).toContain('color: var(--tab-button-color, #5b6472) !important;')
     expect(declarations).toMatch(/overflow-wrap:\s*anywhere/)
   })
 

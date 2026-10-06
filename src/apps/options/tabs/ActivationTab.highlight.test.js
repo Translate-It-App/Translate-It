@@ -167,6 +167,33 @@ describe('ActivationTab highlight reveal', () => {
     expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
   });
 
+  it('preserves unsaved drawer state when the reveal intent repeats while open', async () => {
+    mocks.settingsStore.settings.WHOLE_PAGE_AUTO_TRANSLATE_RULES = ['stored.example/*'];
+    wrapper = mountTab();
+    await nextTick();
+
+    const revealDrawer = () => window.dispatchEvent(
+      new CustomEvent('options-reveal-intent', { detail: 'wholePageRulesDrawer' }),
+    );
+    revealDrawer();
+    await nextTick();
+
+    await wrapper.get('.add-rule-input').setValue('unsaved.example/*');
+    await wrapper.get('.add-rule-btn').trigger('click');
+    await wrapper.get('.add-rule-input').setValue('stored.example/*');
+    await wrapper.get('.add-rule-btn').trigger('click');
+    expect(wrapper.find('.rule-error-message').exists()).toBe(true);
+
+    revealDrawer();
+    await nextTick();
+
+    expect(wrapper.find('#WHOLE_PAGE_AUTO_TRANSLATE_RULES_DRAWER').exists()).toBe(true);
+    expect(wrapper.findAll('.rule-item').map((item) => item.text()).join(' ')).toContain('unsaved.example/*');
+    expect(wrapper.get('.add-rule-input').element.value).toBe('stored.example/*');
+    expect(wrapper.find('.rule-error-message').exists()).toBe(true);
+    expect(mocks.settingsStore.updateSettingLocally).not.toHaveBeenCalled();
+  });
+
   it('keeps the Manage Rules button opening the same drawer', async () => {
     wrapper = mountTab();
     await nextTick();
