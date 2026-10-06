@@ -14,7 +14,14 @@
   --badge-offset: calc(42px * var(--fab-scale)); /* Vertical spacing between badges */
   --translate-badge-size: calc(20px * var(--fab-scale));
   --menu-min-width: 190px;
+  --menu-max-width: 260px;
   --menu-font-size: 13px;
+
+  /* Menu icon metrics are intentionally NOT multiplied by --fab-scale so rows,
+     gaps and the label column stay identical for every FAB_SIZE */
+  --menu-icon-box: 28px;
+  --menu-icon-size: 20px;
+  --menu-gap: 6px;
 
   /* Media Queries for Responsive Scaling */
   @media (max-width: 576px) { // Small screens (Mobile)
@@ -181,7 +188,19 @@
     bottom: 0px !important;
     border-radius: 14px !important;
     padding: 5px !important;
-    width: var(--menu-min-width) !important;
+
+    /* Content-driven width: floor 190px, ceiling min(260px), both bounded by
+       the same viewport-safe --menu-avail-width — so when the viewport offers
+       less than 190px, the floor itself shrinks instead of overflowing.
+       (clamp() with max-content is invalid in Chromium — use the 3 properties.)
+       Free space on either dock side is 100vw + edge-offset - fab-size - 26px,
+       so "- 40px" keeps a >=36px margin for every edge-offset (22/25/30);
+       max(0px, ...) only guards against absurdly tiny viewports. */
+    --menu-avail-width: max(0px, calc(100vw - var(--fab-size) - 40px));
+
+    width: max-content !important;
+    min-width: min(var(--menu-min-width), var(--menu-avail-width)) !important;
+    max-width: min(var(--menu-max-width), var(--menu-avail-width)) !important;
     display: flex !important;
     flex-direction: column !important;
     z-index: 2147483647 !important;
@@ -201,6 +220,7 @@
       display: flex !important;
       flex-wrap: wrap !important;
       align-items: center !important;
+      column-gap: var(--menu-gap) !important;
       padding: 7px 9px !important;
       cursor: pointer !important;
       width: 100% !important;
@@ -219,8 +239,8 @@
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
-        width: calc(var(--fab-size) * 0.52) !important;
-        height: calc(var(--fab-size) * 0.52) !important;
+        width: var(--menu-icon-box) !important;
+        height: var(--menu-icon-box) !important;
         flex-shrink: 0 !important;
         border-radius: 7px !important;
         transition: all 0.2s ease !important;
@@ -229,8 +249,8 @@
         .fab-circle-progress {
           position: absolute !important;
           inset: -2px !important;
-          width: calc(var(--fab-size) * 0.59) !important;
-          height: calc(var(--fab-size) * 0.59) !important;
+          width: calc(var(--menu-icon-box) + 4px) !important;
+          height: calc(var(--menu-icon-box) + 4px) !important;
           transform: rotate(-90deg) !important;
           z-index: 0 !important;
 
@@ -246,8 +266,8 @@
       }
 
       .fab-menu-icon {
-        width: calc(var(--fab-size) * 0.37) !important;
-        height: calc(var(--fab-size) * 0.37) !important;
+        width: var(--menu-icon-size) !important;
+        height: var(--menu-icon-size) !important;
         object-fit: contain !important;
         display: block !important;
         border: none !important;
@@ -259,9 +279,14 @@
       .fab-menu-item-text {
         font-size: var(--menu-font-size) !important;
         font-weight: 600 !important;
-        white-space: nowrap !important;
         font-family: sans-serif !important;
         line-height: 1.2 !important;
+
+        /* min-width:0 overrides the automatic flex minimum so the label can
+           never push itself (or the star) onto a new flex line — long labels
+           wrap INSIDE this column instead; `anywhere` covers unbroken strings */
+        min-width: 0 !important;
+        overflow-wrap: anywhere !important;
         flex: 1 !important;
         letter-spacing: -0.01em !important;
       }
@@ -270,7 +295,7 @@
         background: none !important;
         border: none !important;
         padding: 4px !important;
-        margin-left: 6px !important;
+        margin-left: 0 !important; /* row column-gap provides the spacing */
         margin-right: 2px !important;
         display: flex !important;
         align-items: center !important;
@@ -317,7 +342,10 @@
         width: 100% !important;
         flex: 0 0 100% !important;
         padding-block: 4px 2px !important;
-        padding-inline-start: 28px !important;
+
+        /* aligns with the label column: icon box + gap (was a fixed 28px that
+           only matched the old scale-dependent wrapper at FAB_SIZE=1) */
+        padding-inline-start: calc(var(--menu-icon-box) + var(--menu-gap)) !important;
         box-sizing: border-box !important;
 
         button {
