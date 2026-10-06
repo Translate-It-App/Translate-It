@@ -343,16 +343,22 @@
         flex: 0 0 100% !important;
         padding-block: 4px 2px !important;
 
-        /* aligns with the label column: icon box + gap (was a fixed 28px that
-           only matched the old scale-dependent wrapper at FAB_SIZE=1) */
-        padding-inline-start: calc(var(--menu-icon-box) + var(--menu-gap)) !important;
+        /* inline-size containment: this panel's contents must never inflate the
+           menu's width: max-content — opening the scope disclosure used to sum
+           icon+label+star+panel into one hypothetical flex line (raw max-content
+           373.8px) and snap the menu to its 260px cap (211.3 -> 260 jump).
+           The label-column indent (icon box + gap) is applied by the children's
+           margin-inline-start instead: panel padding still counts toward the
+           contained intrinsic size, child margins do not. */
+        contain: inline-size !important;
         box-sizing: border-box !important;
 
         button {
           display: flex !important;
           align-items: center !important;
           gap: 6px !important;
-          width: 100% !important;
+          width: auto !important; /* column-stretch + margin fills to the right edge (was 100%) */
+          margin-inline-start: calc(var(--menu-icon-box) + var(--menu-gap)) !important;
           padding: 5px 4px !important;
           border: 0 !important;
           background: transparent !important;
@@ -363,7 +369,11 @@
         }
 
         button span { width: 12px !important; }
-        div { padding: 5px 4px !important; font-size: 0.85em !important; }
+        div {
+          padding: 5px 4px !important;
+          font-size: 0.85em !important;
+          margin-inline-start: calc(var(--menu-icon-box) + var(--menu-gap)) !important;
+        }
       }
     }
   }

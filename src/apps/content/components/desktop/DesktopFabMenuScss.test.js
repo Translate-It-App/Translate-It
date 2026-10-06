@@ -54,7 +54,7 @@ describe('DesktopFabMenu SCSS layout contract', () => {
       .toBe('0 0 100% !important');
   });
 
-  it('sizes the menu to content within the available viewport and aligns scopes to the label column', () => {
+  it('sizes the menu to content within the available viewport and contains the scope panel', () => {
     expect(declaration(menu, 'width')).toBe('max-content !important');
     const minWidth = declaration(menu, 'min-width') ?? '';
     const minWidthVariable = source.match(/--menu-min-width\s*:\s*([^;]+);/)?.[1] ?? '';
@@ -70,7 +70,17 @@ describe('DesktopFabMenu SCSS layout contract', () => {
     expect(availableWidth).toMatch(/100vw/);
 
     const scopes = block(/\.fab-auto-translate-scopes\s*\{/);
-    expect(declaration(scopes, 'padding-inline-start'))
-      .toMatch(/calc\(var\(--menu-icon-box\)\s*\+\s*var\(--menu-gap\)\)/);
+    const panelDeclarations = scopes.slice(0, scopes.indexOf('button'));
+    expect(declaration(panelDeclarations, 'contain')).toBe('inline-size !important');
+    expect(declaration(panelDeclarations, 'width')).toBe('100% !important');
+    expect(declaration(panelDeclarations, 'flex')).toBe('0 0 100% !important');
+    expect(declaration(panelDeclarations, 'padding-inline-start')).toBeUndefined();
+
+    const scopeButton = block(/\.fab-auto-translate-scopes\s*\{[\s\S]*?button\s*\{/);
+    const scopeInfo = block(/\.fab-auto-translate-scopes\s*\{[\s\S]*?div\s*\{/);
+    const labelColumnIndent = /calc\(var\(--menu-icon-box\)\s*\+\s*var\(--menu-gap\)\)/;
+    expect(declaration(scopeButton, 'margin-inline-start')).toMatch(labelColumnIndent);
+    expect(declaration(scopeButton, 'width')).toBe('auto !important');
+    expect(declaration(scopeInfo, 'margin-inline-start')).toMatch(labelColumnIndent);
   });
 });
