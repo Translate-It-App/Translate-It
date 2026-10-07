@@ -205,49 +205,45 @@ async function postInitializeBackgroundService() {
     startMemoryMonitoring();
   }
   logger.info("[Background] Memory Garbage Collector initialized!");
+}
 
-  // Initialize keyboard shortcuts listener
-  if (browser.commands && browser.commands.onCommand) {
-    // Import command handler dynamically and register listener
-    (async function initializeShortcutsListener() {
-      try {
-        const { handleCommandEvent } = await import("@/handlers/command-handler.js");
+let resolveCommandReadiness;
+const commandReadiness = new Promise(resolve => {
+  resolveCommandReadiness = resolve;
+});
 
-        if (typeof handleCommandEvent === 'function') {
-          // Register the command listener
-          browser.commands.onCommand.addListener(async (command, tab) => {
-            try {
-              await handleCommandEvent(command, tab);
-            } catch (error) {
-              errorHandler.handle(error, {
-                context: `background-command-${command}`,
-                showToast: false
-              });
-            }
-          });
+// Register commands before asynchronous startup so Chrome can wake this worker
+// and deliver a command while background initialization is still in progress.
+if (browser.commands && browser.commands.onCommand) {
+  browser.commands.onCommand.addListener(async (command, tab) => {
+    try {
+      if (!(await commandReadiness)) return;
 
-          logger.info("Keyboard shortcuts listener registered successfully");
-        }
-      } catch (error) {
-        errorHandler.handle(error, {
-          context: 'background-shortcuts-init',
-          showToast: false
-        });
+      const { handleCommandEvent } = await import("@/handlers/command-handler.js");
+      if (typeof handleCommandEvent === 'function') {
+        await handleCommandEvent(command, tab);
       }
-    })();
-  }
-
+    } catch (error) {
+      errorHandler.handle(error, {
+        context: `background-command-${command}`,
+        showToast: false
+      });
+    }
+  });
 }
 
 // Initialize Background Service
 initializeBackgroundService(backgroundService, postInitializeBackgroundService, {
   shouldRetry: error => !ExtensionContextManager.isContextError(error),
-}).catch((error) => {
+}).then(() => {
+  resolveCommandReadiness(true);
+}, (error) => {
+  resolveCommandReadiness(false);
   errorHandler.handle(error, {
     context: 'background-init',
     showToast: false
   });
-});
+}).catch(() => {});
 
 // Phase D OpenAI spike hook (DEV ONLY): shaken out of production builds.
 // Installs `globalThis.__translateItOpenAIRealtimeSpike` (start/status/stop)
