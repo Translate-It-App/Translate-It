@@ -133,6 +133,11 @@ describe('FieldShortcutManager', () => {
         key: 't'
       });
     });
+
+    it('matches picker Space against the browser space key', () => {
+      manager.parsedShortcut = manager.parseShortcut('Ctrl+Space');
+      expect(manager.isShortcutEvent(new KeyboardEvent('keydown', { key: ' ', ctrlKey: true }))).toBe(true);
+    });
   });
 
   describe('initialize', () => {

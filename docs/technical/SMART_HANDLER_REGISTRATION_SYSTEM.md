@@ -146,7 +146,7 @@ This startup schedule is separate from interaction-triggered activation. `Intera
 | `selectElement` | `TRANSLATE_WITH_SELECT_ELEMENT` | `EXCLUDED_SITES` | `contextmenu` / FAB Click |
 | `textSelection` | `TRANSLATE_ON_TEXT_SELECTION` | `EXCLUDED_SITES` | `mouseup` (Selection) |
 | `textFieldIcon` | `TRANSLATE_ON_TEXT_SELECTION` | `DEFAULT_EXCLUDED_TEXT_FIELDS_ICON` + `EXCLUDED_SITES` | `focusin` |
-| `shortcut` | `ENABLE_SHORTCUT_FOR_TEXT_FIELDS` | `EXCLUDED_SITES` | `keydown` (Ctrl+/) |
+| `shortcut` | `ENABLE_SHORTCUT_FOR_TEXT_FIELDS` | `EXCLUDED_SITES` | `keydown` (configured Text Field shortcut; default Ctrl+/) |
 
 ### Special Case: Select Element Escape
 Select Element Escape support works even if user disabled field shortcuts.

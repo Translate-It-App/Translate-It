@@ -7,6 +7,7 @@ import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import { KeyboardStateManager } from '../KeyboardStateManager.js';
 import ResourceTracker from '@/core/memory/ResourceTracker.js';
+import { canonicalShortcutKey, shortcutKeyForEvent } from './shortcutKeys.js';
 
 export class ShortcutManager extends ResourceTracker {
   constructor() {
@@ -83,7 +84,9 @@ export class ShortcutManager extends ResourceTracker {
     
     // Register Ctrl+/ shortcut for translation (will be updated dynamically)
     const ctrlSlashShortcut = new FieldShortcutManager();
-    this.registerShortcut('Ctrl+/', ctrlSlashShortcut);
+    const currentShortcut = await this.getCurrentFieldShortcut();
+    this.ctrlSlashShortcutKey = canonicalShortcutKey(currentShortcut);
+    this.registerShortcut(this.ctrlSlashShortcutKey, ctrlSlashShortcut);
 
     // Store reference for initialization later
     this.ctrlSlashShortcut = ctrlSlashShortcut;
@@ -135,10 +138,9 @@ export class ShortcutManager extends ResourceTracker {
       this._settingsUnsubscribe = settingsManager.onChange('TEXT_FIELD_SHORTCUT', async (newShortcut) => {
         try {
           if (this.ctrlSlashShortcut) {
-            // Update the FieldShortcutManager's shortcut
-            if (typeof this.ctrlSlashShortcut.updateShortcut === 'function') {
-              this.ctrlSlashShortcut.updateShortcut();
-            }
+            this.unregisterShortcut(this.ctrlSlashShortcutKey);
+            this.ctrlSlashShortcutKey = canonicalShortcutKey(newShortcut);
+            this.registerShortcut(this.ctrlSlashShortcutKey, this.ctrlSlashShortcut);
 
             this.logger.debug(`Text field shortcut updated to: ${newShortcut || 'Ctrl+/'}`);
           }
@@ -184,6 +186,7 @@ export class ShortcutManager extends ResourceTracker {
    * @param {Object} handler - Shortcut handler instance
    */
   registerShortcut(key, handler) {
+    key = canonicalShortcutKey(key);
     if (this.shortcuts.has(key)) {
       this.logger.warn(`Overwriting shortcut for key: ${key}`);
     }
@@ -197,6 +200,7 @@ export class ShortcutManager extends ResourceTracker {
    * @param {string} key - Key combination
    */
   unregisterShortcut(key) {
+    key = canonicalShortcutKey(key);
     if (this.shortcuts.has(key)) {
       this.shortcuts.delete(key);
       this.logger.debug(`Unregistered shortcut for: ${key}`);
@@ -211,7 +215,7 @@ export class ShortcutManager extends ResourceTracker {
     if (!this.initialized) return;
 
     // Build key combination string
-    const keyCombo = this.buildKeyCombo(event);
+    const keyCombo = shortcutKeyForEvent(event);
 
     // If empty key combo (modifier only), ignore
     if (!keyCombo) return;
@@ -256,25 +260,7 @@ export class ShortcutManager extends ResourceTracker {
    * @returns {string} Key combination string
    */
   buildKeyCombo(event) {
-    const parts = [];
-
-    if (event.ctrlKey || event.metaKey) parts.push('Ctrl');
-    if (event.altKey) parts.push('Alt');
-    if (event.shiftKey) parts.push('Shift');
-
-    // Add the main key (but ignore modifier keys by themselves)
-    if (event.key && !['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) {
-      parts.push(event.key);
-    } else if (event.code && !['ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight'].includes(event.code)) {
-      parts.push(event.code);
-    }
-
-    // If only modifier keys are present, return empty string (no match)
-    if (parts.length === 1 && ['Ctrl', 'Alt', 'Shift'].includes(parts[0])) {
-      return '';
-    }
-
-    return parts.join('+');
+    return shortcutKeyForEvent(event);
   }
 
   /**
@@ -302,6 +288,8 @@ export class ShortcutManager extends ResourceTracker {
    * Cleanup shortcut manager
    */
   cleanup() {
+    this._settingsUnsubscribe?.();
+    this._settingsUnsubscribe = null;
     this.revertShortcut?.cleanup();
     this.revertShortcut = null;
 

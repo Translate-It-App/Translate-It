@@ -5,7 +5,9 @@ const mocks = vi.hoisted(() => ({
   translateFieldViaSmartHandler: vi.fn(),
   sendMessage: vi.fn(),
   settingsGet: vi.fn(),
-  settingsOnChange: vi.fn(() => vi.fn()),
+  settingsOnChange: vi.fn(),
+  settingsCallbacks: new Map(),
+  settingValues: new Map(),
   pageEventBusOn: vi.fn(),
   pageEventBusEmit: vi.fn(),
 }));
@@ -136,7 +138,16 @@ import { FieldShortcutManager } from '@/features/text-field-interaction/managers
 const nextTask = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function configureSettings() {
+  mocks.settingsCallbacks.clear();
+  mocks.settingValues.clear();
+  mocks.settingsOnChange.mockImplementation((key, callback) => {
+    const callbacks = mocks.settingsCallbacks.get(key) || new Set();
+    callbacks.add(callback);
+    mocks.settingsCallbacks.set(key, callbacks);
+    return () => callbacks.delete(callback);
+  });
   mocks.settingsGet.mockImplementation((key, fallback) => {
+    if (mocks.settingValues.has(key)) return mocks.settingValues.get(key);
     if (key === 'EXTENSION_ENABLED') return true;
     if (key === 'ENABLE_SHORTCUT_FOR_TEXT_FIELDS') return true;
     if (key === 'TEXT_FIELD_SHORTCUT') return 'Ctrl+/';
@@ -146,11 +157,20 @@ function configureSettings() {
   });
 }
 
-function createEvent(key = '/') {
+function changeSetting(key, value) {
+  mocks.settingValues.set(key, value);
+  for (const callback of mocks.settingsCallbacks.get(key) || []) callback(value, undefined, key);
+}
+
+function createEvent(key = '/', modifiers = {}) {
   return new KeyboardEvent('keydown', {
     key,
-    code: key === '/' ? 'Slash' : 'KeyA',
-    ctrlKey: key === '/',
+    code: key === '/' ? 'Slash' : `Key${key.toUpperCase()}`,
+    ctrlKey: modifiers.ctrlKey ?? key === '/',
+    altKey: modifiers.altKey ?? false,
+    shiftKey: modifiers.shiftKey ?? false,
+    metaKey: modifiers.metaKey ?? false,
+    repeat: modifiers.repeat ?? false,
     bubbles: true,
     cancelable: true,
   });
@@ -290,5 +310,80 @@ describe('Ctrl+/ dispatch characterization', () => {
     expect(mocks.translateFieldViaSmartHandler).toHaveBeenCalledTimes(1);
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(mocks.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('uses a configured shortcut for first-event lazy activation', async () => {
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Alt+T');
+    mocks.loadFeature.mockImplementationOnce(async () => {
+      handler = ShortcutHandler.getInstance({ featureManager: {} });
+      await handler.activate();
+      return handler;
+    });
+    await coordinator.initialize();
+
+    document.dispatchEvent(createEvent('t', { ctrlKey: false, altKey: true }));
+    await nextTask();
+    await nextTask();
+
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(mocks.loadFeature).toHaveBeenCalledTimes(1);
+    expect(mocks.loadFeature).toHaveBeenCalledWith('shortcut', false);
+    expect(mocks.translateFieldViaSmartHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not load shortcut feature for an unrelated key before lazy initialization', async () => {
+    await coordinator.initialize();
+
+    document.dispatchEvent(createEvent('a'));
+    await nextTask();
+
+    expect(mocks.loadFeature).not.toHaveBeenCalled();
+    expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not activate or execute a repeated configured shortcut while lazy', async () => {
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Alt+T');
+    await coordinator.initialize();
+
+    document.dispatchEvent(createEvent('t', { ctrlKey: false, altKey: true, repeat: true }));
+    await nextTask();
+
+    expect(mocks.loadFeature).not.toHaveBeenCalled();
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(mocks.translateFieldViaSmartHandler).not.toHaveBeenCalled();
+  });
+
+  it('moves the registered shortcut when the setting changes', async () => {
+    await activateShortcutWiring();
+    const fieldShortcut = shortcutManager.shortcuts.get('Ctrl+/');
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Alt+T');
+
+    expect(shortcutManager.shortcuts.has('Ctrl+/')).toBe(false);
+    expect(shortcutManager.shortcuts.get('Alt+t')).toBe(fieldShortcut);
+    expect(shortcutManager.shortcuts.has('escape')).toBe(true);
+    expect(shortcutManager.shortcuts.has('a')).toBe(false);
+
+    document.dispatchEvent(createEvent());
+    document.dispatchEvent(createEvent('t', { ctrlKey: false, altKey: true, repeat: true }));
+    document.dispatchEvent(createEvent('t', { ctrlKey: false, altKey: true }));
+    await nextTask();
+    await nextTask();
+
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(mocks.translateFieldViaSmartHandler).toHaveBeenCalledTimes(1);
+    expect(mocks.loadFeature).toHaveBeenCalledTimes(1);
+  });
+
+  it('matches Cmd independently from Ctrl and keeps exact complex modifiers', async () => {
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Cmd+Shift+T');
+    await activateShortcutWiring();
+
+    document.dispatchEvent(createEvent('t', { ctrlKey: true, shiftKey: true }));
+    document.dispatchEvent(createEvent('t', { metaKey: true, shiftKey: true }));
+    await nextTask();
+    await nextTask();
+
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(mocks.translateFieldViaSmartHandler).toHaveBeenCalledTimes(1);
   });
 });

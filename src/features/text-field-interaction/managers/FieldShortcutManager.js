@@ -1,6 +1,6 @@
 /**
  * FieldShortcutManager - Manages keyboard shortcuts for text field interactions
- * Handles Ctrl+/ shortcut for quick translation of focused text field content
+ * Handles the configured shortcut for quick translation of focused text field content
  */
 
 import { getScopedLogger } from "@/shared/logging/logger.js";
@@ -15,6 +15,7 @@ import { translateFieldViaSmartHandler } from '@/handlers/smartTranslationIntegr
 import { captureFieldTranslationSource } from '@/features/text-field-interaction/utils/framework/framework-compat/fieldSourceSnapshot.js';
 import { isFieldTranslationRequestError } from '@/handlers/smart-translation/translationErrorOwnership.js';
 import { getFieldTranslationErrorPresentation } from '@/features/text-field-interaction/utils/FieldTranslationErrorPresenter.js';
+import { matchesShortcutEvent, parseShortcut } from '@/core/managers/content/shortcuts/shortcutKeys.js';
 
 export class FieldShortcutManager {
   constructor() {
@@ -74,14 +75,7 @@ export class FieldShortcutManager {
       return this.parseShortcut('Ctrl+/'); // fallback
     }
 
-    const keys = shortcut.split('+').map(key => key.trim().toLowerCase());
-    return {
-      ctrl: keys.includes('ctrl') || keys.includes('control'),
-      alt: keys.includes('alt'),
-      shift: keys.includes('shift'),
-      meta: keys.includes('meta') || keys.includes('cmd'),
-      key: keys.find(k => !['ctrl', 'control', 'alt', 'shift', 'meta', 'cmd'].includes(k)) || '/'
-    };
+    return parseShortcut(shortcut);
   }
 
 /**
@@ -135,12 +129,12 @@ export class FieldShortcutManager {
   }
 
   /**
-   * Execute the Ctrl+/ shortcut
+   * Execute the configured field shortcut
    * @param {KeyboardEvent} event - Keyboard event
    * @returns {Promise<Object>} Execution result
    */
   async execute() {
-    this.logger.debug('Executing Ctrl+/ shortcut');
+    this.logger.debug('Executing field shortcut');
 
     try {
       // Get active element
@@ -159,7 +153,7 @@ export class FieldShortcutManager {
           type: 'ctrl-slash'
         };
       }
-      this.logger.debug(`Translating text via Ctrl+/: "${text.substring(0, 50)}..."`);
+      this.logger.debug(`Translating field text: "${text.substring(0, 50)}..."`);
 
       await translateFieldViaSmartHandler({
         text: snapshot.text,
@@ -277,23 +271,7 @@ export class FieldShortcutManager {
    * @returns {boolean} Whether event matches the shortcut
    */
   isShortcutEvent(event) {
-    if (!this.parsedShortcut || event.repeat) {
-      return false;
-    }
-
-    // Ignore modifier keys by themselves (Control, Shift, Alt, Meta)
-    const modifierKeys = ['Control', 'Shift', 'Alt', 'Meta'];
-    if (modifierKeys.includes(event.key)) {
-      return false;
-    }
-
-    return (
-      (this.parsedShortcut.ctrl === event.ctrlKey) &&
-      (this.parsedShortcut.alt === event.altKey) &&
-      (this.parsedShortcut.shift === event.shiftKey) &&
-      (this.parsedShortcut.meta === event.metaKey) &&
-      (event.key.toLowerCase() === this.parsedShortcut.key.toLowerCase())
-    );
+    return matchesShortcutEvent(event, this.parsedShortcut);
   }
 
   /**
@@ -323,7 +301,7 @@ export class FieldShortcutManager {
       type: 'FieldShortcutManager',
       initialized: this.initialized,
       triggers: [
-        'Ctrl+/ or Cmd+/ in editable fields',
+        'Configured shortcut in editable fields',
         'Requires SHORTCUT_TEXT_FIELDS feature enabled',
         'Requires text content in active field'
       ],
@@ -343,6 +321,8 @@ export class FieldShortcutManager {
       this._settingsUnsubscribe();
       this._settingsUnsubscribe = null;
     }
+    this._shortcutUnsubscribe?.();
+    this._shortcutUnsubscribe = null;
 
     this.featureManager = null;
     this.initialized = false;

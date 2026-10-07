@@ -5,6 +5,7 @@ import { pageEventBus } from '@/core/PageEventBus.js';
 import { ExclusionChecker } from '@/features/exclusion/core/ExclusionChecker.js';
 import { checkUrlExclusionAsync } from '@/features/exclusion/utils/exclusion-utils.js';
 import { shortcutManager } from '@/core/managers/content/shortcuts/ShortcutManager.js';
+import { matchesShortcutEvent, parseShortcut } from '@/core/managers/content/shortcuts/shortcutKeys.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.CONTENT, 'InteractionCoordinator');
 
@@ -111,7 +112,8 @@ class InteractionCoordinator {
   }
 
   async _handleKeyboardInteraction(event) {
-    const isMainShortcut = event.ctrlKey && event.key === '/';
+    const configuredShortcut = parseShortcut(settingsManager.get('TEXT_FIELD_SHORTCUT', 'Ctrl+/'));
+    const isMainShortcut = matchesShortcutEvent(event, configuredShortcut);
     const isEscape = event.key === 'Escape' || event.code === 'Escape';
     
     if (!isMainShortcut && !(isEscape && this.revertMightBeNeeded)) return;
