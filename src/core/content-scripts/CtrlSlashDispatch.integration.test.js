@@ -374,6 +374,73 @@ describe('Ctrl+/ dispatch characterization', () => {
     expect(mocks.loadFeature).toHaveBeenCalledTimes(1);
   });
 
+  it('reconciles the latest setting after subscribing across initialization', async () => {
+    const subscribe = mocks.settingsOnChange.getMockImplementation();
+    let changedDuringFieldSubscription = false;
+    mocks.settingsOnChange.mockImplementation((key, callback, ...args) => {
+      const unsubscribe = subscribe(key, callback, ...args);
+      if (key === 'TEXT_FIELD_SHORTCUT' && !changedDuringFieldSubscription) {
+        changedDuringFieldSubscription = true;
+        changeSetting(key, 'Alt+T');
+      }
+      return unsubscribe;
+    });
+
+    await activateShortcutWiring();
+    const fieldShortcut = shortcutManager.ctrlSlashShortcut;
+
+    expect(shortcutManager.shortcuts.has('Ctrl+/')).toBe(false);
+    expect(shortcutManager.shortcuts.get('Alt+t')).toBe(fieldShortcut);
+
+    document.dispatchEvent(createEvent('t', { ctrlKey: false, altKey: true }));
+    await nextTask();
+    await nextTask();
+
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(mocks.translateFieldViaSmartHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps Escape reserved when configured as the field shortcut, then rebinds to a valid key', async () => {
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Escape');
+    await activateShortcutWiring();
+    const revertShortcut = shortcutManager.revertShortcut;
+    const fieldShortcut = shortcutManager.ctrlSlashShortcut;
+
+    expect(shortcutManager.shortcuts.get('escape')).toBe(revertShortcut);
+    expect([...shortcutManager.shortcuts.values()]).not.toContain(fieldShortcut);
+
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Alt+T');
+
+    expect(shortcutManager.shortcuts.get('escape')).toBe(revertShortcut);
+    expect(shortcutManager.shortcuts.get('Alt+t')).toBe(fieldShortcut);
+
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Escape');
+
+    expect(shortcutManager.shortcuts.get('escape')).toBe(revertShortcut);
+    expect(shortcutManager.shortcuts.has('Alt+t')).toBe(false);
+
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Alt+T');
+
+    expect(shortcutManager.shortcuts.get('escape')).toBe(revertShortcut);
+    expect(shortcutManager.shortcuts.get('Alt+t')).toBe(fieldShortcut);
+  });
+
+  it('preserves an unrelated handler when the field shortcut collides with it', async () => {
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Alt+T');
+    const unrelatedHandler = { shouldExecute: vi.fn(), execute: vi.fn() };
+    shortcutManager.registerShortcut('Alt+T', unrelatedHandler);
+    await activateShortcutWiring();
+    const fieldShortcut = shortcutManager.ctrlSlashShortcut;
+
+    expect(shortcutManager.shortcuts.get('Alt+t')).toBe(unrelatedHandler);
+    expect([...shortcutManager.shortcuts.values()]).not.toContain(fieldShortcut);
+
+    changeSetting('TEXT_FIELD_SHORTCUT', 'Cmd+T');
+
+    expect(shortcutManager.shortcuts.get('Alt+t')).toBe(unrelatedHandler);
+    expect(shortcutManager.shortcuts.get('Meta+t')).toBe(fieldShortcut);
+  });
+
   it('matches Cmd independently from Ctrl and keeps exact complex modifiers', async () => {
     changeSetting('TEXT_FIELD_SHORTCUT', 'Cmd+Shift+T');
     await activateShortcutWiring();

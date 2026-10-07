@@ -85,11 +85,9 @@ export class ShortcutManager extends ResourceTracker {
     // Register Ctrl+/ shortcut for translation (will be updated dynamically)
     const ctrlSlashShortcut = new FieldShortcutManager();
     const currentShortcut = await this.getCurrentFieldShortcut();
-    this.ctrlSlashShortcutKey = canonicalShortcutKey(currentShortcut);
-    this.registerShortcut(this.ctrlSlashShortcutKey, ctrlSlashShortcut);
-
-    // Store reference for initialization later
     this.ctrlSlashShortcut = ctrlSlashShortcut;
+    this.ctrlSlashShortcutKey = null;
+    this.rebindFieldShortcut(currentShortcut);
 
     // Setup dynamic shortcut updates
     this.setupDynamicShortcutUpdates(this.ctrlSlashShortcut);
@@ -137,24 +135,36 @@ export class ShortcutManager extends ResourceTracker {
       // Subscribe to shortcut changes
       this._settingsUnsubscribe = settingsManager.onChange('TEXT_FIELD_SHORTCUT', async (newShortcut) => {
         try {
-          if (this.ctrlSlashShortcut) {
-            this.unregisterShortcut(this.ctrlSlashShortcutKey);
-            this.ctrlSlashShortcutKey = canonicalShortcutKey(newShortcut);
-            this.registerShortcut(this.ctrlSlashShortcutKey, this.ctrlSlashShortcut);
-
-            this.logger.debug(`Text field shortcut updated to: ${newShortcut || 'Ctrl+/'}`);
-          }
+          this.rebindFieldShortcut(newShortcut);
         } catch (error) {
           this.logger.error('Failed to update text field shortcut:', error);
         }
       });
 
-      // Initial setup
+      // Reconcile after subscribing to cover changes made during FieldShortcutManager initialization.
       const currentShortcut = settingsManager.get('TEXT_FIELD_SHORTCUT', 'Ctrl+/');
+      this.rebindFieldShortcut(currentShortcut);
       this.logger.debug(`Initial text field shortcut: ${currentShortcut}`);
 
     } catch (error) {
       this.logger.error('Failed to initialize dynamic shortcuts:', error);
+    }
+  }
+
+  rebindFieldShortcut(shortcut) {
+    const fieldShortcut = this.ctrlSlashShortcut;
+    if (!fieldShortcut) return;
+
+    if (this.ctrlSlashShortcutKey && this.shortcuts.get(this.ctrlSlashShortcutKey) === fieldShortcut) {
+      this.shortcuts.delete(this.ctrlSlashShortcutKey);
+    }
+
+    const key = canonicalShortcutKey(shortcut);
+    this.ctrlSlashShortcutKey = key;
+    const existingHandler = this.shortcuts.get(key);
+    if (!existingHandler || existingHandler === fieldShortcut) {
+      this.shortcuts.set(key, fieldShortcut);
+      this.logger.debug(`Registered field shortcut for: ${key}`);
     }
   }
 
