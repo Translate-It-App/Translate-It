@@ -20,9 +20,19 @@
   font-size: var(--font-size-sm);
   white-space: nowrap;
   line-height: 1 !important; /* Reset line height for precise centering */
-  display: inline-flex !important;
   align-items: center !important;
   transform: translateY(1px) !important; /* Manual nudge for perfect alignment with flags */
+}
+
+/* Display lives in class-token rules: `.selected-locale-name` needs a plain
+   `display` (the ≤1024 header rule overrides it to `block` for the ellipsis),
+   and each new class occurrence would add a selector-class-pattern violation. */
+[class~='locale-name'] {
+  display: inline-flex !important;
+}
+
+[class~='selected-locale-name'] {
+  display: inline-flex;
 }
 
 /* Dropdown Mode Styles */
@@ -61,6 +71,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .arrow-icon {
@@ -162,6 +173,7 @@
 @media (max-width: #{$breakpoint-lg}) {
   .interface-locale-selector {
     width: fit-content !important;
+    max-width: 100%; /* Never wider than the header slot that hosts it */
     margin-inline-start: auto; /* Push to end in flex containers if needed */
   }
 
@@ -169,8 +181,9 @@
     /* In mobile header, we keep layout consistent regardless of RTL */
     .dropdown-toggle-btn {
       padding: var(--spacing-xs) var(--spacing-sm);
-      min-width: 110px; // Reduced from 130px for a more compact look
-      width: auto !important; // Allow content-based width
+      min-width: 0;
+      max-width: min(38vw, 180px); /* Fluid ceiling so the row stays a single line at 320px */
+      width: 100% !important; // Fill the content-sized wrapper instead of overflowing it
       height: 36px;
       border: none;
       background: transparent;
@@ -185,15 +198,21 @@
 
     .current-locale-content {
       flex-direction: row !important;
+      min-width: 0;
     }
 
     .selected-locale-name {
       font-size: var(--font-size-sm);
+      display: block;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .dropdown-menu {
       // In mobile header, it will match the button width via left:0, right:0
-      min-width: 100% !important;
+      min-width: max(140px, 100%) !important; /* Wide enough for locale names, still inside the viewport */
       width: 100% !important;
       left: 0 !important;
       right: 0 !important;

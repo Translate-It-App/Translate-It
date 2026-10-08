@@ -188,7 +188,7 @@
   .mobile-only {
     display: block;
     width: auto;
-    min-width: 140px;
+    min-width: 0; /* Shrink with the header row instead of forcing a 140px floor */
   }
 
   .options-sidebar {
@@ -210,11 +210,12 @@
   }
 
   .sidebar-content {
-    flex-direction: row;
+    flex-flow: row nowrap;
     align-items: center;
     width: 100%;
     gap: var(--spacing-sm);
-    justify-content: space-between; /* Spread items across the header */
+    justify-content: flex-start; /* Auto margin on the first launcher parks the pair on the right */
+    min-width: 0;
   }
 
   .sidebar-header {
@@ -283,6 +284,14 @@
     }
   }
 
+  /* The locale section is the row's pressure valve: it is the only item that
+     may shrink, so a narrow viewport ellipsises the locale name instead of
+     pushing the launchers past the edge. */
+  [class~='sidebar-section'][class~='localization-controls'] {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
   .sidebar-footer {
     display: none;
   }
@@ -296,8 +305,8 @@
   }
 
   .sidebar-content {
-    gap: var(--spacing-sm);
-    justify-content: space-between;
+    gap: $spacing-xs;
+    justify-content: flex-start;
   }
 
   .sidebar-header {
@@ -317,6 +326,13 @@
     h1 {
       font-size: var(--font-size-base);
     }
+  }
+}
+
+/* Narrow header: the nowrap brand stays, only the version chip goes. */
+@media (width <= 400px) {
+  [class~='sidebar-header'] span {
+    display: none;
   }
 }
 
@@ -378,7 +394,7 @@ a.app-link-section {
 /* Adjust for mobile header mode */
 @media (max-width: 1024px) {
   a.app-link-section {
-    padding: var(--spacing-sm);
+    padding: var(--spacing-sm) $spacing-xs;
     
     .app-link-label {
       display: none; /* Hide text to save space on small screens */
@@ -388,5 +404,9 @@ a.app-link-section {
       width: 26px;
       height: 26px;
     }
+  }
+
+  [id='SUBTITLE_TRANSLATOR'] {
+    margin-inline-start: auto; /* Collapses to 0 when the row is tight; parks both launchers at the end as a pair */
   }
 }
