@@ -152,13 +152,15 @@
 
   .tab-content-container {
     padding: $spacing-md !important;
+    padding-bottom: calc(var(--mobile-action-height, 76px) + env(safe-area-inset-bottom, 0px) + $spacing-md) !important;
+    scroll-padding-bottom: calc(var(--mobile-action-height, 76px) + env(safe-area-inset-bottom, 0px) + $spacing-md);
     flex: 1 !important;
     overflow-y: auto !important;
     min-height: 0;
     
     // Additional padding for the content itself
     :global(.tab-content) {
-      padding-bottom: calc(100px + env(safe-area-inset-bottom, 0px)) !important;
+      padding-bottom: $spacing-md !important;
     }
   }
 }
@@ -167,5 +169,7 @@
 @media (max-width: #{$breakpoint-sm}) {
   .tab-content-container {
     padding: $spacing-base $spacing-sm !important;
+    padding-bottom: calc(var(--mobile-action-height, 76px) + env(safe-area-inset-bottom, 0px) + $spacing-base) !important;
+    scroll-padding-bottom: calc(var(--mobile-action-height, 76px) + env(safe-area-inset-bottom, 0px) + $spacing-base);
   }
 }

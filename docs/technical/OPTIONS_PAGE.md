@@ -18,7 +18,7 @@ Certain settings take effect immediately the moment the user interacts with the 
 These settings use the `updateSettingAndPersist` method in the `settings` store, which updates the local state and immediately calls `storageManager.set()` to persist the change.
 
 ### 2. Save-Triggered Application (Manual Save Required)
-Most other configurations are buffered in the local state and require the user to explicitly click the **"Save"** button at the bottom of the navigation sidebar to be permanently applied and synchronized across tabs.
+Most other configurations are buffered in the local state and require the user to explicitly click **"Save"** to be permanently applied and synchronized across tabs. The action stays at the bottom of the navigation on desktop, beside the scrollable navigation on tablet, and in a bottom action bar on mobile.
 
 - **Translation Providers**: API keys, model selections, and provider-specific URLs.
 - **Languages**: Source and Target language preferences.
@@ -40,8 +40,8 @@ The `useSettingsStore` (Pinia) is the single source of truth for all settings.
 
 ### Layout: `OptionsLayout.vue`
 Coordinates the overall structure, including:
-- **`OptionsSidebar.vue`**: Navigation links.
-- **`OptionsNavigation.vue`**: Contains the **Save Button** and status messages.
+- **`OptionsSidebar.vue`**: Header, theme, and interface-language controls.
+- **`OptionsNavigation.vue`**: Contains the route links, one **Save Button**, and status messages; the action area sits outside the scrollable navigation viewport.
 - **`router-view`**: Dynamically loads the selected tab component.
 
 ### Tabs
@@ -162,7 +162,7 @@ Located in `src/shared/config/settingsMigrations.js`, this system ensures that u
 
 - **RTL Support**: The Options page fully supports RTL (Right-to-Left) layouts based on the selected UI language.
 - **Transitions**: Theme and Language changes utilize the `useUITransition` composable for smooth visual effects (View Transitions API).
-- **Responsive Design**: The layout adapts to Tablet and Mobile screens, switching the vertical sidebar to a horizontal scrollable navigation.
+- **Responsive Design**: The layout adapts to Tablet and Mobile screens, switching the vertical navigation to a horizontal scrollable row while keeping Save accessible outside its scroll viewport.
 
 ---
 

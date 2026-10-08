@@ -1,17 +1,51 @@
 <template>
-  <nav class="vertical-tabs">
-    <router-link
-      v-for="item in navigationItems"
-      :key="item.name"
-      :to="{ name: item.name }"
-      :class="['tab-button', { active: $route.name === item.name, disabled: item.disabled }]"
+  <div
+    ref="navRoot"
+    class="options-navigation"
+  >
+    <button
+      v-if="showArrows && canScrollPrevious"
+      class="tab-scroll-arrow previous"
+      type="button"
+      :aria-label="t('options_tabs_scroll_previous')"
+      @click="scrollTabs(-1)"
     >
-      {{ t(item.labelKey) }}
-    </router-link>
-    <div class="tabs-action-area">
+      ‹
+    </button>
+    <nav
+      ref="tabViewport"
+      class="vertical-tabs tab-viewport"
+      :class="{ 'has-previous': canScrollPrevious, 'has-next': canScrollNext }"
+      @scroll="updateScrollState"
+    >
+      <router-link
+        v-for="item in navigationItems"
+        :key="item.name"
+        :to="{ name: item.name }"
+        :class="['tab-button', { active: $route.name === item.name, disabled: item.disabled }]"
+        :aria-current="$route.name === item.name ? 'page' : undefined"
+      >
+        {{ t(item.labelKey) }}
+      </router-link>
+    </nav>
+    <button
+      v-if="showArrows && canScrollNext"
+      class="tab-scroll-arrow next"
+      type="button"
+      :aria-label="t('options_tabs_scroll_next')"
+      @click="scrollTabs(1)"
+    >
+      ›
+    </button>
+    <div
+      ref="actionArea"
+      class="tabs-action-area"
+    >
       <div
         id="status"
         :class="`status-${statusType}`"
+        role="status"
+        aria-atomic="true"
       >
         {{ statusMessage }}
       </div>
@@ -24,11 +58,11 @@
         {{ t('save_settings_button') || 'Save' }}
       </button>
     </div>
-  </nav>
+  </div>
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import './OptionsNavigation.scss'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/features/settings/stores/settings.js'
@@ -45,9 +79,88 @@ import { CONFIG } from '@/shared/config/config.js'
 const logger = getScopedLogger(LOG_COMPONENTS.UI, 'OptionsNavigation')
 
 const { t, locale } = useUnifiedI18n()
-
 const settingsStore = useSettingsStore()
 const router = useRouter()
+
+const navRoot = ref(null)
+const tabViewport = ref(null)
+const actionArea = ref(null)
+const canScrollPrevious = ref(false)
+const canScrollNext = ref(false)
+const showArrows = ref(false)
+let resizeObserver
+let mutationObserver
+let lastViewportWidth
+let actionClearanceContainer
+const scrollBehavior = () => window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ? 'auto' : 'smooth'
+
+const updateScrollState = () => {
+  const viewport = tabViewport.value
+  if (!viewport) return
+  const bounds = viewport.getBoundingClientRect()
+  const items = [...viewport.children]
+  const rtl = getComputedStyle(viewport).direction === 'rtl'
+  const first = items[0]?.getBoundingClientRect()
+  const last = items.at(-1)?.getBoundingClientRect()
+  canScrollPrevious.value = viewport.scrollWidth > viewport.clientWidth && Boolean(rtl ? first && first.right > bounds.right + 1 : first && first.left < bounds.left - 1)
+  canScrollNext.value = viewport.scrollWidth > viewport.clientWidth && Boolean(rtl ? last && last.left < bounds.left - 1 : last && last.right > bounds.right + 1)
+  showArrows.value = viewport.scrollWidth > viewport.clientWidth
+}
+
+const revealActiveTab = () => {
+  const viewport = tabViewport.value
+  const active = viewport?.querySelector('.tab-button.active')
+  if (!viewport || !active) return
+  const bounds = viewport.getBoundingClientRect()
+  const itemBounds = active.getBoundingClientRect()
+  if (itemBounds.left < bounds.left || itemBounds.right > bounds.right) active.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: scrollBehavior() })
+  globalThis.requestAnimationFrame?.(updateScrollState) ?? updateScrollState()
+}
+
+const scrollTabs = (direction) => {
+  const viewport = tabViewport.value
+  if (!viewport) return
+  const rtl = getComputedStyle(viewport).direction === 'rtl'
+  const bounds = viewport.getBoundingClientRect()
+  const items = [...viewport.children]
+  const candidate = direction < 0
+    ? (rtl ? items.find(el => el.getBoundingClientRect().right > bounds.right + 1) : [...items].reverse().find(el => el.getBoundingClientRect().left < bounds.left - 1))
+    : (rtl ? [...items].reverse().find(el => el.getBoundingClientRect().left < bounds.left - 1) : items.find(el => el.getBoundingClientRect().right > bounds.right + 1))
+  candidate?.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: scrollBehavior() })
+}
+
+const syncMobileActionHeight = () => {
+  actionClearanceContainer ??= navRoot.value?.closest('.options-main')
+  if (actionArea.value) actionClearanceContainer?.style.setProperty('--mobile-action-height', `${actionArea.value.getBoundingClientRect().height}px`)
+}
+
+const handleWindowResize = () => {
+  const width = tabViewport.value?.getBoundingClientRect().width
+  if (width == null || width === lastViewportWidth) return
+  lastViewportWidth = width
+  revealActiveTab()
+}
+
+onMounted(async () => {
+  await nextTick()
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => { updateScrollState(); syncMobileActionHeight() })
+    resizeObserver.observe(tabViewport.value)
+    resizeObserver.observe(actionArea.value)
+  }
+  if (typeof MutationObserver !== 'undefined') {
+    mutationObserver = new MutationObserver(updateScrollState)
+    mutationObserver.observe(tabViewport.value, { childList: true, subtree: true, characterData: true })
+  }
+  updateScrollState()
+  syncMobileActionHeight()
+  lastViewportWidth = tabViewport.value?.getBoundingClientRect().width
+  window.addEventListener('resize', handleWindowResize)
+  revealActiveTab()
+})
+onBeforeUnmount(() => { resizeObserver?.disconnect(); mutationObserver?.disconnect(); window.removeEventListener('resize', handleWindowResize); actionClearanceContainer?.style.removeProperty('--mobile-action-height') })
+watch(() => router.currentRoute.value.fullPath, async () => { await nextTick(); revealActiveTab() })
+watch(() => locale.value, async () => { await nextTick(); revealActiveTab(); updateScrollState() })
 
 // Navigation items, labels are reactive to language changes
 const navigationItems = ref([

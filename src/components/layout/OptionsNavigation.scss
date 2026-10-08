@@ -1,22 +1,32 @@
 @use "@/assets/styles/base/variables" as *;
 
-.vertical-tabs {
+.options-navigation {
   flex: 0 0 200px;
+  width: 200px;
+  max-width: 200px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-surface);
   border-right: $border-width $border-style var(--color-border);
+  box-sizing: border-box;
+  min-height: 0;
+}
+
+.vertical-tabs {
+  flex: 1 1 auto;
   padding: $spacing-sm 0 0 0; /* Restored to 10px (spacing-sm) */
   display: flex;
   flex-direction: column;
   background-color: var(--color-surface);
   position: relative;
   box-sizing: border-box;
-  max-width: 200px;
-  width: 200px;
-  height: 100%;
+  min-height: 0;
   overflow-y: hidden; /* Hide scrollbar on desktop by default */
   overflow-x: hidden;
 
   &:hover {
-    overflow-y: auto; /* Show scrollbar on hover if content overflows */
+    overflow-y: auto;
   }
   
   // Custom scrollbar
@@ -52,13 +62,20 @@
   color: var(--color-text-secondary);
   text-align: left;
   text-decoration: none;
-  transition: all $transition-base;
+  transition: color $transition-base, background-color $transition-base, transform $transition-base;
   position: relative;
   
   &:hover:not(.disabled) {
     background-color: var(--color-background);
     color: var(--color-text);
     transform: translateX(2px);
+  }
+
+  &:focus-visible,
+  &.router-link-active:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+    z-index: 1;
   }
   
   &.active {
@@ -70,12 +87,12 @@
     &::before {
       content: '';
       position: absolute;
-      right: 0;
+      inset-inline-end: 0;
       top: 50%;
       transform: translateY(-50%);
       width: 0;
       height: 0;
-      border-left: 8px solid var(--color-background);
+      border-inline-start: 8px solid var(--color-background);
       border-top: 8px solid transparent;
       border-bottom: 8px solid transparent;
     }
@@ -88,10 +105,12 @@
   }
 }
 
+.tab-scroll-arrow {
+  display: none;
+}
+
 .tabs-action-area {
   margin-top: auto;
-  position: sticky;
-  bottom: 0;
   background-color: var(--color-surface);
   padding: $spacing-md $spacing-md calc($spacing-md + 45px) $spacing-md;
   border-top: $border-width $border-style var(--color-border);
@@ -124,6 +143,10 @@
     opacity: 0.6;
     cursor: not-allowed;
   }
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 }
 
 #status {
@@ -146,21 +169,51 @@
 
 // Tablet responsive
 @media (max-width: #{$breakpoint-lg}) {
-  .vertical-tabs {
+  .options-navigation {
     flex: none;
-    border-right: none;
-    border-bottom: $border-width $border-style var(--color-border);
+    width: 100%;
+    max-width: none;
+    height: auto;
+    flex-direction: row;
+    overflow: visible;
+    border: 0;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    align-items: stretch;
+  }
+
+  .vertical-tabs {
+    flex: 1 1 auto;
     flex-direction: row;
     overflow-x: auto;
+    overflow-y: hidden;
     padding: $spacing-xs 0;
     width: 100%;
     max-width: none;
     height: auto; /* Reset desktop height */
-    position: sticky;
-    top: 0;
-    z-index: 10;
     background-color: var(--color-surface);
     
+    min-width: 0;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+    mask-image: linear-gradient(to right, #000, #000);
+    &.has-previous {
+      mask-image: linear-gradient(to right, transparent, #000 18px, #000);
+    }
+
+    &.has-next {
+      mask-image: linear-gradient(to right, #000, #000 calc(100% - 18px), transparent);
+    }
+
+    &.has-previous.has-next {
+      mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+    }
+    &::-webkit-scrollbar {
+      display: none;
+    }
+
     .tab-button {
       border-left: none;
       border-bottom: 3px solid transparent;
@@ -178,35 +231,94 @@
       }
     }
 
-    .tabs-action-area {
-      display: flex;
-      flex-direction: row;
-      margin-top: 0;
-      border-top: none;
-      padding: 0 $spacing-md;
-      border-left: $border-width $border-style var(--color-border);
+  }
+
+  .tabs-action-area {
+    display: flex;
+    flex: 0 1 auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    min-width: 0;
+    max-width: min(40vw, 360px);
+    margin-top: 0;
+    border-top: none;
+    padding: 0 $spacing-md;
+    border-inline-start: $border-width $border-style var(--color-border);
+    position: static;
+    background-color: var(--color-surface);
+    z-index: 1;
+
+    #status {
+      width: auto;
+      min-width: 0;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+
+    .save-button {
       flex-shrink: 0;
+    }
+  }
+
+  .tab-scroll-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 36px;
+    min-height: 40px;
+    border: 0;
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-size: 1.4rem;
+    cursor: pointer;
+    z-index: 2;
+
+    &:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: -2px;
     }
   }
 }
 
 // Mobile responsive
 @media (max-width: #{$breakpoint-md}) {
+  .options-navigation {
+    flex-wrap: wrap;
+  }
+
   .vertical-tabs {
     flex: none;
-    border-right: none;
-    border-bottom: $border-width $border-style var(--color-border);
     flex-direction: row;
     overflow-x: auto;
     padding: 0;
     width: 100%;
     max-width: none;
     height: auto; /* Reset desktop height */
-    position: sticky;
-    top: 0;
-    z-index: 10;
     background-color: var(--color-surface);
     
+    flex: 1 1 100%;
+    width: 100%;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+    mask-image: linear-gradient(to right, #000, #000);
+    &.has-previous {
+      mask-image: linear-gradient(to right, transparent, #000 18px, #000);
+    }
+
+    &.has-next {
+      mask-image: linear-gradient(to right, #000, #000 calc(100% - 18px), transparent);
+    }
+
+    &.has-previous.has-next {
+      mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+    }
+    &::-webkit-scrollbar {
+      display: none;
+    }
+
     .tab-button {
       flex-shrink: 0;
       border-left: none;
@@ -220,26 +332,30 @@
       }
     }
     
-    .tabs-action-area {
-      position: fixed;
-      bottom: 20px; /* Elevated from 0 to clear most nav bars */
-      left: 10px;
-      right: 10px;
-      height: 60px; 
-      background: var(--color-surface-alpha, rgba(255, 255, 255, 0.7));
-      backdrop-filter: blur(16px) saturate(120%); /* Increased blur, decreased saturation for elegance */
-      -webkit-backdrop-filter: blur(16px) saturate(120%);
-      border: 1px solid var(--color-border-alpha, rgba(255, 255, 255, 0.1)); 
-      border-radius: $border-radius-lg; /* Rounded corners for modern look */
-      padding: 0 $spacing-md; 
-      z-index: 100;
-      flex-direction: row;
-      align-items: center; 
-      justify-content: space-between;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25); /* Darker shadow for more depth */
-      margin: 0;
-      width: calc(100% - 20px);
-      box-sizing: border-box;
+  }
+
+  .tabs-action-area {
+    position: fixed;
+    bottom: env(safe-area-inset-bottom, 0px);
+    inset-inline: 10px;
+    max-width: none;
+    min-height: 60px;
+    height: auto;
+    background: var(--color-surface-alpha, rgba(255, 255, 255, 0.7));
+    backdrop-filter: blur(16px) saturate(120%);
+    -webkit-backdrop-filter: blur(16px) saturate(120%);
+    border: 1px solid var(--color-border-alpha, rgba(255, 255, 255, 0.1));
+    border-radius: $border-radius-lg;
+    padding: $spacing-sm $spacing-md;
+    z-index: 100;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+    margin: 0;
+    width: auto;
+    box-sizing: border-box;
 
       .save-button {
         width: auto;
@@ -251,36 +367,82 @@
       }
 
       #status {
-        width: auto;
+        flex: 1 1 120px;
+        min-width: 0;
+        overflow-wrap: anywhere;
         order: 0;
         font-size: $font-size-xs;
         margin: 0;
         padding-inline-end: $spacing-sm;
         font-weight: 600;
       }
-    }
+  }
+
+  .tab-scroll-arrow {
+    display: none;
   }
 }
 
 // RTL specific styles for navigation
-:global(.options-layout.rtl) {
-  .vertical-tabs {
+.extension-options.rtl {
+  .options-navigation {
     border-right: none;
     border-left: $border-width $border-style var(--color-border);
+  }
+  .vertical-tabs {
+    border-right: none;
   }
   
   .tab-button {
     text-align: right;
     border-left: none;
-    border-right: 4px solid transparent;
+    border-inline-end: 4px solid transparent;
     
     &.active {
-      border-left-color: transparent;
-      border-right-color: var(--color-primary);
+      border-inline-start-color: transparent;
+      border-inline-end-color: var(--color-primary);
     }
   }
   
   .tabs-action-area {
     text-align: right;
+  }
+
+  @media (max-width: #{$breakpoint-lg}) {
+    .options-navigation {
+      border: 0;
+    }
+
+    .vertical-tabs.has-previous {
+      mask-image: linear-gradient(to left, transparent, #000 18px, #000);
+    }
+
+    .vertical-tabs.has-next {
+      mask-image: linear-gradient(to left, #000, #000 calc(100% - 18px), transparent);
+    }
+
+    .vertical-tabs.has-previous.has-next {
+      mask-image: linear-gradient(to left, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+    }
+
+    .tab-button {
+      border-inline-end: 0;
+
+      &.active {
+        border-inline-end-color: transparent;
+        border-bottom-color: var(--color-primary);
+      }
+    }
+
+    .tab-scroll-arrow.previous,
+    .tab-scroll-arrow.next {
+      transform: scaleX(-1);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vertical-tabs {
+    scroll-behavior: auto;
   }
 }

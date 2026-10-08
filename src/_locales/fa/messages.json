@@ -1844,6 +1844,12 @@
   "horizontal_action_scroller_next": {
     "message": "پیمایش عملیات به راست"
   },
+  "options_tabs_scroll_previous": {
+    "message": "پیمایش به زبانه‌های قبلی"
+  },
+  "options_tabs_scroll_next": {
+    "message": "پیمایش به زبانه‌های بعدی"
+  },
   "page_translation_btn_translate": {
     "message": "ترجمه صفحه"
   },

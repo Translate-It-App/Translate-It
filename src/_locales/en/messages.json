@@ -1844,6 +1844,12 @@
   "horizontal_action_scroller_next": {
     "message": "Scroll actions right"
   },
+  "options_tabs_scroll_previous": {
+    "message": "Scroll to earlier tabs"
+  },
+  "options_tabs_scroll_next": {
+    "message": "Scroll to later tabs"
+  },
   "page_translation_btn_translate": {
     "message": "Translate Page"
   },

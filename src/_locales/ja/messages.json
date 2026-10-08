@@ -1844,6 +1844,12 @@
   "horizontal_action_scroller_next": {
     "message": "操作を右にスクロール"
   },
+  "options_tabs_scroll_previous": {
+    "message": "前のタブへスクロール"
+  },
+  "options_tabs_scroll_next": {
+    "message": "次のタブへスクロール"
+  },
   "page_translation_btn_translate": {
     "message": "ページ翻訳"
   },
