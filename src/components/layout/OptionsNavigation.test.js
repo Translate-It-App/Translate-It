@@ -708,6 +708,74 @@ describe('OptionsNavigation.vue - navigation overflow behavior', () => {
     parent.remove();
   });
 
+  it('teleports the toast to the options overlay and keeps it outside raised content', async () => {
+    mockValidateSettings.mockReturnValue({ isValid: true, errors: [] });
+    mockSaveSettings.mockResolvedValue(true);
+    safeSendMessageMock.mockResolvedValue({ success: true });
+
+    const overlay = document.createElement('div');
+    overlay.className = 'extension-options rtl';
+    const layout = document.createElement('div');
+    layout.className = 'options-layout';
+    const main = document.createElement('main');
+    main.className = 'options-main';
+    const content = document.createElement('div');
+    content.className = 'tab-content-container';
+    const dropdown = document.createElement('div');
+    dropdown.className = 'ti-dropdown-open';
+    content.append(dropdown);
+    main.append(content);
+    layout.append(main);
+    overlay.append(layout);
+    document.body.append(overlay);
+
+    const wrapper = mount(OptionsNavigation, {
+      attachTo: main,
+      global: {
+        stubs: { RouterLink: { template: '<a v-bind="$attrs"><slot /></a>' } },
+        mocks: { $route: { name: 'languages' } }
+      }
+    });
+    mountedWrappers.push(wrapper);
+    await flushPromises();
+
+    const actionArea = wrapper.find('.tabs-action-area');
+    actionArea.element.getBoundingClientRect = () => ({ left: 0, right: 100, top: 0, bottom: 56, width: 100, height: 56 });
+    resizeObserverCallback();
+    await flushPromises();
+    await wrapper.find('#saveSettings').trigger('click');
+    await flushPromises();
+
+    const status = overlay.querySelector('#status');
+    expect(document.querySelectorAll('#status')).toHaveLength(1);
+    expect(status.parentElement).toBe(overlay);
+    expect(overlay.querySelectorAll('.options-navigation nav #status')).toHaveLength(0);
+    expect(overlay.querySelectorAll('.tab-content-container #status')).toHaveLength(0);
+    expect(status.textContent).toBe('OPTIONS_STATUS_SAVED_SUCCESS');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.classList.contains('is-visible')).toBe(true);
+    expect(status.getAttribute('aria-atomic')).toBe('true');
+    expect(wrapper.find('.tabs-action-area').findAll('#saveSettings')).toHaveLength(1);
+    expect(wrapper.find('.tabs-action-area').element.contains(status)).toBe(false);
+    expect(overlay.style.getPropertyValue('--mobile-action-height')).toBe('56px');
+    expect(status.closest('.extension-options')).toBe(overlay);
+    expect(main.closest('.extension-options')).toBe(overlay);
+
+    dropdown.classList.add('is-open');
+    expect(overlay.querySelectorAll('#status')).toHaveLength(1);
+    expect(status.classList.contains('is-visible')).toBe(true);
+    expect(status.textContent).toBe('OPTIONS_STATUS_SAVED_SUCCESS');
+
+    // Toast content cannot change the measured Save dock height.
+    resizeObserverCallback();
+    expect(overlay.style.getPropertyValue('--mobile-action-height')).toBe('56px');
+    wrapper.unmount();
+    expect(overlay.querySelector('#status')).toBeNull();
+    expect(overlay.style.getPropertyValue('--mobile-action-height')).toBe('');
+    expect(resizeObserverInstance.disconnect).toHaveBeenCalledTimes(1);
+    overlay.remove();
+  });
+
   it('uses RTL previous/next geometry and measures/removes action height on the shared parent', async () => {
     const { wrapper, parent } = mountNavigation();
     await flushPromises();

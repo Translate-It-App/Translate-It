@@ -50,14 +50,19 @@
         {{ t('save_settings_button') || 'Save' }}
       </button>
     </div>
-    <div
-      id="status"
-      :class="['options-status-toast', `status-${statusType}`, { 'is-visible': statusMessage }]"
-      :role="statusType === 'error' ? 'alert' : 'status'"
-      aria-atomic="true"
+    <Teleport
+      :to="toastTarget || 'body'"
+      :disabled="!toastTarget"
     >
-      {{ statusMessage }}
-    </div>
+      <div
+        id="status"
+        :class="['options-status-toast', `status-${statusType}`, { 'is-visible': statusMessage }]"
+        :role="statusType === 'error' ? 'alert' : 'status'"
+        aria-atomic="true"
+      >
+        {{ statusMessage }}
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -92,6 +97,7 @@ let resizeObserver
 let mutationObserver
 let lastViewportWidth
 let actionClearanceContainer
+const toastTarget = ref(null)
 const scrollBehavior = () => window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ? 'auto' : 'smooth'
 
 const updateScrollState = () => {
@@ -130,7 +136,7 @@ const scrollTabs = (direction) => {
 }
 
 const syncMobileActionHeight = () => {
-  actionClearanceContainer ??= navRoot.value?.closest('.options-main')
+  actionClearanceContainer ??= navRoot.value?.closest('.extension-options') || navRoot.value?.closest('.options-main')
   if (actionArea.value) actionClearanceContainer?.style.setProperty('--mobile-action-height', `${actionArea.value.getBoundingClientRect().height}px`)
 }
 
@@ -143,6 +149,8 @@ const handleWindowResize = () => {
 
 onMounted(async () => {
   await nextTick()
+  actionClearanceContainer = navRoot.value?.closest('.extension-options') || navRoot.value?.closest('.options-main')
+  toastTarget.value = navRoot.value?.closest('.extension-options') || null
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => { updateScrollState(); syncMobileActionHeight() })
     resizeObserver.observe(tabViewport.value)

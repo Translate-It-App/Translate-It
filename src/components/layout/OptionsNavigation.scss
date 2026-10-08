@@ -110,6 +110,8 @@
 }
 
 .tabs-action-area {
+  --safe-inline-end: env(safe-area-inset-right, 0px);
+
   margin-top: auto;
   background-color: var(--color-surface);
   padding: $spacing-md $spacing-md calc($spacing-md + 45px) $spacing-md;
@@ -153,7 +155,7 @@
   position: fixed;
   inset-block-end: $spacing-xl;
   inset-inline-end: $spacing-xl;
-  z-index: 1000;
+  z-index: 3000;
   max-inline-size: min(32rem, calc(100vw - 2 * $spacing-md));
   padding: $spacing-md $spacing-lg;
   border: $border-width $border-style var(--color-border);
@@ -352,8 +354,9 @@
   .tabs-action-area {
     position: fixed;
     bottom: env(safe-area-inset-bottom, 0px);
-    inset-inline: 10px;
-    max-width: none;
+    inset-inline: auto max(10px, var(--safe-inline-end));
+    inline-size: fit-content;
+    max-inline-size: calc(100vw - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
     min-height: 60px;
     height: auto;
     background: var(--color-surface-alpha, rgba(255, 255, 255, 0.7));
@@ -369,17 +372,18 @@
     justify-content: space-between;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
     margin: 0;
-    width: auto;
     box-sizing: border-box;
 
-      .save-button {
-        width: auto;
-        min-width: max-content;
-        white-space: nowrap;
-        padding: $spacing-xs $spacing-lg;
-        margin-bottom: 0;
-        box-shadow: 0 4px 12px var(--color-primary-alpha);
-      }
+    .save-button {
+      min-inline-size: 44px;
+      min-block-size: 44px;
+      max-inline-size: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      padding: $spacing-xs $spacing-lg;
+      margin-bottom: 0;
+      box-shadow: 0 4px 12px var(--color-primary-alpha);
+    }
 
   }
 
@@ -416,6 +420,8 @@
   }
   
   .tabs-action-area {
+    --safe-inline-end: env(safe-area-inset-left, 0px);
+
     text-align: right;
   }
 
