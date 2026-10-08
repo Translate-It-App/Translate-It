@@ -879,14 +879,33 @@ describe('PopupHeader.scss More menu modernization', () => {
     expect(iconBlock[1]).toContain('width: 18px')
     expect(iconBlock[1]).toContain('height: 18px')
 
-    // No filter on ANY rule mentioning a menu item: branded multicolor
-    // Subtitle/PDF <img> stay as-is; MaskIcons stay currentColor-driven.
+    // No filter on ANY rule mentioning a menu item: branded Subtitle/PDF
+    // <img> assets stay as-is (multicolor, ADR-001); MaskIcons stay
+    // currentColor-driven.
     for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       if (m[1].includes('ti-header-menu-item')) {
         expect(m[2]).not.toMatch(/filter/)
       }
     }
     expect(bare).not.toMatch(/ti-header-menu-item[^{}]*filter/)
+  })
+
+  it('renders the Subtitle launcher as a multicolor <img>, not a MaskIcon', () => {
+    const vueSource = readFileSync(resolve(here, 'PopupHeader.vue'), 'utf8')
+
+    // Subtitle points at the SVG asset through the menu icon helper…
+    expect(vueSource).toMatch(/<img[\s\S]*?menuIcon\('subtitle\.svg'\)[\s\S]*?>/)
+    // …is decorative (the menu button owns the accessible name)…
+    const subtitleImg = vueSource.match(/<img[\s\S]*?menuIcon\('subtitle\.svg'\)[\s\S]*?>/)
+    expect(subtitleImg[0]).toContain('alt=""')
+    expect(subtitleImg[0]).toContain('aria-hidden="true"')
+    // …and no MaskIcon still references the Subtitle asset (multicolor,
+    // ADR-001, same as the PDF launcher).
+    for (const m of vueSource.matchAll(/<MaskIcon[\s\S]*?\/>/g)) {
+      expect(m[0]).not.toContain('subtitle.svg')
+    }
+    // PDF launcher stays a branded <img> (structure unchanged).
+    expect(vueSource).toMatch(/<img[\s\S]*?menuIcon\('pdf_viewer\/pdf\.png'\)/)
   })
 
   it('keeps the hover contracts reachable (light neutral, dark action tokens)', () => {

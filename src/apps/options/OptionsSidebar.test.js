@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import OptionsSidebar from './OptionsSidebar.vue';
+import { openExtensionApp } from '@/core/ExtensionAppLauncher.js';
 
 const mockT = vi.fn((key, fallback) =>
   key === 'options_description' ? 'Translate the web, your way.' : (fallback ?? key),
@@ -21,7 +22,15 @@ vi.mock('@/shared/logging/logger.js', () => ({
   }),
 }));
 
+vi.mock('@/core/ExtensionAppLauncher.js', () => ({
+  openExtensionApp: vi.fn().mockResolvedValue({ success: true }),
+}));
+
 describe('OptionsSidebar.vue', () => {
+  beforeEach(() => {
+    mockT.mockClear();
+    vi.mocked(openExtensionApp).mockClear();
+  });
   it('renders the canonical tagline via options_description, not the Store description key', () => {
     const wrapper = mount(OptionsSidebar, {
       global: {
@@ -79,5 +88,72 @@ describe('OptionsSidebar.vue', () => {
     // 4-5. Both app-link anchors.
     expect(wrapper.find('#SUBTITLE_TRANSLATOR').exists()).toBe(true);
     expect(wrapper.find('#PDF_TRANSLATOR').exists()).toBe(true);
+  });
+
+  it('renders the Subtitle launcher as a multicolor <img>, not a MaskIcon', () => {
+    const wrapper = mount(OptionsSidebar, {
+      global: {
+        stubs: {
+          ThemeSelector: true,
+          InterfaceLocaleSelector: true,
+        },
+      },
+    });
+
+    const launcher = wrapper.find('#SUBTITLE_TRANSLATOR');
+    expect(launcher.exists()).toBe(true);
+
+    // No monochrome mask for the multicolor Subtitle icon (ADR-001).
+    expect(launcher.find('.mask-icon').exists()).toBe(false);
+
+    const img = launcher.find('img.app-link-icon');
+    expect(img.exists()).toBe(true);
+    // Decorative: the anchor owns the accessible name.
+    expect(img.attributes('alt')).toBe('');
+    expect(img.attributes('aria-hidden')).toBe('true');
+    // Vite may hash or inline the asset, so only assert it points at the
+    // Subtitle SVG without assuming the filename survives bundling.
+    const src = img.attributes('src') ?? '';
+    expect(src).toBeTruthy();
+    expect(
+      src.includes('subtitle') || src.includes('.svg') || src.startsWith('data:'),
+    ).toBe(true);
+  });
+
+  it('exposes a localized accessible name on #SUBTITLE_TRANSLATOR', () => {
+    const wrapper = mount(OptionsSidebar, {
+      global: {
+        stubs: {
+          ThemeSelector: true,
+          InterfaceLocaleSelector: true,
+        },
+      },
+    });
+
+    expect(mockT).toHaveBeenCalledWith('open_subtitle_translator', 'Subtitle Translator');
+    const launcher = wrapper.find('#SUBTITLE_TRANSLATOR');
+    expect(launcher.attributes('aria-label')).toBe('Subtitle Translator');
+    // Visible text is preserved alongside the accessible name.
+    expect(launcher.find('.app-link-label').text()).toBe('Subtitle Translator');
+  });
+
+  it('keeps the PDF launcher as a branded <img> and launches both apps on click', async () => {
+    const wrapper = mount(OptionsSidebar, {
+      global: {
+        stubs: {
+          ThemeSelector: true,
+          InterfaceLocaleSelector: true,
+        },
+      },
+    });
+
+    const pdf = wrapper.find('#PDF_TRANSLATOR');
+    expect(pdf.find('img.app-link-icon').exists()).toBe(true);
+
+    await wrapper.find('#SUBTITLE_TRANSLATOR').trigger('click');
+    expect(openExtensionApp).toHaveBeenCalledWith('subtitle');
+
+    await wrapper.find('#PDF_TRANSLATOR').trigger('click');
+    expect(openExtensionApp).toHaveBeenCalledWith('pdf');
   });
 });

@@ -448,22 +448,30 @@ describe('PopupHeader', () => {
     // breakpoint ownership). JSDOM does not apply CSS, so assert existence.
     expect(items).toHaveLength(7)
     const icons = panel.findAll('.ti-header-menu-item img').map((img) => img.attributes('src'))
-    expect(icons.some((src) => src.includes('subtitle.png'))).toBe(true)
-    expect(icons.some((src) => src.includes('pdf.png'))).toBe(true)
-    expect(icons.some((src) => src.includes('history.svg'))).toBe(false)
-    // Monochrome menu icons render via MaskIcon (currentColor), not <img>.
+    expect(icons.some((src) => src?.includes('subtitle.svg'))).toBe(true)
+    expect(icons.some((src) => src?.includes('pdf.png'))).toBe(true)
+    expect(icons.some((src) => src?.includes('history.svg'))).toBe(false)
+    // Multicolor Subtitle renders via native <img> (ADR-001, same as PDF);
+    // monochrome menu icons render via MaskIcon (currentColor), not <img>.
     const maskSrcs = panel.findAllComponents(MaskIcon).map((icon) => icon.props('src'))
     const maskOrImgSrcs = [...icons, ...maskSrcs]
     const historyIcon = panel.findAllComponents(MaskIcon).find((icon) => icon.props('src').includes('history.svg'))
     expect(historyIcon).toBeDefined()
     expect(historyIcon.props('size')).toBe(18)
-    expect(icons.some((src) => src.includes('subtitle.png'))).toBe(true)
-    expect(icons.some((src) => src.includes('pdf.png'))).toBe(true)
-    expect(maskOrImgSrcs.some((src) => src.includes('mouse-hover.png'))).toBe(true)
-    expect(maskOrImgSrcs.some((src) => src.includes('capture.svg'))).toBe(true)
-    expect(maskOrImgSrcs.some((src) => src.includes('side-panel.png'))).toBe(true)
-    // Capture is fully off the image path: no <img> anywhere in the menu.
-    expect(icons.some((src) => src.includes('capture'))).toBe(false)
+    // Subtitle is no longer a MaskIcon.
+    expect(panel.findAllComponents(MaskIcon).some((icon) => icon.props('src')?.includes('subtitle.svg'))).toBe(false)
+    // Decorative: the button owns the accessible name, the <img> stays hidden.
+    const subtitleImg = panel.findAll('.ti-header-menu-item img').find((img) => img.attributes('src')?.includes('subtitle.svg'))
+    expect(subtitleImg.exists()).toBe(true)
+    expect(subtitleImg.attributes('alt')).toBe('')
+    expect(subtitleImg.attributes('aria-hidden')).toBe('true')
+    expect(panel.findAll('[role="menuitem"]')[0].text()).toContain('popup_subtitle_title_icon')
+    expect(icons.some((src) => src?.includes('pdf.png'))).toBe(true)
+    expect(maskOrImgSrcs.some((src) => src?.includes('mouse-hover.png'))).toBe(true)
+    expect(maskOrImgSrcs.some((src) => src?.includes('capture.svg'))).toBe(true)
+    expect(maskOrImgSrcs.some((src) => src?.includes('side-panel.png'))).toBe(true)
+    // Capture stays mask-driven: no capture <img> in the menu.
+    expect(icons.some((src) => src?.includes('capture'))).toBe(false)
     expect(panel.text()).toContain('Disable on this site')
     expect(panel.text()).toContain('Translation History')
     expect(mockT).toHaveBeenCalledWith('SIDEPANEL_HISTORY_TOOLTIP', 'Translation History')
@@ -957,8 +965,14 @@ describe('PopupHeader', () => {
     const items = panel.findAll('[role="menuitem"]')
     expect(items).toHaveLength(7)
 
-    // 1-2: branded launchers unchanged (first two positions, same assets).
-    expect(items[0].find('img').attributes('src')).toContain('subtitle.png')
+    // 1: subtitle is a multicolor <img> (ADR-001, same as PDF); 2: PDF stays a branded <img>.
+    const subtitleImg = items[0].find('img')
+    expect(subtitleImg.exists()).toBe(true)
+    expect(subtitleImg.attributes('src')).toContain('subtitle.svg')
+    expect(subtitleImg.attributes('alt')).toBe('')
+    expect(subtitleImg.attributes('aria-hidden')).toBe('true')
+    expect(items[0].findComponent(MaskIcon).exists()).toBe(false)
+    expect(items[0].text()).toContain('popup_subtitle_title_icon')
     expect(items[1].find('img').attributes('src')).toContain('pdf.png')
 
     // 3: permanent History action precedes responsive-only duplicates.

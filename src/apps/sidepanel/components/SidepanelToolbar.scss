@@ -120,6 +120,14 @@
       opacity: var(--icon-hover-opacity);
     }
   }
+
+  /* Multicolor Subtitle icon (same as PDF pattern): keep brand colors —
+     the base/dark --icon-filter invert must never recolor it. */
+  #subtitleBtn img,
+  #subtitleBtn .toolbar-icon {
+    filter: none !important;
+    opacity: 1 !important;
+  }
 }
 
 /*

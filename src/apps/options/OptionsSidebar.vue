@@ -46,12 +46,14 @@
         id="SUBTITLE_TRANSLATOR"
         href="#"
         class="sidebar-section app-link-section"
+        :aria-label="t('open_subtitle_translator', 'Subtitle Translator')"
         @click.prevent="openSubtitlePage"
       >
         <img
-          src="@/icons/ui/subtitle.png"
+          src="@/icons/ui/subtitle.svg"
           class="app-link-icon"
-          alt="Subtitle"
+          alt=""
+          aria-hidden="true"
         >
         <span class="app-link-label">{{ t('open_subtitle_translator', 'Subtitle Translator') }}</span>
       </a>

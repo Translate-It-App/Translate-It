@@ -130,7 +130,8 @@
       >
         <img
           :src="subtitleIcon"
-          alt="Subtitle Translator"
+          alt=""
+          aria-hidden="true"
           class="toolbar-icon"
         >
       </button>
@@ -271,7 +272,7 @@ const revertIcon = browser.runtime.getURL('icons/ui/revert.png')
 const mouseHoverIcon = browser.runtime.getURL('icons/ui/mouse-hover.png')
 const settingsIcon = browser.runtime.getURL('icons/ui/settings.png')
 const captureIcon = browser.runtime.getURL('icons/ui/capture.svg')
-const subtitleIcon = browser.runtime.getURL('icons/ui/subtitle.png')
+const subtitleIcon = browser.runtime.getURL('icons/ui/subtitle.svg')
 const pdfIcon = browser.runtime.getURL('icons/ui/pdf_viewer/pdf.png')
 
 const handleSelectElement = async () => {

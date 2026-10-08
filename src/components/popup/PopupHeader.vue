@@ -52,7 +52,7 @@
             @click="close(); handleOpenExtensionApp('subtitle')"
           >
             <img
-              :src="menuIcon('subtitle.png')"
+              :src="menuIcon('subtitle.svg')"
               alt=""
               aria-hidden="true"
             >
