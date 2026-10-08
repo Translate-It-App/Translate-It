@@ -792,6 +792,65 @@ describe('OptionsNavigation.vue - navigation overflow behavior', () => {
     parent.remove();
   });
 
+  it('keeps horizontal overflow behavior at mobile width across the 768px boundary', async () => {
+    vi.stubGlobal('innerWidth', 375);
+    const route = reactive({ name: 'languages', fullPath: '/languages' });
+    const { wrapper, parent } = mountNavigation(route);
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    configureGeometry(wrapper, {
+      scrollWidth: 300, clientWidth: 100,
+      links: links.map((_, index) => ({ left: index === 0 ? -10 : 110 + index * 10, right: index === 0 ? 20 : 140 + index * 10 }))
+    });
+    resizeObserverCallback();
+    await flushPromises();
+
+    const previous = wrapper.find('.tab-scroll-arrow.previous');
+    const next = wrapper.find('.tab-scroll-arrow.next');
+    expect(previous.exists()).toBe(true);
+    expect(next.exists()).toBe(true);
+    expect(previous.attributes('aria-label')).toBe('options_tabs_scroll_previous');
+    expect(next.attributes('aria-label')).toBe('options_tabs_scroll_next');
+    expect(previous.attributes('data-scroll-chevron')).toBe('left');
+    expect(next.attributes('data-scroll-chevron')).toBe('right');
+    expect(previous.text().trim()).toBe('‹');
+    expect(next.text().trim()).toBe('›');
+
+    const frame = wrapper.find('[data-scroll-frame]');
+    expect(frame.element.children[0]).toBe(previous.element);
+    expect(frame.element.children[1]).toBe(wrapper.find('nav').element);
+    expect(frame.element.children[2]).toBe(next.element);
+    expect(wrapper.findAll('#saveSettings')).toHaveLength(1);
+    expect(wrapper.findAll('#status')).toHaveLength(1);
+    expect(frame.element.contains(wrapper.find('#saveSettings').element)).toBe(false);
+    expect(frame.element.contains(wrapper.find('#status').element)).toBe(false);
+
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    await next.trigger('click');
+    expect(links[1].element.scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: 'nearest' }));
+    expect(links.at(-1).element.scrollIntoView).not.toHaveBeenCalled();
+
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    route.name = 'providers';
+    route.fullPath = '/providers';
+    currentRouteName.value = 'providers';
+    currentRouteFullPath.value = '/providers';
+    await flushPromises();
+    expect(links[1].element.scrollIntoView).toHaveBeenCalledTimes(1);
+
+    for (const width of [769, 768, 769]) {
+      vi.stubGlobal('innerWidth', width);
+      window.dispatchEvent(new Event('resize'));
+      await flushPromises();
+      expect(wrapper.find('.tab-scroll-arrow.previous').attributes('aria-label')).toBe('options_tabs_scroll_previous');
+      expect(wrapper.find('.tab-scroll-arrow.next').attributes('aria-label')).toBe('options_tabs_scroll_next');
+      expect(wrapper.find('.tab-scroll-arrow.previous').attributes('data-scroll-chevron')).toBe('left');
+      expect(wrapper.find('.tab-scroll-arrow.next').attributes('data-scroll-chevron')).toBe('right');
+    }
+    wrapper.unmount();
+    parent.remove();
+  });
+
   it('scrolls to the nearest clipped tab and reveals only the clipped active tab on route/locale changes', async () => {
     const route = reactive({ name: 'languages', fullPath: '/languages' });
     const { wrapper, parent } = mountNavigation(route);
