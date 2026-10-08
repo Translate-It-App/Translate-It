@@ -1850,6 +1850,12 @@
   "options_tabs_scroll_next": {
     "message": "پیمایش به زبانه‌های بعدی"
   },
+  "options_tabs_scroll_up": {
+    "message": "پیمایش به زبانه‌های بالاتر"
+  },
+  "options_tabs_scroll_down": {
+    "message": "پیمایش به زبانه‌های پایین‌تر"
+  },
   "page_translation_btn_translate": {
     "message": "ترجمه صفحه"
   },

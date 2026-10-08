@@ -3,40 +3,50 @@
     ref="navRoot"
     class="options-navigation"
   >
-    <button
-      v-if="showArrows && canScrollPrevious"
-      class="tab-scroll-arrow previous"
-      type="button"
-      :aria-label="t('options_tabs_scroll_previous')"
-      @click="scrollTabs(-1)"
+    <div
+      data-scroll-frame
+      :data-scroll-previous="canScrollPrevious ? '' : null"
+      :data-scroll-next="canScrollNext ? '' : null"
     >
-      ‹
-    </button>
-    <nav
-      ref="tabViewport"
-      class="vertical-tabs tab-viewport"
-      :class="{ 'has-previous': canScrollPrevious, 'has-next': canScrollNext }"
-      @scroll="updateScrollState"
-    >
-      <router-link
-        v-for="item in navigationItems"
-        :key="item.name"
-        :to="{ name: item.name }"
-        :class="['tab-button', { active: $route.name === item.name, disabled: item.disabled }]"
-        :aria-current="$route.name === item.name ? 'page' : undefined"
+      <button
+        v-if="showArrows && canScrollPrevious"
+        class="tab-scroll-arrow previous"
+        data-scroll-edge="start"
+        :data-scroll-chevron="isVerticalNavigation ? 'up' : 'left'"
+        type="button"
+        :aria-label="t(isVerticalNavigation ? 'options_tabs_scroll_up' : 'options_tabs_scroll_previous')"
+        @click="scrollTabs(-1)"
       >
-        {{ t(item.labelKey) }}
-      </router-link>
-    </nav>
-    <button
-      v-if="showArrows && canScrollNext"
-      class="tab-scroll-arrow next"
-      type="button"
-      :aria-label="t('options_tabs_scroll_next')"
-      @click="scrollTabs(1)"
-    >
-      ›
-    </button>
+        {{ isVerticalNavigation ? '↑' : '‹' }}
+      </button>
+      <nav
+        ref="tabViewport"
+        class="vertical-tabs tab-viewport"
+        :class="{ 'has-previous': canScrollPrevious, 'has-next': canScrollNext }"
+        @scroll="updateScrollState"
+      >
+        <router-link
+          v-for="item in navigationItems"
+          :key="item.name"
+          :to="{ name: item.name }"
+          :class="['tab-button', { active: $route.name === item.name, disabled: item.disabled }]"
+          :aria-current="$route.name === item.name ? 'page' : undefined"
+        >
+          {{ t(item.labelKey) }}
+        </router-link>
+      </nav>
+      <button
+        v-if="showArrows && canScrollNext"
+        class="tab-scroll-arrow next"
+        data-scroll-edge="end"
+        :data-scroll-chevron="isVerticalNavigation ? 'down' : 'right'"
+        type="button"
+        :aria-label="t(isVerticalNavigation ? 'options_tabs_scroll_down' : 'options_tabs_scroll_next')"
+        @click="scrollTabs(1)"
+      >
+        {{ isVerticalNavigation ? '↓' : '›' }}
+      </button>
+    </div>
     <div
       ref="actionArea"
       class="tabs-action-area"
@@ -93,9 +103,11 @@ const actionArea = ref(null)
 const canScrollPrevious = ref(false)
 const canScrollNext = ref(false)
 const showArrows = ref(false)
+const isVerticalNavigation = ref(false)
 let resizeObserver
 let mutationObserver
 let lastViewportWidth
+let lastViewportHeight
 let actionClearanceContainer
 const toastTarget = ref(null)
 const scrollBehavior = () => window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ? 'auto' : 'smooth'
@@ -105,12 +117,18 @@ const updateScrollState = () => {
   if (!viewport) return
   const bounds = viewport.getBoundingClientRect()
   const items = [...viewport.children]
-  const rtl = getComputedStyle(viewport).direction === 'rtl'
   const first = items[0]?.getBoundingClientRect()
   const last = items.at(-1)?.getBoundingClientRect()
-  canScrollPrevious.value = viewport.scrollWidth > viewport.clientWidth && Boolean(rtl ? first && first.right > bounds.right + 1 : first && first.left < bounds.left - 1)
-  canScrollNext.value = viewport.scrollWidth > viewport.clientWidth && Boolean(rtl ? last && last.left < bounds.left - 1 : last && last.right > bounds.right + 1)
-  showArrows.value = viewport.scrollWidth > viewport.clientWidth
+  if (isVerticalNavigation.value) {
+    canScrollPrevious.value = viewport.scrollHeight > viewport.clientHeight && Boolean(first && first.top < bounds.top - 1)
+    canScrollNext.value = viewport.scrollHeight > viewport.clientHeight && Boolean(last && last.bottom > bounds.bottom + 1)
+    showArrows.value = viewport.scrollHeight > viewport.clientHeight
+  } else {
+    const rtl = getComputedStyle(viewport).direction === 'rtl'
+    canScrollPrevious.value = viewport.scrollWidth > viewport.clientWidth && Boolean(rtl ? first && first.right > bounds.right + 1 : first && first.left < bounds.left - 1)
+    canScrollNext.value = viewport.scrollWidth > viewport.clientWidth && Boolean(rtl ? last && last.left < bounds.left - 1 : last && last.right > bounds.right + 1)
+    showArrows.value = viewport.scrollWidth > viewport.clientWidth
+  }
 }
 
 const revealActiveTab = () => {
@@ -119,13 +137,25 @@ const revealActiveTab = () => {
   if (!viewport || !active) return
   const bounds = viewport.getBoundingClientRect()
   const itemBounds = active.getBoundingClientRect()
-  if (itemBounds.left < bounds.left || itemBounds.right > bounds.right) active.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: scrollBehavior() })
+  const clipped = isVerticalNavigation.value
+    ? itemBounds.top < bounds.top || itemBounds.bottom > bounds.bottom
+    : itemBounds.left < bounds.left || itemBounds.right > bounds.right
+  if (clipped) active.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: scrollBehavior() })
   globalThis.requestAnimationFrame?.(updateScrollState) ?? updateScrollState()
 }
 
 const scrollTabs = (direction) => {
   const viewport = tabViewport.value
   if (!viewport) return
+  if (isVerticalNavigation.value) {
+    const bounds = viewport.getBoundingClientRect()
+    const items = [...viewport.children]
+    const candidate = direction < 0
+      ? [...items].reverse().find(el => el.getBoundingClientRect().top < bounds.top - 1)
+      : items.find(el => el.getBoundingClientRect().bottom > bounds.bottom + 1)
+    candidate?.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: scrollBehavior() })
+    return
+  }
   const rtl = getComputedStyle(viewport).direction === 'rtl'
   const bounds = viewport.getBoundingClientRect()
   const items = [...viewport.children]
@@ -142,9 +172,14 @@ const syncMobileActionHeight = () => {
 
 const handleWindowResize = () => {
   const width = tabViewport.value?.getBoundingClientRect().width
-  if (width == null || width === lastViewportWidth) return
+  const height = tabViewport.value?.getBoundingClientRect().height
+  if (width == null || height == null) return
+  const viewportChanged = width !== lastViewportWidth || height !== lastViewportHeight
   lastViewportWidth = width
-  revealActiveTab()
+  lastViewportHeight = height
+  isVerticalNavigation.value = window.innerWidth > 1024
+  updateScrollState()
+  if (viewportChanged) revealActiveTab()
 }
 
 onMounted(async () => {
@@ -157,12 +192,14 @@ onMounted(async () => {
     resizeObserver.observe(actionArea.value)
   }
   if (typeof MutationObserver !== 'undefined') {
-    mutationObserver = new MutationObserver(updateScrollState)
+    mutationObserver = new MutationObserver(() => { updateScrollState(); syncMobileActionHeight() })
     mutationObserver.observe(tabViewport.value, { childList: true, subtree: true, characterData: true })
   }
+  isVerticalNavigation.value = window.innerWidth > 1024
   updateScrollState()
   syncMobileActionHeight()
   lastViewportWidth = tabViewport.value?.getBoundingClientRect().width
+  lastViewportHeight = tabViewport.value?.getBoundingClientRect().height
   window.addEventListener('resize', handleWindowResize)
   revealActiveTab()
 })

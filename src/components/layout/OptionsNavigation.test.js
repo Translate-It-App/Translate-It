@@ -544,18 +544,23 @@ describe('OptionsNavigation.vue - navigation overflow behavior', () => {
     return { wrapper, parent };
   };
 
-  const setRect = (element, { left, right }) => {
-    element.getBoundingClientRect = () => ({ left, right, top: 0, bottom: 20, width: right - left, height: 20 });
+  const setRect = (element, { left = 0, right = 20, top = 0, bottom = 20 }) => {
+    element.getBoundingClientRect = () => ({ left, right, top, bottom, width: right - left, height: bottom - top });
     element.scrollIntoView = vi.fn();
   };
 
-  const configureGeometry = (wrapper, { viewport = [0, 100], links, scrollWidth = 100, clientWidth = 100 } = {}) => {
+  const configureGeometry = (wrapper, {
+    viewport = [0, 100], viewportY = [0, 100], links,
+    scrollWidth = 100, clientWidth = 100, scrollHeight = 100, clientHeight = 100
+  } = {}) => {
     const nav = wrapper.find('nav').element;
     const navLinks = wrapper.findAll('nav a');
-    setRect(nav, { left: viewport[0], right: viewport[1] });
+    setRect(nav, { left: viewport[0], right: viewport[1], top: viewportY[0], bottom: viewportY[1] });
     Object.defineProperties(nav, {
       scrollWidth: { configurable: true, value: scrollWidth },
-      clientWidth: { configurable: true, value: clientWidth }
+      clientWidth: { configurable: true, value: clientWidth },
+      scrollHeight: { configurable: true, value: scrollHeight },
+      clientHeight: { configurable: true, value: clientHeight }
     });
     navLinks.forEach((link, index) => setRect(link.element, links?.[index] ?? { left: index * 20, right: index * 20 + 20 }));
     return nav;
@@ -636,6 +641,153 @@ describe('OptionsNavigation.vue - navigation overflow behavior', () => {
     await flushPromises();
     expect(wrapper.find('.tab-scroll-arrow.previous').exists()).toBe(false);
     expect(wrapper.find('.tab-scroll-arrow.next').exists()).toBe(false);
+    wrapper.unmount();
+    parent.remove();
+  });
+
+  it('uses vertical overflow indicators and scrolls the nearest clipped tab', async () => {
+    vi.stubGlobal('innerWidth', 1280);
+    const { wrapper, parent } = mountNavigation();
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    const setVertical = (geometry, scrollHeight = 240, clientHeight = 100) => {
+      configureGeometry(wrapper, {
+        viewportY: [0, 100], scrollHeight, clientHeight,
+        links: geometry.map(({ top, bottom }) => ({ left: 0, right: 100, top, bottom }))
+      });
+      resizeObserverCallback();
+      return flushPromises();
+    };
+
+    await setVertical(links.map((_, index) => ({ top: index * 8, bottom: index * 8 + 8 })), 100, 100);
+    expect(wrapper.findAll('.tab-scroll-arrow')).toHaveLength(0);
+
+    await setVertical(links.map((_, index) => ({ top: index * 20, bottom: index * 20 + 20 })));
+    expect(wrapper.find('.tab-scroll-arrow.previous').exists()).toBe(false);
+    expect(wrapper.find('.tab-scroll-arrow.next').exists()).toBe(true);
+    expect(wrapper.find('.tab-scroll-arrow.next').attributes('aria-label')).toBe('options_tabs_scroll_down');
+    expect(wrapper.find('.tab-scroll-arrow.next').text().trim()).toBe('↓');
+
+    await setVertical(links.map((_, index) => index < 5
+      ? { top: -100 + index * 20, bottom: -80 + index * 20 }
+      : { top: (index - 5) * 10, bottom: (index - 5) * 10 + 10 }));
+    expect(wrapper.find('.tab-scroll-arrow.previous').exists()).toBe(true);
+    expect(wrapper.find('.tab-scroll-arrow.next').exists()).toBe(false);
+    expect(wrapper.find('.tab-scroll-arrow.previous').attributes('aria-label')).toBe('options_tabs_scroll_up');
+    expect(wrapper.find('.tab-scroll-arrow.previous').text().trim()).toBe('↑');
+
+    await setVertical(links.map((_, index) => ({
+      top: index === 0 ? -10 : index * 20,
+      bottom: index === 0 ? 10 : index === 11 ? 110 : index * 20 + 20
+    })));
+    expect(wrapper.find('.tab-scroll-arrow.previous').exists()).toBe(true);
+    expect(wrapper.find('.tab-scroll-arrow.next').exists()).toBe(true);
+    const frame = wrapper.find('[data-scroll-frame]');
+    expect(frame.exists()).toBe(true);
+    expect(frame.element.children[0].getAttribute('data-scroll-chevron')).toBe('up');
+    expect(frame.element.children[0].getAttribute('aria-label')).toBe('options_tabs_scroll_up');
+    expect(frame.element.children[1]).toBe(wrapper.find('nav').element);
+    expect(frame.element.children[2].getAttribute('data-scroll-chevron')).toBe('down');
+    expect(frame.element.children[2].getAttribute('aria-label')).toBe('options_tabs_scroll_down');
+    expect(frame.element.children).toHaveLength(3);
+    expect(wrapper.findAll('#status')).toHaveLength(1);
+    expect(wrapper.findAll('#saveSettings')).toHaveLength(1);
+    expect(frame.element.contains(wrapper.find('#status').element)).toBe(false);
+    expect(frame.element.contains(wrapper.find('#saveSettings').element)).toBe(false);
+    expect(wrapper.find('.tabs-action-area').element.parentElement).not.toBe(frame.element);
+
+    // At the top, Down targets the first partially hidden item, not the far edge.
+    await setVertical(links.map((_, index) => ({ top: index * 20, bottom: index * 20 + 20 })));
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    await wrapper.find('.tab-scroll-arrow.next').trigger('click');
+    expect(links[5].element.scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: 'nearest', block: 'nearest' }));
+    expect(links[11].element.scrollIntoView).not.toHaveBeenCalled();
+
+    // At the bottom, Up targets the nearest partially hidden item from below.
+    await setVertical(links.map((_, index) => index < 4
+      ? { top: -100 + index * 20, bottom: -80 + index * 20 }
+      : index === 4 ? { top: -10, bottom: 10 } : { top: (index - 5) * 10, bottom: (index - 5) * 10 + 10 }));
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    await wrapper.find('.tab-scroll-arrow.previous').trigger('click');
+    expect(links[4].element.scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: 'nearest', block: 'nearest' }));
+    expect(links[0].element.scrollIntoView).not.toHaveBeenCalled();
+    wrapper.unmount();
+    parent.remove();
+  });
+
+  it('reveals clipped desktop active tabs on route, locale, and viewport-height changes, not observer updates', async () => {
+    vi.stubGlobal('innerWidth', 1280);
+    const route = reactive({ name: 'languages', fullPath: '/languages' });
+    const { wrapper, parent } = mountNavigation(route);
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    const nav = configureGeometry(wrapper, {
+      viewportY: [0, 100], scrollHeight: 240, clientHeight: 100,
+      links: links.map((_, index) => ({ top: index * 20, bottom: index * 20 + 20 }))
+    });
+    window.dispatchEvent(new Event('resize'));
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+
+    // Manual vertical scrolling must survive resize-observer indicator updates.
+    setRect(links[0].element, { top: -20, bottom: 0 });
+    resizeObserverCallback();
+    await flushPromises();
+    expect(links[0].element.scrollIntoView).not.toHaveBeenCalled();
+    window.dispatchEvent(new Event('resize'));
+    expect(links[0].element.scrollIntoView).not.toHaveBeenCalled();
+
+    // Route change reveals only the newly active, clipped link.
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    setRect(links[1].element, { top: 110, bottom: 130 });
+    route.name = 'providers';
+    route.fullPath = '/providers';
+    currentRouteName.value = 'providers';
+    currentRouteFullPath.value = '/providers';
+    await flushPromises();
+    expect(links[1].element.scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(links.filter((link, index) => index !== 1).some(link => link.element.scrollIntoView.mock.calls.length)).toBe(false);
+
+    // Locale refresh still reveals the active link, and real height changes do too.
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    locale.value = 'fr';
+    await flushPromises();
+    expect(links[1].element.scrollIntoView).toHaveBeenCalledTimes(1);
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    nav.getBoundingClientRect = () => ({ left: 0, right: 100, top: 0, bottom: 120, width: 100, height: 120 });
+    window.dispatchEvent(new Event('resize'));
+    expect(links[1].element.scrollIntoView).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+    parent.remove();
+  });
+
+  it('switches back to horizontal arrows and labels at the tablet breakpoint', async () => {
+    vi.stubGlobal('innerWidth', 1280);
+    const { wrapper, parent } = mountNavigation();
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    configureGeometry(wrapper, {
+      scrollWidth: 300, clientWidth: 100, scrollHeight: 240, clientHeight: 100,
+      links: links.map((_, index) => ({
+        left: index === 0 ? -10 : index * 30,
+        right: index === 0 ? 10 : index * 30 + 20,
+        top: index * 20,
+        bottom: index * 20 + 20
+      }))
+    });
+    resizeObserverCallback();
+    await flushPromises();
+    expect(wrapper.find('.tab-scroll-arrow.next').attributes('aria-label')).toBe('options_tabs_scroll_down');
+
+    vi.stubGlobal('innerWidth', 1024);
+    window.dispatchEvent(new Event('resize'));
+    await flushPromises();
+    expect(wrapper.find('.tab-scroll-arrow.previous').attributes('aria-label')).toBe('options_tabs_scroll_previous');
+    expect(wrapper.find('.tab-scroll-arrow.next').attributes('aria-label')).toBe('options_tabs_scroll_next');
+    expect(wrapper.find('.tab-scroll-arrow.previous').attributes('data-scroll-chevron')).toBe('left');
+    expect(wrapper.find('.tab-scroll-arrow.next').attributes('data-scroll-chevron')).toBe('right');
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    await wrapper.find('.tab-scroll-arrow.next').trigger('click');
+    expect(links[3].element.scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: 'nearest', block: 'nearest' }));
     wrapper.unmount();
     parent.remove();
   });

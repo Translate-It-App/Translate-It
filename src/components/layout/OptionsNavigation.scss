@@ -22,12 +22,8 @@
   position: relative;
   box-sizing: border-box;
   min-height: 0;
-  overflow-y: hidden; /* Hide scrollbar on desktop by default */
+  overflow-y: auto;
   overflow-x: hidden;
-
-  &:hover {
-    overflow-y: auto;
-  }
   
   // Custom scrollbar
   &::-webkit-scrollbar {
@@ -50,6 +46,7 @@
 
 .tab-button {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   width: auto;
   padding: $spacing-base $spacing-xl;
@@ -106,7 +103,30 @@
 }
 
 .tab-scroll-arrow {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 40px;
+  min-width: 40px;
+  min-height: 40px;
+  margin-inline: auto;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: $border-radius-base;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: $font-size-lg;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--color-text);
+    background: var(--color-background);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 }
 
 .tabs-action-area {
@@ -114,13 +134,132 @@
 
   margin-top: auto;
   background-color: var(--color-surface);
-  padding: $spacing-md $spacing-md calc($spacing-md + 45px) $spacing-md;
+  padding: $spacing-md;
   border-top: $border-width $border-style var(--color-border);
   display: flex;
   flex-direction: column;
   gap: $spacing-base;
   align-items: center;
   z-index: 5;
+}
+
+@media (min-width: #{$breakpoint-lg + 1px}) {
+  [data-scroll-frame] {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  [data-scroll-frame] > nav {
+    // Clears the 44px targets + 2px edge offsets so revealed first/last links
+    // never land under an overlay chevron.
+    scroll-padding-block: 48px;
+  }
+
+  [data-scroll-frame] > nav > a {
+    padding-inline: $spacing-md;
+  }
+
+  [data-scroll-frame][data-scroll-previous]::before,
+  [data-scroll-frame][data-scroll-next]::after {
+    position: absolute;
+    inset-inline: auto 0;
+    inline-size: 48px;
+    block-size: 36px;
+    content: '';
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  [data-scroll-frame][data-scroll-previous]::before {
+    inset-block-start: 0;
+    background: linear-gradient(to bottom, var(--color-surface), transparent);
+  }
+
+  [data-scroll-frame][data-scroll-next]::after {
+    inset-block-end: 0;
+    background: linear-gradient(to top, var(--color-surface), transparent);
+  }
+
+  [data-scroll-frame] > button {
+    position: absolute;
+    inset-inline: auto 4px;
+    inline-size: 44px;
+    block-size: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--color-text-secondary);
+    box-shadow: none;
+    font-size: 0;
+    cursor: pointer;
+    z-index: 2;
+  }
+
+  // Small 32px visual disc inside the transparent 44px hit target.
+  [data-scroll-frame] > button::after {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    inline-size: 32px;
+    block-size: 32px;
+    border-radius: 50%;
+    background: var(--color-surface-alpha, var(--color-surface));
+    box-shadow: 0 1px 4px rgb(0 0 0 / 12%);
+    content: '';
+    transform: translate(-50%, -50%);
+    z-index: -1;
+  }
+
+  [data-scroll-frame] > button:hover {
+    color: var(--color-text);
+    background: transparent;
+  }
+
+  [data-scroll-frame] > button:hover::after {
+    background: var(--color-surface);
+    box-shadow: 0 2px 6px rgb(0 0 0 / 16%);
+  }
+
+  [data-scroll-frame] > button:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  [data-scroll-frame] > button[data-scroll-edge="start"] {
+    inset-block-start: 2px;
+  }
+
+  [data-scroll-frame] > button[data-scroll-edge="end"] {
+    inset-block-end: 2px;
+  }
+
+  [data-scroll-frame] > button[data-scroll-chevron="up"]::before,
+  [data-scroll-frame] > button[data-scroll-chevron="down"]::before {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    inline-size: 8px;
+    block-size: 8px;
+    border-top: 1.5px solid currentcolor;
+    border-right: 1.5px solid currentcolor;
+    content: '';
+    z-index: 1;
+  }
+
+  [data-scroll-frame] > button[data-scroll-chevron="up"]::before {
+    transform: translate(-50%, -50%) rotate(-45deg);
+  }
+
+  [data-scroll-frame] > button[data-scroll-chevron="down"]::before {
+    transform: translate(-50%, -50%) rotate(135deg);
+  }
 }
 
 .save-button {
@@ -193,6 +332,10 @@
 
 // Tablet responsive
 @media (max-width: #{$breakpoint-lg}) {
+  [data-scroll-frame] {
+    display: contents;
+  }
+
   .options-navigation {
     flex: none;
     width: 100%;

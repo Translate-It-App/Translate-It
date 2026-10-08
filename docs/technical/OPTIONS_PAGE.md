@@ -162,7 +162,7 @@ Located in `src/shared/config/settingsMigrations.js`, this system ensures that u
 
 - **RTL Support**: The Options page fully supports RTL (Right-to-Left) layouts based on the selected UI language.
 - **Transitions**: Theme and Language changes utilize the `useUITransition` composable for smooth visual effects (View Transitions API).
-- **Responsive Design**: The layout adapts to Tablet and Mobile screens, switching the vertical navigation to a horizontal scrollable row while keeping Save accessible outside its scroll viewport.
+- **Responsive Design**: Desktop keeps vertical navigation with conditional up/down controls when links overflow. Tablet and Mobile use a horizontal scrollable row while keeping Save accessible outside its scroll viewport.
 
 ---
 

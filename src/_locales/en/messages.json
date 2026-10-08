@@ -1850,6 +1850,12 @@
   "options_tabs_scroll_next": {
     "message": "Scroll to later tabs"
   },
+  "options_tabs_scroll_up": {
+    "message": "Scroll to tabs above"
+  },
+  "options_tabs_scroll_down": {
+    "message": "Scroll to tabs below"
+  },
   "page_translation_btn_translate": {
     "message": "Translate Page"
   },

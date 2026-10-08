@@ -1850,6 +1850,12 @@
   "options_tabs_scroll_next": {
     "message": "次のタブへスクロール"
   },
+  "options_tabs_scroll_up": {
+    "message": "上のタブへスクロール"
+  },
+  "options_tabs_scroll_down": {
+    "message": "下のタブへスクロール"
+  },
   "page_translation_btn_translate": {
     "message": "ページ翻訳"
   },
