@@ -429,6 +429,96 @@ describe('OptionsNavigation.vue - Save Validation UX & Partial Save', () => {
     expect(safeSendMessageMock).not.toHaveBeenCalled();
     expect(wrapper.find('#status').text()).toBe('OPTIONS_STATUS_SAVED_FAILED');
     expect(wrapper.find('#status').classes()).toContain('status-error');
+    expect(wrapper.find('#status').attributes('role')).toBe('alert');
+    expect(wrapper.find('#status').classes()).toContain('is-visible');
+    expect(wrapper.find('#status').attributes('aria-atomic')).toBe('true');
+  });
+
+  it('keeps one accessible toast host and clears each feedback state at its specified duration', async () => {
+    vi.useFakeTimers();
+    const settleSave = async () => {
+      const settling = flushPromises();
+      await vi.advanceTimersByTimeAsync(0);
+      await settling;
+    };
+    const cases = [
+      {
+        type: 'success', role: 'status', duration: 2000,
+        setup: () => {
+          mockValidateSettings.mockReturnValue({ isValid: true, errors: [] });
+          mockSaveSettings.mockResolvedValue(true);
+        }
+      },
+      {
+        type: 'warning', role: 'status', duration: 3000,
+        setup: () => {
+          mockValidateSettings.mockReturnValue({ isValid: false, errors: ['prompt:PROMPT_TEMPLATE:validation_prompt_template_empty'] });
+          mockSettingsStore.settings.PROMPT_TEMPLATE = 'invalid draft template';
+          mockSaveSettings.mockResolvedValue(true);
+        }
+      },
+      {
+        type: 'error', role: 'alert', duration: 5000,
+        setup: () => mockValidateSettings.mockReturnValue({ isValid: false, errors: ['validation_source_language_empty'] })
+      },
+      {
+        type: 'error', role: 'alert', duration: 3000,
+        setup: () => {
+          mockValidateSettings.mockReturnValue({ isValid: true, errors: [] });
+          mockSaveSettings.mockRejectedValue(new Error('Save failed'));
+        }
+      }
+    ];
+
+    try {
+      for (const { type, role, duration, setup } of cases) {
+        vi.clearAllMocks();
+        mockSettingsStore.settings = {
+          TRANSLATION_API: 'google',
+          MODE_PROVIDERS: {},
+          PROMPT_TEMPLATE: 'valid template $_{SOURCE} $_{TARGET} $_{TEXT}'
+        };
+        vi.mocked(storageManager.get).mockResolvedValue({
+          PROMPT_TEMPLATE: 'last persisted template $_{SOURCE} $_{TARGET} $_{TEXT}'
+        });
+        mockSaveSettings.mockResolvedValue(true);
+        safeSendMessageMock.mockResolvedValue({ success: true });
+        setup();
+
+        const wrapper = mount(OptionsNavigation, {
+          global: {
+            stubs: { RouterLink: true },
+            mocks: { $route: { name: 'languages' } }
+          }
+        });
+        await wrapper.find('#saveSettings').trigger('click');
+        await settleSave();
+
+        const status = wrapper.find('#status');
+        const actionArea = wrapper.find('.tabs-action-area');
+        expect(wrapper.findAll('#status')).toHaveLength(1);
+        expect(status.classes()).toContain(`status-${type}`);
+        expect(status.classes()).toContain('is-visible');
+        expect(status.attributes('role')).toBe(role);
+        expect(status.attributes('aria-atomic')).toBe('true');
+        expect(wrapper.find('nav').element.contains(status.element)).toBe(false);
+        expect(actionArea.element.contains(status.element)).toBe(false);
+        expect(actionArea.findAll('#saveSettings')).toHaveLength(1);
+        expect(actionArea.element.children).toHaveLength(1);
+
+        await vi.advanceTimersByTimeAsync(duration - 1);
+        expect(status.classes()).toContain('is-visible');
+        await vi.advanceTimersByTimeAsync(1);
+        await wrapper.vm.$nextTick();
+        expect(status.text()).toBe('');
+        expect(status.classes()).not.toContain('is-visible');
+        wrapper.unmount();
+        vi.clearAllTimers();
+      }
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -503,6 +593,8 @@ describe('OptionsNavigation.vue - navigation overflow behavior', () => {
     expect(wrapper.find('nav [aria-current="page"]').text()).toBe('languages_tab_title');
     expect(wrapper.findAll('#status')).toHaveLength(1);
     expect(wrapper.findAll('#saveSettings')).toHaveLength(1);
+    expect(wrapper.find('.tabs-action-area').findAll('#saveSettings')).toHaveLength(1);
+    expect(wrapper.find('.tabs-action-area').element.children).toHaveLength(1);
     expect(wrapper.find('nav').element.contains(wrapper.find('#status').element)).toBe(false);
     expect(wrapper.find('nav').element.contains(wrapper.find('#saveSettings').element)).toBe(false);
     expect(wrapper.findAll('.tab-scroll-arrow')).toHaveLength(0);

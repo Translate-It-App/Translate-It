@@ -150,21 +150,43 @@
 }
 
 #status {
-  width: 100%;
-  text-align: center;
+  position: fixed;
+  inset-block-end: $spacing-xl;
+  inset-inline-end: $spacing-xl;
+  z-index: 1000;
+  max-inline-size: min(32rem, calc(100vw - 2 * $spacing-md));
+  padding: $spacing-md $spacing-lg;
+  border: $border-width $border-style var(--color-border);
+  border-radius: $border-radius-lg;
+  background: var(--color-surface);
+  color: var(--toast-text-color, var(--color-text));
   font-size: $font-size-sm;
   font-weight: $font-weight-medium;
   margin: 0;
-  min-height: 1.2em;
-  order: -1;
-  
+  overflow-wrap: anywhere;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+  opacity: var(--toast-opacity, 0);
+  transform: translateY(var(--toast-offset, 6px));
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+
   &.status-success {
-    color: var(--color-success);
+    color: var(--color-success-text, var(--color-success));
   }
   
   &.status-error {
-    color: var(--color-error);
+    color: var(--color-error-text, var(--color-error));
   }
+
+}
+
+[id="status"][class~="is-visible"] {
+  --toast-opacity: 1;
+  --toast-offset: 0px;
+}
+
+[id="status"][class~="status-warning"] {
+  --toast-text-color: var(--color-warning-text, var(--color-warning));
 }
 
 // Tablet responsive
@@ -249,13 +271,6 @@
     position: static;
     background-color: var(--color-surface);
     z-index: 1;
-
-    #status {
-      width: auto;
-      min-width: 0;
-      max-width: 100%;
-      overflow-wrap: anywhere;
-    }
 
     .save-button {
       flex-shrink: 0;
@@ -366,16 +381,12 @@
         box-shadow: 0 4px 12px var(--color-primary-alpha);
       }
 
-      #status {
-        flex: 1 1 120px;
-        min-width: 0;
-        overflow-wrap: anywhere;
-        order: 0;
-        font-size: $font-size-xs;
-        margin: 0;
-        padding-inline-end: $spacing-sm;
-        font-weight: 600;
-      }
+  }
+
+  #status {
+    inset-block-end: calc(env(safe-area-inset-bottom, 0px) + var(--mobile-action-height, 76px) + $spacing-md);
+    inset-inline-end: $spacing-md;
+    max-inline-size: calc(100vw - 2 * $spacing-md);
   }
 
   .tab-scroll-arrow {
@@ -444,5 +455,10 @@
 @media (prefers-reduced-motion: reduce) {
   .vertical-tabs {
     scroll-behavior: auto;
+  }
+
+  #status {
+    transition: none;
+    transform: none;
   }
 }

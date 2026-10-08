@@ -41,14 +41,6 @@
       ref="actionArea"
       class="tabs-action-area"
     >
-      <div
-        id="status"
-        :class="`status-${statusType}`"
-        role="status"
-        aria-atomic="true"
-      >
-        {{ statusMessage }}
-      </div>
       <button 
         id="saveSettings" 
         :disabled="isSaving"
@@ -57,6 +49,14 @@
       >
         {{ t('save_settings_button') || 'Save' }}
       </button>
+    </div>
+    <div
+      id="status"
+      :class="['options-status-toast', `status-${statusType}`, { 'is-visible': statusMessage }]"
+      :role="statusType === 'error' ? 'alert' : 'status'"
+      aria-atomic="true"
+    >
+      {{ statusMessage }}
     </div>
   </div>
 </template>

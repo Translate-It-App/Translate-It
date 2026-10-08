@@ -41,7 +41,7 @@ The `useSettingsStore` (Pinia) is the single source of truth for all settings.
 ### Layout: `OptionsLayout.vue`
 Coordinates the overall structure, including:
 - **`OptionsSidebar.vue`**: Header, theme, and interface-language controls.
-- **`OptionsNavigation.vue`**: Contains the route links, one **Save Button**, and status messages; the action area sits outside the scrollable navigation viewport.
+- **`OptionsNavigation.vue`**: Owns route links and the single **Save Button** workflow; the action area sits outside the scrollable navigation viewport, and one floating status Toast reports Save feedback without resizing navigation.
 - **`router-view`**: Dynamically loads the selected tab component.
 
 ### Tabs
