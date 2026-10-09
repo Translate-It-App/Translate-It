@@ -545,25 +545,23 @@ describe('official release helper', () => {
     }
   }, 30000);
 
-  it('fails closed when GitHub-generated notes fail or return an empty or malformed body', () => {
-    for (const options of [
-      { generatedFailure: true },
-      { generatedResponse: 'empty' },
-      { generatedResponse: 'malformed' },
-      { generatedBody: ' \n\t ' },
-      { generatedBody: '## Wrong Heading\n\n* unexpected' },
-      { generatedBody: 'No heading at all' },
-      { generatedBody: "## What's Changed" },
-      { generatedBody: "## What's Changed\n\n## New Contributors\n* @dev" },
-    ]) {
-      const result = run(options);
-      expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
-      expect(generatedNotesCall(result.calls)).toBeTruthy();
-      expect(releaseCreate(result.calls)).toBeUndefined();
-      expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
-      expect(result.output).toBe('');
-      result.cleanup();
-    }
+  it.each([
+    ['fail to generate', { generatedFailure: true }],
+    ['return an empty body', { generatedResponse: 'empty' }],
+    ['return a malformed body', { generatedResponse: 'malformed' }],
+    ['return a whitespace-only body', { generatedBody: ' \n\t ' }],
+    ['return an unexpected heading', { generatedBody: '## Wrong Heading\n\n* unexpected' }],
+    ['return no heading', { generatedBody: 'No heading at all' }],
+    ['return only the heading', { generatedBody: "## What's Changed" }],
+    ['return no change entries', { generatedBody: "## What's Changed\n\n## New Contributors\n* @dev" }],
+  ])('fails closed when GitHub-generated notes %s', (_scenario, options) => {
+    const result = run(options);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+    expect(generatedNotesCall(result.calls)).toBeTruthy();
+    expect(releaseCreate(result.calls)).toBeUndefined();
+    expect(result.calls.some(args => args.includes('repos/owner/repo/git/refs') && args.includes('POST'))).toBe(false);
+    expect(result.output).toBe('');
+    result.cleanup();
   }, 30000);
 
   it('retries an existing valid Draft by replacing and verifying both official ZIPs', () => {
