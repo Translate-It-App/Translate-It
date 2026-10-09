@@ -173,21 +173,39 @@ describe('ci preflight decision script', () => {
     expectDecision(runPush({ change: repo => writeFileSync(join(repo, 'other.cfg'), 'x\n') }), 'true');
   });
 
-  it('push Changelog deletion/rename fail; other and code-to-docs renames classify both paths', () => {
+  it('push Changelog deletion fails', () => {
     const deleted = runPush({ change: repo => rmSync(join(repo, 'docs/Changelog.md')) });
     expect(deleted.status).toBe(1);
+  });
+
+  it('push Changelog rename fails', () => {
     const renamed = runPush({ change: repo => git(repo, 'mv', 'docs/Changelog.md', 'docs/History.md') });
     expect(renamed.status).toBe(1);
+  });
+
+  it('push other documentation changes run when forced', () => {
     expectDecision(runPush({ change: repo => writeFileSync(join(repo, 'docs/update.md'), 'x\n'), run: { forced: 'true' } }), 'true');
-    for (const change of [
-      repo => rmSync(join(repo, 'docs/Changelog.md')),
-      repo => git(repo, 'mv', 'docs/Changelog.md', 'docs/History.md'),
-    ]) {
-      const forcedGone = runPush({ change, run: { forced: 'true' } });
-      expect(forcedGone.status).toBe(1);
-      expect(forcedGone.output).not.toContain('run_full=');
-    }
+  });
+
+  it('forced push with deleted Changelog fails without a decision', () => {
+    const change = repo => rmSync(join(repo, 'docs/Changelog.md'));
+    const forcedGone = runPush({ change, run: { forced: 'true' } });
+    expect(forcedGone.status).toBe(1);
+    expect(forcedGone.output).not.toContain('run_full=');
+  });
+
+  it('forced push with renamed Changelog fails without a decision', () => {
+    const change = repo => git(repo, 'mv', 'docs/Changelog.md', 'docs/History.md');
+    const forcedGone = runPush({ change, run: { forced: 'true' } });
+    expect(forcedGone.status).toBe(1);
+    expect(forcedGone.output).not.toContain('run_full=');
+  });
+
+  it('push code-to-docs renames classify both paths', () => {
     expectDecision(runPush({ change: repo => git(repo, 'mv', 'src.js', 'docs/src.js') }), 'true');
+  });
+
+  it('push documentation renames skip', () => {
     expectDecision(runPush({ change: repo => { writeFileSync(join(repo, 'docs/old.md'), 'x\n'); git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'add doc'); git(repo, 'mv', 'docs/old.md', 'docs/new.md'); } }), 'false');
   });
 
@@ -213,30 +231,63 @@ describe('ci preflight decision script', () => {
     }
   });
 
-  it('push accepts merge commits and fails safely on invalid SHA, fetch, or diff', () => {
+  it('push accepts merge commits', () => {
     expectDecision(runPush({ merge: true, shallow: true }), 'false');
+  });
+
+  it('push with zero before SHA defaults to full', () => {
     const zero = runPush({ run: { before: '0'.repeat(40) } });
     expectDecision(zero, 'true');
+  });
+
+  it('push with invalid before SHA defaults to full', () => {
     const invalid = runPush({ run: { before: 'not-a-sha' } });
     expectDecision(invalid, 'true');
+  });
+
+  it('push with failed fetch defaults to full', () => {
     const fetchFail = runPush({ run: { failGit: 'fetch' } });
     expectDecision(fetchFail, 'true');
+  });
+
+  it('push with failed diff defaults to full', () => {
     const diffFail = runPush({ run: { failGit: 'diff' } });
     expectDecision(diffFail, 'true');
+  });
+
+  it('push with unknown diff status defaults to full', () => {
     const unknownStatus = runPush({ run: { fakeDiffStatus: 'Q\\0docs/unknown.md\\0' } });
     expectDecision(unknownStatus, 'true');
   });
 
-  it('push does not call GitHub API; forced/non-ancestor/missing-history default full', () => {
+  it('push does not call GitHub API', () => {
     const normal = runPush({ change: repo => writeFileSync(join(repo, 'docs/a.md'), 'a\n') });
     expect(normal.calls).toBe('');
     expect(normal.gitCalls).toContain('fetch --no-tags --depth=64');
+  });
+
+  it('forced push defaults to full', () => {
     expectDecision(runPush({ run: { forced: 'true' } }), 'true');
+  });
+
+  it('push with missing forced status defaults to full', () => {
     expectDecision(runPush({ run: { omitForced: true } }), 'true');
+  });
+
+  it('push with unknown forced status defaults to full', () => {
     expectDecision(runPush({ run: { forced: 'unknown' } }), 'true');
+  });
+
+  it('push with non-ancestor history defaults to full', () => {
     expectDecision(runPush({ diverged: true, run: { forced: 'false' } }), 'true');
+  });
+
+  it('push with unavailable before history defaults to full', () => {
     const invalid = runPush({ run: { before: 'f'.repeat(40) } });
     expectDecision(invalid, 'true');
+  });
+
+  it('push with zero after SHA defaults to full', () => {
     const afterZero = runPush({ run: { after: '0'.repeat(40) } });
     expectDecision(afterZero, 'true');
   });
