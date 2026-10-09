@@ -525,6 +525,8 @@ describe('OptionsNavigation.vue - Save Validation UX & Partial Save', () => {
 describe('OptionsNavigation.vue - navigation overflow behavior', () => {
   let resizeObserverCallback;
   let resizeObserverInstance;
+  let mutationObserverCallback;
+  let mutationObserverInstance;
   let mountedWrappers;
 
   const mountNavigation = (route = { name: currentRouteName.value, fullPath: currentRouteFullPath.value }) => {
@@ -572,6 +574,11 @@ describe('OptionsNavigation.vue - navigation overflow behavior', () => {
     vi.stubGlobal('requestAnimationFrame', callback => { callback(); return 1; });
     vi.stubGlobal('ResizeObserver', class {
       constructor(callback) { resizeObserverCallback = callback; resizeObserverInstance = this; }
+      observe = vi.fn();
+      disconnect = vi.fn();
+    });
+    vi.stubGlobal('MutationObserver', class {
+      constructor(callback) { mutationObserverCallback = callback; mutationObserverInstance = this; }
       observe = vi.fn();
       disconnect = vi.fn();
     });
@@ -1020,6 +1027,183 @@ describe('OptionsNavigation.vue - navigation overflow behavior', () => {
     expect(parent.querySelector('.options-navigation')).toBeNull();
     expect(resizeObserverInstance.disconnect).toHaveBeenCalledTimes(1);
     expect(parent.style.getPropertyValue('--mobile-action-height')).toBe('');
+    parent.remove();
+  });
+
+  it('chooses the nearest clipped tab in RTL and advances through multiple clipped tabs', async () => {
+    const { wrapper, parent } = mountNavigation();
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    vi.stubGlobal('getComputedStyle', () => ({ direction: 'rtl' }));
+    const place = (positions) => configureGeometry(wrapper, {
+      scrollWidth: 300, clientWidth: 100,
+      links: positions.map(([left, right]) => ({ left, right }))
+    });
+    place(links.map((_, index) => [180 - index * 40, 220 - index * 40]));
+    resizeObserverCallback();
+    await flushPromises();
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    await wrapper.find('.tab-scroll-arrow.previous').trigger('click');
+    expect(links[2].element.scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(links[0].element.scrollIntoView).not.toHaveBeenCalled();
+
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    place(links.map((_, index) => index < 3
+      ? [20 + index * 40, 60 + index * 40]
+      : [-20 - (index - 3) * 40, 20 - (index - 3) * 40]));
+    await wrapper.find('.tab-scroll-arrow.next').trigger('click');
+    expect(links[3].element.scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(links[11].element.scrollIntoView).not.toHaveBeenCalled();
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    place(links.map((_, index) => index < 3
+      ? [20 + index * 40, 60 + index * 40]
+      : index === 3 ? [20, 60] : [-20 - (index - 4) * 40, 20 - (index - 4) * 40]));
+    await wrapper.find('.tab-scroll-arrow.next').trigger('click');
+    expect(links[4].element.scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(links[11].element.scrollIntoView).not.toHaveBeenCalled();
+    wrapper.unmount();
+    parent.remove();
+  });
+
+  it.each([
+    ['previous overlay', false, { left: 0, right: 48, top: 20, bottom: 60 }],
+    ['next overlay', false, { left: 52, right: 100, top: 20, bottom: 60 }],
+    ['RTL previous overlay', true, { left: 52, right: 100, top: 20, bottom: 60 }],
+    ['RTL next overlay', true, { left: 0, right: 48, top: 20, bottom: 60 }]
+  ])('reveals an active tab under the %s', async (_label, rtl, arrowRect) => {
+    vi.stubGlobal('innerWidth', 1024);
+    const route = reactive({ name: 'providers', fullPath: '/providers' });
+    const { wrapper, parent } = mountNavigation(route);
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    configureGeometry(wrapper, {
+      scrollWidth: 300, clientWidth: 100,
+      links: links.map((_, index) => index === 0
+        ? (rtl ? { left: 120, right: 140 } : { left: -20, right: 0 })
+        : index === 11 && rtl
+          ? { left: -20, right: 0 }
+        : index === 1
+          ? (arrowRect.left > 50 ? { left: 80, right: 100 } : { left: 0, right: 20 })
+          : { left: index * 30 + 100, right: index * 30 + 120 })
+    });
+    vi.stubGlobal('getComputedStyle', () => ({ direction: rtl ? 'rtl' : 'ltr' }));
+    resizeObserverCallback();
+    await flushPromises();
+    const coveredArrow = wrapper.find(arrowRect.left > 50 ? '.tab-scroll-arrow.previous' : '.tab-scroll-arrow.next');
+    setRect(coveredArrow.element, arrowRect);
+    links.forEach(link => link.element.scrollIntoView.mockClear());
+    route.fullPath = '/providers?refresh=1';
+    currentRouteFullPath.value = route.fullPath;
+    await flushPromises();
+    expect(links[1].element.scrollIntoView).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
+    parent.remove();
+  });
+
+  it('does not scroll an active tab that is fully visible', async () => {
+    vi.stubGlobal('innerWidth', 1024);
+    const route = reactive({ name: 'providers', fullPath: '/providers' });
+    const { wrapper, parent } = mountNavigation(route);
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    configureGeometry(wrapper, { links: links.map((_, index) => ({ left: index * 20, right: index * 20 + 15 })) });
+    links[1].element.scrollIntoView.mockClear();
+    route.fullPath = '/providers?refresh=1';
+    currentRouteFullPath.value = route.fullPath;
+    await flushPromises();
+    expect(links[1].element.scrollIntoView).not.toHaveBeenCalled();
+    wrapper.unmount();
+    parent.remove();
+  });
+
+  it('does not treat in-flow tablet arrows as overlays', async () => {
+    vi.stubGlobal('innerWidth', 1024);
+    const route = reactive({ name: 'providers', fullPath: '/providers' });
+    const { wrapper, parent } = mountNavigation(route);
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    const nav = configureGeometry(wrapper, {
+      scrollWidth: 300, clientWidth: 100,
+      links: links.map((_, index) => index === 0 ? { left: -20, right: 0 } : index === 1 ? { left: 10, right: 30 } : { left: index * 30 + 100, right: index * 30 + 120 })
+    });
+    resizeObserverCallback();
+    await flushPromises();
+    setRect(wrapper.find('.tab-scroll-arrow.previous').element, { left: -40, right: 0, top: 0, bottom: 100 });
+    links[1].element.scrollIntoView.mockClear();
+    route.fullPath = '/providers?refresh=1';
+    currentRouteFullPath.value = route.fullPath;
+    await flushPromises();
+    expect(links[1].element.scrollIntoView).not.toHaveBeenCalled();
+    wrapper.unmount();
+    parent.remove();
+    expect(nav).toBeDefined();
+  });
+
+  it('reveals desktop vertical active tabs hidden beneath the overlay arrows', async () => {
+    vi.stubGlobal('innerWidth', 1280);
+    const route = reactive({ name: 'providers', fullPath: '/providers' });
+    const { wrapper, parent } = mountNavigation(route);
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    configureGeometry(wrapper, {
+      viewportY: [0, 100], scrollHeight: 240, clientHeight: 100,
+      links: links.map((_, index) => index === 1
+        ? { left: 0, right: 100, top: 80, bottom: 100 }
+        : { left: 0, right: 100, top: index * 20, bottom: index * 20 + 20 })
+    });
+    resizeObserverCallback();
+    await flushPromises();
+    setRect(wrapper.find('.tab-scroll-arrow.next').element, { left: 56, right: 100, top: 78, bottom: 122 });
+    links[1].element.scrollIntoView.mockClear();
+    route.fullPath = '/providers?refresh=1';
+    currentRouteFullPath.value = route.fullPath;
+    await flushPromises();
+    expect(links[1].element.scrollIntoView).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+    parent.remove();
+  });
+
+  it('rechecks active visibility after tab-label mutations, coalesces work, and cancels on unmount', async () => {
+    const { wrapper, parent } = mountNavigation();
+    await flushPromises();
+    const links = wrapper.findAll('nav a');
+    configureGeometry(wrapper, {
+      scrollWidth: 300, clientWidth: 100,
+      links: links.map((_, index) => ({ left: index * 20, right: index * 20 + 15 }))
+    });
+    window.dispatchEvent(new Event('resize'));
+    links[0].element.scrollIntoView.mockClear();
+    let queued = [];
+    vi.stubGlobal('requestAnimationFrame', callback => { queued.push(callback); return queued.length; });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    // Observer/state updates during user scrolling do not reveal the active tab.
+    setRect(links[0].element, { left: -20, right: -5 });
+    mutationObserverCallback([{ type: 'attributes', target: links[0].element }]);
+    expect(links[0].element.scrollIntoView).not.toHaveBeenCalled();
+    expect(queued).toHaveLength(0);
+
+    locale.value = 'fr';
+    await flushPromises();
+    queued = [];
+    setRect(links[0].element, { left: -20, right: 10 });
+    mutationObserverCallback([
+      { type: 'characterData', target: links[0].element.firstChild },
+      { type: 'childList', target: links[0].element }
+    ]);
+    expect(queued).toHaveLength(1);
+    queued.shift()();
+    expect(links[0].element.scrollIntoView).toHaveBeenCalledTimes(1);
+
+    links[0].element.scrollIntoView.mockClear();
+    mutationObserverCallback([{ type: 'characterData', target: links[0].element.firstChild }]);
+    expect(queued).toHaveLength(2);
+    wrapper.unmount();
+    expect(mutationObserverInstance.disconnect).toHaveBeenCalled();
+    expect(globalThis.cancelAnimationFrame).toHaveBeenCalled();
+    queued.pop()();
+    expect(links[0].element.scrollIntoView).not.toHaveBeenCalled();
     parent.remove();
   });
 });

@@ -106,6 +106,9 @@ const showArrows = ref(false)
 const isVerticalNavigation = ref(false)
 let resizeObserver
 let mutationObserver
+let mutationRevealFrame
+let mutationRevealScheduled = false
+let isUnmounted = false
 let lastViewportWidth
 let lastViewportHeight
 let actionClearanceContainer
@@ -131,16 +134,42 @@ const updateScrollState = () => {
   }
 }
 
+const getUsableBounds = (viewport) => {
+  const bounds = viewport.getBoundingClientRect()
+  const usable = { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom }
+  const rtl = getComputedStyle(viewport).direction === 'rtl'
+  for (const edge of ['previous', 'next']) {
+    const arrow = navRoot.value?.querySelector(`.tab-scroll-arrow.${edge}`)
+    if (!arrow) continue
+    const arrowBounds = arrow.getBoundingClientRect()
+    const intersects = arrowBounds.left < bounds.right && arrowBounds.right > bounds.left
+      && arrowBounds.top < bounds.bottom && arrowBounds.bottom > bounds.top
+    if (!intersects) continue
+    if (isVerticalNavigation.value) {
+      if (edge === 'previous') usable.top = Math.max(usable.top, arrowBounds.bottom)
+      else usable.bottom = Math.min(usable.bottom, arrowBounds.top)
+    } else {
+      const atRight = edge === 'previous' ? rtl : !rtl
+      if (atRight) usable.right = Math.min(usable.right, arrowBounds.left)
+      else usable.left = Math.max(usable.left, arrowBounds.right)
+    }
+  }
+  return usable
+}
+
+const isActiveTabClipped = (viewport, active) => {
+  const bounds = getUsableBounds(viewport)
+  const itemBounds = active.getBoundingClientRect()
+  return isVerticalNavigation.value
+    ? itemBounds.top < bounds.top || itemBounds.bottom > bounds.bottom
+    : itemBounds.left < bounds.left || itemBounds.right > bounds.right
+}
+
 const revealActiveTab = () => {
   const viewport = tabViewport.value
   const active = viewport?.querySelector('.tab-button.active')
   if (!viewport || !active) return
-  const bounds = viewport.getBoundingClientRect()
-  const itemBounds = active.getBoundingClientRect()
-  const clipped = isVerticalNavigation.value
-    ? itemBounds.top < bounds.top || itemBounds.bottom > bounds.bottom
-    : itemBounds.left < bounds.left || itemBounds.right > bounds.right
-  if (clipped) active.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: scrollBehavior() })
+  if (isActiveTabClipped(viewport, active)) active.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: scrollBehavior() })
   globalThis.requestAnimationFrame?.(updateScrollState) ?? updateScrollState()
 }
 
@@ -160,9 +189,37 @@ const scrollTabs = (direction) => {
   const bounds = viewport.getBoundingClientRect()
   const items = [...viewport.children]
   const candidate = direction < 0
-    ? (rtl ? items.find(el => el.getBoundingClientRect().right > bounds.right + 1) : [...items].reverse().find(el => el.getBoundingClientRect().left < bounds.left - 1))
-    : (rtl ? [...items].reverse().find(el => el.getBoundingClientRect().left < bounds.left - 1) : items.find(el => el.getBoundingClientRect().right > bounds.right + 1))
+    ? (rtl ? [...items].reverse().find(el => el.getBoundingClientRect().right > bounds.right + 1) : [...items].reverse().find(el => el.getBoundingClientRect().left < bounds.left - 1))
+    : (rtl ? items.find(el => el.getBoundingClientRect().left < bounds.left - 1) : items.find(el => el.getBoundingClientRect().right > bounds.right + 1))
   candidate?.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: scrollBehavior() })
+}
+
+const touchesTabContent = (record) => {
+  if (record.type !== 'characterData' && record.type !== 'childList') return false
+  let target = record.target
+  if (target.nodeType !== Node.ELEMENT_NODE) target = target.parentElement
+  return Boolean(target?.closest('.tab-button'))
+}
+
+const scheduleMutationReveal = () => {
+  if (mutationRevealScheduled || isUnmounted) return
+  const viewport = tabViewport.value
+  const active = viewport?.querySelector('.tab-button.active')
+  if (!viewport || !active || !isActiveTabClipped(viewport, active)) return
+  mutationRevealScheduled = true
+  const reveal = () => {
+    mutationRevealScheduled = false
+    mutationRevealFrame = undefined
+    if (!isUnmounted) revealActiveTab()
+  }
+  if (globalThis.requestAnimationFrame) mutationRevealFrame = globalThis.requestAnimationFrame(reveal)
+  else reveal()
+}
+
+const handleNavMutations = (records) => {
+  updateScrollState()
+  syncMobileActionHeight()
+  if (records.some(touchesTabContent)) scheduleMutationReveal()
 }
 
 const syncMobileActionHeight = () => {
@@ -192,7 +249,7 @@ onMounted(async () => {
     resizeObserver.observe(actionArea.value)
   }
   if (typeof MutationObserver !== 'undefined') {
-    mutationObserver = new MutationObserver(() => { updateScrollState(); syncMobileActionHeight() })
+    mutationObserver = new MutationObserver(handleNavMutations)
     mutationObserver.observe(tabViewport.value, { childList: true, subtree: true, characterData: true })
   }
   isVerticalNavigation.value = window.innerWidth > 1024
@@ -203,7 +260,15 @@ onMounted(async () => {
   window.addEventListener('resize', handleWindowResize)
   revealActiveTab()
 })
-onBeforeUnmount(() => { resizeObserver?.disconnect(); mutationObserver?.disconnect(); window.removeEventListener('resize', handleWindowResize); actionClearanceContainer?.style.removeProperty('--mobile-action-height') })
+onBeforeUnmount(() => {
+  isUnmounted = true
+  if (mutationRevealFrame !== undefined) globalThis.cancelAnimationFrame?.(mutationRevealFrame)
+  mutationRevealScheduled = false
+  resizeObserver?.disconnect()
+  mutationObserver?.disconnect()
+  window.removeEventListener('resize', handleWindowResize)
+  actionClearanceContainer?.style.removeProperty('--mobile-action-height')
+})
 watch(() => router.currentRoute.value.fullPath, async () => { await nextTick(); revealActiveTab() })
 watch(() => locale.value, async () => { await nextTick(); revealActiveTab(); updateScrollState() })
 
