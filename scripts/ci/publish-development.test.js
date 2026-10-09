@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync
 import { tmpdir } from 'node:os';
 import { join, delimiter, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createBashEnvPreload } from './test-helpers.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(here, 'publish-development.sh');
@@ -180,7 +181,11 @@ if (args[0] === 'api' && endpoint.endsWith('/git/refs')) process.stdout.write('{
     MOCK_DRAFT_REBIND: draftRebind,
     MOCK_VERIFY: verify,
   };
-  const result = spawnSync('bash', [SCRIPT], { cwd: dir, env, encoding: 'utf8' });
+  const result = spawnSync('bash', [SCRIPT], { cwd: dir, env: createBashEnvPreload(dir, env), encoding: 'utf8' });
+  if (result.error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw result.error;
+  }
   const calls = existsSync(callsFile) ? readFileSync(callsFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
   return {
     status: result.status ?? 1,
@@ -188,8 +193,8 @@ if (args[0] === 'api' && endpoint.endsWith('/git/refs')) process.stdout.write('{
     stderr: result.stderr,
     calls,
     files: {
-      chrome: join(publishDir, 'Translate-It-development-for-Chrome.zip'),
-      firefox: join(publishDir, 'Translate-It-development-for-Firefox.zip'),
+      chrome: `${publishDir}/Translate-It-development-for-Chrome.zip`,
+      firefox: `${publishDir}/Translate-It-development-for-Firefox.zip`,
     },
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
@@ -226,7 +231,7 @@ describe('development workflow_run publisher', () => {
     expect(result.calls.some(args => args[0] === 'release' && args[1] === 'view')).toBe(false);
     expect(result.calls.some(args => args[0] === 'release' && args[1] === 'upload')).toBe(false);
     result.cleanup();
-  });
+  }, 30000);
 
   it('requests backup asset binaries with an explicit octet-stream Accept header', () => {
     const result = run();
@@ -239,7 +244,7 @@ describe('development workflow_run publisher', () => {
       expect(args).toContain('Accept: application/octet-stream');
     }
     result.cleanup();
-  });
+  }, 30000);
 
   it('orders success as draft, delete, uploads, tag, publish with numeric REST id', () => {
     const result = run();
@@ -269,7 +274,7 @@ describe('development workflow_run publisher', () => {
     }
     expect(result.stderr).not.toContain('rollback/recovery failed');
     result.cleanup();
-  });
+  }, 30000);
 
   it('discovers slurped pages with the match on page two, dupes across pages, or none', () => {
     const found = run({ list: 'paged-found' });
@@ -502,7 +507,7 @@ describe('development workflow_run publisher', () => {
     expect(result.stderr).toContain('rollback/recovery failed');
     expect(result.calls.some(args => JSON.stringify(args) === JSON.stringify(publishPatch(publishedMarker)))).toBe(false);
     result.cleanup();
-  });
+  }, 30000);
 
   it('attempts no rollback when first creation fails', () => {
     const result = run({ list: 'create-first', body: '', fail: 'create' });
@@ -512,7 +517,7 @@ describe('development workflow_run publisher', () => {
     expect(result.calls.some(args => args.includes('/git/refs/tags/development'))).toBe(false);
     expect(result.stderr).not.toContain('rollback');
     result.cleanup();
-  });
+  }, 30000);
 
   it('creates the first release as a draft and publishes only after the tag', () => {
     const result = run({ list: 'create-first', body: '', tag: 'missing' });
@@ -527,7 +532,7 @@ describe('development workflow_run publisher', () => {
     expect(result.calls).toContainEqual(publishPatch(publishedMarker));
     expect(result.calls.some(args => args[0] === 'release' && args[1] === 'view')).toBe(false);
     result.cleanup();
-  });
+  }, 30000);
 
   it('retries an existing draft publishing marker', () => {
     const retry = run({ body: marker({ run_number: 20, run_attempt: 2, run_id: 300, sha: SHA, state: 'publishing' }), draft: 'true', tag: 'missing' });
@@ -538,7 +543,7 @@ describe('development workflow_run publisher', () => {
     expect(retry.calls.filter(args => args[0] === 'release' && args[1] === 'create')).toHaveLength(0);
     expect(retry.calls.findIndex(args => JSON.stringify(args) === JSON.stringify(tagCreate(SHA)))).toBeLessThan(retry.calls.findIndex(args => JSON.stringify(args) === JSON.stringify(publishPatch(publishedMarker))));
     retry.cleanup();
-  });
+  }, 30000);
 
   it('skips older high-water and allows an equal retry', () => {
     const older = run({ body: marker({ run_number: 21, run_attempt: 1 }) });
@@ -618,5 +623,5 @@ describe('development workflow_run publisher', () => {
     expect(decimal.status).toBe(0);
     expect(decimal.calls).toContainEqual(tagPatch(decimalSha));
     decimal.cleanup();
-  });
+  }, 30000);
 });

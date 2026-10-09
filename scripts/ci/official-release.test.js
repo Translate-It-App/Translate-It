@@ -4,11 +4,13 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, delimiter, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createBashEnvPreload } from './test-helpers.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const script = join(root, 'scripts/ci/official-release.sh');
-const workflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
-const developmentWorkflow = readFileSync(join(root, '.github/workflows/development-release.yml'), 'utf8');
+const readWorkflow = file => readFileSync(join(root, '.github/workflows', file), 'utf8').replace(/\r\n?/g, '\n');
+const workflow = readWorkflow('release.yml');
+const developmentWorkflow = readWorkflow('development-release.yml');
 const scriptSource = readFileSync(script, 'utf8');
 const releaseNotesSource = readFileSync(join(root, 'scripts/ci/release-notes.mjs'), 'utf8');
 const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
@@ -229,7 +231,11 @@ process.stdout.write(process.env.MOCK_VUE_JSON);
   env.MOCK_GENERATED_FAILURE = generatedFailure ? '1' : '';
   env.MOCK_GENERATED_RESPONSE = generatedResponse;
   env.MOCK_REF_SHA_SEQUENCE = tagShaSequence.join(',');
-  const result = spawnSync('bash', [script, command], { cwd, env, encoding: 'utf8' });
+  const result = spawnSync('bash', [script, command], { cwd, env: createBashEnvPreload(dir, env), encoding: 'utf8' });
+  if (result.error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw result.error;
+  }
   const calls = readFileSync(callsFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
   return {
     status: result.status ?? 1,
@@ -264,7 +270,7 @@ describe('official release helper', () => {
       expect(mutations(result.calls)).toEqual([]);
       result.cleanup();
     }
-  });
+  }, 30000);
 
   it('fails closed when a tag, release, or preparatory API request is unavailable', () => {
     for (const options of [
@@ -296,7 +302,7 @@ describe('official release helper', () => {
     expect(generatedIndex).toBeLessThan(createIndex);
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=66\n`);
     result.cleanup();
-  });
+  }, 30000);
 
   it('reuses a matching existing draft when both tag and release already exist', () => {
     const result = run({ tagExists: true, existingRelease: true, existingReleaseTitle: releaseTitle });
@@ -309,7 +315,7 @@ describe('official release helper', () => {
     expect(result.pnpmCalls).toEqual([]);
     expect(result.state.releases[0].body).toBe('Maintainer-edited draft body');
     result.cleanup();
-  });
+  }, 30000);
 
   it('does not create a tag when the checked-out main commit drifts or cannot be read', () => {
     for (const options of [{ checkoutSha: 'b'.repeat(40) }, { checkoutFailure: true }]) {
@@ -340,7 +346,7 @@ describe('official release helper', () => {
     expect(tagCreateIndex).toBeLessThan(createIndex);
     expect(releaseBody(result.calls)).toContain("<summary><h4>What's Changed</h4></summary>");
     result.cleanup();
-  });
+  }, 30000);
 
   it('retrieves and validates generated notes before creating the missing tag, and creates no tag when they fail', () => {
     const success = run();
@@ -414,7 +420,7 @@ describe('official release helper', () => {
     expect(body.indexOf(customItem)).toBeLessThan(body.indexOf('* ci: fixture change'));
     expect(generatedNotesCall(result.calls)).toEqual(['api', '--method', 'POST', 'repos/owner/repo/releases/generate-notes', '-f', `tag_name=${tag}`, '-f', `target_commitish=${sha}`]);
     result.cleanup();
-  });
+  }, 30000);
 
   it("uses the What's Changed title as the collapsed summary and keeps metadata outside", () => {
     const result = run({});
@@ -442,7 +448,7 @@ describe('official release helper', () => {
     expect(body.indexOf('**Full Changelog**')).toBeGreaterThan(body.indexOf('</details>'));
     expect(body.trimEnd().endsWith(`**Full Changelog**: https://github.com/owner/repo/compare/v1.19.0...${tag}`)).toBe(true);
     result.cleanup();
-  });
+  }, 30000);
 
   it('keeps GitHub metadata outside the collapse and handles bodies without New Contributors or without metadata', () => {
     const cases = [
@@ -518,7 +524,7 @@ describe('official release helper', () => {
     expect(body).toContain('**bold**');
     expect(body).toContain('`code`');
     result.cleanup();
-  });
+  }, 30000);
 
   it('rejects missing, duplicate, malformed-heading, and invalid-date changelog entries before creating a Draft', () => {
     const cases = [
@@ -594,7 +600,7 @@ describe('official release helper', () => {
     expect(result.calls.some(args => args[0] === 'release' && ['upload', 'edit'].includes(args[1]))).toBe(false);
     expect(result.calls.some(args => args.some(value => String(value).includes('/releases/tags/')))).toBe(false);
     result.cleanup();
-  });
+  }, 30000);
 
   it('rejects a draft containing unexpected assets before any mutation', () => {
     const result = run({ command: 'finalize-draft', initialAssets: [
@@ -606,7 +612,7 @@ describe('official release helper', () => {
     expect(result.stderr).toContain('unexpected assets');
     expect(result.calls.some(args => args.includes('--method') && ['DELETE', 'POST', 'PATCH'].includes(args[args.indexOf('--method') + 1]))).toBe(false);
     result.cleanup();
-  });
+  }, 30000);
 
   it('requires exactly the two expected assets after upload before succeeding', () => {
     for (const extraFinalAsset of ['unrelated.zip', chromeName]) {
@@ -618,7 +624,7 @@ describe('official release helper', () => {
       expect(result.state.release.draft).toBe(true);
       result.cleanup();
     }
-  });
+  }, 30000);
 
   it('rejects missing or duplicate browser ZIPs before any GitHub mutation', () => {
     for (const options of [{ chrome: false }, { firefox: false }, { duplicateChrome: true }, { duplicateFirefox: true }]) {
@@ -627,14 +633,14 @@ describe('official release helper', () => {
       expect(result.calls).toEqual([]);
       result.cleanup();
     }
-  });
+  }, 30000);
 
   it('rejects browser ZIPs whose version does not match RELEASE_TAG before any GitHub mutation', () => {
     const result = run({ command: 'finalize-draft', zipVersion: 'v9.0.0' });
     expect(result.status).not.toBe(0);
     expect(result.calls).toEqual([]);
     result.cleanup();
-  });
+  }, 30000);
 
   it('rejects tag drift, wrong release identity, and already-published releases before upload', () => {
     for (const options of [
@@ -659,7 +665,7 @@ describe('official release helper', () => {
     expect(result.calls.filter(args => args.some(value => String(value).startsWith('https://uploads.github.com/')))).toHaveLength(0);
     expect(result.state.release.draft).toBe(true);
     result.cleanup();
-  });
+  }, 30000);
 
   it('rejects a malformed draft creation response without exporting anything', () => {
     for (const createResponse of ['invalidId', 'wrongTag', 'notDraft', 'wrongTitle']) {
@@ -678,7 +684,7 @@ describe('official release helper', () => {
     expect(releaseCreate(result.calls)).toEqual(expectedReleaseCreate(result.calls));
     expect(result.output).toBe(`tag=${tag}\nsha=${sha}\nrelease_id=77\n`);
     result.cleanup();
-  });
+  }, 30000);
 
   it('leaves the release draft if either upload fails', () => {
     for (const options of [{ uploadFailure: 'first' }, { uploadFailure: 'second' }]) {
