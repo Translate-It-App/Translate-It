@@ -168,6 +168,27 @@ describe('SubtitleApp', () => {
     });
   });
 
+  it('renders the decorative multicolor subtitle SVG and preserves header content/actions', async () => {
+    subtitleState.status.value = 'completed';
+    subtitleState.currentFile.value = { name: 'sample.srt' };
+    const wrapper = mountSubtitleApp();
+
+    await nextTick();
+
+    const header = wrapper.find('.app-header');
+    const logoImage = header.find('.logo img');
+    expect(logoImage.attributes('src')).toMatch(/^data:image\/svg\+xml,/);
+    expect(logoImage.attributes('alt')).toBe('');
+    expect(logoImage.attributes('aria-hidden')).toBe('true');
+    expect(header.find('h1').text()).toBe('Subtitle Translator');
+    expect(header.find('.logo-text span').text()).toBe('Powered by Translate It');
+    expect(header.text()).not.toContain('mdi:closed-caption-outline');
+    expect(header.find('.report-link').text()).toContain('Report Issue');
+    expect(header.find('.header-actions').exists()).toBe(true);
+
+    wrapper.unmount();
+  });
+
   it('opens provider settings through the anchor-aware options helper', async () => {
     openOptionsPageMock.mockResolvedValue({ success: true });
     const wrapper = mountSubtitleApp();

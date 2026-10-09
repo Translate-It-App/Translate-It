@@ -5,10 +5,12 @@
   >
     <header class="app-header">
       <div class="logo">
-        <v-icon
-          icon="mdi:closed-caption-outline"
+        <img
+          src="@/icons/ui/subtitle.svg"
           class="logo-icon"
-        />
+          alt=""
+          aria-hidden="true"
+        >
         <div class="logo-text">
           <h1>{{ t('subtitle_app_title', 'Subtitle Translator') }}</h1>
           <span>{{ t('subtitle_app_powered_by', 'Powered by Translate It') }}</span>
@@ -501,8 +503,9 @@ onUnmounted(() => {
       gap: 1rem;
 
       .logo-icon {
-        font-size: 2.5rem;
-        color: var(--primary-color);
+        width: 2.5rem;
+        height: 2.5rem;
+        object-fit: contain;
       }
 
       .logo-text {
