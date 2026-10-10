@@ -58,9 +58,9 @@ for (const browser of ['chrome', 'firefox']) {
 }
 
 if (failures.length > 0) {
-  console.error('Production bundle invariant failed:');
+  console.error('❌ Production bundle invariant failed:');
   for (const failure of failures) console.error(`- ${failure}`);
   process.exitCode = 1;
 } else {
-  console.log('Production bundle invariant passed for Chrome and Firefox.');
+  console.log('✅ Production bundle invariant passed for Chrome and Firefox.');
 }

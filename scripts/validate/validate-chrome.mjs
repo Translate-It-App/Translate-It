@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { execSync } from 'child_process'
+import { execFileSync, execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { logStep, logSuccess, logError } from '../shared/logger.mjs'
+import { logStep, logError, logInfo } from '../shared/logger.mjs'
 import { createBox, createErrorBox, centerText, emptyBoxLine, formatPackageSize, formatFileSize } from '../shared/box-utils.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -32,7 +32,7 @@ async function validateChromeExtension() {
     if (!fs.existsSync(CHROME_BUILD_DIR)) {
       throw new Error(`Chrome build directory not found: ${CHROME_BUILD_DIR}`)
     }
-    console.log('├─ ✅ Chrome build directory found')
+    logInfo('Chrome build directory found')
     console.log(`└─ Path: ${CHROME_BUILD_DIR}\n`)
     
     // Step 2: Validate manifest
@@ -51,25 +51,33 @@ async function validateChromeExtension() {
     if (substitutedManifest.manifest_version !== 3) {
       throw new Error('Chrome extension must use Manifest V3')
     }
-    console.log(`├─ ✅ Manifest Version: V${substitutedManifest.manifest_version}`)
+    console.log(`├─ Manifest Version: V${substitutedManifest.manifest_version}`)
 
     if (!substitutedManifest.name || !substitutedManifest.version || !substitutedManifest.description) {
       throw new Error('Missing required manifest fields')
     }
-    console.log(`├─ ✅ Extension Name: ${substitutedManifest.name}`)
-    console.log(`├─ ✅ Extension Version: ${substitutedManifest.version}`)
-    console.log(`└─ ✅ Manifest validation completed\n`)
+    console.log(`├─ Extension Name: ${substitutedManifest.name}`)
+    console.log(`├─ Extension Version: ${substitutedManifest.version}`)
+    console.log(`└─ Manifest validation completed\n`)
     
     // Step 3: Check web-ext availability
+    let webExtAvailable = true
     try {
-      execSync('web-ext --version', { stdio: 'pipe' })
+      execFileSync('web-ext', ['--version'], { stdio: 'pipe' })
     } catch (error) {
-      console.log('⚠️  web-ext not found. Install with: pnpm run setup:chrome-validator\n')
-      results.warnings++
+      if (error.code === 'ENOENT') {
+        webExtAvailable = false
+        console.log('⚠️  web-ext not found. Install with: pnpm run setup:chrome-validator\n')
+        results.warnings++
+      } else {
+        webExtAvailable = false
+        console.log('❌ web-ext availability check failed\n')
+        results.errors++
+      }
     }
     
     // Step 4: Web-ext validation (if available)
-    try {
+    if (webExtAvailable) try {
       logStep('Running web-ext validation...')
       
       // Create temp directory
@@ -80,23 +88,21 @@ async function validateChromeExtension() {
       const webExtCommand = `web-ext build --source-dir="${CHROME_BUILD_DIR}" --artifacts-dir="${TEMP_ARTIFACTS_DIR}" --overwrite-dest`
       const output = execSync(webExtCommand, { encoding: 'utf8' })
       
-      console.log('├─ ✅ web-ext validation passed')
+      console.log('├─ web-ext validation passed')
       
       // Check if zip was created
       if (output.includes('Your web extension is ready:')) {
         const zipPath = output.match(/Your web extension is ready: (.+)/)?.[1]
         if (zipPath && fs.existsSync(zipPath.trim())) {
           const zipStats = fs.statSync(zipPath.trim())
-          console.log(`├─ ✅ Package created: ${formatFileSize(zipStats.size)}`)
+          console.log(`├─ Package created: ${formatFileSize(zipStats.size)}`)
         }
       }
-      console.log('└─ ✅ Cross-browser validation completed\n')
+      console.log('└─ Cross-browser validation completed\n')
       
     } catch (error) {
-      if (!error.message.includes('web-ext')) {
-        console.log('└─ ❌ web-ext validation failed\n')
-        results.errors++
-      }
+      console.log('└─ web-ext validation failed\n')
+      results.errors++
     }
     
     // Step 5: Chrome-specific analysis
@@ -143,7 +149,7 @@ async function validateChromeExtension() {
       })
     }
     if (issues.length === 0 && warnings.length === 0) {
-      console.log('├─   ✅ No compatibility issues found')
+      console.log('├─   No compatibility issues found')
     }
     console.log('└─ Chrome analysis completed\n')
     
@@ -159,12 +165,12 @@ async function validateChromeExtension() {
     console.log(`├─   Size Limit:  ${sizeLimit} MB (Chrome Web Store)`)
 
     if (stats.totalSize > sizeLimit * 1024 * 1024) {
-      console.log('└─ ❌ Package size exceeds Chrome limit\n')
+      console.log('└─ Package size exceeds Chrome limit\n')
       throw new Error(`Extension size (${sizeStr}) exceeds Chrome limit (${sizeLimit}MB)`)
     } else {
       const percentageUsed = ((stats.totalSize / (sizeLimit * 1024 * 1024)) * 100).toFixed(1)
       console.log(`├─   Usage:       ${percentageUsed}% of allowed size`)
-      console.log('└─ ✅ Package size within limits\n')
+      console.log('└─ Package size within limits\n')
     }
     
     // Cleanup
@@ -182,8 +188,6 @@ async function validateChromeExtension() {
     console.log(`║${centerText(`Warnings: ${results.warnings.toString().padStart(3, ' ')}`)}║`)
     console.log(`║${centerText(`Notices:  ${results.notices.toString().padStart(3, ' ')}`)}║`)
     console.log(emptyBoxLine())
-    console.log('╠════════════════════════════════════════════════════════════════╣')
-    console.log(`║${centerText('🕸 Chrome Extension Ready for Web Store Submission!')}║`)
     console.log('╚════════════════════════════════════════════════════════════════╝\n')
     
     if (results.errors > 0) {

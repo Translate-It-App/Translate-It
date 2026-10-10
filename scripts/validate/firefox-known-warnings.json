@@ -1,0 +1,14 @@
+[
+  { "code": "UNSAFE_VAR_ASSIGNMENT", "messagePrefix": "Unsafe assignment to innerHTML", "file": "vendor/vue-core.js", "count": 2, "note": "previously-reviewed; not safe" },
+  { "code": "UNSAFE_VAR_ASSIGNMENT", "messagePrefix": "Error in no-unsanitized: Unexpected callable.", "file": "vendor/vue-core.js", "count": 1, "note": "previously-reviewed; not safe" },
+  { "code": "DANGEROUS_EVAL", "messagePrefix": "The Function constructor is eval.", "file": "assets/ocr/worker.min.js", "count": 2, "note": "previously-reviewed; not safe" },
+  { "code": "UNSAFE_VAR_ASSIGNMENT", "messagePrefix": "Unsafe assignment to innerHTML", "file": "vendor/vendor.js", "count": 1, "note": "previously-reviewed; not safe" },
+  { "code": "UNSAFE_VAR_ASSIGNMENT", "messagePrefix": "Unsafe call to import for argument 0", "file": "vendor/vendor.js", "count": 1, "note": "previously-reviewed; not safe" },
+  { "code": "DANGEROUS_EVAL", "messagePrefix": "The Function constructor is eval.", "file": "vendor/vendor.js", "count": 1, "note": "previously-reviewed; not safe" },
+  { "code": "DANGEROUS_EVAL", "messagePrefix": "The Function constructor is eval.", "file": "src/core/background/index.js", "count": 1, "note": "previously-reviewed; not safe" },
+  { "code": "DANGEROUS_EVAL", "messagePrefix": "The Function constructor is eval.", "file": "src/core/content-scripts/index-iframe.js", "count": 1, "note": "previously-reviewed; not safe" },
+  { "code": "UNSAFE_VAR_ASSIGNMENT", "messagePrefix": "Unsafe call to import for argument 0", "file": "pdf.worker.mjs", "count": 1, "note": "previously-reviewed; not safe" },
+  { "code": "UNSAFE_VAR_ASSIGNMENT", "messagePrefix": "Unsafe assignment to innerHTML", "file": "src/core/content-scripts/index-main.js", "count": 3, "note": "previously-reviewed; not safe" },
+  { "code": "UNSAFE_VAR_ASSIGNMENT", "messagePrefix": "Error in no-unsanitized: Unexpected callable.", "file": "src/core/content-scripts/index-main.js", "count": 1, "note": "previously-reviewed; not safe" },
+  { "code": "DANGEROUS_EVAL", "messagePrefix": "The Function constructor is eval.", "file": "src/core/content-scripts/index-main.js", "count": 1, "note": "previously-reviewed; not safe" }
+]
