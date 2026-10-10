@@ -179,15 +179,12 @@
             >
               <div class="lang-meta">
                 <span class="lang-flag">
-                  <img 
-                    v-if="lang.code === 'fa'" 
-                    :src="getFarsiFlagUrl()" 
-                    alt="🇮🇷" 
-                    class="farsi-flag-img" 
+                  <img
+                    :src="getFlagUrl(lang)"
+                    alt=""
+                    class="lang-flag-img"
+                    aria-hidden="true"
                   >
-                  <template v-else>
-                    {{ getFlagEmoji(lang) }}
-                  </template>
                 </span>
                 <span class="lang-name">{{ lang.name }}</span>
                 <span class="lang-code-badge">{{ lang.code.toUpperCase() }}</span>
@@ -271,6 +268,7 @@ import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import LoadingSpinner from '@/components/base/LoadingSpinner.vue'
+import { resolveTTSFlagCode } from './ttsFlag.js'
 
 const logger = getScopedLogger(LOG_COMPONENTS.UI, 'TTSTab')
 const { t } = useUnifiedI18n()
@@ -385,109 +383,16 @@ const closeVoicesDrawer = () => {
   tempPreferredVoices.value = clonePreferredVoices(settingsStore.settings?.TTS_PREFERRED_VOICES)
 }
 
-// Get Farsi SVG flag URL from extension assets
-const getFarsiFlagUrl = () => {
+// Resolve every language to a bundled flag; unknown codes use the neutral fallback.
+const getFlagUrl = (lang) => {
   try {
-    return browser.runtime.getURL('icons/flags/ir.svg')
+    return browser.runtime.getURL(`icons/flags/${resolveTTSFlagCode(lang)}.svg`)
   } catch {
-    return ''
-  }
-}
-
-// Generate Flag emoji dynamically with comprehensive fallback resolution
-const getFlagEmoji = (lang) => {
-  if (!lang) return '🌐'
-  
-  // Use explicit flagCode from language metadata JSON if populated
-  let code = lang.flagCode
-  
-  // Dynamic fallback mapping for languages missing flagCode in JSON
-  if (!code && lang.code) {
-    const cleanCode = lang.code.toLowerCase().trim()
-    const baseLang = cleanCode.split('-')[0]
-    
-    const fallbackFlags = {
-      'en': 'gb',
-      'fa': 'ir',
-      'ja': 'jp',
-      'ko': 'kr',
-      'zh': 'cn',
-      'zh-cn': 'cn',
-      'zh-tw': 'tw',
-      'yue': 'hk',
-      'lzh': 'tw',
-      'ar': 'sa',
-      'he': 'il',
-      'hi': 'in',
-      'el': 'gr',
-      'da': 'dk',
-      'sv': 'se',
-      'uk': 'ua',
-      'cs': 'cz',
-      'et': 'ee',
-      'sl': 'si',
-      'sq': 'al',
-      'be': 'by',
-      'ka': 'ge',
-      'hy': 'am',
-      'ne': 'np',
-      'si': 'lk',
-      'my': 'mm',
-      'km': 'kh',
-      'lo': 'la',
-      'gu': 'in',
-      'ta': 'in',
-      'te': 'in',
-      'kn': 'in',
-      'ml': 'in',
-      'pa': 'in',
-      'bn': 'bd',
-      'ur': 'pk',
-      'am': 'et',
-      'om': 'et',
-      'sw': 'ke',
-      'ny': 'mw',
-      'st': 'za',
-      'zu': 'za',
-      'xh': 'za',
-      'af': 'za',
-      'eu': 'es',
-      'ca': 'es',
-      'co': 'fr',
-      'fy': 'nl',
-      'gl': 'es',
-      'haw': 'us',
-      'hmn': 'la',
-      'ig': 'ng',
-      'jw': 'id',
-      'kk': 'kz',
-      'ky': 'kg',
-      'lb': 'lu',
-      'mi': 'nz',
-      'sm': 'ws',
-      'gd': 'gb',
-      'sn': 'zw',
-      'su': 'id',
-      'tg': 'tj',
-      'tt': 'ru',
-      'uz': 'uz',
-      'yi': 'il',
-      'yo': 'ng'
+    try {
+      return browser.runtime.getURL('icons/flags/un.svg')
+    } catch {
+      return 'icons/flags/un.svg'
     }
-    
-    code = fallbackFlags[cleanCode] || fallbackFlags[baseLang] || baseLang
-  }
-  
-  if (!code) return '🌐'
-  
-  const codePoints = code
-    .toUpperCase()
-    .split('')
-    .map(char => 127397 + char.charCodeAt(0))
-  try {
-    return String.fromCodePoint(...codePoints)
-  } catch {
-    return '🌐'
   }
 }
 
