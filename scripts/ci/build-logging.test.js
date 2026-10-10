@@ -18,6 +18,37 @@ afterEach(() => {
   tempDir = undefined
 })
 
+function createAggregateWorkspace(version, children) {
+  const workspace = path.join(tempDir, 'workspace')
+  const buildDir = path.join(workspace, 'scripts', 'build')
+  const sharedDir = path.join(workspace, 'scripts', 'shared')
+  fs.mkdirSync(buildDir, { recursive: true })
+  fs.mkdirSync(sharedDir, { recursive: true })
+  fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({ name: 'build-logging-test', version }))
+  fs.copyFileSync(path.join(root, 'scripts', 'build', 'build-all.mjs'), path.join(buildDir, 'build-all.mjs'))
+  fs.copyFileSync(path.join(root, 'scripts', 'shared', 'box-utils.mjs'), path.join(sharedDir, 'box-utils.mjs'))
+  fs.writeFileSync(path.join(sharedDir, 'logger.mjs'), `export function logStep(message) { console.log(message) }\nexport function logError(message, details) { console.log(message); if (details) console.log(details) }\n`)
+  for (const browser of ['chrome', 'firefox']) {
+    const script = path.join(buildDir, `build-${browser}.mjs`)
+    fs.writeFileSync(script, children[browser])
+    if (!fs.existsSync(script)) throw new Error(`Missing aggregate child fixture: ${script}`)
+  }
+  return workspace
+}
+
+function runAggregate(workspace, extraEnv = {}) {
+  for (const browser of ['chrome', 'firefox']) {
+    if (!fs.existsSync(path.join(workspace, 'scripts', 'build', `build-${browser}.mjs`))) {
+      throw new Error(`Missing aggregate child fixture for ${browser}`)
+    }
+  }
+  return spawnSync(process.execPath, ['scripts/build/build-all.mjs', '--parallel'], {
+    cwd: workspace,
+    env: { ...process.env, ...extraEnv },
+    encoding: 'utf8',
+  })
+}
+
 describe('build terminal logging', () => {
   it.each([
     [0, '00:00'],
@@ -70,33 +101,16 @@ describe('build terminal logging', () => {
 
   it('copies both browser ZIPs and reports aggregate MM:SS without generating release notes', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-logging-duration-'))
-    const workspace = path.join(tempDir, 'workspace')
-    const bin = path.join(tempDir, 'bin')
-    fs.mkdirSync(path.join(workspace, 'scripts', 'build'), { recursive: true })
-    fs.mkdirSync(path.join(workspace, 'scripts', 'shared'), { recursive: true })
-    fs.mkdirSync(path.join(workspace, 'dist', 'chrome'), { recursive: true })
-    fs.mkdirSync(path.join(workspace, 'dist', 'firefox'), { recursive: true })
-    fs.mkdirSync(bin, { recursive: true })
-
     const version = '0.0.0-logging-test'
-    fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({ version }))
-    fs.copyFileSync(path.join(root, 'scripts', 'build', 'build-all.mjs'), path.join(workspace, 'scripts', 'build', 'build-all.mjs'))
-    fs.copyFileSync(path.join(root, 'scripts', 'shared', 'box-utils.mjs'), path.join(workspace, 'scripts', 'shared', 'box-utils.mjs'))
-    fs.writeFileSync(path.join(workspace, 'scripts', 'shared', 'logger.mjs'), `export function logStep(message) { console.log(message) }\nexport function logError(message, details) { console.log(message); if (details) console.log(details) }\n`)
-    fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh\nprintf 'STUB_CHILD_OUTPUT\\n'\nexit 0\n`, { mode: 0o755 })
-    fs.writeFileSync(path.join(tempDir, 'mock-date.cjs'), `let calls = 0; Date.now = () => calls++ === 0 ? 0 : 246800;`)
-    for (const browser of ['chrome', 'firefox']) {
-      fs.writeFileSync(path.join(workspace, 'dist', browser, `Translate-It-v${version}.zip`), 'zip')
-    }
-
-    const result = spawnSync(process.execPath, ['scripts/build/build-all.mjs', '--parallel'], {
-      cwd: workspace,
-      env: {
-        ...process.env,
-        PATH: `${bin}${path.delimiter}${process.env.PATH}`,
-        NODE_OPTIONS: `--require ${path.join(tempDir, 'mock-date.cjs')}`,
-      },
-      encoding: 'utf8',
+    const zipScript = browser => `import fs from 'node:fs'; import path from 'node:path';\nconst version = '${version}';\nconst file = path.join('dist', '${browser}', 'Translate-It-v' + version + '.zip');\nfs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, '${browser}-zip');\n`
+    const workspace = createAggregateWorkspace(version, {
+      chrome: zipScript('chrome'),
+      firefox: zipScript('firefox'),
+    })
+    const preload = path.join(tempDir, 'mock-date.cjs')
+    fs.writeFileSync(preload, `let calls = 0; Date.now = () => calls++ === 0 ? 0 : 246800;`)
+    const result = runAggregate(workspace, {
+      NODE_OPTIONS: `--require="${preload.replaceAll('\\', '/')}"`,
     })
 
     expect(result.status).toBe(0)
@@ -104,6 +118,8 @@ describe('build terminal logging', () => {
     expect(result.stdout).toContain(`Firefox ZIP: dist/Publish/Translate-It-v${version}-for-Firefox.zip`)
     expect(result.stdout).toContain('⏱️ Total build time: 04:07')
     expect(result.stdout).not.toContain('Release notes:')
+    expect(fs.readFileSync(path.join(workspace, 'dist', 'Publish', `Translate-It-v${version}-for-Chrome.zip`), 'utf8')).toBe('chrome-zip')
+    expect(fs.readFileSync(path.join(workspace, 'dist', 'Publish', `Translate-It-v${version}-for-Firefox.zip`), 'utf8')).toBe('firefox-zip')
     expect(fs.existsSync(path.join(workspace, 'dist', 'Publish', 'release-notes.md'))).toBe(false)
   })
 
@@ -135,26 +151,12 @@ describe('build terminal logging', () => {
   })
 
   it('prints both parallel child diagnostics before failing without generating publish artifacts', () => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-logging-bin-'))
-    const stubNode = path.join(tempDir, 'node')
-    fs.writeFileSync(stubNode, `#!/bin/sh
-case "$1" in
-  scripts/build/build-chrome.mjs) printf 'CHROME_CHILD_STDOUT\\n'; printf 'CHROME_CHILD_STDERR\\n' >&2; exit 0 ;;
-  scripts/build/build-firefox.mjs) printf 'FIREFOX_CHILD_STDOUT\\n'; printf 'FIREFOX_CHILD_STDERR\\n' >&2; exit 7 ;;
-  *) exit 99 ;;
-esac
-`, { mode: 0o755 })
-    const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
-    const artifactPaths = [
-      `dist/Publish/Translate-It-v${version}-for-Chrome.zip`,
-      `dist/Publish/Translate-It-v${version}-for-Firefox.zip`,
-    ].map(relativePath => path.join(root, relativePath))
-    const before = artifactPaths.map(file => fs.existsSync(file))
-    const result = spawnSync(process.execPath, ['scripts/build/build-all.mjs', '--parallel'], {
-      cwd: root,
-      env: { ...process.env, PATH: `${tempDir}${path.delimiter}${process.env.PATH}` },
-      encoding: 'utf8',
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-logging-failure-'))
+    const workspace = createAggregateWorkspace('0.0.0-logging-test', {
+      chrome: `console.log('CHROME_CHILD_STDOUT'); console.error('CHROME_CHILD_STDERR');\n`,
+      firefox: `console.log('FIREFOX_CHILD_STDOUT'); console.error('FIREFOX_CHILD_STDERR'); process.exitCode = 7;\n`,
     })
+    const result = runAggregate(workspace)
 
     expect(result.status).not.toBe(0)
     expect(result.stdout).toContain('CHROME_CHILD_STDOUT')
@@ -163,46 +165,18 @@ esac
     expect(result.stderr).toContain('FIREFOX_CHILD_STDERR')
     expect(result.stdout).not.toContain('ALL BUILDS COMPLETED')
     expect(result.stdout).not.toContain('Creating publish packages')
-    expect(artifactPaths.map(file => fs.existsSync(file))).toEqual(before)
+    expect(fs.existsSync(path.join(workspace, 'dist', 'Publish'))).toBe(false)
   })
 
   it('fails the aggregate build when expected browser ZIPs are missing', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-logging-missing-'))
-    const workspace = path.join(tempDir, 'workspace')
-    const bin = path.join(tempDir, 'bin')
-    fs.mkdirSync(path.join(workspace, 'scripts', 'build'), { recursive: true })
-    fs.mkdirSync(path.join(workspace, 'scripts', 'shared'), { recursive: true })
-    fs.mkdirSync(bin, { recursive: true })
-
     const version = '0.0.0-logging-test'
-    fs.writeFileSync(
-      path.join(workspace, 'package.json'),
-      JSON.stringify({ name: 'build-logging-test', version })
-    )
-    fs.copyFileSync(
-      path.join(root, 'scripts', 'build', 'build-all.mjs'),
-      path.join(workspace, 'scripts', 'build', 'build-all.mjs')
-    )
-    fs.writeFileSync(
-      path.join(workspace, 'scripts', 'shared', 'logger.mjs'),
-      `export function logStep(message) { console.log(message) }\nexport function logError(message, details) { console.log(message); if (details) console.log(details) }\n`
-    )
-    fs.writeFileSync(
-      path.join(workspace, 'scripts', 'shared', 'box-utils.mjs'),
-       `export function centerText(value) { return String(value) }\nexport function createBox(value) { return String(value) }\nexport function createSuccessBox(value) { return String(value) }\nexport function createErrorBox(value) { return String(value) }\nexport function formatDuration(value) { return String(value) }\n`
-    )
-    fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh
-printf 'STUB_CHILD_OUTPUT\\n'
-exit 0
-`, { mode: 0o755 })
-
-    const runAggregate = () => spawnSync(process.execPath, ['scripts/build/build-all.mjs', '--parallel'], {
-      cwd: workspace,
-      env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
-      encoding: 'utf8',
+    const workspace = createAggregateWorkspace(version, {
+      chrome: `console.log('STUB_CHILD_OUTPUT');\n`,
+      firefox: `console.log('STUB_CHILD_OUTPUT');\n`,
     })
     // Case 1: both browser ZIPs missing.
-    let result = runAggregate()
+    let result = runAggregate(workspace)
 
     expect(result.status).not.toBe(0)
     expect(result.stdout).toContain('STUB_CHILD_OUTPUT')
@@ -213,7 +187,7 @@ exit 0
     const chromeZip = path.join(workspace, 'dist', 'chrome', `Translate-It-v${version}.zip`)
     fs.mkdirSync(path.dirname(chromeZip), { recursive: true })
     fs.writeFileSync(chromeZip, 'fake-chrome-zip')
-    result = runAggregate()
+    result = runAggregate(workspace)
 
     expect(result.status).not.toBe(0)
     expect(result.stdout).toContain('Missing expected browser package')

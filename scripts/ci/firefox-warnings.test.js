@@ -23,31 +23,50 @@ function fixtureWarnings(entries = baseline) {
   })))
 }
 
-function run(warnings, { errors = 0, notices = 0, raw, errorCodes, linterExitCode = 0, linterSignal, verbose = false } = {}) {
+function run(warnings, { errors = 0, notices = 0, raw, errorCodes, linterExitCode = 0, linterSignal, linterStderr = '', linterErrorMessage, verbose = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'firefox-warning-test-'))
   tempDirs.push(dir)
   const build = path.join(dir, 'build')
-  const bin = path.join(dir, 'bin')
   fs.mkdirSync(build)
-  fs.mkdirSync(bin)
   fs.writeFileSync(path.join(build, 'manifest.json'), JSON.stringify({
     manifest_version: 3, name: 'Fixture', version: '1.0', description: 'Fixture', permissions: [],
     browser_specific_settings: { gecko: { id: 'fixture@example.invalid' } }
   }))
   fs.writeFileSync(path.join(build, 'bundle.js'), 'fixture')
-  fs.writeFileSync(path.join(bin, 'addons-linter'), '#!/bin/sh\nprintf \'%s\' "$LINTER_OUTPUT"\nif [ -n "$LINTER_SIGNAL" ]; then kill -s "$LINTER_SIGNAL" $$; fi\nexit "$LINTER_EXIT_CODE"\n')
-  fs.chmodSync(path.join(bin, 'addons-linter'), 0o755)
-  const errorItems = Array.from({ length: errors }, (_, index) => ({ code: errorCodes?.[index] ?? 'UNEXPECTED_ERROR', message: 'Fixture error' }))
+  const errorItems = Array.from({ length: errors }, (_, index) => ({ code: errorCodes?.[index] ?? 'UNEXPECTED_ERROR', message: 'Fixture error', file: 'src/fixture.js', line: 12, column: 4 }))
   const noticeItems = Array.from({ length: notices }, () => ({ code: 'FIXTURE_NOTICE', message: 'Fixture notice' }))
   const output = raw ?? JSON.stringify({
     summary: { errors: errorItems.length, warnings: warnings.length, notices: noticeItems.length },
     errors: errorItems, warnings, notices: noticeItems
   })
+  const preload = path.join(dir, 'linter-preload.cjs')
+  fs.writeFileSync(preload, [
+    "const childProcess = require('node:child_process')",
+    "const { syncBuiltinESMExports } = require('node:module')",
+    'const originalExecSync = childProcess.execSync',
+    'childProcess.execSync = function (command, options) {',
+    "  if (!/^addons-linter(?:\\s|$)/.test(command)) return originalExecSync.call(this, command, options)",
+    '  const output = process.env.LINTER_OUTPUT',
+    '  const signal = process.env.LINTER_SIGNAL',
+    '  const status = Number(process.env.LINTER_EXIT_CODE)',
+    '  const stderr = process.env.LINTER_STDERR',
+    '  if (status !== 0 || signal) {',
+    "    const error = new Error(process.env.LINTER_ERROR_MESSAGE || 'mock addons-linter termination')",
+    '    error.stdout = output',
+    '    error.stderr = stderr',
+    '    error.status = signal ? null : status',
+    '    error.signal = signal || null',
+    '    throw error',
+    '  }',
+    '  return options?.encoding ? output : Buffer.from(output)',
+    '}',
+    'syncBuiltinESMExports()'
+  ].join('\n'))
   let stdout = ''
   let status = 0
   try {
     stdout = execFileSync(process.execPath, [path.join(root, 'scripts/validate/validate-firefox.mjs'), ...(verbose ? ['--verbose'] : [])], {
-      encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FIREFOX_BUILD_DIR: build, LINTER_OUTPUT: output, LINTER_EXIT_CODE: String(linterExitCode), LINTER_SIGNAL: linterSignal ?? '' }
+      encoding: 'utf8', env: { ...process.env, FIREFOX_BUILD_DIR: build, LINTER_OUTPUT: output, LINTER_EXIT_CODE: String(linterExitCode), LINTER_SIGNAL: linterSignal ?? '', LINTER_STDERR: linterStderr, LINTER_ERROR_MESSAGE: linterErrorMessage ?? '', NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require="${preload}"`.trim() }
     })
   } catch (error) {
     stdout = error.stdout || ''
@@ -125,6 +144,20 @@ describe('Firefox known warning inventory', () => {
     expect(result.stdout).toContain('Notices:  3')
   })
 
+  it('prints actionable details for non-ignored errors', () => {
+    const result = run([], { errors: 1 })
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('❌ ERROR UNEXPECTED_ERROR src/fixture.js:12:4: Fixture error')
+  })
+
+  it('keeps ignored-only error success concise without disclosing ignored details', () => {
+    const result = run([], { errors: 1, errorCodes: ['DATA_COLLECTION_PERMISSIONS_PROP_RESERVED'], linterExitCode: 1 })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('Errors:   0 (1 ignored)')
+    expect(result.stdout).not.toContain('❌ ERROR')
+    expect(result.stdout).not.toContain('Fixture error')
+  })
+
   it('fails when the linter exits with an unexpected status despite reporting zero errors', () => {
     const result = run([], { linterExitCode: 9 })
     expect(result.status).toBe(1)
@@ -150,9 +183,35 @@ describe('Firefox known warning inventory', () => {
   })
 
   it('fails when the linter is terminated by a signal', () => {
-    const result = run([], { errors: 1, errorCodes: ['DATA_COLLECTION_PERMISSIONS_PROP_RESERVED'], linterSignal: 'TERM' })
+    const result = run([], { errors: 1, errorCodes: ['DATA_COLLECTION_PERMISSIONS_PROP_RESERVED'], linterSignal: 'SIGTERM' })
     expect(result.status).toBe(1)
     expect(result.stdout).toContain('addons-linter exited unexpectedly after signal SIGTERM')
+  })
+
+  it('includes the signal when a terminated linter produced no report', () => {
+    const result = run([], { raw: '', linterSignal: 'SIGTERM' })
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('addons-linter failed without a report after signal SIGTERM')
+  })
+
+  it('shows the install hint for the Windows shell missing-command message', () => {
+    const result = run([], {
+      raw: '',
+      linterExitCode: 1,
+      linterErrorMessage: "'addons-linter' is not recognized as an internal or external command, operable program or batch file."
+    })
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('addons-linter not found. Install with: pnpm add -D addons-linter')
+    expect(result.stdout).toContain('addons-linter unavailable; validation was not performed')
+  })
+
+  it('preserves malformed JSON failure details and bounds included stderr', () => {
+    const stderr = `diagnostic ${'x'.repeat(2500)}`
+    const result = run([], { raw: 'not-json', linterExitCode: 1, linterStderr: stderr })
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('Untrusted addons-linter report: output is not valid JSON')
+    expect(result.stdout).toContain(`addons-linter stderr: ${stderr.slice(0, 2048)} [truncated]`)
+    expect(result.stdout).not.toContain(stderr)
   })
 
   it('succeeds for a zero-exit linter with a valid report', () => {

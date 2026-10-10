@@ -70,6 +70,7 @@ async function validateFirefoxExtension() {
     logStep('Running Mozilla addons-linter...')
     const knownBaseline = JSON.parse(fs.readFileSync(KNOWN_WARNINGS_PATH, 'utf8'))
     let output
+    let stderr = ''
     let exitStatus = 0
     let exitSignal
     let spawnError
@@ -80,15 +81,22 @@ async function validateFirefoxExtension() {
       exitStatus = error.status
       exitSignal = error.signal
       spawnError = error.status == null && !error.signal && Boolean(error.code)
-      const stderr = String(error.stderr || '')
-      if (!output && (error.code === 'ENOENT' || /addons-linter.*not found/i.test(stderr) || error.message.includes('not found'))) {
+      stderr = String(error.stderr || '')
+      const windowsMissingCommand = /'addons-linter' is not recognized as an internal or external command/i.test(error.message)
+      if (!output && (error.code === 'ENOENT' || /addons-linter.*not found/i.test(stderr) || error.message.includes('not found') || windowsMissingCommand)) {
         console.log('⚠️ addons-linter not found. Install with: pnpm add -D addons-linter')
         throw new Error('addons-linter unavailable; validation was not performed')
       }
-      if (!output && (exitStatus !== 0 || exitSignal || error.code)) throw new Error(`addons-linter failed without a report: ${stderr || error.message}`)
+      if (!output && (exitStatus !== 0 || exitSignal || error.code)) throw new Error(`addons-linter failed without a report${exitSignal ? ` after signal ${exitSignal}` : ''}: ${stderr || error.message}`)
     }
 
-    const report = parseLinterReport(output, IGNORED_ERROR_CODES)
+    let report
+    try {
+      report = parseLinterReport(output, IGNORED_ERROR_CODES)
+    } catch (error) {
+      if (stderr) throw new Error(`${error.message}; addons-linter stderr: ${stderr.slice(0, 2048)}${stderr.length > 2048 ? ' [truncated]' : ''}`)
+      throw error
+    }
     const ignoredErrors = report.ignoredErrors
     const effectiveErrors = report.errors - ignoredErrors
     results.errors += effectiveErrors
@@ -105,6 +113,9 @@ async function validateFirefoxExtension() {
     }
     for (const item of classification.new) console.log(`⚠️ NEW ${item.code} ${item.file}: ${item.message}`)
     for (const item of classification.missing) console.log(`ℹ️ Known baseline absent: ${item.file} | ${item.messagePrefix} expected ${item.expected}, observed ${item.observed}`)
+    for (const item of report.errorItems.filter(item => !IGNORED_ERROR_CODES.includes(item.code))) {
+      console.log(`❌ ERROR ${item.code || 'UNKNOWN'}${item.file ? ` ${item.file}` : ''}${item.line != null ? `:${item.line}${item.column != null ? `:${item.column}` : ''}` : ''}: ${item.message || ''}`)
+    }
     if (classification.new.length === 0 && classification.missing.length === 0) {
       console.log('ℹ️ Known warnings match the reviewed baseline; this is not a safety assessment')
     }

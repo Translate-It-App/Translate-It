@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFileSync, execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -62,16 +62,21 @@ async function validateChromeExtension() {
     
     // Step 3: Check web-ext availability
     let webExtAvailable = true
-    try {
-      execFileSync('web-ext', ['--version'], { stdio: 'pipe' })
-    } catch (error) {
-      if (error.code === 'ENOENT') {
+    const webExtPackagePath = path.join(rootDir, 'node_modules', 'web-ext', 'package.json')
+    if (!fs.existsSync(webExtPackagePath)) {
+      webExtAvailable = false
+      console.log('⚠️  web-ext not found. Install with: pnpm run setup:chrome-validator\n')
+      results.warnings++
+    } else {
+      try {
+        const webExtPackage = JSON.parse(fs.readFileSync(webExtPackagePath, 'utf8'))
+        const webExtBin = path.resolve(path.dirname(webExtPackagePath), webExtPackage.bin['web-ext'])
+        execFileSync(process.execPath, [webExtBin, '--version'], { cwd: rootDir, stdio: 'pipe' })
+      } catch (error) {
         webExtAvailable = false
-        console.log('⚠️  web-ext not found. Install with: pnpm run setup:chrome-validator\n')
-        results.warnings++
-      } else {
-        webExtAvailable = false
-        console.log('❌ web-ext availability check failed\n')
+        console.log('❌ web-ext availability check failed')
+        printCommandError(error)
+        console.log()
         results.errors++
       }
     }
@@ -85,8 +90,9 @@ async function validateChromeExtension() {
         fs.mkdirSync(TEMP_ARTIFACTS_DIR, { recursive: true })
       }
       
-      const webExtCommand = `web-ext build --source-dir="${CHROME_BUILD_DIR}" --artifacts-dir="${TEMP_ARTIFACTS_DIR}" --overwrite-dest`
-      const output = execSync(webExtCommand, { encoding: 'utf8' })
+      const webExtPackage = JSON.parse(fs.readFileSync(webExtPackagePath, 'utf8'))
+      const webExtBin = path.resolve(path.dirname(webExtPackagePath), webExtPackage.bin['web-ext'])
+      const output = execFileSync(process.execPath, [webExtBin, 'build', `--source-dir=${CHROME_BUILD_DIR}`, `--artifacts-dir=${TEMP_ARTIFACTS_DIR}`, '--overwrite-dest'], { cwd: rootDir, encoding: 'utf8' })
       
       console.log('├─ web-ext validation passed')
       
@@ -102,6 +108,8 @@ async function validateChromeExtension() {
       
     } catch (error) {
       console.log('└─ web-ext validation failed\n')
+      printCommandError(error)
+      console.log()
       results.errors++
     }
     
@@ -210,6 +218,16 @@ async function validateChromeExtension() {
     
     logError('Chrome validation failed:', error.message)
     process.exit(1)
+  }
+}
+
+function printCommandError(error) {
+  console.log(`web-ext error: ${error.message}`)
+  for (const [label, output] of [['stdout', error.stdout], ['stderr', error.stderr]]) {
+    if (!output) continue
+    const text = Buffer.isBuffer(output) ? output.toString('utf8') : String(output)
+    const trimmed = text.trim()
+    if (trimmed) console.log(`web-ext ${label}: ${trimmed.slice(0, 2000)}${trimmed.length > 2000 ? '… [truncated]' : ''}`)
   }
 }
 

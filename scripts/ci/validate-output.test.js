@@ -15,7 +15,7 @@ afterEach(() => {
 
 function createWorkspace() {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'validate-output-'))
-  const workspace = path.join(tempDir, 'workspace')
+  const workspace = path.join(tempDir, 'workspace with spaces')
   fs.mkdirSync(path.join(workspace, 'scripts', 'validate'), { recursive: true })
   fs.mkdirSync(path.join(workspace, 'scripts', 'shared'), { recursive: true })
   fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({ name: 'translate-it', version: '1.0.0' }))
@@ -49,31 +49,74 @@ export const formatFileSize = value => String(value)
   return { workspace, buildDir }
 }
 
-function installWebExt(bin, { available = true, versionExit = 0, buildExit = 0 } = {}) {
-  fs.mkdirSync(bin, { recursive: true })
-  if (!available) return
-  fs.writeFileSync(path.join(bin, 'web-ext'), `#!/bin/sh
-if [ "$1" = "--version" ]; then exit ${versionExit}; fi
-if [ ${buildExit} -ne 0 ]; then printf 'web-ext executed and failed\n' >&2; exit ${buildExit}; fi
-printf 'web-ext executed successfully\n'
-`, { mode: 0o755 })
+function installWebExt(workspace, { versionExit = 0, buildExit = 0 } = {}) {
+  const packageDir = path.join(workspace, 'node_modules', 'web-ext')
+  fs.mkdirSync(path.join(packageDir, 'bin'), { recursive: true })
+  fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ bin: { 'web-ext': 'bin/web-ext.js' } }))
+  fs.writeFileSync(path.join(packageDir, 'bin', 'web-ext.js'), `
+import fs from 'node:fs'
+import path from 'node:path'
+if (process.argv[2] === '--version') {
+  if (${versionExit}) { console.error('distinctive version failure'); process.exit(${versionExit}) }
+  console.log('10.1.0')
+} else {
+  if (${buildExit}) { console.error('distinctive build stderr'); console.log('distinctive build stdout'); process.exit(${buildExit}) }
+  const artifactArg = process.argv.find(arg => arg.startsWith('--artifacts-dir='))
+  const zip = path.join(artifactArg.slice('--artifacts-dir='.length), 'fixture.zip')
+  fs.writeFileSync(zip, 'fixture package')
+  console.log('Your web extension is ready: ' + zip)
+}
+`)
 }
 
-function run(script, workspace, bin, args = []) {
+function run(script, workspace, args = []) {
   return spawnSync(process.execPath, [script, ...args], {
     cwd: workspace,
-    env: { ...process.env, PATH: bin },
+    env: { ...process.env },
     encoding: 'utf8',
+  })
+}
+
+function runAggregate(workspace, args = [], { failFirefox = false } = {}) {
+  const preload = path.join(tempDir, 'aggregate-preload.cjs')
+  const callsFile = path.join(tempDir, 'aggregate-calls.txt')
+  fs.writeFileSync(preload, [
+    "const childProcess = require('node:child_process')",
+    "const { syncBuiltinESMExports } = require('node:module')",
+    'const originalExecSync = childProcess.execSync',
+    'childProcess.execSync = function (command, options) {',
+    "  const commands = ['node scripts/validate/validate-chrome.mjs', 'node scripts/validate/validate-firefox.mjs', 'node scripts/validate/validate-firefox.mjs --verbose', 'node scripts/validate/validate-production-bundle.mjs']",
+    '  if (!commands.includes(command)) return originalExecSync.call(this, command, options)',
+    "  require('node:fs').appendFileSync(process.env.AGGREGATE_CALLS, command + '\\n')",
+    "  if (process.env.AGGREGATE_FAIL_FIREFOX === '1' && command.startsWith('node scripts/validate/validate-firefox.mjs')) {",
+    "    const error = new Error('mock Firefox validation failure')",
+    '    error.status = 6',
+    "    error.stdout = ''",
+    "    error.stderr = ''",
+    '    throw error',
+    '  }',
+    "  return options?.encoding ? '' : Buffer.alloc(0)",
+    '}',
+    'syncBuiltinESMExports()'
+  ].join('\n'))
+  return spawnSync(process.execPath, ['scripts/validate/validate-all.mjs', ...args], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      AGGREGATE_CALLS: callsFile,
+      AGGREGATE_FAIL_FIREFOX: failFirefox ? '1' : '0',
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require="${preload}"`.trim()
+    },
+    encoding: 'utf8'
   })
 }
 
 describe('validation output', () => {
   it('keeps Chrome intermediate rows neutral and reports one final status without store claims', () => {
     const { workspace } = createWorkspace()
-    const bin = path.join(tempDir, 'bin')
-    installWebExt(bin)
+    installWebExt(workspace)
 
-    const result = run('scripts/validate/validate-chrome.mjs', workspace, bin)
+    const result = run('scripts/validate/validate-chrome.mjs', workspace)
     const text = result.stdout + result.stderr
     expect(result.status).toBe(0)
     expect(text).toContain('ℹ  Chrome build directory found')
@@ -102,23 +145,22 @@ describe('validation output', () => {
 
   it('fails when web-ext is available but its validation command fails', () => {
     const { workspace } = createWorkspace()
-    const bin = path.join(tempDir, 'bin')
-    installWebExt(bin, { buildExit: 9 })
+    installWebExt(workspace, { buildExit: 9 })
 
-    const result = run('scripts/validate/validate-chrome.mjs', workspace, bin)
+    const result = run('scripts/validate/validate-chrome.mjs', workspace)
     const text = result.stdout + result.stderr
     expect(result.status).not.toBe(0)
     expect(text).toContain('web-ext validation failed')
     expect(text).toContain('Status: ❌ FAILED')
     expect(text).not.toContain('Status: ✅ PASSED')
+    expect(text).toContain('distinctive build stderr')
+    expect(text).toContain('distinctive build stdout')
   })
 
-  it('warns and skips web-ext only when the executable is unavailable', () => {
+  it('warns and skips web-ext only when the optional package is missing', () => {
     const { workspace } = createWorkspace()
-    const bin = path.join(tempDir, 'bin')
-    installWebExt(bin, { available: false })
 
-    const result = run('scripts/validate/validate-chrome.mjs', workspace, bin)
+    const result = run('scripts/validate/validate-chrome.mjs', workspace)
     const text = result.stdout + result.stderr
     expect(result.status).toBe(0)
     expect(text).toContain('web-ext not found')
@@ -132,10 +174,9 @@ describe('validation output', () => {
 
   it('counts a present web-ext that fails its version check as an error', () => {
     const { workspace } = createWorkspace()
-    const bin = path.join(tempDir, 'bin')
-    installWebExt(bin, { versionExit: 9 })
+    installWebExt(workspace, { versionExit: 9 })
 
-    const result = run('scripts/validate/validate-chrome.mjs', workspace, bin)
+    const result = run('scripts/validate/validate-chrome.mjs', workspace)
     const text = result.stdout + result.stderr
     expect(result.status).not.toBe(0)
     expect(text).toContain('❌ web-ext availability check failed')
@@ -144,17 +185,13 @@ describe('validation output', () => {
     expect(text).toContain('Warnings:   0')
     expect(text).toContain('Status: ❌ FAILED')
     expect(text).not.toContain('✅ Chrome validation passed')
+    expect(text).toContain('distinctive version failure')
   })
 
   it('reports aggregate success without redundant per-stage success lines', () => {
     const { workspace } = createWorkspace()
-    const bin = path.join(tempDir, 'bin')
-    fs.mkdirSync(bin, { recursive: true })
-    fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh
-exit 0
-`, { mode: 0o755 })
 
-    const result = run('scripts/validate/validate-all.mjs', workspace, bin)
+    const result = runAggregate(workspace)
     const text = result.stdout + result.stderr
     expect(result.status).toBe(0)
     expect(text).toContain('✅ ALL VALIDATIONS PASSED')
@@ -166,17 +203,10 @@ exit 0
 
   it('forwards --verbose to the Firefox validator only', () => {
     const { workspace } = createWorkspace()
-    const bin = path.join(tempDir, 'bin')
-    const argsFile = path.join(tempDir, 'args.txt')
-    fs.mkdirSync(bin, { recursive: true })
-    fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh
-printf '%s %s\\n' "$1" "$2" >> "${argsFile}"
-exit 0
-`, { mode: 0o755 })
 
-    const result = run('scripts/validate/validate-all.mjs', workspace, bin, ['--verbose'])
+    const result = runAggregate(workspace, ['--verbose'])
     expect(result.status).toBe(0)
-    const invocations = fs.readFileSync(argsFile, 'utf8')
+    const invocations = fs.readFileSync(path.join(tempDir, 'aggregate-calls.txt'), 'utf8')
     expect(invocations).toContain('scripts/validate/validate-firefox.mjs --verbose')
     expect(invocations).not.toContain('scripts/validate/validate-chrome.mjs --verbose')
     expect(invocations).not.toContain('scripts/validate/validate-production-bundle.mjs --verbose')
@@ -184,18 +214,8 @@ exit 0
 
   it('propagates aggregate failures with actionable diagnostics and duration', () => {
     const { workspace } = createWorkspace()
-    const bin = path.join(tempDir, 'bin')
-    fs.mkdirSync(bin, { recursive: true })
-    fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh
-case "$1" in
-  scripts/validate/validate-chrome.mjs) exit 0 ;;
-  scripts/validate/validate-firefox.mjs) exit 6 ;;
-  scripts/validate/validate-production-bundle.mjs) exit 0 ;;
-  *) exit 99 ;;
-esac
-`, { mode: 0o755 })
 
-    const result = run('scripts/validate/validate-all.mjs', workspace, bin)
+    const result = runAggregate(workspace, [], { failFirefox: true })
     const text = result.stdout + result.stderr
     expect(result.status).not.toBe(0)
     expect(text).toContain('Firefox validation failed')
