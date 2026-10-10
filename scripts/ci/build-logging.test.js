@@ -68,7 +68,7 @@ describe('build terminal logging', () => {
     }
   })
 
-  it('uses MM:SS in aggregate success output and release notes', () => {
+  it('copies both browser ZIPs and reports aggregate MM:SS without generating release notes', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-logging-duration-'))
     const workspace = path.join(tempDir, 'workspace')
     const bin = path.join(tempDir, 'bin')
@@ -100,9 +100,11 @@ describe('build terminal logging', () => {
     })
 
     expect(result.status).toBe(0)
+    expect(result.stdout).toContain(`Chrome ZIP: dist/Publish/Translate-It-v${version}-for-Chrome.zip`)
+    expect(result.stdout).toContain(`Firefox ZIP: dist/Publish/Translate-It-v${version}-for-Firefox.zip`)
     expect(result.stdout).toContain('⏱️ Total build time: 04:07')
-    expect(fs.readFileSync(path.join(workspace, 'dist', 'Publish', 'release-notes.md'), 'utf8'))
-      .toContain('Build time: 04:07')
+    expect(result.stdout).not.toContain('Release notes:')
+    expect(fs.existsSync(path.join(workspace, 'dist', 'Publish', 'release-notes.md'))).toBe(false)
   })
 
   it('reports configuration without a hardcoded Vue version', () => {
@@ -146,7 +148,6 @@ esac
     const artifactPaths = [
       `dist/Publish/Translate-It-v${version}-for-Chrome.zip`,
       `dist/Publish/Translate-It-v${version}-for-Firefox.zip`,
-      'dist/Publish/release-notes.md',
     ].map(relativePath => path.join(root, relativePath))
     const before = artifactPaths.map(file => fs.existsSync(file))
     const result = spawnSync(process.execPath, ['scripts/build/build-all.mjs', '--parallel'], {
@@ -200,8 +201,6 @@ exit 0
       env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
       encoding: 'utf8',
     })
-    const releaseNotes = path.join(workspace, 'dist', 'Publish', 'release-notes.md')
-
     // Case 1: both browser ZIPs missing.
     let result = runAggregate()
 
@@ -209,7 +208,6 @@ exit 0
     expect(result.stdout).toContain('STUB_CHILD_OUTPUT')
     expect(result.stdout).toContain('Missing expected browser package')
     expect(result.stdout).not.toContain('ALL BUILDS COMPLETED')
-    expect(fs.existsSync(releaseNotes)).toBe(false)
 
     // Case 2: only the Firefox browser ZIP is missing.
     const chromeZip = path.join(workspace, 'dist', 'chrome', `Translate-It-v${version}.zip`)
@@ -221,7 +219,6 @@ exit 0
     expect(result.stdout).toContain('Missing expected browser package')
     expect(result.stdout).toContain('firefox')
     expect(result.stdout).not.toContain('ALL BUILDS COMPLETED')
-    expect(fs.existsSync(releaseNotes)).toBe(false)
   })
 
   it('uses consistent ZIP progress wording and a single aggregate success heading', () => {

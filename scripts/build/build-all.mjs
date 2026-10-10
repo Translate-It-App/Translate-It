@@ -160,31 +160,7 @@ async function buildAll() {
       fs.copyFileSync(firefoxZip, path.join(publishDir, `Translate-It-v${version}-for-Firefox.zip`))
     }
     
-    // Step 4: Generate release notes
-    const releaseNotes = `# Translate It v${version} Release
-
-## Chrome Extension
-- **File**: Translate-It-v${version}-for-Chrome.zip
-- **Manifest**: Version 3
-- **Compatible**: Chrome 88+
-
-## Firefox Extension
-- **File**: Translate-It-v${version}-for-Firefox.zip
-- **Manifest**: Version 3
-- **Compatible**: Firefox 112+
-
-## Installation
-1. Download the appropriate file for your browser
-2. Extract and load as unpacked extension for testing
-3. Or submit to respective web stores
-
-Generated on: ${new Date().toISOString()}
-Build time: ${formatDuration(Date.now() - startTime)}
-`
-    
-    fs.writeFileSync(path.join(publishDir, 'release-notes.md'), releaseNotes)
-    
-    // Step 5: Success summary
+    // Step 4: Success summary
     const duration = formatDuration(Date.now() - startTime)
     
     const horizontalLine = '═'.repeat(64)
@@ -197,8 +173,6 @@ Build time: ${formatDuration(Date.now() - startTime)}
     console.log(`╠${horizontalLine}╣`)
     console.log(`║${centerText(`⏱️ Total build time: ${duration}`)}║`)
     console.log(`╚${horizontalLine}╝\n`)
-    
-    logStep('Release notes: dist/Publish/release-notes.md')
     
   } catch (error) {
     console.log('\n' + createErrorBox('❌ BUILD FAILED'))
