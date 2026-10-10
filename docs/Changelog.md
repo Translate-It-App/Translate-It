@@ -1,3 +1,19 @@
+#### v1.22.0 – Released on October 10, 2026
+
+##### Changed
+
+- Improved the Settings page layout, navigation, and usability across desktop and mobile devices.
+- Improved Auto Page Translation controls and rule management.
+- Improved AI-powered Page Translation performance.
+
+##### Fixed
+
+- Fixed Page Translation issues on websites with dynamic navigation.
+- Improved keyboard shortcut reliability for Select Element and Text Field translation.
+- Fixed Text-to-Speech button visibility and language flag display issues.
+
+---
+
 #### v1.20.1 – Released on October 04, 2026
 
 ##### Added
