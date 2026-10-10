@@ -1,5 +1,5 @@
 import { logStep, logSuccess, logError, logInfo } from './logger.mjs'
-import { formatFileSize, formatPackageSize } from './box-utils.mjs'
+import { formatFileSize, formatPackageSize, formatDuration } from './box-utils.mjs'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -141,7 +141,7 @@ export class BuildReporter {
    */
   logBuildStep(step, status = 'in-progress') {
     const icon = status === 'failed' ? '❌' : status === 'in-progress' ? '⚡' : '·'
-    const duration = status === 'completed' ? `(${((Date.now() - this.startTime) / 1000).toFixed(1)}s)` : ''
+    const duration = status === 'completed' ? `(${formatDuration(Date.now() - this.startTime)})` : ''
     const prefix = status === 'completed' ? '└─' : '├─'
 
     // Only print header for first call
@@ -278,14 +278,14 @@ export class BuildReporter {
    * Show final success message
    */
   success(buildStats) {
-    const duration = ((Date.now() - this.startTime) / 1000).toFixed(1)
+    const duration = formatDuration(Date.now() - this.startTime)
     const browserName = this.browser.toUpperCase()
     console.log('╔════════════════════════════════════════════════════════════════╗')
 
     const centeredText = this.centerText(`✅ ${browserName} BUILD SUCCESSFUL`)
     console.log(`║${centeredText}║`)
 
-    const timeLine = `⏱ Build completed in ${duration}s`
+    const timeLine = `⏱ Build completed in ${duration}`
     console.log(`║${this.centerText(timeLine)}║`)
 
     if (buildStats) {

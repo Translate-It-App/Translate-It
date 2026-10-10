@@ -5,7 +5,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { logStep, logError } from '../shared/logger.mjs'
-import { centerText, createBox, createSuccessBox, createErrorBox } from '../shared/box-utils.mjs'
+import { centerText, createBox, createSuccessBox, createErrorBox, formatDuration } from '../shared/box-utils.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '../..')
@@ -179,13 +179,13 @@ async function buildAll() {
 3. Or submit to respective web stores
 
 Generated on: ${new Date().toISOString()}
-Build time: ${((Date.now() - startTime) / 1000).toFixed(1)}s
+Build time: ${formatDuration(Date.now() - startTime)}
 `
     
     fs.writeFileSync(path.join(publishDir, 'release-notes.md'), releaseNotes)
     
     // Step 5: Success summary
-    const duration = ((Date.now() - startTime) / 1000).toFixed(1)
+    const duration = formatDuration(Date.now() - startTime)
     
     const horizontalLine = '═'.repeat(64)
     console.log('\n╔' + horizontalLine + '╗')
@@ -195,7 +195,7 @@ Build time: ${((Date.now() - startTime) / 1000).toFixed(1)}s
     if (firefoxCopied) console.log(`║${centerText(`Firefox ZIP: dist/Publish/Translate-It-v${version}-for-Firefox.zip`)}║`)
     if (!chromeCopied && !firefoxCopied) console.log(`║${centerText('No browser ZIPs were copied to dist/Publish/')}║`)
     console.log(`╠${horizontalLine}╣`)
-    console.log(`║${centerText(`⏱️ Total build time: ${duration}s`)}║`)
+    console.log(`║${centerText(`⏱️ Total build time: ${duration}`)}║`)
     console.log(`╚${horizontalLine}╝\n`)
     
     logStep('Release notes: dist/Publish/release-notes.md')

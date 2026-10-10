@@ -5,6 +5,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { BuildReporter } from '../shared/build-reporter.mjs'
+import { formatDuration } from '../shared/box-utils.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const output = []
@@ -18,11 +19,23 @@ afterEach(() => {
 })
 
 describe('build terminal logging', () => {
+  it.each([
+    [0, '00:00'],
+    [9000, '00:09'],
+    [60000, '01:00'],
+    [246800, '04:07'],
+    [3600000, '60:00'],
+  ])('formats %i milliseconds as %s', (milliseconds, expected) => {
+    expect(formatDuration(milliseconds)).toBe(expected)
+  })
+
   it('keeps intermediate rows neutral and reports measured sizes with one final browser success', () => {
     vi.spyOn(console, 'log').mockImplementation(value => output.push(String(value ?? '')))
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-logging-'))
     fs.writeFileSync(path.join(tempDir, 'popup.html'), 'abc')
-    vi.spyOn(Date, 'now').mockReturnValue(1500)
+    vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(0).mockReturnValueOnce(246800).mockReturnValueOnce(246800)
+      .mockReturnValueOnce(0).mockReturnValueOnce(246800).mockReturnValueOnce(246800)
 
     for (const browser of ['chrome', 'firefox']) {
       output.length = 0
@@ -40,11 +53,12 @@ describe('build terminal logging', () => {
       expect(rows[0]).toContain('⚡ Vite compilation')
       expect(rows[0].startsWith('├─')).toBe(true)
       expect(rows[1]).toContain('· Vite compilation')
-      expect(rows[1]).toContain('(0.0s)')
+      expect(rows[1]).toContain('(04:07)')
       expect(rows[1].startsWith('└─')).toBe(true)
       expect(rows.every(line => !line.includes('✅'))).toBe(true)
       expect(text).toContain('0.00 KB')
       expect(text).toContain(`${browser.toUpperCase()} BUILD SUCCESSFUL`)
+      expect(text).toContain('⏱ Build completed in 04:07')
       expect((text.match(/✅/g) || [])).toHaveLength(1)
       expect(text).not.toContain('Manifest generation')
       expect(text).not.toContain('Optimized')
@@ -52,6 +66,43 @@ describe('build terminal logging', () => {
       expect(text).not.toContain('webpack')
       expect(text).not.toContain('submission')
     }
+  })
+
+  it('uses MM:SS in aggregate success output and release notes', () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-logging-duration-'))
+    const workspace = path.join(tempDir, 'workspace')
+    const bin = path.join(tempDir, 'bin')
+    fs.mkdirSync(path.join(workspace, 'scripts', 'build'), { recursive: true })
+    fs.mkdirSync(path.join(workspace, 'scripts', 'shared'), { recursive: true })
+    fs.mkdirSync(path.join(workspace, 'dist', 'chrome'), { recursive: true })
+    fs.mkdirSync(path.join(workspace, 'dist', 'firefox'), { recursive: true })
+    fs.mkdirSync(bin, { recursive: true })
+
+    const version = '0.0.0-logging-test'
+    fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({ version }))
+    fs.copyFileSync(path.join(root, 'scripts', 'build', 'build-all.mjs'), path.join(workspace, 'scripts', 'build', 'build-all.mjs'))
+    fs.copyFileSync(path.join(root, 'scripts', 'shared', 'box-utils.mjs'), path.join(workspace, 'scripts', 'shared', 'box-utils.mjs'))
+    fs.writeFileSync(path.join(workspace, 'scripts', 'shared', 'logger.mjs'), `export function logStep(message) { console.log(message) }\nexport function logError(message, details) { console.log(message); if (details) console.log(details) }\n`)
+    fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh\nprintf 'STUB_CHILD_OUTPUT\\n'\nexit 0\n`, { mode: 0o755 })
+    fs.writeFileSync(path.join(tempDir, 'mock-date.cjs'), `let calls = 0; Date.now = () => calls++ === 0 ? 0 : 246800;`)
+    for (const browser of ['chrome', 'firefox']) {
+      fs.writeFileSync(path.join(workspace, 'dist', browser, `Translate-It-v${version}.zip`), 'zip')
+    }
+
+    const result = spawnSync(process.execPath, ['scripts/build/build-all.mjs', '--parallel'], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+        NODE_OPTIONS: `--require ${path.join(tempDir, 'mock-date.cjs')}`,
+      },
+      encoding: 'utf8',
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('⏱️ Total build time: 04:07')
+    expect(fs.readFileSync(path.join(workspace, 'dist', 'Publish', 'release-notes.md'), 'utf8'))
+      .toContain('Build time: 04:07')
   })
 
   it('reports configuration without a hardcoded Vue version', () => {
@@ -137,7 +188,7 @@ esac
     )
     fs.writeFileSync(
       path.join(workspace, 'scripts', 'shared', 'box-utils.mjs'),
-      `export function centerText(value) { return String(value) }\nexport function createBox(value) { return String(value) }\nexport function createSuccessBox(value) { return String(value) }\nexport function createErrorBox(value) { return String(value) }\n`
+       `export function centerText(value) { return String(value) }\nexport function createBox(value) { return String(value) }\nexport function createSuccessBox(value) { return String(value) }\nexport function createErrorBox(value) { return String(value) }\nexport function formatDuration(value) { return String(value) }\n`
     )
     fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh
 printf 'STUB_CHILD_OUTPUT\\n'

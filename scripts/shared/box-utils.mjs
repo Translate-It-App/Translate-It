@@ -112,4 +112,14 @@ function formatFileSize(bytes) {
   return `${kb.toFixed(2)} KB`
 }
 
-export { createBox, createSuccessBox, createErrorBox, centerText, emptyBoxLine, formatPackageSize, formatFileSize, BOX_WIDTH }
+/**
+ * Format a duration as minutes and seconds
+ */
+function formatDuration(milliseconds) {
+  const totalSeconds = Math.round(milliseconds / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
+export { createBox, createSuccessBox, createErrorBox, centerText, emptyBoxLine, formatPackageSize, formatFileSize, formatDuration, BOX_WIDTH }
