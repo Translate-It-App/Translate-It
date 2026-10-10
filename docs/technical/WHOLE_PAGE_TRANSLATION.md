@@ -55,7 +55,7 @@ Centralizes all external event listeners for the system.
 ### 4. PageTranslationScheduler
 The core engine for queue management and batch request dispatching. It is deeply integrated with the **Optimization Levels** system.
 - **Dynamic Chunk Scaling**: Automatically adjusts the number of text segments per request based on the provider's optimization level (e.g., larger batches for "Economy" mode to save AI tokens, smaller batches for "Turbo" mode for faster progressive updates).
-- **Concurrency Control**: Synchronizes its parallel processing limits with the global `RateLimitManager` settings for the active provider.
+- **Concurrency Control**: Fills a bounded set of independent AI batch workers from one flush. The existing parallel retry lane dispatches these batches; the shared provider `RateLimitManager` bounds physical AI requests, including recovery. AUTO source resolution still holds siblings until the first batch confirms the session's language pair. Traditional providers retain their existing dispatch behavior.
 - **Memory Safety**: Inherits from `ResourceTracker`; automatically clears the queue on cleanup.
 - **Prioritization**: Forces immediate flush for high-priority items if capacity is reached.
 
@@ -103,12 +103,14 @@ When the user clicks "Stop" or "Restore" in the page translation UI, a cancellat
 ### 3. Fault-Tolerant Mapping
 The system uses a "Soft-Failure" strategy. If a single batch fails, the scheduler catches the error, marks those specific segments as failed (reverting to original text), and continues with the rest of the page. This prevents a single network error from breaking the entire page translation.
 
+Scheduler item IDs are returned by the background and matched before settlement, so out-of-order batches or results cannot cross-assign nodes. Missing IDs fail only their own items; unknown or duplicate IDs invalidate the response. Relevant setting changes and trusted SPA navigation stop obsolete sessions without reverting committed nodes. Internal automatic navigation within one document can retain unchanged accepted nodes in fresh session storage, including their original text, after checking document, provider, target and settings revision. This avoids resending translated shared navigation through AUTO language bootstrap. Global provider changes stop only Page sessions that actually use the global fallback. Shared AI 429 cooldown also applies to siblings and API-key failover; cancellation keeps an occupied request slot until its transport task settles.
+
 ## Smart Features
 
 ### Optimization Level Integration
 The system is "Optimization-Aware." It respects the user's preference for **Speed vs. Cost** by dynamically reconfiguring its scheduling strategy:
 - **Level 1 (Economy/Stable)**: Uses larger chunks (up to 80 segments for AI) and lower concurrency. This is highly efficient for LLMs as it reduces the frequency of System Prompt repetition and stays within IP-based rate limits for traditional providers.
-- **Level 5 (Turbo/Fast)**: Uses smaller chunks (as small as 15 segments) and higher concurrency. This provides a "progressive rendering" experience where the page translates in rapid, small bursts.
+- **Level 5 (Turbo/Fast)**: Uses smaller chunks and higher concurrency. Current Custom page batches retain their existing maximum of 10 segments at level 5 and 25 at level 3 (the separate Custom provider category uses the traditional sizing curve). Other AI providers use 15 and 30 respectively. Character limits can further reduce a batch. Custom's shared request ceilings are 4 and 2 respectively.
 
 ### Modular Event Management
 By isolating event handling into `PageTranslationEventManager`, the system prevents "Listener Leaks" and ensures that global signals (like conflict resolution with Select Element mode) are handled consistently.

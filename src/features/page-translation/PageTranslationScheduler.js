@@ -56,6 +56,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     // Memory-safe map for logical context grouping
     this.contextMap = new WeakMap();
     this._nextContextId = 1;
+    this._nextItemId = 1;
 
     this.settings = { 
       ...DEFAULT_PAGE_TRANSLATION_SETTINGS,
@@ -220,6 +221,14 @@ export class PageTranslationScheduler extends ResourceTracker {
     }
   }
 
+  recordRetainedTranslation(context) {
+    if (!this.isTranslated || context !== this.sessionContext) return;
+    this.totalTasks++;
+    this.translatedCount++;
+    this._reportProgress();
+    this._checkCompletion();
+  }
+
   /**
    * Enqueue a text for translation with a given priority (score).
    * @param {string} text - Text to translate
@@ -266,6 +275,7 @@ export class PageTranslationScheduler extends ResourceTracker {
 
     return new Promise((resolve, reject) => {
       this.queue.push({ 
+        id: String(this._nextItemId++),
         text: text.trim(), 
         score: score || 0, 
         isHighPriority,
@@ -409,6 +419,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       while (this.queue.length > 0 && this.isTranslated && flushContext === this.sessionContext) {
         const config = await this._getBatchConfig();
         if (!this._ownsFlushSession(flushSessionId, flushContext)) return;
+        if (this.activeFlushes > (this.settings.maxConcurrentFlushes || 1)) break;
         let currentBatch = [];
 
         // 1. SELECT BATCH: Use specialized filters based on the mode
@@ -453,6 +464,11 @@ export class PageTranslationScheduler extends ResourceTracker {
 
         // 2. EXECUTE BATCH: Process the selected items
         this.isFirstBatch = false;
+        // Fill one available worker; provider-wide limits still own physical AI requests.
+        if (config.parallelExecution && this.queue.length > 0
+            && this.activeFlushes < (this.settings.maxConcurrentFlushes || 1)) {
+          void this.flush();
+        }
         await this._executeBatchRequest(currentBatch, config, flushContext, flushSessionId);
         this.activeBatches.delete(activeBatch);
         activeBatch = null;
@@ -525,7 +541,7 @@ export class PageTranslationScheduler extends ResourceTracker {
    * Internal method to handle the actual translation request and resolution.
    */
   async _executeBatchRequest(batch, config, flushContext, flushSessionId) {
-    const textsToTranslate = batch.map(item => ({ text: item.text }));
+    const textsToTranslate = batch.map(item => ({ id: item.id, text: item.text }));
     
     const batchMessage = MessageFormat.create(
       MessageActions.PAGE_TRANSLATE_BATCH,
@@ -550,7 +566,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       const result = await safeSendMessage(batchMessage, 'page-translation-batch');
 
       // Validation after async call
-      if (!this.isTranslated || (flushContext && flushContext !== this.sessionContext)) {
+      if (!this._ownsFlushSession(flushSessionId, flushContext)) {
         this.logger.debug('Batch discarded: session changed or stopped');
         batch.forEach(item => this._resolveItem(item, item.text, 'cancelled'));
         return;
@@ -578,14 +594,27 @@ export class PageTranslationScheduler extends ResourceTracker {
 
       // Resolve successfully translated items
       const translatedTexts = JSON.parse(result.translatedText);
+      if (!Array.isArray(translatedTexts)) throw new TypeError('Page translation response must be an array');
       this.logger.debug(`Batch received: ${translatedTexts.length} items`);
+
+      const hasItemIds = batch.every(item => typeof item.id === 'string');
+      const resultsById = hasItemIds ? new Map() : null;
+      if (resultsById) {
+        const expectedIds = new Set(batch.map(item => item.id));
+        for (const translatedItem of translatedTexts) {
+          if (!expectedIds.has(translatedItem?.id) || resultsById.has(translatedItem.id)) {
+            throw new TypeError('Page translation response has an unknown or duplicate item ID');
+          }
+          resultsById.set(translatedItem.id, translatedItem);
+        }
+      }
 
       if (translatedTexts.length !== batch.length) {
         this.logger.error('Batch size mismatch!', { sent: batch.length, received: translatedTexts.length });
       }
 
       batch.forEach((item, index) => {
-        const translatedItem = translatedTexts[index];
+        const translatedItem = resultsById ? resultsById.get(item.id) : translatedTexts[index];
 
         const isExplicitlySkipped = typeof translatedItem === 'object'
           && translatedItem !== null
@@ -627,19 +656,20 @@ export class PageTranslationScheduler extends ResourceTracker {
     }  }
 
   async _getBatchConfig() {
+    const settings = this.settings;
     // Priority: this.settings (from Manager) -> defaults
-    if (!this.settings.translationApi) {
-      this.settings.translationApi = await getTranslationApiAsync();
+    if (!settings.translationApi) {
+      settings.translationApi = await getTranslationApiAsync();
     }
-    if (!this.settings.targetLanguage) {
-      this.settings.targetLanguage = await getTargetLanguageAsync();
+    if (!settings.targetLanguage) {
+      settings.targetLanguage = await getTargetLanguageAsync();
     }
 
     const { getProviderConfiguration } = await import('@/features/translation/core/ProviderConfigurations.js');
     const { getProviderOptimizationLevelAsync } = await import('@/shared/config/config.js');
 
-    const providerRegistryId = this.settings.translationApi;
-    const targetLanguage = this.settings.targetLanguage;
+    const providerRegistryId = settings.translationApi;
+    const targetLanguage = settings.targetLanguage;
     
     const providerName = registryIdToName(providerRegistryId);
     const level = await getProviderOptimizationLevelAsync(providerName);
@@ -649,7 +679,7 @@ export class PageTranslationScheduler extends ResourceTracker {
 
     // Sync concurrency settings with optimization level
     if (providerConfig.rateLimit) {
-      this.settings.maxConcurrentFlushes = providerConfig.rateLimit.maxConcurrent;
+      settings.maxConcurrentFlushes = providerConfig.rateLimit.maxConcurrent;
     }
 
     // Dynamic Chunk Size Scaling (Optimization Level Alignment)
@@ -679,7 +709,8 @@ export class PageTranslationScheduler extends ResourceTracker {
       providerRegistryId,
       targetLanguage,
       chunkSize: Math.max(chunkSize, 5), // Ensure at least 5 segments per batch
-      lazyLoading: this.settings.lazyLoading,
+      parallelExecution: isAI || isProviderType(providerName, ProviderTypes.CUSTOM),
+      lazyLoading: settings.lazyLoading,
       maxChars: isAI ? (providerConfig.batching?.maxBatchSizeChars || await getWholePageAiMaxCharsAsync()) : (providerConfig.batching?.characterLimit || await getWholePageMaxCharsAsync())
     };
   }

@@ -69,6 +69,7 @@ describe('PageTranslationSettingsLoader', () => {
     expect(settings).toEqual({
       translationApi: 'google',
       isExplicitProvider: false,
+      usesGlobalProvider: true,
       targetLanguage: 'fa',
       lazyLoading: true,
       rootMargin: '150px',
@@ -148,6 +149,7 @@ describe('PageTranslationSettingsLoader', () => {
 
     expect(settings.translationApi).toBe('gemini');
     expect(settings.isExplicitProvider).toBe(true);
+    expect(settings.usesGlobalProvider).toBe(false);
     expect(settings.targetLanguage).toBe('en');
   });
 
@@ -159,16 +161,35 @@ describe('PageTranslationSettingsLoader', () => {
     let settings = await PageTranslationSettingsLoader.load();
     expect(settings.translationApi).toBe('openai');
     expect(settings.isExplicitProvider).toBe(false);
+    expect(settings.usesGlobalProvider).toBe(false);
 
     // Option overrides mode specific
     settings = await PageTranslationSettingsLoader.load({ provider: 'gemini' });
     expect(settings.translationApi).toBe('gemini');
     expect(settings.isExplicitProvider).toBe(true);
+    expect(settings.usesGlobalProvider).toBe(false);
 
     // If mode specific doesn't exist, use global
     config.getModeProvidersAsync.mockResolvedValue({});
     settings = await PageTranslationSettingsLoader.load();
     expect(settings.translationApi).toBe('google');
+    expect(settings.usesGlobalProvider).toBe(true);
+  });
+
+  it.each([undefined, null, ''])('marks a falsy Page override (%s) as global-dependent', async (provider) => {
+    config.getModeProvidersAsync.mockResolvedValue({ [TranslationMode.Page]: provider });
+
+    expect(await PageTranslationSettingsLoader.load()).toMatchObject({
+      translationApi: 'google', isExplicitProvider: false, usesGlobalProvider: true,
+    });
+  });
+
+  it('keeps a Page override independent even when it equals the global provider', async () => {
+    config.getModeProvidersAsync.mockResolvedValue({ [TranslationMode.Page]: 'google' });
+
+    expect(await PageTranslationSettingsLoader.load()).toMatchObject({
+      translationApi: 'google', isExplicitProvider: false, usesGlobalProvider: false,
+    });
   });
 
   it('should use default values for missing settings', async () => {

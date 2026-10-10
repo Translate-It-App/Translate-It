@@ -157,7 +157,22 @@ export class PageTranslationBridge extends ResourceTracker {
     this.showOriginalOnHover = true; // Initial default
   }
 
-  async initialize(settings, onTranslateCallback, sessionContext = null) {
+  async initialize(settings, onTranslateCallback, sessionContext = null, {
+    preserveAcceptedTranslations = false, onRetainedTranslation = null, settingsRevision = 0,
+  } = {}) {
+    const previous = preserveAcceptedTranslations && this.session ? {
+      nodeStorage: this.session.nodesTranslator?.nodeStorage,
+      document: this.session.root?.ownerDocument,
+      translationApi: this.session.translationApi,
+      targetLanguage: this.session.targetLanguage,
+      settingsRevision: this.session.settingsRevision,
+    } : null;
+    const previousStorage = preserveAcceptedTranslations
+      && previous?.document === document
+      && previous.targetLanguage === settings.targetLanguage
+      && previous.translationApi === settings.translationApi
+      && previous.settingsRevision === settingsRevision
+      ? previous.nodeStorage : null;
     this.cleanup();
     
     // Explicitly set from settings (defaulted to true if undefined)
@@ -172,6 +187,10 @@ export class PageTranslationBridge extends ResourceTracker {
       domTranslator: null,
       persistentTranslator: null,
       context: sessionContext,
+      url: window.location.href,
+      targetLanguage: settings.targetLanguage,
+      translationApi: settings.translationApi,
+      settingsRevision,
       root: null,
       active: true,
       shadowDiscoveryObserver: null,
@@ -207,6 +226,7 @@ export class PageTranslationBridge extends ResourceTracker {
 
     const isFreshTarget = (node, sourceValue, generation) => {
       if (!currentSession.active || this.session !== currentSession || !node) return false;
+      if (window.location.href !== currentSession.url) return false;
 
       const owner = node.nodeType === Node.ATTRIBUTE_NODE ? node.ownerElement : node;
       const root = currentSession.root;
@@ -251,6 +271,7 @@ export class PageTranslationBridge extends ResourceTracker {
 
     const isActiveTarget = (node) => {
       if (!currentSession.active || this.session !== currentSession || !node) return false;
+      if (window.location.href !== currentSession.url) return false;
       const owner = node.nodeType === Node.ATTRIBUTE_NODE ? node.ownerElement : node;
       const root = currentSession.root;
       return isOwnedTarget(owner, root);
@@ -427,7 +448,7 @@ export class PageTranslationBridge extends ResourceTracker {
 
           const canApply = decision
             && decision.session === currentSession
-            && currentSession.active
+            && isActiveTarget(node)
             && decision.generation === targetGenerations.get(node)
             && decision.outcome === 'accepted-pending'
             && (!decision.settlement || decision.settlement.state === 'pending');
@@ -461,6 +482,11 @@ export class PageTranslationBridge extends ResourceTracker {
           try {
             actualNodeData.originalText = getCurrentNodeValue(node);
             setCurrentNodeValue(node, text);
+            actualNodeData.acceptedTranslation = {
+              originalText: actualNodeData.originalText,
+              text: getCurrentNodeValue(node),
+              updateId: actualNodeData.updateId,
+            };
           } catch (error) {
             if (decision.settlement?.state === 'pending') {
               decision.settlement.settle(
@@ -485,6 +511,16 @@ export class PageTranslationBridge extends ResourceTracker {
 
       restore(node, callback) {
         const nodeData = this.nodeStorage.get(node);
+        const accepted = nodeData?.acceptedTranslation;
+        // A stopped SPA owner may outlive host edits while its replacement loads.
+        if (!currentSession.active && (!isConnectedTarget(node)
+            || node.ownerDocument !== document
+            || !accepted || nodeData.updateId !== accepted.updateId
+            || getCurrentNodeValue(node) !== accepted.text)) {
+          this.nodeStorage.delete(node);
+          callback?.(node);
+          return;
+        }
         if (node?.nodeType === Node.ATTRIBUTE_NODE && nodeData) {
           if (nodeData.originalText !== null) setCurrentNodeValue(node, nodeData.originalText);
           this.nodeStorage.delete(node);
@@ -497,6 +533,31 @@ export class PageTranslationBridge extends ResourceTracker {
     }
 
     const nodesTranslator = new GuardedNodesTranslator(translateWithContext);
+    const retainAcceptedTranslation = (node) => {
+      if (!previousStorage || nodesTranslator.has(node) || !isActiveTarget(node)) return false;
+      const previous = previousStorage.get(node);
+      const accepted = previous?.acceptedTranslation;
+      if (!accepted || previous.updateId !== accepted.updateId
+          || getCurrentNodeValue(node) !== accepted.text) return false;
+      nodesTranslator.nodeStorage.set(node, {
+        id: nodesTranslator.idCounter++, updateId: 1, originalText: accepted.originalText,
+        importanceScore: previous.importanceScore,
+        acceptedTranslation: { ...accepted, updateId: 1 },
+      });
+      if (settings.showOriginalOnHover) hoverPreviewLookup.add(node, accepted.originalText, accepted.text);
+      applyTranslationFont(node);
+      onRetainedTranslation?.();
+      return true;
+    };
+
+    if (currentSession.intersectionScheduler) {
+      const originalAdd = currentSession.intersectionScheduler.add;
+      currentSession.intersectionScheduler.add = function(node, callback) {
+        // Restore ownership must survive even when visibility defers translation.
+        if (retainAcceptedTranslation(node)) return;
+        return originalAdd.call(this, node, callback);
+      };
+    }
 
     /**
      * MONKEY-PATCH: Capture the node being processed by NodesTranslator.
@@ -505,6 +566,8 @@ export class PageTranslationBridge extends ResourceTracker {
      */
     const originalTranslate = nodesTranslator.translate;
     nodesTranslator.translate = function(node, callback) {
+      retainAcceptedTranslation(node);
+      if (this.has(node)) return originalTranslate.call(this, node, callback);
       this.currentNode = node;
       this.currentTaskGeneration = nextTargetGeneration(node);
       this.currentTaskOwnsStorage = typeof this.has === 'function' ? !this.has(node) : true;
@@ -823,9 +886,8 @@ export class PageTranslationBridge extends ResourceTracker {
   }
 
   translate(element) {
-    if (!this.session) return;
+    if (!this.session?.active || window.location.href !== this.session.url) return;
     this.session.root = element;
-    this.session.active = true;
     
     // Respect auto-translate setting: 
     // Use persistentTranslator (MutationObserver) only if enabled.
@@ -845,9 +907,12 @@ export class PageTranslationBridge extends ResourceTracker {
   }
 
   stopPersistence() {
+    // Retain restore storage, but invalidate pending writers and lazy callbacks.
+    if (this.session) this.session.active = false;
     if (this.session && this.session.persistentTranslator) {
       try {
         this.session.stopShadowPersistence?.();
+        this.session.intersectionScheduler?.intersectionObserver?.intersectionObserver?.disconnect();
         const pt = this.session.persistentTranslator;
         // Search for the observer in observedNodesStorage (it's a Map of node -> XMutationObserver)
         if (pt.observedNodesStorage) {

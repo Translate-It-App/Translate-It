@@ -122,6 +122,141 @@ describe('PageTranslationScheduler', () => {
     scheduler.reset();
   });
 
+  it('counts retained nodes once per callback and reaches idle without a provider request', async () => {
+    vi.useFakeTimers();
+    try {
+      scheduler.setSettings({ autoTranslateOnDOMChanges: true });
+      scheduler.recordRetainedTranslation(scheduler.sessionContext);
+      scheduler.recordRetainedTranslation(Symbol('old-context'));
+      expect(scheduler.totalTasks).toBe(1);
+      expect(scheduler.translatedCount).toBe(1);
+      expect(scheduler.failedCount).toBe(0);
+      expect(scheduler.pendingSettlements.size).toBe(0);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(pageEventBus.emit).toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_IDLE, expect.objectContaining({
+        translatedCount: 1, totalCount: 1, failedCount: 0, isAutoTranslating: true,
+      }));
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      scheduler.stop();
+      scheduler.recordRetainedTranslation(scheduler.sessionContext);
+      expect(scheduler.totalTasks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  describe('bounded independent AI batches', () => {
+    it.each([[3, 25, 2], [5, 10, 4]])('enables Custom workers at level %i without changing its existing batch size', async (level, chunkSize, limit) => {
+      const config = await import('@/shared/config/config.js');
+      const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(level);
+      scheduler.setSettings({ translationApi: 'custom', targetLanguage: 'ja' });
+      try {
+        const batchConfig = await scheduler._getBatchConfig();
+        expect(batchConfig.parallelExecution).toBe(true);
+        expect(batchConfig.chunkSize).toBe(chunkSize);
+        expect(scheduler.settings.maxConcurrentFlushes).toBe(limit);
+      } finally {
+        optimization.mockRestore();
+      }
+    });
+
+    const configureBatches = (limit) => {
+      vi.spyOn(scheduler, '_getBatchConfig').mockImplementation(async () => {
+        scheduler.settings.maxConcurrentFlushes = limit;
+        return { providerRegistryId: 'custom', targetLanguage: 'ja', parallelExecution: true };
+      });
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: queue.slice(0, 2), remainingItems: queue.slice(2),
+      }));
+    };
+
+    it.each([1, 2, 4])('fills %i workers from one flush and never exceeds its limit', async (limit) => {
+      vi.useFakeTimers();
+      try {
+        configureBatches(limit);
+        let active = 0;
+        let maxActive = 0;
+        safeSendMessage.mockImplementation(async (message) => {
+          maxActive = Math.max(maxActive, ++active);
+          const items = JSON.parse(message.data.text);
+          await new Promise(resolve => setTimeout(resolve, 20));
+          active--;
+          return { success: true, translatedText: JSON.stringify(items.map(item => ({ ...item, text: `translated:${item.text}` }))) };
+        });
+        const promises = Array.from({ length: 12 }, (_, index) => scheduler.enqueue(`source ${index}`));
+        const flush = scheduler.flush();
+        await vi.runAllTimersAsync();
+        await flush;
+        const settlements = await Promise.all(promises);
+        expect(maxActive).toBe(limit);
+        expect(active).toBe(0);
+        expect(safeSendMessage).toHaveBeenCalledTimes(6);
+        expect(settlements.map(result => result.text)).toEqual(Array.from({ length: 12 }, (_, index) => `translated:source ${index}`));
+        settlements.forEach(result => result.settle('accepted'));
+        expect(scheduler.translatedCount).toBe(12);
+        expect(scheduler.activeFlushes).toBe(0);
+      } finally {
+        scheduler.stop();
+        vi.useRealTimers();
+      }
+    });
+
+    it('maps reversed result IDs and preserves valid siblings when one result is missing', async () => {
+      const batch = [
+        { id: 'a', text: 'A', resolve: vi.fn() },
+        { id: 'b', text: 'B', resolve: vi.fn() },
+        { id: 'c', text: 'C', resolve: vi.fn() },
+      ];
+      safeSendMessage.mockResolvedValue({ success: true, translatedText: JSON.stringify([
+        { id: 'c', text: 'translated C' }, { id: 'a', text: 'translated A' },
+      ]) });
+      await scheduler._executeBatchRequest(batch, { providerRegistryId: 'custom' }, scheduler.sessionContext, scheduler.translationSessionId);
+      expectSettlement(batch[0].resolve, 'translated A');
+      expectSettlement(batch[2].resolve, 'translated C');
+      expect(getSettlement(batch[1].resolve).state).toBe('failed');
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      '[{"id":"a","text":"wrong"},{"id":"a","text":"duplicate"}]',
+      '[{"id":"unknown","text":"wrong"}]',
+      '{"unexpected":"object"}',
+      'not JSON',
+    ])('fails invalid identity or JSON without applying or retrying it: %s', async (response) => {
+      const item = { id: 'a', text: 'original', resolve: vi.fn() };
+      safeSendMessage.mockResolvedValue({ success: true, translatedText: response });
+      await scheduler._executeBatchRequest([item], { providerRegistryId: 'custom' }, scheduler.sessionContext, scheduler.translationSessionId);
+      expectSettlement(item.resolve, 'original');
+      expect(getSettlement(item.resolve).state).toBe('failed');
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('assigns separate identities to repeated text without dropping distinct nodes', async () => {
+      const promises = [
+        scheduler.enqueue('same text', null, 1, document.createTextNode('same text')),
+        scheduler.enqueue('same text', null, 1, document.createTextNode('same text')),
+      ];
+      expect(new Set(scheduler.queue.map(item => item.id)).size).toBe(2);
+      expect(scheduler.totalTasks).toBe(2);
+      scheduler.stop();
+      const settlements = await Promise.all(promises);
+      expect(settlements.every(result => result.state === 'cancelled')).toBe(true);
+    });
+
+    it('rejects a delayed success from a different session even with a null context', async () => {
+      scheduler.setTranslationState(true, 'old', null);
+      let release;
+      safeSendMessage.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+      const item = { id: 'old-item', text: 'original', resolve: vi.fn() };
+      const pending = scheduler._executeBatchRequest([item], { providerRegistryId: 'custom' }, null, 'old');
+      scheduler.setTranslationState(true, 'new', null);
+      release({ success: true, translatedText: '[{"id":"old-item","text":"stale"}]' });
+      await pending;
+      expectSettlement(item.resolve, 'original');
+      expect(getSettlement(item.resolve).state).toBe('cancelled');
+    });
+  });
+
   describe('Initialization & State', () => {
     it('uses trusted lifecycle callback instead of aggregate PageEventBus transport', () => {
       const onLifecycleEvent = vi.fn();

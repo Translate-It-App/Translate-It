@@ -13,6 +13,7 @@ import { ErrorTypes } from "@/shared/error-management/ErrorTypes.js";
 import { matchErrorToType } from "@/shared/error-management/ErrorMatcher.js";
 import { ProviderNames, TranslationCallPurpose } from "@/features/translation/providers/ProviderConstants.js";
 import { appendTranslationDiagnostic } from '@/features/translation/ir/TranslationOperation.js';
+import { rateLimitManager } from '@/features/translation/core/RateLimitManager.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.TRANSLATION, 'ProviderRequestEngine');
 
@@ -332,10 +333,9 @@ export const ProviderRequestEngine = {
     const finalCharCount = charCount || 0;
     const finalOriginalCharCount = originalCharCount || 0;
 
-    const { globalCallId, sessionCallId } = statsManager.recordRequest(provider.providerName, finalSessionId, finalCharCount, finalOriginalCharCount, normalizedCallPurpose);
-
     // MOCK BYPASS: If URL is a mock protocol, skip actual fetch but keep stats and logs
     if (url.startsWith('mock://')) {
+      const { globalCallId } = statsManager.recordRequest(provider.providerName, finalSessionId, finalCharCount, finalOriginalCharCount, normalizedCallPurpose);
       const mockDuration = 100 + Math.random() * 200;
       logger.debugLazy(() => {
         return [`[Call #${globalCallId}] Mock Engine Bypass: 200 OK (${mockDuration.toFixed(0)}ms)`, {
@@ -346,22 +346,6 @@ export const ProviderRequestEngine = {
       });
       return { status: 200, ok: true, json: async () => ({ mock: true }) };
     }
-
-    const sessionTag = finalSessionId ? ` [Session: ${finalSessionId.substring(0, 8)}${sessionCallId > 0 ? ` #${sessionCallId}` : ''}]` : '';
-    
-    // CENTRALIZED SMART LOGGING: REQUEST
-      logger.debugLazy(() => {
-        const sanitizedUrl = this._maskSensitiveData(url);
-        const payload = this._parsePayload(fetchOptions.body);
-
-        return [`[Call #${globalCallId}]${sessionTag} Request: ${sanitizedUrl}`, {
-          context,
-          charCount: finalCharCount,
-          payloadType: payload ? (Array.isArray(payload) ? 'array' : typeof payload) : 'empty',
-        }];
-      });
-    
-    const startTime = Date.now();
 
     try {
       const finalFetchOptions = { ...fetchOptions };
@@ -376,6 +360,27 @@ export const ProviderRequestEngine = {
       // Capture proxy configuration for this physical attempt.
       const proxyConfig = await provider._initializeProxy();
 
+      if (provider.constructor.isAI) {
+        await rateLimitManager.waitForCooldown(provider.providerName, abortController?.signal);
+      }
+      if (abortController?.signal?.aborted) throw createOperationAbortError(abortController.signal);
+
+      const { globalCallId, sessionCallId } = statsManager.recordRequest(provider.providerName, finalSessionId, finalCharCount, finalOriginalCharCount, normalizedCallPurpose);
+      const sessionTag = finalSessionId ? ` [Session: ${finalSessionId.substring(0, 8)}${sessionCallId > 0 ? ` #${sessionCallId}` : ''}]` : '';
+
+      // CENTRALIZED SMART LOGGING: REQUEST
+      logger.debugLazy(() => {
+        const sanitizedUrl = this._maskSensitiveData(url);
+        const payload = this._parsePayload(fetchOptions.body);
+
+        return [`[Call #${globalCallId}]${sessionTag} Request: ${sanitizedUrl}`, {
+          context,
+          charCount: finalCharCount,
+          payloadType: payload ? (Array.isArray(payload) ? 'array' : typeof payload) : 'empty',
+        }];
+      });
+
+      const startTime = Date.now();
       const response = await proxyManager.fetch(url, finalFetchOptions, proxyConfig);
       const duration = Date.now() - startTime;
       const retryAt = parseRetryAt(response);
@@ -486,6 +491,9 @@ export const ProviderRequestEngine = {
         if (providerCode !== undefined) err.code = providerCode;
         if (errorType === ErrorTypes.RATE_LIMIT_REACHED && retryAt !== undefined) {
           err.retryAt = retryAt;
+        }
+        if (provider.constructor.isAI && errorType === ErrorTypes.RATE_LIMIT_REACHED) {
+          rateLimitManager.notifyRateLimit(provider.providerName, err);
         }
         throw err;
       }

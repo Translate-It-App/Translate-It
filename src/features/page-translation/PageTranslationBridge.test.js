@@ -5,6 +5,7 @@ vi.mock('domtranslator', () => {
   class MockNodesTranslator {
     constructor(callback) {
       this.callback = callback;
+      this.has = vi.fn(() => false);
       this.translate = vi.fn(function(node, cb) { if (cb) cb(node); });
       this.update = vi.fn(function(node, cb) { if (cb) cb(node); });
     }

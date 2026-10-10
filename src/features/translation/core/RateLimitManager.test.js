@@ -122,6 +122,149 @@ describe('RateLimitManager', () => {
 
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+  describe('shared capacity and cooldown', () => {
+    const deferred = () => {
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      return { promise, resolve };
+    };
+    const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+
+    it('keeps a cancelled live task in its slot until the transport settles, and removes queued listeners', async () => {
+      const live = deferred();
+      const controller = new AbortController();
+      const first = manager.executeWithRateLimit('TestProvider', () => live.promise, '', TranslationPriority.LOW, { abortController: controller });
+      await settle();
+      controller.abort('user-cancelled');
+      const queuedController = new AbortController();
+      const removeListener = vi.spyOn(queuedController.signal, 'removeEventListener');
+      const cancelledTask = vi.fn();
+      const cancelled = manager.executeWithRateLimit('TestProvider', cancelledTask, '', TranslationPriority.LOW, { abortController: queuedController });
+      await settle();
+      queuedController.abort('user-cancelled');
+      await expect(cancelled).rejects.toMatchObject({ type: ErrorTypes.USER_CANCELLED });
+      expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+      const nextTask = vi.fn(() => 'next');
+      const next = manager.executeWithRateLimit('TestProvider', nextTask);
+      await settle();
+      expect(manager.getPerformanceStats('TestProvider')).toMatchObject({ active: 1, totalPending: 1 });
+      expect(nextTask).not.toHaveBeenCalled();
+      live.resolve('late');
+      await first;
+      await expect(next).resolves.toBe('next');
+      expect(cancelledTask).not.toHaveBeenCalled();
+      expect(manager.getPerformanceStats('TestProvider').active).toBe(0);
+    });
+
+    it('clears pending work without resetting live accounting', async () => {
+      const live = deferred();
+      const first = manager.executeWithRateLimit('TestProvider', () => live.promise);
+      const controller = new AbortController();
+      const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+      const pending = manager.executeWithRateLimit('TestProvider', () => 'cleared', '', TranslationPriority.NORMAL, { abortController: controller });
+      await settle();
+      manager.clearQueue('TestProvider');
+      await expect(pending).rejects.toThrow('Queue cleared');
+      expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+      const nextTask = vi.fn(() => 'next');
+      const next = manager.executeWithRateLimit('TestProvider', nextTask);
+      await settle();
+      expect(manager.getPerformanceStats('TestProvider').active).toBe(1);
+      expect(nextTask).not.toHaveBeenCalled();
+      live.resolve();
+      await first;
+      await expect(next).resolves.toBe('next');
+      expect(manager.getPerformanceStats('TestProvider').active).toBe(0);
+    });
+
+    it('retains state when reload lowers capacity below the live count', async () => {
+      await manager.reloadConfigurations();
+      mockRuntime.providerLevels.set('WebAI', 5);
+      await manager.reloadConfigurations();
+      const state = manager.providerStates.get('WebAI');
+      const live = Array.from({ length: 4 }, () => deferred());
+      const requests = live.map(item => manager.executeWithRateLimit('WebAI', () => item.promise));
+      await settle();
+      expect(state.activeRequests).toBe(4);
+      mockRuntime.providerLevels.set('WebAI', 3);
+      await manager.reloadConfigurations();
+      expect(manager.providerStates.get('WebAI')).toBe(state);
+      expect(state.config.maxConcurrent).toBe(2);
+      const nextTask = vi.fn(() => 'next');
+      const next = manager.executeWithRateLimit('WebAI', nextTask);
+      await settle();
+      live[0].resolve(); live[1].resolve();
+      await Promise.all(requests.slice(0, 2));
+      expect(nextTask).not.toHaveBeenCalled();
+      live[2].resolve();
+      await requests[2];
+      await expect(next).resolves.toBe('next');
+      live[3].resolve(); await requests[3];
+      expect(state.activeRequests).toBe(0);
+    });
+
+    it('shares Retry-After with siblings and retries even when an in-flight sibling succeeds', async () => {
+      vi.useFakeTimers();
+      try {
+        const state = manager._initializeProvider('Shared429', { maxConcurrent: 2, delayBetweenRequests: 0 });
+        const live = deferred();
+        const rateLimitError = Object.assign(new Error('429'), { type: ErrorTypes.RATE_LIMIT_REACHED, statusCode: 429, retryAt: Date.now() + 10000 });
+        const failed = manager.executeWithRateLimit('Shared429', () => Promise.reject(rateLimitError));
+        const sibling = manager.executeWithRateLimit('Shared429', () => live.promise);
+        await expect(failed).rejects.toBe(rateLimitError);
+        const tasks = [vi.fn(() => 'queued sibling'), vi.fn(() => 'retry')];
+        const queued = tasks.map(task => manager.executeWithRateLimit('Shared429', task));
+        live.resolve('success'); await sibling;
+        expect(state.currentBackoffMultiplier).toBe(1);
+        await vi.advanceTimersByTimeAsync(9999);
+        tasks.forEach(task => expect(task).not.toHaveBeenCalled());
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(Promise.all(queued)).resolves.toEqual(['queued sibling', 'retry']);
+        expect(state.activeRequests).toBe(0);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('uses bounded client backoff for zero-delay providers without Retry-After', async () => {
+      vi.useFakeTimers();
+      try {
+        const state = manager._initializeProvider('Custom', {
+          maxConcurrent: 1, delayBetweenRequests: 0,
+          adaptiveBackoff: { enabled: true, baseMultiplier: 2, maxDelay: 3000 },
+        });
+        const error = Object.assign(new Error('429'), { type: ErrorTypes.RATE_LIMIT_REACHED });
+        await expect(manager.executeWithRateLimit('Custom', () => Promise.reject(error))).rejects.toBe(error);
+        expect(state.retryAt - Date.now()).toBe(3000);
+        const task = vi.fn(() => 'next');
+        const next = manager.executeWithRateLimit('Custom', task);
+        await vi.advanceTimersByTimeAsync(2999);
+        expect(task).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(next).resolves.toBe('next');
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('does not overflow long shared deadlines and releases cancellation listeners', async () => {
+      vi.useFakeTimers();
+      try {
+        const state = manager._initializeProvider('Long429', { maxConcurrent: 1, delayBetweenRequests: 0 });
+        manager.notifyRateLimit('Long429', { type: ErrorTypes.RATE_LIMIT_REACHED, retryAt: Date.now() + 2_147_483_648 });
+        const controller = new AbortController();
+        const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+        const wait = manager.waitForCooldown('Long429', controller.signal);
+        const task = vi.fn(() => 'next');
+        const queued = manager.executeWithRateLimit('Long429', task);
+        await vi.advanceTimersByTimeAsync(2_147_483_647);
+        expect(task).not.toHaveBeenCalled();
+        controller.abort('user-cancelled');
+        await expect(wait).rejects.toMatchObject({ type: ErrorTypes.USER_CANCELLED });
+        expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(queued).resolves.toBe('next');
+        expect(state.activeRequests).toBe(0);
+      } finally { vi.useRealTimers(); }
+    });
+  });
+
   describe('provider circuit threshold configuration', () => {
     it('uses Bing explicit threshold and opens after third eligible failure', async () => {
       const state = await manager._initializeProviderWithLevel('BingTranslate');

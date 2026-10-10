@@ -32,6 +32,7 @@ export class FeatureManager extends ResourceTracker {
     this._evaluationQueue = [];
     this._evaluationDebounceTimer = null;
     this._lastDetectedUrl = window.location.href;
+    this.navigationCursor = null;
     this._featureRevisions = new Map();
     this._activationPromises = new Map();
     this._navigationRevision = 0;
@@ -831,18 +832,59 @@ export class FeatureManager extends ResourceTracker {
     }
   }
 
-  checkForUrlChange() {
+  _compareNavigationCursor(cursor) {
+    if (!Number.isSafeInteger(cursor?.documentEpoch) || cursor.documentEpoch <= 0
+        || !Number.isSafeInteger(cursor.routeRevision) || cursor.routeRevision < 0
+        || typeof cursor.url !== 'string' || !cursor.url) return null;
+    const current = this.navigationCursor;
+    if (!current) return 1;
+    if (cursor.documentEpoch !== current.documentEpoch) return cursor.documentEpoch > current.documentEpoch ? 1 : -1;
+    if (cursor.routeRevision !== current.routeRevision) return cursor.routeRevision > current.routeRevision ? 1 : -1;
+    return cursor.url === current.url ? 0 : null;
+  }
+
+  _stopPageForNavigation() {
+    this._navigationRevision += 1;
+    this.featureHandlers.get('pageTranslation')?.stopAutoTranslation({ cancellationReason: 'operation-abort' }).catch(() => {
+      logger.warn('Stopping obsolete page translation on navigation failed');
+    });
+  }
+
+  acceptPageNavigation(cursor) {
+    const comparison = this._compareNavigationCursor(cursor);
+    if (comparison === null || comparison < 0 || cursor.url !== window.location.href) return false;
+    if (comparison > 0) {
+      const page = this.featureHandlers.get('pageTranslation');
+      if (this.navigationCursor && (page?.isTranslating || page?.isAutoTranslating
+          || page?.abortController || page?.bridge?.session?.active)) this._stopPageForNavigation();
+      this.navigationCursor = { ...cursor };
+    }
+    this._lastDetectedUrl = cursor.url;
+    return true;
+  }
+
+  checkForUrlChange({ navigationCursor, navigationUnavailable = false } = {}) {
     const newUrl = window.location.href;
-    if (newUrl === this._lastDetectedUrl) return false;
+    let capturedNavigation = false;
+    if (navigationCursor !== undefined) {
+      const comparison = this._compareNavigationCursor(navigationCursor);
+      if (comparison === null) navigationUnavailable = true;
+      else if (comparison > 0) {
+        this.navigationCursor = { ...navigationCursor };
+        capturedNavigation = true;
+      }
+    }
+    if (!navigationUnavailable && !capturedNavigation && newUrl === this._lastDetectedUrl) return false;
 
     const oldUrl = this._lastDetectedUrl;
     this._lastDetectedUrl = newUrl;
-    this._navigationRevision += 1;
-    const capturedRevision = this._navigationRevision;
-    return this.handleUrlChange(oldUrl, newUrl, capturedRevision);
+    this._stopPageForNavigation();
+    if (navigationUnavailable) return false;
+    return this.handleUrlChange(oldUrl, newUrl, this._navigationRevision);
   }
 
   async handleUrlChange(oldUrl, newUrl, expectedRevision = null) {
+    if (expectedRevision !== null && this._isNavigationStale(expectedRevision)) return;
     let capturedRevision;
     if (expectedRevision !== null) {
       capturedRevision = expectedRevision;
@@ -910,7 +952,7 @@ export class FeatureManager extends ResourceTracker {
         if (isStale()) return;
         const response = await sendRegularMessage({
           action: MessageActions.PAGE_TRANSLATE,
-          data: { isAuto: true },
+          data: { isAuto: true, preserveAcceptedTranslations: true },
         }, { returnFailureResponse: true });
         if (response?.success === false) {
           logger.debug('SPA auto page translation command rejected', response);

@@ -1,0 +1,469 @@
+{
+  "date": "2026-10-10",
+  "comparisonBase": "ab672717b6cee11b0f28d50e05752545d02053c8",
+  "reviewMode": "primary-agent-only",
+  "browser": {
+    "name": "Firefox",
+    "version": "157.0.1",
+    "extensionVersion": "1.20.1",
+    "nonManifestFilesMatched": 269,
+    "temporaryAddon": true
+  },
+  "settings": {
+    "provider": "Custom",
+    "source": "auto",
+    "target": "ja",
+    "optimizationLevel": 5,
+    "cache": false,
+    "lazy": false,
+    "domPersistence": true,
+    "mockDelayMs": 800
+  },
+  "sourceHashes": {
+    "src/core/background/PageNavigationTracker.js": "7571670ed63066f7f05714a8ec72b0a18da635f9e4abecbc1718d4bd18eb5d0d",
+    "src/features/page-translation/PageTranslationManager.js": "eff081105ddc2d2f2271b0a25e1855b4afbbbc3b6e67035136640135b4c4aef3",
+    "src/features/page-translation/utils/PageTranslationEventManager.js": "c59af60ebe828611e2b97063c0341441885bdd92accd24db73f3eb21c6060c43",
+    "src/handlers/content/ContentMessageHandler.js": "0e754f233cd474dde0fbe357cf12646d273253654a23ff991f7c3409a3f0b8f1"
+  },
+  "buildHashes": {
+    "dist/chrome/Translate-It-v1.20.1/src/core/background/index.js": "c6b82f3d535f7e18a78486a8566f222724f7a4ac06733a7f7e28351b50f4194e",
+    "dist/firefox/Translate-It-v1.20.1/src/core/background/index.js": "6c0eb9fc8cb868f351eec9a870a8eac21c03b8acf8d412e8489581dfddec2dcb",
+    "dist/chrome/Translate-It-v1.20.1/src/core/content-scripts/index-main.js": "3d107b9d92f613bcb6a1e85f1c19b975f4a98b68e06ee54a69e8f3000ecd92b8",
+    "dist/firefox/Translate-It-v1.20.1/src/core/content-scripts/index-main.js": "32134b619c2569ba1712ceb1e3c66a33a7172b756a699d9749122e6c0f784d10"
+  },
+  "trials": [
+    {
+      "case": "initial",
+      "status": {
+        "total": 34,
+        "translated": 34,
+        "failed": 0,
+        "acceptedRecords": 34,
+        "mismatch": 0,
+        "duplicate": 0,
+        "revision": 0,
+        "initialAborted": null,
+        "active": true
+      },
+      "http": {
+        "attempts": 4,
+        "success": 4,
+        "errors": 0,
+        "aborts": 0,
+        "peak": 3,
+        "wireItems": 34,
+        "requests": [
+          {
+            "id": 1,
+            "startMs": 837.2902000000468,
+            "endMs": 1644.7256000000052,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 2,
+            "startMs": 1650.0407000000123,
+            "endMs": 2463.584499999997,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 3,
+            "startMs": 1650.7116000000387,
+            "endMs": 2463.675399999949,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 4,
+            "startMs": 1651.4891000000061,
+            "endMs": 2463.7273999999743,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 4
+          }
+        ]
+      }
+    },
+    {
+      "case": "first-aba",
+      "status": {
+        "total": 46,
+        "translated": 46,
+        "failed": 0,
+        "acceptedRecords": 46,
+        "mismatch": 0,
+        "duplicate": 0,
+        "revision": 2,
+        "initialAborted": true,
+        "active": true
+      },
+      "http": {
+        "attempts": 3,
+        "success": 2,
+        "errors": 0,
+        "aborts": 1,
+        "peak": 1,
+        "wireItems": 22,
+        "requests": [
+          {
+            "id": 1,
+            "startMs": 268.7260000000242,
+            "endMs": 293.8011000000406,
+            "status": null,
+            "outcome": "aborted",
+            "itemCount": 10
+          },
+          {
+            "id": 2,
+            "startMs": 1208.2395999999717,
+            "endMs": 2010.3974000000162,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 3,
+            "startMs": 2014.5333999999566,
+            "endMs": 2819.28740000003,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 2
+          }
+        ]
+      },
+      "stop": {
+        "clears": 1,
+        "active": false,
+        "accepted": 46,
+        "currentSession": null
+      }
+    },
+    {
+      "case": "observer-lifecycle",
+      "cycles": [
+        {
+          "index": 0,
+          "retired": {
+            "active": false,
+            "revision": null,
+            "retiredRevision": 0
+          },
+          "inactive": {
+            "active": false,
+            "revision": null,
+            "retiredRevision": 0
+          },
+          "activated": {
+            "active": true,
+            "revision": 0,
+            "retiredRevision": 0
+          },
+          "active": {
+            "active": true,
+            "revision": 1,
+            "retiredRevision": 0
+          },
+          "inactiveUnchanged": true,
+          "activeOnce": true
+        },
+        {
+          "index": 1,
+          "retired": {
+            "active": false,
+            "revision": null,
+            "retiredRevision": 1
+          },
+          "inactive": {
+            "active": false,
+            "revision": null,
+            "retiredRevision": 1
+          },
+          "activated": {
+            "active": true,
+            "revision": 0,
+            "retiredRevision": 1
+          },
+          "active": {
+            "active": true,
+            "revision": 1,
+            "retiredRevision": 1
+          },
+          "inactiveUnchanged": true,
+          "activeOnce": true
+        },
+        {
+          "index": 2,
+          "retired": {
+            "active": false,
+            "revision": null,
+            "retiredRevision": 1
+          },
+          "inactive": {
+            "active": false,
+            "revision": null,
+            "retiredRevision": 1
+          },
+          "activated": {
+            "active": true,
+            "revision": 0,
+            "retiredRevision": 1
+          },
+          "active": {
+            "active": true,
+            "revision": 1,
+            "retiredRevision": 1
+          },
+          "inactiveUnchanged": true,
+          "activeOnce": true
+        }
+      ],
+      "allPassed": true
+    },
+    {
+      "case": "current-manager-restart",
+      "status": {
+        "total": 46,
+        "translated": 46,
+        "failed": 0,
+        "acceptedRecords": 46,
+        "mismatch": 0,
+        "duplicate": 0,
+        "revision": 2,
+        "initialAborted": true,
+        "active": true
+      },
+      "http": {
+        "attempts": 5,
+        "success": 5,
+        "errors": 0,
+        "aborts": 0,
+        "peak": 4,
+        "wireItems": 46,
+        "requests": [
+          {
+            "id": 1,
+            "startMs": 819.0580999999074,
+            "endMs": 1634.6483999999473,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 2,
+            "startMs": 1639.4550999999046,
+            "endMs": 2441.9762999999803,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 3,
+            "startMs": 1640.7502000000095,
+            "endMs": 2442.0396000000183,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 4,
+            "startMs": 1642.3230999999214,
+            "endMs": 2457.8508000000147,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 5,
+            "startMs": 1643.4079999999376,
+            "endMs": 2457.97359999991,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 6
+          }
+        ]
+      },
+      "independent": {
+        "targets": 46,
+        "mismatches": 0
+      }
+    },
+    {
+      "case": "second-aba",
+      "status": {
+        "total": 58,
+        "translated": 58,
+        "failed": 0,
+        "acceptedRecords": 58,
+        "mismatch": 0,
+        "duplicate": 0,
+        "revision": 4,
+        "initialAborted": true,
+        "active": true
+      },
+      "http": {
+        "attempts": 4,
+        "success": 2,
+        "errors": 0,
+        "aborts": 2,
+        "peak": 2,
+        "wireItems": 24,
+        "requests": [
+          {
+            "id": 1,
+            "startMs": 260.4053999999305,
+            "endMs": 424.9168999999529,
+            "status": null,
+            "outcome": "aborted",
+            "itemCount": 10
+          },
+          {
+            "id": 2,
+            "startMs": 263.45899999991525,
+            "endMs": 426.46710000000894,
+            "status": null,
+            "outcome": "aborted",
+            "itemCount": 2
+          },
+          {
+            "id": 3,
+            "startMs": 1340.9836999999825,
+            "endMs": 2150.395099999965,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 4,
+            "startMs": 2153.418399999966,
+            "endMs": 2959.988299999968,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 2
+          }
+        ]
+      },
+      "independent": {
+        "targets": 58,
+        "mappingMismatches": 0,
+        "restoreMismatches": 0
+      }
+    },
+    {
+      "case": "same-url-state-scroll",
+      "updates": 20,
+      "scrolls": 20,
+      "sessionAndRevisionUnchanged": true,
+      "status": {
+        "total": 58,
+        "translated": 58,
+        "failed": 0,
+        "acceptedRecords": 58,
+        "mismatch": 0,
+        "duplicate": 0,
+        "revision": 4,
+        "initialAborted": false,
+        "active": true
+      },
+      "http": {
+        "attempts": 6,
+        "success": 6,
+        "errors": 0,
+        "aborts": 0,
+        "peak": 4,
+        "wireItems": 58,
+        "requests": [
+          {
+            "id": 1,
+            "startMs": 892.9413000000641,
+            "endMs": 1531.0815999999177,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 2,
+            "startMs": 1534.9103999999352,
+            "endMs": 2350.477200000081,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 3,
+            "startMs": 1535.8584000000264,
+            "endMs": 2350.624300000025,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 4,
+            "startMs": 1536.1117000000086,
+            "endMs": 2350.808599999873,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 5,
+            "startMs": 1558.1710000000894,
+            "endMs": 2365.8511999999173,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 10
+          },
+          {
+            "id": 6,
+            "startMs": 2356.943500000052,
+            "endMs": 3172.496999999974,
+            "status": 200,
+            "outcome": "finished",
+            "itemCount": 8
+          }
+        ]
+      },
+      "independent": {
+        "targets": 58,
+        "mappingMismatches": 0,
+        "restoreMismatches": 0
+      }
+    }
+  ],
+  "checks": {
+    "windowsFiles": 557,
+    "windowsTests": 11112,
+    "newTests": 12,
+    "excludedLocally": [
+      "scripts/ci/preflight.test.js",
+      "scripts/ci/official-release.test.js",
+      "scripts/ci/publish-development.test.js",
+      "scripts/ci/development-workflow.test.js"
+    ],
+    "jsLint": "pass",
+    "styleLint": "pass",
+    "builds": [
+      "chrome",
+      "firefox"
+    ],
+    "validators": "pass",
+    "firefoxWarnings": 16,
+    "typecheckScript": false
+  },
+  "limitations": [
+    "No new Chrome or real-model run",
+    "Browser cases use a fixed local mock and cache off",
+    "Child discovery rejection verified at handler/tracker test boundary",
+    "No new timing or model effort/tier claim",
+    "Intermediate generated-copy lint failure and retired-manager browser failure excluded from final success claims"
+  ],
+  "cleanup": {
+    "temporaryAddonRemoved": true,
+    "ownedFirefoxClosed": true,
+    "ownedMockStopped": true,
+    "portClosed": true
+  }
+}

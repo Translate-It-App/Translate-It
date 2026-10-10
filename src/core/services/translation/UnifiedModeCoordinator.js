@@ -16,6 +16,19 @@ import { appendTranslationDiagnostic } from '@/features/translation/ir/Translati
 
 const logger = getScopedLogger(LOG_COMPONENTS.TRANSLATION, 'UnifiedModeCoordinator');
 
+function createBatchAbortError(signal) {
+  const error = new Error('Batch translation aborted');
+  error.name = 'AbortError';
+  if (['user-cancelled', 'user_cancelled'].includes(signal?.reason)) {
+    error.type = ErrorTypes.USER_CANCELLED;
+  } else {
+    error.operationAborted = true;
+    error.cancellationReason = typeof signal?.reason === 'string' && signal.reason && signal.reason !== 'timeout'
+      ? signal.reason : 'operation-abort';
+  }
+  return error;
+}
+
 export class UnifiedModeCoordinator {
   constructor() {
     // sessionId -> per-session semantic-pair resolution state for Page 'auto' batches.
@@ -254,7 +267,7 @@ export class UnifiedModeCoordinator {
       };
     }
     if (state.resolutionPromise) {
-      return { resolutionPromise: state.resolutionPromise };
+      return { state, resolutionPromise: state.resolutionPromise };
     }
 
     state.resolutionPromise = new Promise((resolve, reject) => {
@@ -301,11 +314,9 @@ export class UnifiedModeCoordinator {
         state._resolveSource({ effectiveSourceLanguage, effectiveTargetLanguage });
       }
     } else {
-      // No complete pair confirmed: release any waiters and drop the slot so a
-      // later attempt can become the resolver again. Never cache source alone.
-      this.pageSourceResolvers.delete(sessionId);
-      const error = new Error(`No semantic language pair resolved for page session ${sessionId}`);
-      if (state._rejectSource) state._rejectSource(error);
+      // Success without a concrete pair consumes this batch; a waiting batch becomes the next owner.
+      state.resolutionPromise = null;
+      if (state._resolveSource) state._resolveSource(null);
     }
 
     state._resolveSource = null;
@@ -408,11 +419,35 @@ export class UnifiedModeCoordinator {
     if (!providerInstance) throw new Error(`Provider '${provider}' initialization failed`);
 
     let timeoutId;
+    let onAbort;
     let sessionId = null;
     let sourceResolution = null;
 
     try {
       sessionId = request.sessionId || data.sessionId || messageId;
+      if (abortController.signal.aborted) throw createBatchAbortError(abortController.signal);
+
+      // One deadline covers source-resolution waiting and the provider call, including handoffs.
+      const BATCH_TIMEOUT_MS = TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS;
+      const terminalPromise = new Promise((_, reject) => {
+        onAbort = () => {
+          clearTimeout(timeoutId);
+          reject(createBatchAbortError(abortController.signal));
+        };
+        abortController.signal.addEventListener('abort', onAbort, { once: true });
+        timeoutId = setTimeout(() => {
+          const timeoutError = new Error(`Batch translation timed out after ${BATCH_TIMEOUT_MS}ms`);
+          timeoutError.type = ErrorTypes.TRANSLATION_TIMEOUT;
+          appendTranslationDiagnostic(executionContext, {
+            type: 'BATCH_TIMEOUT',
+            stage: 'mode-coordinator',
+            reason: timeoutError.message,
+            code: timeoutError.type,
+          });
+          reject(timeoutError);
+          abortController.abort('timeout');
+        }, BATCH_TIMEOUT_MS);
+      });
 
       // Per-session semantic-pair resolution for auto-detected Page batches.
       // Concurrency-safe: only the ownership batch issues a provider call with
@@ -423,19 +458,24 @@ export class UnifiedModeCoordinator {
       let effectiveSourceLanguage = sourceLanguage;
 
       if (mode === TranslationMode.Page && sourceLanguage === AUTO_DETECT_VALUE) {
-        sourceResolution = this._acquirePageSourceResolution(sessionId);
-
-        if (sourceResolution.isOwner) {
-          // Resolution owner: the only path permitted to execute with 'auto'.
-          effectiveSourceLanguage = sourceLanguage;
-        } else if (sourceResolution.effectiveSourceLanguage) {
-          effectiveSourceLanguage = sourceResolution.effectiveSourceLanguage;
-          targetLanguage = sourceResolution.effectiveTargetLanguage;
-        } else {
-          // Concurrent batch: wait for the owner to confirm the semantic pair.
-          const resolvedPair = await sourceResolution.resolutionPromise;
-          effectiveSourceLanguage = resolvedPair.effectiveSourceLanguage;
-          targetLanguage = resolvedPair.effectiveTargetLanguage;
+        while (true) {
+          if (abortController.signal.aborted) throw createBatchAbortError(abortController.signal);
+          sourceResolution = this._acquirePageSourceResolution(sessionId);
+          if (sourceResolution.isOwner) break;
+          const resolvedPair = sourceResolution.effectiveSourceLanguage
+            ? sourceResolution
+            : await Promise.race([sourceResolution.resolutionPromise, terminalPromise]);
+          if (sourceResolution.state && this.pageSourceResolvers.get(sessionId) !== sourceResolution.state) {
+            const error = new Error(`Page translation session ended: ${sessionId}`);
+            error.type = ErrorTypes.USER_CANCELLED;
+            throw error;
+          }
+          if (resolvedPair) {
+            effectiveSourceLanguage = resolvedPair.effectiveSourceLanguage;
+            targetLanguage = resolvedPair.effectiveTargetLanguage;
+            break;
+          }
+          // Each handoff consumes one successful batch, never re-sends the former owner.
         }
       }
 
@@ -455,28 +495,7 @@ export class UnifiedModeCoordinator {
         ? items 
         : items.map(item => (typeof item === 'string' ? item : item.text) || '');
 
-      // Timeout Protection (5 minutes) for each batch call
-      const BATCH_TIMEOUT_MS = TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS;
-      const timeoutPromise = new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-          const timeoutError = new Error(`Batch translation timed out after ${BATCH_TIMEOUT_MS}ms`);
-          timeoutError.type = ErrorTypes.TRANSLATION_TIMEOUT;
-          appendTranslationDiagnostic(executionContext, {
-            type: 'BATCH_TIMEOUT',
-            stage: 'mode-coordinator',
-            reason: timeoutError.message,
-            code: timeoutError.type,
-          });
-          abortController.abort();
-          reject(timeoutError);
-        }, BATCH_TIMEOUT_MS);
-        
-        // Link timeout cleanup to abort signal
-        if (abortController?.signal) {
-          abortController.signal.addEventListener('abort', () => clearTimeout(timeoutId));
-        }
-      });
-
+      if (abortController.signal.aborted) throw createBatchAbortError(abortController.signal);
       const response = await Promise.race([
         providerInstance.translate(translationPayload, effectiveSourceLanguage, targetLanguage, {
           mode,
@@ -488,15 +507,18 @@ export class UnifiedModeCoordinator {
             instruction,
             rawJsonPayload: true,
             executionContext,
+            // Page batches have no conversation-history dependency; the shared AI limiter owns HTTP capacity.
+            ...(mode === TranslationMode.Page && providerInstance.constructor.isAI && { parallelExecution: true }),
             ...(languagePairResolved && { languagePairResolved: true }),
         }),
-        timeoutPromise
+        terminalPromise
       ]);
 
       // Resolution owner finalizes the session pair from the effective
       // source/target returned by ProviderCoordinator.
       if (sourceResolution?.isOwner) {
         this._finalizePageSourceResolution(sessionId, sourceResolution, response);
+        sourceResolution = null;
       }
 
       const translatedSegments = (response && typeof response === 'object' && response.translatedText !== undefined) 
@@ -552,6 +574,7 @@ export class UnifiedModeCoordinator {
       throw error;
     } finally {
       clearTimeout(timeoutId);
+      if (onAbort) abortController.signal.removeEventListener('abort', onAbort);
       translationEngine.lifecycleRegistry.unregisterRequest(messageId);
     }
   }

@@ -116,6 +116,35 @@ describe('UnifiedModeCoordinator', () => {
   });
 
   describe('processPageTranslation', () => {
+    it.each([
+      ['custom', true], ['openai', true], ['deepl', false], ['google', false],
+    ])('opts independent Page batches into the parallel lane only for AI (%s)', async (provider, isAI) => {
+      const providerInstance = {
+        constructor: { isAI },
+        translate: vi.fn().mockResolvedValue({ translatedText: ['translated'], sourceLanguage: 'en', targetLanguage: 'ja' }),
+      };
+      mockEngine.getProvider.mockResolvedValue(providerInstance);
+      const result = await coordinator.processRequest({
+        mode: TranslationMode.Page,
+        messageId: `page-${provider}`,
+        data: { provider, sourceLanguage: 'en', targetLanguage: 'ja', text: JSON.stringify([{ id: 'original-unit', text: 'source' }]) },
+      }, { translationEngine: mockEngine });
+      const options = providerInstance.translate.mock.calls[0][3];
+      if (isAI) expect(options.parallelExecution).toBe(true);
+      else expect(options).not.toHaveProperty('parallelExecution');
+      expect(JSON.parse(result.translatedText)).toEqual([{ id: 'original-unit', text: 'translated' }]);
+    });
+
+    it('retains the ordinary lane for AI Subtitle batches', async () => {
+      const providerInstance = { constructor: { isAI: true }, translate: vi.fn().mockResolvedValue(['translated']) };
+      mockEngine.getProvider.mockResolvedValue(providerInstance);
+      await coordinator.processRequest({
+        mode: TranslationMode.Subtitle, messageId: 'subtitle',
+        data: { provider: 'custom', sourceLanguage: 'en', targetLanguage: 'ja', items: [{ id: 'cue', text: 'source' }] },
+      }, { translationEngine: mockEngine });
+      expect(providerInstance.translate.mock.calls[0][3]).not.toHaveProperty('parallelExecution');
+    });
+
     it('returns empty batches without provider or lifecycle work', async () => {
       const request = {
         mode: TranslationMode.Page,
@@ -497,6 +526,76 @@ describe('UnifiedModeCoordinator', () => {
     });
 
     describe('Resolution failure', () => {
+      it('hands a successful unresolved AUTO batch to one waiting owner without failing siblings', async () => {
+        const sources = [];
+        const first = deferred();
+        const provider = {
+          translate: vi.fn(async (_items, source) => {
+            sources.push(source);
+            if (sources.length === 1) await first.promise;
+            return { translatedText: ['first', 'second'], sourceLanguage: sources.length === 1 ? 'auto' : 'en', targetLanguage: 'fa' };
+          }),
+        };
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const spy = spyAcquires(coordinator, ['handoff']);
+        const pending = Array.from({ length: 4 }, (_, index) => coordinator.processRequest(
+          pageBatchRequest({ sessionId: 'handoff', messageId: `handoff-${index}` }), { translationEngine: mockEngine }
+        ));
+        await waitForAcquires(spy, 'handoff', 4);
+        first.resolve();
+        const results = await Promise.all(pending);
+        expect(results.map(result => result.success)).toEqual([true, true, true, true]);
+        expect(sources).toEqual(['auto', 'auto', 'en', 'en']);
+        expect(provider.translate).toHaveBeenCalledTimes(4);
+        expect(coordinator.pageSourceResolvers.get('handoff').effectiveSourceLanguage).toBe('en');
+      });
+
+      it('consumes each successful no-pair batch once with one AUTO owner per handoff', async () => {
+        let activeAuto = 0;
+        let maximumAuto = 0;
+        const provider = {
+          translate: vi.fn(async () => {
+            maximumAuto = Math.max(maximumAuto, ++activeAuto);
+            await Promise.resolve();
+            activeAuto--;
+            return { translatedText: ['first', 'second'], sourceLanguage: 'auto', targetLanguage: 'fa' };
+          }),
+        };
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const results = await Promise.all(Array.from({ length: 8 }, (_, index) => coordinator.processRequest(
+          pageBatchRequest({ sessionId: 'all-unresolved', messageId: `unresolved-${index}` }), { translationEngine: mockEngine }
+        )));
+        expect(results.every(result => result.success)).toBe(true);
+        expect(provider.translate).toHaveBeenCalledTimes(8);
+        expect(maximumAuto).toBe(1);
+        expect(coordinator.pageSourceResolvers.get('all-unresolved').effectiveSourceLanguage).toBeNull();
+        coordinator.clearPageSourceLanguage('all-unresolved');
+        expect(coordinator.pageSourceResolvers.size).toBe(0);
+      });
+
+      it('releases a successful owner before local output transformation can fail', async () => {
+        const first = deferred();
+        let calls = 0;
+        const provider = { translate: vi.fn(async () => {
+          if (++calls === 1) await first.promise;
+          return { translatedText: ['first', 'second'], sourceLanguage: calls === 1 ? 'auto' : 'en', targetLanguage: 'fa' };
+        }) };
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const spy = spyAcquires(coordinator, ['s1']);
+        const owner = coordinator._processGenericBatch(
+          pageBatchRequest({ sessionId: 's1', messageId: 'transform-owner' }), { translationEngine: mockEngine },
+          { mode: TranslationMode.Page, items: ['p1', 'p2'], transformOutput: () => { throw new Error('local output failure'); } }
+        );
+        const rejection = expect(owner).rejects.toThrow('local output failure');
+        const waiter = coordinator.processRequest(pageBatchRequest({ sessionId: 's1', messageId: 'healthy-waiter' }), { translationEngine: mockEngine });
+        await waitForAcquires(spy, 's1', 2);
+        first.resolve();
+        await rejection;
+        await expect(waiter).resolves.toMatchObject({ success: true });
+        expect(provider.translate).toHaveBeenCalledTimes(2);
+        expect(coordinator.pageSourceResolvers.get('s1').effectiveSourceLanguage).toBe('en');
+      });
+
       it('releases concurrent waiters, clears state, and allows a fresh resolver', async () => {
         const provider = deferredProvider();
         mockEngine.getProvider.mockResolvedValue(provider);
@@ -530,6 +629,83 @@ describe('UnifiedModeCoordinator', () => {
     });
 
     describe('Cancellation', () => {
+      it.each(['user-cancelled', 'document-replaced'])('releases only the %s waiter without dispatching or cancelling healthy siblings', async reason => {
+        const provider = deferredProvider();
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const controllers = new Map();
+        mockEngine.lifecycleRegistry.registerRequest.mockImplementation(messageId => {
+          const controller = new AbortController();
+          controllers.set(messageId, controller);
+          return controller;
+        });
+        const spy = spyAcquires(coordinator, ['s1']);
+        const pending = Array.from({ length: 4 }, (_, index) => coordinator.processRequest(
+          pageBatchRequest({ sessionId: 's1', messageId: `cancel-${index}` }), { translationEngine: mockEngine }
+        ));
+        await waitForAcquires(spy, 's1', 4);
+        const signal = controllers.get('cancel-1').signal;
+        const removeListener = vi.spyOn(signal, 'removeEventListener');
+        controllers.get('cancel-1').abort(reason);
+        const result = await pending[1];
+        expect(result.success).toBe(false);
+        if (reason === 'document-replaced') expect(result.suppressed).toBe(true);
+        else expect(result.errorType).toBe(ErrorTypes.USER_CANCELLED);
+        expect(mockEngine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledWith('cancel-1');
+        expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+        expect(provider.sources).toEqual(['auto']);
+        provider.pending[0].resolve(provider.success('en'));
+        await flush(); await flush();
+        expect(provider.sources).toEqual(['auto', 'en', 'en']);
+        provider.pending[1].resolve(provider.success('en'));
+        provider.pending[2].resolve(provider.success('en'));
+        const results = await Promise.all(pending);
+        expect(results.map(item => item.success)).toEqual([true, false, true, true]);
+      });
+
+      it('times out source-resolution waiting with the same typed batch deadline', async () => {
+        vi.useFakeTimers();
+        try {
+          const owner = coordinator._acquirePageSourceResolution('waiting-timeout');
+          const provider = { translate: vi.fn() };
+          mockEngine.getProvider.mockResolvedValue(provider);
+          const pending = coordinator.processRequest(pageBatchRequest({ sessionId: 'waiting-timeout', messageId: 'waiter-timeout' }), { translationEngine: mockEngine });
+          let result;
+          pending.then(value => { result = value; });
+          await vi.advanceTimersByTimeAsync(TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS - 1);
+          expect(result).toBeUndefined();
+          await vi.advanceTimersByTimeAsync(1);
+          await expect(pending).resolves.toMatchObject({ success: false, errorType: ErrorTypes.TRANSLATION_TIMEOUT });
+          expect(provider.translate).not.toHaveBeenCalled();
+          expect(mockEngine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledWith('waiter-timeout');
+          expect(coordinator.pageSourceResolvers.get('waiting-timeout')).toBe(owner.state);
+          coordinator.clearPageSourceLanguage('waiting-timeout');
+        } finally { vi.useRealTimers(); }
+      });
+
+      it('does not resurrect a cleared session between a successful handoff and reacquisition', async () => {
+        const first = deferred();
+        const provider = { translate: vi.fn(async () => {
+          await first.promise;
+          return { translatedText: ['first', 'second'], sourceLanguage: 'auto', targetLanguage: 'fa' };
+        }) };
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const finalize = coordinator._finalizePageSourceResolution.bind(coordinator);
+        vi.spyOn(coordinator, '_finalizePageSourceResolution').mockImplementation((...args) => {
+          finalize(...args);
+          coordinator.clearPageSourceLanguage('s1');
+        });
+        const spy = spyAcquires(coordinator, ['s1']);
+        const pending = Array.from({ length: 4 }, (_, index) => coordinator.processRequest(
+          pageBatchRequest({ sessionId: 's1', messageId: `clear-handoff-${index}` }), { translationEngine: mockEngine }
+        ));
+        await waitForAcquires(spy, 's1', 4);
+        first.resolve();
+        const results = await Promise.all(pending);
+        expect(results.map(result => result.success)).toEqual([true, false, false, false]);
+        expect(provider.translate).toHaveBeenCalledTimes(1);
+        expect(coordinator.pageSourceResolvers.size).toBe(0);
+      });
+
       it('terminates a waiter, clears state, and ignores a late owner result', async () => {
         const provider = deferredProvider();
         mockEngine.getProvider.mockResolvedValue(provider);
@@ -799,12 +975,16 @@ describe('UnifiedModeCoordinator', () => {
       const provider = deferredProvider();
       mockEngine.getProvider.mockResolvedValue(provider);
 
-      // Owner resolves with no detectable language -> slot dropped, no lock kept.
+      // The empty session record keeps clear/handoff identity, without a pending owner or cached pair.
       const first = coordinator.processRequest(pageBatchRequest({ sessionId: 's1', messageId: 'm1' }), { translationEngine: mockEngine });
       await flush();
       provider.pending[0].resolve({ translatedText: ['ت۱', 'ت۲'] });
       await first;
-      expect(coordinator.pageSourceResolvers.has('s1')).toBe(false);
+      expect(coordinator.pageSourceResolvers.get('s1')).toMatchObject({
+        effectiveSourceLanguage: null,
+        effectiveTargetLanguage: null,
+        resolutionPromise: null,
+      });
 
       const second = coordinator.processRequest(pageBatchRequest({ sessionId: 's1', messageId: 'm2' }), { translationEngine: mockEngine });
       await flush();

@@ -6,7 +6,7 @@
 
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
-import { registryIdToName } from '@/features/translation/providers/ProviderConstants.js';
+import { registryIdToName, isProviderType, ProviderTypes } from '@/features/translation/providers/ProviderConstants.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import {
   isFatalError,
@@ -36,6 +36,8 @@ const EXPLICIT_ADAPTIVE_BACKOFF_DEFAULTS = Object.freeze({
 });
 
 const DEFAULT_CIRCUIT_BREAK_THRESHOLD = 5;
+const MAX_TIMER_DELAY = 2_147_483_647;
+const RATE_LIMIT_BACKOFF_BASE_MS = 2000;
 
 function resolveCircuitBreakThreshold(value) {
   return typeof value === 'number'
@@ -126,11 +128,21 @@ export class RateLimitManager {
    * Reset or load configurations from ProviderConfigurations
    */
   async reloadConfigurations() {
-    this.providerStates.clear();
-
     for (const name of Object.keys(PROVIDER_CONFIGURATIONS)) {
       const level = await getProviderOptimizationLevelAsync(name);
       const optimizedConfig = getProviderConfiguration(name, level);
+      const existing = this.providerStates.get(name);
+      if (existing) {
+        if (existing.isManualConfig) continue;
+        // Retain live requests, queued work and cooldowns while applying new limits.
+        existing.config = { ...existing.config, ...optimizedConfig.rateLimit };
+        existing.isManualConfig = false;
+        existing.optimizationLevel = level;
+        existing.configSource = 'fresh-load';
+        existing.circuitBreakThreshold = resolveCircuitBreakThreshold(optimizedConfig.errorHandling?.circuitBreakThreshold);
+        this._processQueue(name);
+        continue;
+      }
       this._initializeProvider(name, optimizedConfig.rateLimit, {
         isManualConfig: false,
         optimizationLevel: level,
@@ -179,6 +191,7 @@ export class RateLimitManager {
       configSource: options.configSource || (isManualConfig ? 'manual' : 'fresh-load'),
       activeRequests: 0,
       lastRequestTime: 0,
+      retryAt: 0,
       queues: {
         [TranslationPriority.HIGH]: [],
         [TranslationPriority.NORMAL]: [],
@@ -273,13 +286,16 @@ export class RateLimitManager {
           const index = queue.indexOf(request);
           if (index !== -1) {
             queue.splice(index, 1);
+            request.cleanupAbort();
             reject(createAbortError(abortSignal, 'Request aborted while in queue'));
           }
         };
+        request.cleanupAbort = () => abortSignal.removeEventListener('abort', onAbort);
         abortSignal.addEventListener('abort', onAbort, { once: true });
         
         // If already aborted
         if (abortSignal.aborted) {
+          request.cleanupAbort();
           reject(createAbortError(abortSignal, 'Request aborted before enqueuing'));
           return;
         }
@@ -305,6 +321,7 @@ export class RateLimitManager {
 
     // While we have capacity and pending requests, start them
     while (state.activeRequests < state.config.maxConcurrent) {
+      if (!this._hasPendingRequests(state)) break;
       // Check delay between requests
       const now = Date.now();
       const baseDelay = state.config.delayBetweenRequests || 0;
@@ -317,16 +334,17 @@ export class RateLimitManager {
           : Math.min(effectiveDelay, baseDelay * adaptiveBackoff.maxMultiplier);
       const timeSinceLast = now - state.lastRequestTime;
 
-      if (timeSinceLast < adjustedDelay) {
-        const waitTime = Math.max(0, adjustedDelay - timeSinceLast);
+      const cooldownWait = Math.max(0, adjustedDelay - timeSinceLast, state.retryAt - now);
+      if (cooldownWait > 0) {
         if (state.nextProcessTimer) clearTimeout(state.nextProcessTimer);
-        state.nextProcessTimer = setTimeout(() => this._processQueue(providerName), waitTime);
+        state.nextProcessTimer = setTimeout(() => this._processQueue(providerName), Math.min(cooldownWait, MAX_TIMER_DELAY));
         break; 
       }
 
       // Get next request by priority
       const nextRequest = this._getNextRequest(state);
       if (!nextRequest) break;
+      nextRequest.cleanupAbort?.();
 
       // Update state and execute
       state.activeRequests++;
@@ -360,6 +378,7 @@ export class RateLimitManager {
     [TranslationPriority.HIGH, TranslationPriority.NORMAL, TranslationPriority.LOW].forEach(p => {
       while (state.queues[p].length > 0) {
         const req = state.queues[p].shift();
+        req.cleanupAbort?.();
         
         const rejection = isCircuitBreaker
           ? this._copyCircuitError(error)
@@ -529,6 +548,7 @@ export class RateLimitManager {
       state.successfulRequestsSinceBackoff = 0;
       logger.warn(`Rate limit detected for ${providerName}, increasing backoff to ${state.currentBackoffMultiplier}x`);
     }
+    if (isRateLimit) this.notifyRateLimit(providerName, error);
 
     // Provider-health-eligible fatal errors open the circuit immediately. Fatality
     // alone is not sufficient because request-local INVALID_REQUEST,
@@ -543,6 +563,45 @@ export class RateLimitManager {
         state.lastCircuitError = error; // Store the error that caused the break
         logger.error(`Circuit breaker OPENED for ${providerName} ${isFatal ? '(FATAL ERROR) ' : ''}after ${state.consecutiveFailures} failures. Error: ${error.message || error}`);
       }
+    }
+  }
+
+  /** Share physical 429 deadlines, including errors consumed by API-key failover. */
+  notifyRateLimit(providerName, error) {
+    const name = registryIdToName(providerName) || providerName;
+    const state = this.providerStates.get(name);
+    if (!state || (error?.type !== ErrorTypes.RATE_LIMIT_REACHED
+        && (error?.type || Number(error?.statusCode) !== 429))) return;
+
+    const adaptiveBackoff = getAdaptiveBackoffConfig(state.config);
+    const isAI = isProviderType(name, ProviderTypes.AI) || isProviderType(name, ProviderTypes.CUSTOM);
+    const baseDelay = state.config.delayBetweenRequests || (isAI ? RATE_LIMIT_BACKOFF_BASE_MS : 0);
+    const clientDelay = adaptiveBackoff.enabled === false ? 0 : Math.min(
+      baseDelay * state.currentBackoffMultiplier,
+      adaptiveBackoff.explicit ? adaptiveBackoff.maxDelay : baseDelay * adaptiveBackoff.maxMultiplier
+    );
+    state.retryAt = Math.max(state.retryAt, Date.now() + clientDelay,
+      Number.isFinite(error.retryAt) ? error.retryAt : 0);
+  }
+
+  /** Wait inside an existing slot; acquiring another slot here would deadlock at limit one. */
+  async waitForCooldown(providerName, signal) {
+    const name = registryIdToName(providerName) || providerName;
+    const state = this.providerStates.get(name);
+    while (true) {
+      if (signal?.aborted) throw createAbortError(signal);
+      const delay = (state?.retryAt || 0) - Date.now();
+      if (delay <= 0) return;
+      await new Promise((resolve, reject) => {
+        const cleanup = () => signal?.removeEventListener('abort', onAbort);
+        const timer = setTimeout(() => { cleanup(); resolve(); }, Math.min(delay, MAX_TIMER_DELAY));
+        const onAbort = () => {
+          clearTimeout(timer);
+          cleanup();
+          reject(createAbortError(signal));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
     }
   }
 
@@ -575,11 +634,8 @@ export class RateLimitManager {
   clearQueue(providerName) {
     const state = this.providerStates.get(providerName);
     if (state) {
-      [TranslationPriority.HIGH, TranslationPriority.NORMAL, TranslationPriority.LOW].forEach(p => {
-        state.queues[p].forEach(req => req.reject(new Error("Queue cleared")));
-        state.queues[p] = [];
-      });
-      state.activeRequests = 0;
+      this._rejectQueue(state, new Error("Queue cleared"));
+      if (state.nextProcessTimer) clearTimeout(state.nextProcessTimer);
     }
   }
 
@@ -599,6 +655,7 @@ export class RateLimitManager {
           const reqMessageId = request.options?.messageId || request.options?.abortController?.messageId;
           
           if (!messageId || reqMessageId === messageId) {
+            request.cleanupAbort?.();
             request.reject(createAbortError(null, messageId ? 'Request cancelled' : 'All requests cleared'));
           } else {
             remaining.push(request);

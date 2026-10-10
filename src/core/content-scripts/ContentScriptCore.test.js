@@ -40,10 +40,13 @@ describe('Vue infrastructure frame contract', () => {
     );
     expect(registration).toBeDefined();
 
-    await registration[1]();
+    const navigationCursor = { documentEpoch: 1, routeRevision: 2, url: 'https://example.com/new-route' };
+    await registration[1]({ data: { navigationCursor } });
 
     expect(featureManagerMock.initialize).toHaveBeenCalledOnce();
-    expect(featureManagerMock.checkForUrlChange).toHaveBeenCalledOnce();
+    expect(featureManagerMock.checkForUrlChange).toHaveBeenCalledExactlyOnceWith({
+      navigationCursor, navigationUnavailable: undefined,
+    });
   });
 
   it('iframe content core does not expose Vue loading', () => {
@@ -64,10 +67,13 @@ describe('Vue infrastructure frame contract', () => {
     );
     expect(registration).toBeDefined();
 
-    await registration[1]();
+    const navigationCursor = { documentEpoch: 2, routeRevision: 1, url: 'https://frame.example.com/#two' };
+    await registration[1]({ data: { navigationCursor } });
 
     expect(featureManagerMock.initialize).toHaveBeenCalledOnce();
-    expect(featureManagerMock.checkForUrlChange).toHaveBeenCalledOnce();
+    expect(featureManagerMock.checkForUrlChange).toHaveBeenCalledExactlyOnceWith({
+      navigationCursor, navigationUnavailable: undefined,
+    });
   });
 
   it('iframe loadFeature("vue") resolves null without mounting Vue', async () => {

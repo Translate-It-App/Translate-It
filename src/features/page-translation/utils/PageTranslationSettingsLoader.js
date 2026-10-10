@@ -82,6 +82,7 @@ export class PageTranslationSettingsLoader {
     const settings = {
       translationApi: effectiveProvider,
       isExplicitProvider,
+      usesGlobalProvider: !isExplicitProvider && !modeProviders?.[TranslationMode.Page],
       targetLanguage: options.targetLanguage || targetLanguage,
       lazyLoading: !!lazyLoading,
       rootMargin: formattedRootMargin,

@@ -71,6 +71,9 @@ import { FeatureManager } from './FeatureManager.js';
 describe('FeatureManager SPA auto page command transport', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    const owner = FeatureManager.getInstance();
+    owner.featureHandlers.clear();
+    owner.navigationCursor = { documentEpoch: 1, routeRevision: 0, url: window.location.href };
     mocks.settingsManager.get.mockImplementation((key, fallback) => {
       if (key === 'WHOLE_PAGE_TRANSLATION_ENABLED') return true;
       if (key === 'WHOLE_PAGE_AUTO_TRANSLATE_RULES') return [{ pattern: 'example.com' }];
@@ -102,7 +105,7 @@ describe('FeatureManager SPA auto page command transport', () => {
     expect(mocks.sendRegularMessage).toHaveBeenCalledOnce();
     expect(mocks.sendRegularMessage).toHaveBeenCalledWith({
       action: MessageActions.PAGE_TRANSLATE,
-      data: { isAuto: true },
+      data: { isAuto: true, preserveAcceptedTranslations: true },
     }, { returnFailureResponse: true });
   });
 
@@ -128,6 +131,179 @@ describe('FeatureManager SPA auto page command transport', () => {
     } finally {
       Object.defineProperty(window, 'top', { configurable: true, value: previousTop });
     }
+  });
+
+  const configureSameUrlPage = () => {
+    const owner = FeatureManager.getInstance();
+    owner._lastDetectedUrl = window.location.href;
+    owner.navigationCursor = { documentEpoch: 1, routeRevision: 0, url: window.location.href };
+    const page = {
+      currentUrl: window.location.href, isActive: true, userRestoredOverride: false,
+      autoStartCancelledUrls: new Set(),
+      stopAutoTranslation: vi.fn().mockResolvedValue({ success: true }),
+    };
+    owner.featureHandlers.set('pageTranslation', page);
+    owner.reevaluateFeatures = vi.fn().mockResolvedValue(undefined);
+    mocks.loadFeature.mockResolvedValue(page);
+    return { owner, page };
+  };
+
+  const cursor = (routeRevision, url = window.location.href, documentEpoch = 1) => ({ documentEpoch, routeRevision, url });
+  const historyNotification = (routeRevision = 1) => ({
+    navigationCursor: cursor(routeRevision, new URL('/intermediate-route', window.location.href).href),
+  });
+
+  it('keeps pending work for same-route state updates and untracked notifications', () => {
+    const { owner, page } = configureSameUrlPage();
+    expect(owner.checkForUrlChange({ navigationCursor: cursor(0) })).toBe(false);
+    expect(owner.checkForUrlChange()).toBe(false);
+    expect(page.stopAutoTranslation).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates one captured route across synchronous and asynchronous receivers', async () => {
+    const { owner, page } = configureSameUrlPage();
+    const event = historyNotification();
+    const pending = owner.checkForUrlChange(event);
+    expect(owner.checkForUrlChange(event)).toBe(false);
+    await pending;
+    expect(owner.checkForUrlChange(event)).toBe(false);
+    expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+    expect(mocks.sendRegularMessage).toHaveBeenCalledOnce();
+  });
+
+  it('distinguishes an unchanged captured away-URL state from a second real away route', async () => {
+    const { owner, page } = configureSameUrlPage();
+    await owner.checkForUrlChange(historyNotification(1));
+    expect(owner.checkForUrlChange(historyNotification(1))).toBe(false);
+    await owner.checkForUrlChange(historyNotification(3));
+    expect(page.stopAutoTranslation).toHaveBeenCalledTimes(2);
+    expect(owner.checkForUrlChange(historyNotification(1))).toBe(false);
+  });
+
+  it('uses cumulative route identity when the latest current-URL state arrives first', async () => {
+    const { owner, page } = configureSameUrlPage();
+    await owner.checkForUrlChange({ navigationCursor: cursor(2) });
+    expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+    expect(owner.checkForUrlChange(historyNotification(1))).toBe(false);
+    expect(owner.checkForUrlChange({ navigationCursor: cursor(2) })).toBe(false);
+    expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+    expect(owner.navigationCursor).toEqual(cursor(2));
+  });
+
+  it('still observes a real live URL change when a received cursor is old', async () => {
+    const { owner, page } = configureSameUrlPage();
+    owner.navigationCursor = cursor(4);
+    const originalUrl = window.location.href;
+    try {
+      window.history.replaceState({}, '', '/newest-route');
+      await owner.checkForUrlChange(historyNotification(1));
+      expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+      expect(owner._lastDetectedUrl).toBe(window.location.href);
+      expect(owner.navigationCursor.routeRevision).toBe(4);
+    } finally { window.history.replaceState({}, '', originalUrl); }
+  });
+
+  it('accepts a locally observed route baseline without restarting its delayed notification', async () => {
+    const { owner, page } = configureSameUrlPage();
+    const originalUrl = window.location.href;
+    try {
+      window.history.replaceState({}, '', '/local-route');
+      await owner.checkForUrlChange();
+      expect(owner.acceptPageNavigation(cursor(1))).toBe(true);
+      expect(owner.checkForUrlChange({ navigationCursor: cursor(1) })).toBe(false);
+      expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+      await owner.checkForUrlChange({ navigationCursor: cursor(3) });
+      expect(page.stopAutoTranslation).toHaveBeenCalledTimes(2);
+    } finally { window.history.replaceState({}, '', originalUrl); }
+  });
+
+  it('orders document epochs independently of route revisions and rejects old commands', async () => {
+    const { owner, page } = configureSameUrlPage();
+    owner.navigationCursor = cursor(20);
+    await owner.checkForUrlChange({ navigationCursor: cursor(0, window.location.href, 2) });
+    expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+    expect(owner.checkForUrlChange({ navigationCursor: cursor(99) })).toBe(false);
+    expect(owner.acceptPageNavigation(cursor(99))).toBe(false);
+    expect(owner.navigationCursor.documentEpoch).toBe(2);
+  });
+
+  it.each([
+    null, {}, { documentEpoch: 1, routeRevision: -1, url: 'x' },
+    { documentEpoch: 1, routeRevision: NaN, url: 'x' },
+    { documentEpoch: 1, routeRevision: 0, url: {} },
+    { documentEpoch: 1, routeRevision: 0, url: 'inconsistent-same-cursor' },
+  ])('stops without auto-restart for malformed cursor %o', navigationCursor => {
+    const { owner, page } = configureSameUrlPage();
+    expect(owner.checkForUrlChange({ navigationCursor })).toBe(false);
+    expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+    expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+  });
+
+  it('stops without auto-restart when producer persistence is unavailable', () => {
+    const { owner, page } = configureSameUrlPage();
+    expect(owner.checkForUrlChange({ navigationUnavailable: true })).toBe(false);
+    expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+    expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+  });
+
+  it('invalidates synchronously for a missed round trip and requests retained restart', async () => {
+    const { owner, page } = configureSameUrlPage();
+    const revision = owner._navigationRevision;
+    const pending = owner.checkForUrlChange(historyNotification());
+
+    expect(owner._navigationRevision).toBe(revision + 1);
+    expect(page.stopAutoTranslation).toHaveBeenCalledExactlyOnceWith({ cancellationReason: 'operation-abort' });
+    expect(page.stopAutoTranslation.mock.invocationCallOrder[0]).toBeLessThan(owner.reevaluateFeatures.mock.invocationCallOrder[0]);
+    await pending;
+    expect(mocks.sendRegularMessage).toHaveBeenCalledExactlyOnceWith({
+      action: MessageActions.PAGE_TRANSLATE,
+      data: { isAuto: true, preserveAcceptedTranslations: true },
+    }, { returnFailureResponse: true });
+    expect(owner.checkForUrlChange()).toBe(false);
+    expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+  });
+
+  it.each(['no-rule', 'disabled', 'extension-disabled', 'excluded', 'manual-restore', 'cancelled-url', 'iframe'])(
+    'does not auto restart a missed round trip when %s', async (condition) => {
+      const { owner, page } = configureSameUrlPage();
+      const previousTop = window.top;
+      if (condition === 'no-rule') mocks.matchesAutoTranslateRule.mockReturnValue(false);
+      if (condition === 'disabled') mocks.settingsManager.get.mockImplementation((key, fallback) => key === 'WHOLE_PAGE_TRANSLATION_ENABLED' ? false : fallback);
+      if (condition === 'extension-disabled') mocks.settingsManager.isExtensionEnabled.mockReturnValue(false);
+      if (condition === 'excluded') mocks.exclusionChecker.isFeatureAllowed.mockResolvedValue(false);
+      if (condition === 'manual-restore') page.userRestoredOverride = true;
+      if (condition === 'cancelled-url') page.autoStartCancelledUrls.add(window.location.href);
+      if (condition === 'iframe') Object.defineProperty(window, 'top', { configurable: true, value: {} });
+      try {
+        await owner.checkForUrlChange(historyNotification());
+        expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+        expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(window, 'top', { configurable: true, value: previousTop });
+      }
+    }
+  );
+
+  it('honors a manual stop while round-trip reevaluation is pending', async () => {
+    const { owner, page } = configureSameUrlPage();
+    let release;
+    owner.reevaluateFeatures.mockReturnValue(new Promise(resolve => { release = resolve; }));
+    const pending = owner.checkForUrlChange(historyNotification());
+    page.userRestoredOverride = true;
+    release();
+    await pending;
+    expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+  });
+
+  it('lets only the newest evidenced navigation revision start translation', async () => {
+    const { owner } = configureSameUrlPage();
+    let release;
+    owner.reevaluateFeatures.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const obsolete = owner.checkForUrlChange(historyNotification(1));
+    await owner.checkForUrlChange({ navigationCursor: cursor(2, new URL('/another-intermediate-route', window.location.href).href) });
+    release();
+    await obsolete;
+    expect(mocks.sendRegularMessage).toHaveBeenCalledOnce();
   });
 
   it('deduplicates URL signals with a synchronous shared snapshot', async () => {

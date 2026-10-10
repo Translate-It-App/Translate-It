@@ -31,7 +31,7 @@ explicit typed failure
 | --- | --- |
 | `ProviderCoordinator` | Selected-provider execution orchestration (language swap, JSON detection, strategy choice, clean-up). |
 | `QueueManager` | Retry scheduling (attempts, backoff, cancellation). |
-| `RateLimitManager` | Provider health / circuit breaker. |
+| `RateLimitManager` | Shared provider request capacity, AI 429 cooldown, provider health / circuit breaker. |
 | `ProviderRequestEngine` | Physical API call, API-key failover, physical request stats. |
 | `BaseAIProvider` | Structured-response recovery and conversation-candidate lifecycle. |
 | Feature consumers | Source preservation and UI mutation. |
@@ -150,7 +150,7 @@ TEXT_TOO_LONG
 
 ## 8. Provider Health Contract
 
-`RateLimitManager` per-provider state drives health: `consecutiveFailures`, `isCircuitOpen`, `circuitOpenTime`, `currentBackoffMultiplier`, `performanceStats`.
+`RateLimitManager` per-provider state drives health: `consecutiveFailures`, `isCircuitOpen`, `circuitOpenTime`, `currentBackoffMultiplier`, `performanceStats`. Its `activeRequests` capacity is shared across AI page batches and structured recovery. A physical AI 429 extends the shared `retryAt` deadline, including when API-key failover consumes that error; queued siblings and subsequent calls inside an existing slot wait for the deadline. Successful siblings do not clear it. Queue clearing and configuration reload retain live request accounting until the task settles.
 
 - **Network/provider failures affect health.** `_recordFailure` increments failure counters and may open the circuit.
 - **Cancellation does not.** Excluded from `_recordFailure`.
@@ -235,12 +235,14 @@ Do not infer local provenance from the shape of an error message or HTTP status.
 
 ## 13. Timeout and Cancellation
 
-- **Timeout owner**: `OptimizedJsonHandler.processBatch` (and `StreamingManager` for streaming) produce `TRANSLATION_TIMEOUT` and abort the request.
+- **Timeout owner**: `OptimizedJsonHandler.processBatch`, `UnifiedModeCoordinator` for Page/Subtitle batches, and `StreamingManager` for streaming produce `TRANSLATION_TIMEOUT` and abort the request. The generic batch deadline includes waiting for the Page session's source-language resolution and is not reset by a handoff.
 - **Abort propagation:** the `AbortController` signal flows into `ProviderRequestEngine.executeRequest`/fetch. An `AbortError` normalizes to `USER_CANCELLED`.
 - **Final type preservation:** timeout keeps `TRANSLATION_TIMEOUT`; user abort keeps `USER_CANCELLED`; a post-response abort is converted to `USER_CANCELLED`.
 - **Late settlement suppression:** `OptimizedJsonHandler` wraps the provider promise so a late resolve/reject is consumed and dropped; no unhandled rejection, no second application.
 - **No unhandled promise rejection:** late settlements are consumed/wrapped.
 - **No retry on terminal timeout/cancel** except where the code explicitly does so (a send/done of the batch boundary aborts instead of queue-retrying).
+
+**Page AUTO source resolution:** only one pending batch per session owns AUTO detection. A successful batch without a concrete language pair remains accepted and hands ownership to another pending batch; it is never re-sent for resolution, and no guessed pair is cached. Repeated successful handoffs consume distinct batches, bounded by the existing work and each batch's deadline. Provider failure still rejects waiting siblings. A waiter-only abort terminates that waiter without cancelling the shared owner; clearing the session prevents a resolved handoff or late owner from recreating its state.
 
 ---
 
@@ -330,6 +332,8 @@ Numeric response IDs are valid only in a proven positional-wire context; they ar
 | --- | --- |
 | Local validation (TEXT_TOO_LONG: no network, no retry, no health) | `src/features/translation/core/QueueManager.test.js`, `src/features/translation/core/RateLimitManager.test.js`, `RateLimitManager.real-policy.test.js`, `src/shared/error-management/ValidationPolicy.test.js`, `src/features/translation/core/CrossLayerRetryBound.test.js`, `src/features/translation/providers/LingvaProvider.test.js` |
 | Rate limit / circuit breaker | `src/features/translation/core/RateLimitManager.test.js`, `RateLimitManager.real-policy.test.js`, `src/shared/error-management/ErrorMatcher.test.js` |
+| Page AI physical concurrency, shared 429, repair and cancellation | `src/core/services/translation/UnifiedModeCoordinator.integration.test.js` (real Custom provider, parser, queue and limiter; fixture settings/browser APIs and mocked physical fetch) |
+| Page AUTO success without a pair, bounded handoff and waiting cancellation/deadline | `src/core/services/translation/UnifiedModeCoordinator.test.js`, `UnifiedModeCoordinator.integration.test.js` |
 | Queue retry | `src/features/translation/core/QueueManager.test.js`, `src/features/translation/core/CrossLayerRetryBound.test.js` |
 | API-key failover | `src/features/translation/providers/ApiKeyManager.test.js`, `src/features/translation/providers/utils/ProviderRequestEngine.test.js` |
 | Timeout / cancel / late settlement | `src/features/translation/core/managers/OptimizedJsonHandler.test.js`, `src/features/translation/core/StreamingManager.test.js`, `src/features/translation/handlers/handleCancelTranslation.test.js` |

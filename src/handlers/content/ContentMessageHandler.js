@@ -969,8 +969,8 @@ export class ContentMessageHandler extends ResourceTracker {
         this.logger.warn('translateItContentCore not available, UI state sync may not work');
       }
 
-      // If PageTranslationManager is not available, try to load the feature on-demand
-      if (!this.pageTranslationManager) {
+      // Reacquire inactive instances so commands share the current navigation owner.
+      if (!this.pageTranslationManager?.isActive) {
         try {
           const { loadFeature } = await import('@/core/content-scripts/chunks/lazy-features.js');
           const manager = await loadFeature('pageTranslation');

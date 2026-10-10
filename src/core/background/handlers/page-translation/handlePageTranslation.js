@@ -6,6 +6,7 @@ import ExtensionContextManager from '@/core/extensionContext.js';
 import { unifiedTranslationService } from '@/core/services/translation/UnifiedTranslationService.js';
 import { statsManager } from '@/features/translation/core/TranslationStatsManager.js';
 import { tabPermissionChecker } from '@/core/tabPermissions.js';
+import { pageNavigationTracker } from '@/core/background/PageNavigationTracker.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.PAGE_TRANSLATION, 'handlePageTranslation');
 
@@ -103,11 +104,27 @@ async function sendFrameCommandWithResponseDeadline(
   deadlineMs = FRAME_COMMAND_RESPONSE_TIMEOUT_MS
 ) {
   let timeoutId;
+  let expired = false;
   try {
+    const sendPromise = (async () => {
+      if (message.action === MessageActions.PAGE_TRANSLATE && !message.data?.navigationUnavailable) {
+        let data;
+        try {
+          const navigationCursor = await pageNavigationTracker.getAdmissionCursor(tabId, frameId);
+          data = navigationCursor ? { navigationCursor } : { navigationUnavailable: true };
+        } catch {
+          data = { navigationUnavailable: true };
+        }
+        message = { ...message, data: { ...message.data, ...data } };
+      }
+      if (expired) return null;
+      return browser.tabs.sendMessage(tabId, message, { frameId });
+    })();
     const response = await Promise.race([
-      browser.tabs.sendMessage(tabId, message, { frameId }),
+      sendPromise,
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
+          expired = true;
           const timeoutError = new Error(`Frame ${frameId} command response timed out`);
           timeoutError.isResponseTimeout = true;
           reject(timeoutError);
@@ -199,7 +216,15 @@ async function runPreFanoutPreparation(message, sender, discoverFrames = true) {
       return true;
     });
 
-    return { targetTabId, access, allFrames };
+    let navigationUnavailable = false;
+    if (message.action === MessageActions.PAGE_TRANSLATE) {
+      try { await pageNavigationTracker.seed(targetTabId, allFrames); }
+      catch {
+        navigationUnavailable = true;
+        logger.debug('Page navigation preparation unavailable');
+      }
+    }
+    return { targetTabId, access, allFrames, navigationUnavailable };
   })();
 
   try {
@@ -351,15 +376,6 @@ export async function handlePageTranslation(message, sender) {
         });
       }
 
-      // Special case: Clear session if a NEW translation starts on the same ID
-      if (message.action === MessageActions.PAGE_TRANSLATE_START) {
-        const sessionId = message.data?.sessionId || message.data?.messageId;
-        if (sessionId) {
-          statsManager.clearSession(sessionId);
-          unifiedTranslationService.clearPageSourceSession(sessionId);
-        }
-      }
-
       browser.runtime.sendMessage(message).catch(() => {});
       return { success: true };
     }
@@ -396,7 +412,8 @@ export async function handlePageTranslation(message, sender) {
     preparation = await runPreFanoutPreparation(message, sender);
     if (preparation.error) return preparation.error;
 
-    const { targetTabId, access, allFrames } = preparation;
+    const { targetTabId, access, allFrames, navigationUnavailable } = preparation;
+    if (navigationUnavailable) message = { ...message, data: { ...message.data, navigationUnavailable: true } };
     if (!access.isAccessible) {
       logger.debug(`Page translation blocked on restricted tab ${targetTabId}: ${access.errorMessage}`);
       return {
@@ -551,11 +568,14 @@ if (typeof browser !== 'undefined' && browser.webNavigation) {
         
         // Wait for page to load a bit before sending translate message
         setTimeout(() => {
-          browser.tabs.sendMessage(tabId, { action: MessageActions.PAGE_TRANSLATE, data: { isAuto: true } })
+          handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: { isAuto: true } }, { tab: { id: tabId } })
+            .then(result => {
+              if (result.isTransportFailure && !result.reason) throw new Error('Content script not ready');
+            })
             .catch(() => {
               // If fails (page not ready), try once more after 2 seconds
               setTimeout(() => {
-                browser.tabs.sendMessage(tabId, { action: MessageActions.PAGE_TRANSLATE, data: { isAuto: true } }).catch(() => {});
+                handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: { isAuto: true } }, { tab: { id: tabId } }).catch(() => {});
               }, 2000);
             });
         }, 1000);

@@ -29,6 +29,13 @@ vi.mock('../../core/TranslationStatsManager.js', () => ({
   }
 }));
 
+vi.mock('@/features/translation/core/RateLimitManager.js', () => ({
+  rateLimitManager: {
+    waitForCooldown: vi.fn().mockResolvedValue(),
+    notifyRateLimit: vi.fn(),
+  },
+}));
+
 // Mock browser compatibility to avoid real navigator/UA calls
 vi.mock('@/utils/browser/compatibility.js', () => ({
   getBrowserInfoSync: vi.fn(() => ({ isFirefox: false, isMobile: false })),
@@ -47,6 +54,7 @@ import { ApiKeyManager } from '../ApiKeyManager.js';
 import { proxyManager } from '@/shared/proxy/ProxyManager.js';
 import { getBrowserInfoSync } from '@/utils/browser/compatibility.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
+import { rateLimitManager } from '@/features/translation/core/RateLimitManager.js';
 
 const createProxyConfig = (host = 'proxy.test') => ({
   enabled: true,
@@ -96,6 +104,7 @@ describe('ProviderRequestEngine', () => {
     delete mockProvider.classifyProviderHttpError;
     delete mockProvider.shouldFailoverApiKey;
     delete mockProvider.isApiKeyCandidateEligible;
+    delete mockProvider.constructor;
   });
 
   describe('successful JSON response classification', () => {
@@ -154,6 +163,34 @@ describe('ProviderRequestEngine', () => {
       ]),
       json: async () => body,
       clone() { return this; },
+    });
+
+    it('reports physical AI 429 before key failover can consume it, and waits before fetch', async () => {
+      mockProvider.constructor = { isAI: true };
+      const pendingCooldown = deferred();
+      rateLimitManager.waitForCooldown.mockReturnValueOnce(pendingCooldown.promise);
+      proxyManager.fetch.mockResolvedValue(httpErrorResponse({}, 429, 'Too Many Requests', { 'Retry-After': '5' }));
+      const controller = new AbortController();
+      const request = ProviderRequestEngine.executeApiCall(mockProvider, {
+        url: 'https://api.test.com', fetchOptions: { headers: {} }, abortController: controller,
+      });
+      await Promise.resolve(); await Promise.resolve();
+      expect(rateLimitManager.waitForCooldown).toHaveBeenCalledWith('TestProvider', controller.signal);
+      expect(proxyManager.fetch).not.toHaveBeenCalled();
+      pendingCooldown.resolve();
+      await expect(request).rejects.toMatchObject({ type: ErrorTypes.RATE_LIMIT_REACHED });
+      expect(rateLimitManager.notifyRateLimit).toHaveBeenCalledWith('TestProvider', expect.objectContaining({
+        type: ErrorTypes.RATE_LIMIT_REACHED, statusCode: 429, retryAt: expect.any(Number),
+      }));
+    });
+
+    it('does not publish a non-rate-limit AI HTTP error as a cooldown', async () => {
+      mockProvider.constructor = { isAI: true };
+      proxyManager.fetch.mockResolvedValue(httpErrorResponse({}, 401, 'Unauthorized'));
+      await expect(ProviderRequestEngine.executeApiCall(mockProvider, {
+        url: 'https://api.test.com', fetchOptions: { headers: {} },
+      })).rejects.toMatchObject({ type: ErrorTypes.API_KEY_INVALID });
+      expect(rateLimitManager.notifyRateLimit).not.toHaveBeenCalled();
     });
 
     it('normalizes Retry-After seconds on canonical rate-limit errors', async () => {
@@ -1199,7 +1236,7 @@ describe('ProviderRequestEngine', () => {
       expect(error.cause).toBeDefined();
     });
 
-    it('preserves explicit user cancellation for an aborted transport call', async () => {
+    it('preserves explicit user cancellation without sending an already-aborted call', async () => {
       const controller = new AbortController();
       controller.abort('user-cancelled');
       proxyManager.fetch.mockRejectedValue(new DOMException('Aborted', 'AbortError'));
@@ -1208,7 +1245,8 @@ describe('ProviderRequestEngine', () => {
       await expect(ProviderRequestEngine.executeApiCall(mockProvider, { ...baseParams(), abortController: controller }))
         .rejects.toMatchObject({ type: ErrorTypes.USER_CANCELLED });
 
-      expect(statsManager.recordRequest).toHaveBeenCalledTimes(1);
+      expect(proxyManager.fetch).not.toHaveBeenCalled();
+      expect(statsManager.recordRequest).not.toHaveBeenCalled();
       expect(statsManager.recordError).not.toHaveBeenCalled();
     });
 

@@ -4,9 +4,16 @@ import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { ActionReasons } from '@/shared/messaging/core/MessagingConstants.js';
 import { tabPermissionChecker } from '@/core/tabPermissions.js';
 import { handlePageTranslation } from './handlePageTranslation.js';
+import { pageNavigationTracker } from '@/core/background/PageNavigationTracker.js';
+
+const navigationStore = vi.hoisted(() => ({ saved: {} }));
 
 vi.mock('webextension-polyfill', () => ({
   default: {
+    storage: { session: {
+      get: vi.fn(async () => structuredClone(navigationStore.saved)),
+      set: vi.fn(async value => { navigationStore.saved = structuredClone(value); }),
+    } },
     runtime: {
       sendMessage: vi.fn(),
     },
@@ -17,6 +24,7 @@ vi.mock('webextension-polyfill', () => ({
     },
     webNavigation: {
       getAllFrames: vi.fn(),
+      getFrame: vi.fn(),
       onCommitted: { addListener: vi.fn() },
     },
   },
@@ -74,6 +82,9 @@ function setupFrames(frameResults, { activeTabId = 42 } = {}) {
       url: frameId === 0 ? 'https://example.com' : `https://frame-${frameId}.example`,
     }))
   );
+  browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+    url: frameId === 0 ? 'https://example.com' : `https://frame-${frameId}.example`,
+  }));
   browser.tabs.sendMessage.mockImplementation((_tabId, _message, { frameId }) => {
     const frame = frameResults.find(candidate => candidate.frameId === frameId);
     if (frame?.error) return Promise.reject(frame.error);
@@ -91,6 +102,131 @@ async function expectPreFanoutTimeout(resultPromise) {
   expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
 }
+
+describe('PAGE_TRANSLATE producer cursor admission', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    navigationStore.saved = {};
+    pageNavigationTracker.state = null;
+    pageNavigationTracker.dirty = false;
+    pageNavigationTracker.pending = Promise.resolve();
+    browser.storage.session.set.mockImplementation(async value => { navigationStore.saved = structuredClone(value); });
+  });
+
+  it('seeds participating frames and attaches a distinct current document cursor to each command', async () => {
+    setupFrames([{ frameId: 0, response: { success: true } }, { frameId: 7, response: { success: true } }]);
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: { isAuto: true } }, sender);
+    const commands = browser.tabs.sendMessage.mock.calls;
+    expect(commands[0][1].data).toMatchObject({ isAuto: true, navigationCursor: { routeRevision: 0, url: 'https://example.com' } });
+    expect(commands[1][1].data.navigationCursor.url).toBe('https://frame-7.example');
+    expect(commands[1][1].data.navigationCursor.documentEpoch).toBeGreaterThan(commands[0][1].data.navigationCursor.documentEpoch);
+    expect(browser.storage.session.set.mock.invocationCallOrder[0]).toBeLessThan(browser.tabs.sendMessage.mock.invocationCallOrder[0]);
+  });
+
+  it.each(['history', 'commit'])('refreshes first enrollment after an untracked %s races a stale discovery snapshot', async event => {
+    setupFrames([{ frameId: 0, response: { success: true } }]);
+    browser.webNavigation.getAllFrames.mockImplementationOnce(async () => {
+      if (event === 'history') await pageNavigationTracker.capture(42, 0, 'https://example.com/new');
+      else await pageNavigationTracker.committed(42, 0, 'https://example.com/new');
+      return [{ frameId: 0, url: 'https://example.com' }];
+    });
+    browser.webNavigation.getFrame.mockResolvedValue({ url: 'https://example.com/new' });
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+    expect(browser.tabs.sendMessage.mock.calls[0][1].data.navigationCursor.url).toBe('https://example.com/new');
+    expect(browser.webNavigation.getFrame).toHaveBeenCalledWith({ tabId: 42, frameId: 0 });
+  });
+
+  it('does not overwrite native evidence with an older getAllFrames snapshot', async () => {
+    setupFrames([{ frameId: 0, response: { success: true } }]);
+    await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+    browser.webNavigation.getAllFrames.mockImplementationOnce(async () => {
+      await pageNavigationTracker.capture(42, 0, 'https://example.com/new');
+      return [{ frameId: 0, url: 'https://example.com' }];
+    });
+    browser.webNavigation.getFrame.mockResolvedValue({ url: 'https://example.com/new' });
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+    expect(browser.tabs.sendMessage.mock.calls[0][1].data.navigationCursor).toMatchObject({ routeRevision: 1, url: 'https://example.com/new' });
+  });
+
+  it('reads the current cursor at frame dispatch after a route changes during preparation', async () => {
+    setupFrames([{ frameId: 0, response: { success: true } }]);
+    const getCursor = pageNavigationTracker.getCursor.bind(pageNavigationTracker);
+    const spy = vi.spyOn(pageNavigationTracker, 'getCursor').mockImplementationOnce(async (tabId, frameId) => {
+      await pageNavigationTracker.capture(tabId, frameId, 'https://example.com/later');
+      return getCursor(tabId, frameId);
+    });
+    browser.webNavigation.getFrame.mockResolvedValue({ url: 'https://example.com/later' });
+    try {
+      await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+      expect(browser.tabs.sendMessage.mock.calls[0][1].data.navigationCursor).toMatchObject({ routeRevision: 1, url: 'https://example.com/later' });
+    } finally { spy.mockRestore(); }
+  });
+
+  it('sends unavailable admission rather than an undurable cursor after persistence failure', async () => {
+    setupFrames([{ frameId: 0, response: { success: false, reason: ActionReasons.SILENT_ERROR } }]);
+    browser.storage.session.set.mockRejectedValueOnce(new Error('session unavailable'));
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+    expect(browser.tabs.sendMessage.mock.calls[0][1].data).toEqual({ navigationUnavailable: true });
+  });
+
+  it('keeps active child navigation tracking when later Page frame discovery fails', async () => {
+    setupFrames([{ frameId: 0, response: { success: true } }, { frameId: 7, response: { success: true } }]);
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+    const initial = structuredClone(navigationStore.saved);
+    const child = await pageNavigationTracker.getCursor(42, 7);
+    browser.storage.session.set.mockClear();
+    browser.tabs.sendMessage.mockClear();
+    browser.webNavigation.getAllFrames.mockRejectedValueOnce(new Error('discovery unavailable'));
+    browser.tabs.sendMessage.mockResolvedValueOnce({ success: false, reason: ActionReasons.SILENT_ERROR });
+
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+
+    expect(browser.tabs.sendMessage).toHaveBeenCalledOnce();
+    expect(browser.tabs.sendMessage.mock.calls[0][1].data).toEqual({ navigationUnavailable: true });
+    expect(browser.tabs.sendMessage.mock.calls[0][2]).toEqual({ frameId: 0 });
+    expect(await pageNavigationTracker.getCursor(42, 7)).toEqual(child);
+    expect(navigationStore.saved).toEqual(initial);
+    expect(browser.storage.session.set).not.toHaveBeenCalled();
+    expect(await pageNavigationTracker.capture(42, 7, 'https://frame-7.example/b')).toMatchObject({ documentEpoch: child.documentEpoch, routeRevision: 1 });
+    expect(await pageNavigationTracker.capture(42, 7, child.url)).toEqual({ ...child, routeRevision: 2 });
+
+    browser.webNavigation.getAllFrames.mockResolvedValueOnce([{ frameId: 0, url: 'https://example.com' }]);
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+    expect(await pageNavigationTracker.getCursor(42, 7)).toBeNull();
+  });
+
+  it.each([null, { url: '' }, 'rejected'])(
+    'sends unavailable admission without a stale baseline when the frame API returns %o', async frame => {
+      setupFrames([{ frameId: 0, response: { success: false, reason: ActionReasons.SILENT_ERROR } }]);
+      if (frame === 'rejected') browser.webNavigation.getFrame.mockRejectedValueOnce(new Error('frame unavailable'));
+      else browser.webNavigation.getFrame.mockResolvedValueOnce(frame);
+      await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+      expect(browser.tabs.sendMessage.mock.calls[0][1].data).toEqual({ navigationUnavailable: true });
+    }
+  );
+
+  it.each(['transport failure', 'user decline'])('keeps committed-document cursor on the existing persistence retry for %s', async failure => {
+    vi.useFakeTimers();
+    try {
+      setupFrames([{ frameId: 0, response: { success: true } }]);
+      await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+      await handlePageTranslation({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { isAutoTranslating: true, translatedCount: 1 },
+      }, sender);
+      await pageNavigationTracker.committed(42, 0, 'https://example.com');
+      browser.tabs.sendMessage.mockClear();
+      if (failure === 'transport failure') browser.tabs.sendMessage.mockRejectedValueOnce(new Error('Content script unavailable'));
+      else browser.tabs.sendMessage.mockResolvedValueOnce({ success: false, reason: ActionReasons.USER_CANCELLED });
+      onCommittedListener({ tabId: 42, frameId: 0, transitionType: 'link' });
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(failure === 'transport failure' ? 2 : 1);
+      expect(browser.tabs.sendMessage.mock.calls.every(([, message]) => message.data.navigationCursor.documentEpoch === 2)).toBe(true);
+      await onCommittedListener({ tabId: 42, frameId: 0, transitionType: 'reload' });
+    } finally { vi.useRealTimers(); }
+  });
+});
 
 describe('handlePageTranslation response projection', () => {
   beforeEach(() => {
@@ -828,6 +964,9 @@ describe('bounded frame command response deadline', () => {
         url: `https://frame-${index}.example`,
       }))
     );
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+      url: `https://frame-${frameId === 0 ? 0 : frameId / 7}.example`,
+    }));
     browser.tabs.sendMessage.mockImplementation((_tabId, _message, { frameId }) => {
       const handler = frameHandlers.find(candidate => candidate.frameId === frameId);
       return handler ? handler.run() : Promise.resolve({ success: true });
@@ -883,6 +1022,37 @@ describe('bounded frame command response deadline', () => {
       { frameId: 7, success: false },
     ]);
     expect(result.frames.some(frame => frame.isResponseTimeout)).toBe(false);
+  });
+
+  it('bounds a stalled dispatch cursor read and does not send the command after its deadline', async () => {
+    setupBoundedFrames([{ frameId: 0, run: () => Promise.resolve({ success: true }) }]);
+    const cursorRead = deferred();
+    const spy = vi.spyOn(pageNavigationTracker, 'getCursor').mockReturnValueOnce(cursorRead.promise);
+    try {
+      const result = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+      await vi.advanceTimersByTimeAsync(RESPONSE_TIMEOUT_MS + 100);
+      expect(await result).toMatchObject({ success: false, isTransportFailure: true, reason: 'frame_command_response_timeout' });
+      expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+      cursorRead.resolve({ documentEpoch: 1, routeRevision: 0, url: 'https://frame-0.example' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+
+  it('bounds a stalled fresh-frame API read without blocking captured navigation or sending late', async () => {
+    setupBoundedFrames([{ frameId: 0, run: () => Promise.resolve({ success: true }) }]);
+    const frameRead = deferred();
+    browser.webNavigation.getFrame.mockReturnValueOnce(frameRead.promise);
+    const result = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(browser.webNavigation.getFrame).toHaveBeenCalledOnce();
+    expect(await pageNavigationTracker.capture(42, 0, 'https://frame-0.example/new')).toMatchObject({ url: 'https://frame-0.example/new' });
+    await vi.advanceTimersByTimeAsync(RESPONSE_TIMEOUT_MS + 100);
+    expect(await result).toMatchObject({ success: false, reason: 'frame_command_response_timeout', isTransportFailure: true });
+    frameRead.resolve({ url: 'https://frame-0.example' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+    expect((await pageNavigationTracker.getCursor(42, 0)).url).toBe('https://frame-0.example/new');
   });
 
   it('returns an uncertainty result when every frame response times out', async () => {

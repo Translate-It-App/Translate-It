@@ -7,6 +7,7 @@ import { ActionReasons } from '@/shared/messaging/core/MessagingConstants.js';
 import { applyTranslationToTextField } from '../smartTranslationIntegration.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import browser from 'webextension-polyfill';
+import { loadFeature } from '@/core/content-scripts/chunks/lazy-features.js';
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LIVE_DUBBING_ACTIONS } from '@/features/live-dubbing/constants.js';
 import {
@@ -76,6 +77,8 @@ vi.mock('./RevertHandler.js', () => ({
   revertHandler: { executeRevert: vi.fn() },
 }));
 
+vi.mock('@/core/content-scripts/chunks/lazy-features.js', () => ({ loadFeature: vi.fn() }));
+
 vi.mock('../smartTranslationIntegration.js', () => ({
   applyTranslationToTextField: vi.fn(),
 }));
@@ -107,6 +110,7 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
   beforeEach(() => {
     ContentMessageHandler.resetInstance();
     vi.clearAllMocks();
+    loadFeature.mockReset();
     resetLiveDubbingTranscriptState();
     browser.runtime.sendMessage.mockResolvedValue({ success: true });
     handler = new ContentMessageHandler();
@@ -715,6 +719,42 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
 
     await expect(handler.handlePageTranslate({ data: {} })).resolves.toBe(rejection);
     expect(handler.pageTranslationManager.translatePage).toHaveBeenCalledWith({});
+  });
+
+  it('reacquires the current Page instance after its cached instance was deactivated', async () => {
+    const retired = {
+      isActive: false,
+      activate: vi.fn().mockResolvedValue(true),
+      translatePage: vi.fn().mockResolvedValue({ success: true }),
+    };
+    const current = { isActive: true, translatePage: vi.fn().mockResolvedValue({ success: true }) };
+    handler.setPageTranslationManager(retired);
+    loadFeature.mockResolvedValue(current);
+
+    await expect(handler.handlePageTranslate({ data: { isAuto: true } })).resolves.toEqual({ success: true });
+    await handler.handlePageTranslate({ data: {} });
+
+    expect(loadFeature).toHaveBeenCalledExactlyOnceWith('pageTranslation');
+    expect(handler.pageTranslationManager).toBe(current);
+    expect(current.translatePage).toHaveBeenCalledTimes(2);
+    expect(retired.activate).not.toHaveBeenCalled();
+    expect(retired.translatePage).not.toHaveBeenCalled();
+  });
+
+  it('does not revive a retired Page instance when current feature admission is unavailable', async () => {
+    const retired = { isActive: false, activate: vi.fn().mockResolvedValue(true), translatePage: vi.fn() };
+    handler.setPageTranslationManager(retired);
+    loadFeature.mockResolvedValue(null);
+    handler.errorHandler = {
+      getErrorForUI: vi.fn().mockResolvedValue({ message: 'Page feature unavailable', type: ErrorTypes.SERVICE }),
+      handle: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(handler.handlePageTranslate({ data: {} })).resolves.toMatchObject({ success: false });
+
+    expect(loadFeature).toHaveBeenCalledWith('pageTranslation');
+    expect(retired.activate).not.toHaveBeenCalled();
+    expect(retired.translatePage).not.toHaveBeenCalled();
   });
 
   it('keeps restore and stop-auto commands on trusted runtime handlers', async () => {
