@@ -3,6 +3,7 @@ import { reactive, ref, nextTick } from 'vue';
 import { mount, flushPromises } from '@vue/test-utils';
 import SubtitleApp from './SubtitleApp.vue';
 import { PublicTranslationErrorActions } from '@/shared/error-management/PublicTranslationError.js';
+import subtitleLogo from '@/icons/ui/subtitle.svg';
 
 const { openOptionsPageMock, useSubtitleTranslationMock } = vi.hoisted(() => ({
   openOptionsPageMock: vi.fn(),
@@ -177,7 +178,7 @@ describe('SubtitleApp', () => {
 
     const header = wrapper.find('.app-header');
     const logoImage = header.find('.logo img');
-    expect(logoImage.attributes('src')).toMatch(/^data:image\/svg\+xml,/);
+    expect(logoImage.attributes('src')).toBe(subtitleLogo);
     expect(logoImage.attributes('alt')).toBe('');
     expect(logoImage.attributes('aria-hidden')).toBe('true');
     expect(header.find('h1').text()).toBe('Subtitle Translator');

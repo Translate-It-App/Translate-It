@@ -4,10 +4,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createBashEnvPreload } from './test-helpers.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const workflow = readFileSync(join(root, '.github/workflows/development-release.yml'), 'utf8');
-const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
+const readWorkflow = file => readFileSync(join(root, '.github/workflows', file), 'utf8').replace(/\r\n?/g, '\n');
+const workflow = readWorkflow('development-release.yml');
+const ci = readWorkflow('ci.yml');
 const qualify = workflow.slice(workflow.indexOf('  qualify:'), workflow.indexOf('\n  publish:'));
 const publish = workflow.slice(workflow.indexOf('  publish:'));
 const artifactStep = qualify.slice(qualify.indexOf('      - name: Find exact run artifact'));
@@ -32,7 +34,7 @@ process.stdout.write(process.env.MOCK_ARTIFACT_IDS);
     const result = spawnSync('bash', ['-c', artifactScript], {
       cwd: dir,
       encoding: 'utf8',
-      env: {
+      env: createBashEnvPreload(dir, {
         ...process.env,
         PATH: `${dir}${delimiter}${process.env.PATH}`,
         SOURCE_RUN_ID: '123',
@@ -42,8 +44,9 @@ process.stdout.write(process.env.MOCK_ARTIFACT_IDS);
         MOCK_CALLS: callsFile,
         MOCK_ARTIFACT_IDS: ids,
         MOCK_API_FAILURE: String(apiFailure),
-      },
+      }),
     });
+    if (result.error) throw result.error;
     return {
       ...result,
       output: existsSync(outputFile) ? readFileSync(outputFile, 'utf8') : '',

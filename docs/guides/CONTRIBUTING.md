@@ -43,6 +43,8 @@ cd Translate-It
 pnpm install
 ```
 
+The `scripts/ci/*.test.js` tests execute the release shell scripts, so they also require `git`, `bash`, and `jq` on `PATH`. On Windows, install [Git for Windows](https://git-scm.com/download/win) (which provides `git` and `bash`) and a `jq` executable. The preflight tests use the real `git` with temporary local repositories; the release tests mock the GitHub CLI (`gh`) and other relevant commands. None of these tests make real GitHub API calls.
+
 ### Initial Setup
 
 After installing dependencies, run the setup command to ensure all development tools are configured:
