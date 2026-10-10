@@ -52,7 +52,7 @@ export const formatFileSize = value => String(value)
 function installWebExt(workspace, { versionExit = 0, buildExit = 0 } = {}) {
   const packageDir = path.join(workspace, 'node_modules', 'web-ext')
   fs.mkdirSync(path.join(packageDir, 'bin'), { recursive: true })
-  fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ bin: { 'web-ext': 'bin/web-ext.js' } }))
+  fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ type: 'module', bin: { 'web-ext': 'bin/web-ext.js' } }))
   fs.writeFileSync(path.join(packageDir, 'bin', 'web-ext.js'), `
 import fs from 'node:fs'
 import path from 'node:path'
