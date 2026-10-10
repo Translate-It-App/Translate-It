@@ -189,6 +189,7 @@
 
 Translate It رایگان و متن‌باز است. حمایت مالی به ادامهٔ توسعه، آزمایش و نگه‌داری آن کمک می‌کند.
 
+- **ستاره در GitHub:** اگر Translate It برایتان مفید است، با [ستاره دادن به پروژه در GitHub](https://github.com/Translate-It-App/Translate-It) از آن حمایت کنید و کمک کنید افراد بیشتری با آن آشنا شوند.
 - **حمایت مالی:** از پروژه در [GitHub Sponsors](https://github.com/sponsors/Translate-It-App) حمایت کنید. جزئیات در [SPONSORSHIP.md](../SPONSORSHIP.md) آمده است.
 - **همکاری:** همکاری‌های فنی، اکوسیستمی و تجاری جداگانه پیگیری می‌شوند. اطلاعات بیشتر در [PARTNERSHIPS.md](../PARTNERSHIPS.md) است.
 
