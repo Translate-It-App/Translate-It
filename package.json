@@ -1,6 +1,6 @@
 {
   "name": "translate-it",
-  "version": "1.20.1",
+  "version": "1.22.0",
   "type": "module",
   "description": "Translator for selected text, web pages, PDFs, subtitles, images, and live dubbing, with traditional and AI providers.",
   "scripts": {
