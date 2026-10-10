@@ -1,8 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { mount, flushPromises } from '@vue/test-utils';
 import { reactive } from 'vue';
 import TTSTab from './TTSTab.vue';
 import { getPersistedDefaultSettings } from '@/shared/config/settingsDefaults.js';
+import { resolveTTSFlagCode } from './ttsFlag.js';
+import { PROVIDER_CONFIGS } from '@/features/tts/constants/ttsProviders.js';
+
+const mockLanguages = vi.hoisted(() => ({ languages: [{ code: 'en', name: 'English' }] }));
 
 // Mock unified i18n (same pattern as other Options tab tests)
 vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
@@ -38,7 +44,7 @@ vi.mock('@/composables/shared/useLanguages.js', async () => {
   return {
     useLanguages: () => ({
       isLoaded: vueRef(true),
-      translationLanguages: vueRef([{ code: 'en', name: 'English' }]),
+      translationLanguages: vueRef(mockLanguages.languages),
       loadLanguages: vi.fn().mockResolvedValue()
     })
   };
@@ -96,6 +102,7 @@ describe('TTSTab.vue - Voices drawer staged save', () => {
     vi.clearAllMocks();
     mockSettingsStore.settings.TTS_ENGINE = 'google';
     mockSettingsStore.settings.TTS_PREFERRED_VOICES = {};
+    mockLanguages.languages = [{ code: 'en', name: 'English' }];
   });
 
   const openDrawer = async (wrapper) => {
@@ -111,6 +118,65 @@ describe('TTSTab.vue - Voices drawer staged save', () => {
     await wrapper.find('.drawer-footer-actions button').trigger('click');
     await flushPromises();
   };
+
+  it('resolves explicit, regional, base-language, and unknown flag codes', () => {
+    expect(resolveTTSFlagCode({ code: 'en-us', flagCode: 'ir' })).toBe('ir');
+    expect(resolveTTSFlagCode({ code: 'en-us' })).toBe('us');
+    expect(resolveTTSFlagCode({ code: 'ja-JP' })).toBe('jp');
+    expect(resolveTTSFlagCode({ code: 'en', flagCode: 'missing' })).toBe('un');
+    expect(resolveTTSFlagCode({ code: 'unknown' })).toBe('un');
+    expect(resolveTTSFlagCode()).toBe('un');
+  });
+
+  it('renders bundled flag images and uses the neutral image for unknown languages', async () => {
+    mockLanguages.languages = [
+      { code: 'en', name: 'English' },
+      { code: 'xx-unknown', name: 'Unknown' }
+    ];
+    const wrapper = mountTab();
+    await openDrawer(wrapper);
+
+    const flags = wrapper.findAll('.lang-flag img');
+    expect(flags.map(flag => flag.attributes('src'))).toEqual([
+      'icons/flags/gb.svg',
+      'icons/flags/un.svg'
+    ]);
+    expect(flags.map(flag => flag.attributes('alt'))).toEqual(['', '']);
+    expect(flags.every(flag => flag.attributes('aria-hidden') === 'true')).toBe(true);
+    expect(wrapper.findAll('.lang-meta').every(item => !/[\u{1F1E6}-\u{1F1FF}]/u.test(item.text()))).toBe(true);
+    expect(browser.runtime.getURL).toHaveBeenCalledWith('icons/flags/gb.svg');
+    expect(browser.runtime.getURL).toHaveBeenCalledWith('icons/flags/un.svg');
+  });
+
+  it('maps every engine-supported locale and provider language to a bundled flag asset', async () => {
+    const { TTSLanguageService: languageService } = await vi.importActual('@/features/tts/services/TTSLanguageService.js');
+    const providerLanguages = new Set([
+      ...PROVIDER_CONFIGS.google.supportedLanguages,
+      ...Object.keys(PROVIDER_CONFIGS.edge.voices)
+    ]);
+    const localeDirectory = resolve('src/utils/i18n/locales');
+    const localeLanguages = readdirSync(localeDirectory)
+      .filter(file => file.endsWith('.json'))
+      .map(file => JSON.parse(readFileSync(resolve(localeDirectory, file), 'utf8')).code);
+    const exposedLanguages = new Set([...providerLanguages, ...localeLanguages].filter(code =>
+      languageService.supportsLanguage('google', code) || languageService.supportsLanguage('edge', code)
+    ));
+    const expectedMappings = {
+      it: 'it', no: 'no', fi: 'fi', pl: 'pl', ro: 'ro', hu: 'hu', sk: 'sk',
+      th: 'th', vi: 'vn', ms: 'my', ps: 'af', bg: 'bg', hr: 'hr', lv: 'lv',
+      lt: 'lt', ga: 'ie', is: 'is', mk: 'mk', az: 'az', mn: 'mn', so: 'so', to: 'to'
+    };
+
+    Object.entries(expectedMappings).forEach(([language, flag]) => {
+      expect(resolveTTSFlagCode({ code: language })).toBe(flag);
+    });
+    exposedLanguages.forEach((code) => {
+      const flag = resolveTTSFlagCode({ code });
+      if (code !== 'eo') expect(flag, `${code} should have a country flag`).not.toBe('un');
+      expect(existsSync(resolve('src/icons/flags', `${flag}.svg`)), `${code} -> ${flag}`).toBe(true);
+    });
+    expect(resolveTTSFlagCode({ code: 'eo' })).toBe('un');
+  });
 
   it('open seeds the draft from the store without aliasing it', async () => {
     mockSettingsStore.settings.TTS_PREFERRED_VOICES = {
