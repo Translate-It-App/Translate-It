@@ -44,6 +44,7 @@ export const formatFileSize = value => String(value)
     version: '1.0.0',
     description: 'Fixture extension',
     background: { service_worker: 'worker.js' },
+    permissions: ['<all_urls>'],
   }))
   return { workspace, buildDir }
 }
@@ -79,8 +80,20 @@ describe('validation output', () => {
     expect(text).not.toContain('├─ Chrome build directory found')
     expect(text).toContain('Path: ')
     expect(text).toContain('Manifest Version: V3')
-    expect(text).toContain('Total Files: 1')
+    expect(text).toContain('├─   Service worker correctly configured for Manifest V3')
+    expect(text).toContain('├─   Uses <all_urls> permission (required for translation)')
+    expect(text).not.toContain('├─   ℹ️')
+    expect(text).toContain('└─ Manifest validation completed\n')
+    expect(text).toContain('└─ Cross-browser validation completed\n')
+    expect(text).toContain('└─ Chrome analysis completed\n')
+    expect(text).toContain('└─ Package size within limits\n')
+    expect(text).toContain('├─ PACKAGE STATISTICS:')
+    expect(text).toContain('Size Limit:  128 MB (Chrome Web Store)')
     expect(text).toContain('Status: ✅ PASSED')
+    expect(text).toContain('Errors:     0')
+    expect(text).toContain('Warnings:   0')
+    expect(text).toContain('Notices:    0')
+    expect(text).toContain('Total Files: 1')
     expect(text.match(/✅/g)).toHaveLength(1)
     expect(text).not.toContain('├─ ✅')
     expect(text).not.toContain('Ready for Web Store')

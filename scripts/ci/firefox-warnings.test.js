@@ -31,7 +31,8 @@ function run(warnings, { errors = 0, notices = 0, raw, errorCodes, linterExitCod
   fs.mkdirSync(build)
   fs.mkdirSync(bin)
   fs.writeFileSync(path.join(build, 'manifest.json'), JSON.stringify({
-    manifest_version: 3, name: 'Fixture', version: '1.0', description: 'Fixture', permissions: []
+    manifest_version: 3, name: 'Fixture', version: '1.0', description: 'Fixture', permissions: [],
+    browser_specific_settings: { gecko: { id: 'fixture@example.invalid' } }
   }))
   fs.writeFileSync(path.join(build, 'bundle.js'), 'fixture')
   fs.writeFileSync(path.join(bin, 'addons-linter'), '#!/bin/sh\nprintf \'%s\' "$LINTER_OUTPUT"\nif [ -n "$LINTER_SIGNAL" ]; then kill -s "$LINTER_SIGNAL" $$; fi\nexit "$LINTER_EXIT_CODE"\n')
@@ -153,6 +154,29 @@ describe('Firefox known warning inventory', () => {
   it('succeeds for a zero-exit linter with a valid report', () => {
     const result = run([])
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain('Mozilla validation completed')
+    expect(result.stdout).toContain('└─ Mozilla validation completed\n\n')
+  })
+
+  it('prints plain compatibility rows and closes each successful section with a blank line', () => {
+    const result = run([])
+    expect(result.stdout).toContain('├─   Firefox-specific settings configured')
+    expect(result.stdout).toContain('├─   Extension ID: fixture@example.invalid')
+    expect(result.stdout).toContain('└─ Manifest validation completed\n\n')
+    expect(result.stdout).toContain('└─ Package size within limits\n\n')
+  })
+
+  it('formats the summary status and terminates the box without a separator or redundant success line', () => {
+    const passed = run([])
+    const summary = passed.stdout.slice(passed.stdout.indexOf('╔════════'))
+    expect(summary).toContain('Status: ✅ PASSED')
+    expect(summary).toMatch(/Notices:[\s\S]*?\n╚════════[^\n]*╝\n\n$/)
+    expect(summary).not.toMatch(/\n╠════════[^\n]*╣\n╚/)
+    expect(passed.stdout).not.toContain('Firefox validation completed')
+
+    const failed = run([], { errors: 1 })
+    expect(failed.status).toBe(1)
+    expect(failed.stdout).toContain('FIREFOX VALIDATION FAILED')
+    expect(failed.stdout).toContain('addons-linter found 1 error(s)')
+    expect(failed.stdout).not.toContain('Status: ✅ PASSED')
   })
 })

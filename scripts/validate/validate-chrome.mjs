@@ -145,7 +145,7 @@ async function validateChromeExtension() {
     }
     if (info.length > 0) {
       info.forEach(infoItem => {
-        console.log(`├─   ℹ️  ${infoItem}`)
+        console.log(`├─   ${infoItem}`)
       })
     }
     if (issues.length === 0 && warnings.length === 0) {

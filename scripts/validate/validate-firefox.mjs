@@ -4,7 +4,7 @@ import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { logStep, logSuccess, logError, logInfo } from '../shared/logger.mjs'
+import { logStep, logError, logInfo } from '../shared/logger.mjs'
 import { createBox, createErrorBox, centerText, emptyBoxLine, formatPackageSize, formatFileSize } from '../shared/box-utils.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -58,7 +58,7 @@ async function validateFirefoxExtension() {
     }
     console.log(`├─ Extension Name: ${substitutedManifest.name}`)
     console.log(`├─ Extension Version: ${substitutedManifest.version}`)
-    console.log('└─ Manifest validation completed')
+    console.log('└─ Manifest validation completed\n')
     
     // Step 3: Mozilla addons-linter validation
     // Ignored error codes (reserved features not yet implemented):
@@ -110,7 +110,7 @@ async function validateFirefoxExtension() {
       throw new Error(`addons-linter exited unexpectedly${exitStatus != null ? ` with status ${exitStatus}` : ''}${exitSignal ? ` after signal ${exitSignal}` : ''}`)
     }
     if (effectiveErrors > 0) throw new Error(`addons-linter found ${effectiveErrors} error(s)`)
-    logInfo('Mozilla validation completed')
+    console.log('└─ Mozilla validation completed\n')
     
     // Step 4: Firefox-specific analysis
     logStep('Analyzing Firefox compatibility...')
@@ -183,15 +183,14 @@ async function validateFirefoxExtension() {
     } else {
       const percentageUsed = ((stats.totalSize / (sizeLimit * 1024 * 1024)) * 100).toFixed(1)
       console.log(`├─   Usage:       ${percentageUsed}% of allowed size`)
-      logInfo('Package size within limits')
+      console.log('└─ Package size within limits\n')
     }
     
     // Final summary
     console.log('╔════════════════════════════════════════════════════════════════╗')
     console.log(`║${centerText('🦊 FIREFOX VALIDATION SUMMARY')}║`)
     console.log('╠════════════════════════════════════════════════════════════════╣')
-    const statusText = results.errors === 0 ? 'PASSED' : 'FAILED'
-    const statusLine = `Status:  ${statusText}`
+    const statusLine = results.errors === 0 ? 'Status: ✅ PASSED' : 'Status: ❌ FAILED'
     const errorLine = `Errors:    ${results.errors.toString().padStart(3, ' ')}`
     const warningLine = `Warnings:  ${results.warnings.toString().padStart(3, ' ')}`
     const noticeLine = `Notices:   ${results.notices.toString().padStart(3, ' ')}`
@@ -202,14 +201,11 @@ async function validateFirefoxExtension() {
     console.log(`║${centerText(warningLine)}║`)
     console.log(`║${centerText(noticeLine)}║`)
     console.log(emptyBoxLine())
-    console.log('╠════════════════════════════════════════════════════════════════╣')
     console.log('╚════════════════════════════════════════════════════════════════╝\n')
     
     if (results.errors > 0) {
       process.exit(1)
     }
-    logSuccess('Firefox validation completed')
-    
   } catch (error) {
     console.log(createErrorBox('🦊 FIREFOX VALIDATION FAILED') + '\n')
     const horizontalLine = '═'.repeat(64)
