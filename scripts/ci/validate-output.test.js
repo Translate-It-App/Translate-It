@@ -59,8 +59,8 @@ printf 'web-ext executed successfully\n'
 `, { mode: 0o755 })
 }
 
-function run(script, workspace, bin) {
-  return spawnSync(process.execPath, [script], {
+function run(script, workspace, bin, args = []) {
+  return spawnSync(process.execPath, [script, ...args], {
     cwd: workspace,
     env: { ...process.env, PATH: bin },
     encoding: 'utf8',
@@ -162,6 +162,24 @@ exit 0
     expect(text).not.toContain('Chrome validation completed successfully')
     expect(text).not.toContain('Firefox validation completed successfully')
     expect(text).not.toContain('Production bundle validation completed successfully')
+  })
+
+  it('forwards --verbose to the Firefox validator only', () => {
+    const { workspace } = createWorkspace()
+    const bin = path.join(tempDir, 'bin')
+    const argsFile = path.join(tempDir, 'args.txt')
+    fs.mkdirSync(bin, { recursive: true })
+    fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh
+printf '%s %s\\n' "$1" "$2" >> "${argsFile}"
+exit 0
+`, { mode: 0o755 })
+
+    const result = run('scripts/validate/validate-all.mjs', workspace, bin, ['--verbose'])
+    expect(result.status).toBe(0)
+    const invocations = fs.readFileSync(argsFile, 'utf8')
+    expect(invocations).toContain('scripts/validate/validate-firefox.mjs --verbose')
+    expect(invocations).not.toContain('scripts/validate/validate-chrome.mjs --verbose')
+    expect(invocations).not.toContain('scripts/validate/validate-production-bundle.mjs --verbose')
   })
 
   it('propagates aggregate failures with actionable diagnostics and duration', () => {

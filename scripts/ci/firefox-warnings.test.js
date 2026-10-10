@@ -23,7 +23,7 @@ function fixtureWarnings(entries = baseline) {
   })))
 }
 
-function run(warnings, { errors = 0, notices = 0, raw, errorCodes, linterExitCode = 0, linterSignal } = {}) {
+function run(warnings, { errors = 0, notices = 0, raw, errorCodes, linterExitCode = 0, linterSignal, verbose = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'firefox-warning-test-'))
   tempDirs.push(dir)
   const build = path.join(dir, 'build')
@@ -46,7 +46,7 @@ function run(warnings, { errors = 0, notices = 0, raw, errorCodes, linterExitCod
   let stdout = ''
   let status = 0
   try {
-    stdout = execFileSync(process.execPath, [path.join(root, 'scripts/validate/validate-firefox.mjs')], {
+    stdout = execFileSync(process.execPath, [path.join(root, 'scripts/validate/validate-firefox.mjs'), ...(verbose ? ['--verbose'] : [])], {
       encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FIREFOX_BUILD_DIR: build, LINTER_OUTPUT: output, LINTER_EXIT_CODE: String(linterExitCode), LINTER_SIGNAL: linterSignal ?? '' }
     })
   } catch (error) {
@@ -57,31 +57,35 @@ function run(warnings, { errors = 0, notices = 0, raw, errorCodes, linterExitCod
 }
 
 describe('Firefox known warning inventory', () => {
-  it('matches exactly the 16-item baseline', () => {
+  it('summarizes the 16-item baseline without printing known warning details by default', () => {
     const result = run(fixtureWarnings())
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain('Known 16 / New 0 warnings')
-    expect(result.stdout).toContain('Warnings: 16')
-    expect(result.stdout).toContain('· KNOWN ')
-    expect(result.stdout).not.toContain('⚠️ KNOWN')
+    expect(result.stdout).toContain('Warnings: 16 (16 known, 0 new)')
+    expect(result.stdout).not.toContain('· KNOWN ')
+    for (const item of baseline) {
+      expect(result.stdout).not.toContain(item.code)
+      expect(result.stdout).not.toContain(item.file)
+      expect(result.stdout).not.toContain(item.messagePrefix)
+    }
+    expect(result.stdout).toContain('ℹ️ Known warnings match the reviewed baseline; this is not a safety assessment')
   })
 
   it('reports an unknown warning as new and keeps its details visible', () => {
     const item = warning({ code: 'UNEXPECTED_CODE', message: 'Unexpected warning detail', file: 'new.js' })
     const result = run([...fixtureWarnings(), item])
-    expect(result.stdout).toContain('Known 16 / New 1 warnings')
+    expect(result.stdout).toContain('Warnings: 17 (16 known, 1 new)')
     expect(result.stdout).toContain('⚠️ NEW UNEXPECTED_CODE new.js: Unexpected warning detail')
   })
 
   it('classifies an occurrence beyond a known count as new', () => {
     const known = fixtureWarnings()
     const result = run([...known, { ...known[0] }])
-    expect(result.stdout).toContain('Known 16 / New 1 warnings')
+    expect(result.stdout).toContain('Warnings: 17 (16 known, 1 new)')
   })
 
   it('reports known warnings that are absent without pretending they were seen', () => {
     const result = run(fixtureWarnings(baseline.slice(1)))
-    expect(result.stdout).toContain('Known 14 / New 0 warnings')
+    expect(result.stdout).toContain('Warnings: 14 (14 known, 0 new)')
     expect(result.stdout).toContain('expected 2, observed 0')
   })
 
@@ -89,7 +93,7 @@ describe('Firefox known warning inventory', () => {
     const warnings = fixtureWarnings()
     warnings.push({ ...warnings[0], file: 'unlisted.js' })
     const result = run(warnings)
-    expect(result.stdout).toContain('Known 16 / New 1 warnings')
+    expect(result.stdout).toContain('Warnings: 17 (16 known, 1 new)')
     expect(result.stdout).toContain('unlisted.js')
   })
 
@@ -155,6 +159,15 @@ describe('Firefox known warning inventory', () => {
     const result = run([])
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('└─ Mozilla validation completed\n\n')
+  })
+
+  it('prints known warning details only with --verbose while new warnings remain visible', () => {
+    const item = warning({ code: 'UNEXPECTED_CODE', message: 'Unexpected warning detail', file: 'new.js' })
+    const result = run([...fixtureWarnings(), item], { verbose: true })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('Warnings: 17 (16 known, 1 new)')
+    expect(result.stdout).toContain('· KNOWN ')
+    expect(result.stdout).toContain('⚠️ NEW UNEXPECTED_CODE new.js: Unexpected warning detail')
   })
 
   it('prints plain compatibility rows and closes each successful section with a blank line', () => {

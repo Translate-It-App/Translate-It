@@ -94,16 +94,19 @@ async function validateFirefoxExtension() {
     results.errors += effectiveErrors
     results.warnings += report.warnings
     results.notices += report.notices
+    const classification = classifyWarnings(report.warningItems, knownBaseline)
+    const verbose = process.argv.includes('--verbose')
     console.log('├─ VALIDATION RESULTS:')
     console.log(`├─   Errors:   ${effectiveErrors}${ignoredErrors ? ` (${ignoredErrors} ignored)` : ''}`)
-    console.log(`├─   Warnings: ${report.warnings}`)
+    console.log(`├─   Warnings: ${report.warnings} (${classification.known} known, ${classification.new.length} new)`)
     console.log(`├─   Notices:  ${report.notices}`)
-    if (report.warningItems) {
-      const classification = classifyWarnings(report.warningItems, knownBaseline)
-      console.log(`├─   Known ${classification.known} / New ${classification.new.length} warnings`)
-      for (const item of classification.new) console.log(`⚠️ NEW ${item.code} ${item.file}: ${item.message}`)
+    if (verbose) {
       for (const item of classification.knownItems) console.log(`· KNOWN ${item.code} ${item.file}: ${item.message}`)
-      for (const item of classification.missing) console.log(`ℹ️ Known baseline absent: ${item.file} | ${item.messagePrefix} expected ${item.expected}, observed ${item.observed}`)
+    }
+    for (const item of classification.new) console.log(`⚠️ NEW ${item.code} ${item.file}: ${item.message}`)
+    for (const item of classification.missing) console.log(`ℹ️ Known baseline absent: ${item.file} | ${item.messagePrefix} expected ${item.expected}, observed ${item.observed}`)
+    if (classification.new.length === 0 && classification.missing.length === 0) {
+      console.log('ℹ️ Known warnings match the reviewed baseline; this is not a safety assessment')
     }
     const ignoredErrorExit = exitStatus === 1 && !exitSignal && !spawnError && effectiveErrors === 0 && ignoredErrors > 0 && report.errorItems.every(item => IGNORED_ERROR_CODES.includes(item.code))
     if ((exitStatus !== 0 || exitSignal || spawnError) && !ignoredErrorExit) {

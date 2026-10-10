@@ -217,4 +217,17 @@ gate, not a development-time check.
 
 ## Firefox Validation — Known Warnings
 
-The Firefox addons-linter reports a reviewed set of existing warnings; the baseline keeps new warnings distinguishable without hiding known findings. The inventory is `scripts/validate/firefox-known-warnings.json`. **Known** means a warning matches its code, stable message prefix, file, and allowed count; **New** includes unmatched or excess warnings. Both remain visible in validation output. Investigate warnings before changing the baseline, and update it only after review. A known warning is not necessarily safe. Local validation success does not imply Mozilla Add-ons store acceptance.
+The Firefox addons-linter warning summary is concise by default: it reports the total and known/new counts, keeps new warning details visible, and reports baseline entries that were not observed. Known warning details are shown with `--verbose`:
+
+```sh
+pnpm run validate:firefox
+pnpm run validate:firefox -- --verbose
+```
+
+The aggregate validator forwards the verbose flag to Firefox:
+
+```sh
+pnpm run validate -- --verbose
+```
+
+The inventory is `scripts/validate/firefox-known-warnings.json`. **Known** means a warning matches its code, stable message prefix, file, and allowed count; **New** includes unmatched or excess warnings. A known warning is not necessarily safe. Investigate warnings before changing the baseline, and update it only after review. Local validation success does not imply Mozilla Add-ons store acceptance.

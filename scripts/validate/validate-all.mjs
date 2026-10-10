@@ -31,7 +31,7 @@ async function validateAll() {
     // Step 2: Validate Firefox
     logStep('Validating Firefox extension...')
     try {
-      execSync('node scripts/validate/validate-firefox.mjs', {
+      execSync(`node scripts/validate/validate-firefox.mjs${process.argv.includes('--verbose') ? ' --verbose' : ''}`, {
         stdio: 'inherit',
         cwd: process.cwd()
       })
