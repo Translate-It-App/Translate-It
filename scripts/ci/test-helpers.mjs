@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from 'node:fs';
+import { writeFileSync, statSync, accessSync, constants } from 'node:fs';
 import { delimiter, join } from 'node:path';
 
 // Shared helpers for the CI shell-script tests so they behave the same on
@@ -38,13 +38,33 @@ export function createBashEnvPreload(mockDir, env) {
 
 // Locate an executable on PATH without relying on POSIX-only tools such as
 // `which`, which is not available to native Windows Node processes.
+// Directories and other non-file candidates are skipped, as are files the
+// current user cannot execute on POSIX; the search continues until a valid
+// candidate is found.
+function isExecutableFile(fullPath) {
+  let stat;
+  try {
+    stat = statSync(fullPath);
+  } catch {
+    return false;
+  }
+  if (!stat.isFile()) return false;
+  if (process.platform === 'win32') return true;
+  try {
+    accessSync(fullPath, constants.X_OK);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 export function resolveExecutable(name) {
   const candidates = process.platform === 'win32' ? [`${name}.exe`, `${name}.cmd`, `${name}.bat`, name] : [name];
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     if (!dir) continue;
     for (const candidate of candidates) {
       const fullPath = join(dir, candidate);
-      if (existsSync(fullPath)) return fullPath;
+      if (isExecutableFile(fullPath)) return fullPath;
     }
   }
   throw new Error(`Unable to locate ${name} on PATH.`);
