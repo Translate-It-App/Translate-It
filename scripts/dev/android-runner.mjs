@@ -4,7 +4,7 @@ import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { logStep, logSuccess, logError } from '../shared/logger.mjs'
+import { logStep, logSuccess, logError, logInfo } from '../shared/logger.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '../..')
@@ -114,7 +114,7 @@ async function runAndroid() {
     let webExtCommand = `web-ext run -t firefox-android --source-dir "${FIREFOX_BUILD_DIR}" --android-device "${deviceIp}"`
     
     if (firefoxPackage) {
-      logStep(`Using Firefox package: ${firefoxPackage}`)
+      logInfo(`Using Firefox package: ${firefoxPackage}`)
       webExtCommand += ` --firefox-apk="${firefoxPackage}"`
     }
     
@@ -126,7 +126,7 @@ async function runAndroid() {
   } catch (error) {
     // execSync throws if the process exits with non-zero code or is interrupted (e.g., Ctrl+C)
     if (error.status === null) {
-      logSuccess('Android runner stopped (SIGINT)')
+      logInfo('Android runner stopped (SIGINT)')
     } else {
       logError('Android deployment failed:', error.message)
       process.exit(1)

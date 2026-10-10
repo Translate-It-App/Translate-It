@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execSync } from 'child_process'
-import { logStep, logSuccess, logError } from '../shared/logger.mjs'
+import { logStep, logError } from '../shared/logger.mjs'
 import { createBox, centerText, emptyBoxLine } from '../shared/box-utils.mjs'
 
 /**
@@ -21,7 +21,6 @@ async function validateAll() {
         stdio: 'inherit',
         cwd: process.cwd()
       })
-      logSuccess('Chrome validation completed successfully')
     } catch (error) {
       logError('Chrome validation failed')
       totalErrors++
@@ -32,11 +31,10 @@ async function validateAll() {
     // Step 2: Validate Firefox
     logStep('Validating Firefox extension...')
     try {
-      execSync('node scripts/validate/validate-firefox.mjs', {
+      execSync(`node scripts/validate/validate-firefox.mjs${process.argv.includes('--verbose') ? ' --verbose' : ''}`, {
         stdio: 'inherit',
         cwd: process.cwd()
       })
-      logSuccess('Firefox validation completed successfully')
     } catch (error) {
       logError('Firefox validation failed')
       totalErrors++
@@ -51,7 +49,6 @@ async function validateAll() {
         stdio: 'inherit',
         cwd: process.cwd()
       })
-      logSuccess('Production bundle validation completed successfully')
     } catch (error) {
       logError('Production bundle validation failed')
       totalErrors++
@@ -65,12 +62,11 @@ async function validateAll() {
       console.log(`║${centerText('✅ ALL VALIDATIONS PASSED')}║`)
       console.log('╠════════════════════════════════════════════════════════════════╣')
       console.log(emptyBoxLine())
-      console.log(`║${centerText('🕸 Chrome Extension: Ready for Web Store')}║`)
-      console.log(`║${centerText('🦊 Firefox Extension: Ready for Add-ons Store')}║`)
+      console.log(`║${centerText('🕸 Chrome Extension: Passed')}║`)
+      console.log(`║${centerText('🦊 Firefox Extension: Passed')}║`)
       console.log(emptyBoxLine())
       console.log('╠════════════════════════════════════════════════════════════════╣')
       console.log(`║${centerText(`⏱️ Total validation time: ${duration}s`)}║`)
-      console.log(`║${centerText('✅ Extensions ready for submission!')}║`)
     } else {
       console.log(`║${centerText('❌ VALIDATION FAILED')}║`)
       console.log('╠════════════════════════════════════════════════════════════════╣')
@@ -82,10 +78,7 @@ async function validateAll() {
     console.log('╚════════════════════════════════════════════════════════════════╝\n')
     
     if (totalErrors > 0) {
-      logError(`${totalErrors} validation(s) failed`)
       process.exit(1)
-    } else {
-      logSuccess('All extensions validated successfully!')
     }
     
   } catch (error) {

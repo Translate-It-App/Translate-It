@@ -1,5 +1,5 @@
 import { logStep, logSuccess, logError, logInfo } from './logger.mjs'
-import { formatFileSize, formatPackageSize } from './box-utils.mjs'
+import { formatFileSize, formatPackageSize, formatDuration } from './box-utils.mjs'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -112,14 +112,12 @@ export class BuildReporter {
     const browserLabel = 'Browser'
     const outputLabel = 'Output Directory'
     const modeLabel = 'Build Mode'
-    const versionLabel = 'Vue Version'
 
     // Find the maximum label length
     const maxLabelLength = Math.max(
       browserLabel.length,
       outputLabel.length,
-      modeLabel.length,
-      versionLabel.length
+      modeLabel.length
     )
 
     // Browser line
@@ -135,20 +133,16 @@ export class BuildReporter {
     // Build Mode line
     const modeValue = process.env.NODE_ENV || 'Production'
     const modeLine = this.padRight(`${modeLabel}:`, LABEL_WIDTH - 3)
-    console.log(`├─ ${modeLine} ${modeValue}`)
-
-    // Vue Version line
-    const versionValue = '3.5.18'
-    const versionLine = this.padRight(`${versionLabel}:`, LABEL_WIDTH - 3)
-    console.log(`└─ ${versionLine} ${versionValue}\n`)
+    console.log(`└─ ${modeLine} ${modeValue}\n`)
   }
 
   /**
    * Log build steps
    */
   logBuildStep(step, status = 'in-progress') {
-    const icon = status === 'completed' ? '✅' : status === 'failed' ? '❌' : '⚡'
-    const duration = status === 'completed' ? `(${((Date.now() - this.startTime) / 1000).toFixed(1)}s)` : ''
+    const icon = status === 'failed' ? '❌' : status === 'in-progress' ? '⚡' : '·'
+    const duration = status === 'completed' ? `(${formatDuration(Date.now() - this.startTime)})` : ''
+    const prefix = status === 'completed' ? '└─' : '├─'
 
     // Only print header for first call
     if (!this._buildProcessStarted) {
@@ -157,24 +151,14 @@ export class BuildReporter {
     }
 
     // Use consistent label width for alignment
-    const stepLine = this.padRight(`${icon} ${step}`, LABEL_WIDTH - 3) // -3 for "├─ "
+    const stepLine = this.padRight(`${icon} ${step}`, LABEL_WIDTH - 3) // -3 for tree prefix
 
     if (duration) {
-      console.log(`├─ ${stepLine} ${duration}`)
+      console.log(`${prefix} ${stepLine} ${duration}`)
     } else {
-      console.log(`├─ ${stepLine}`)
+      console.log(`${prefix} ${stepLine}`)
     }
 
-    if (status === 'completed') {
-      const browserType = this.browser === 'chrome' ? 'Chrome V3' : 'Firefox V3'
-      const manifestLine = this.padRight(`${icon} Manifest generation...`, LABEL_WIDTH - 3)
-      const assetLine = this.padRight(`${icon} Asset optimization...`, LABEL_WIDTH - 3)
-      const bundleLine = this.padRight(`${icon} Bundle compression...`, LABEL_WIDTH - 3)
-
-      console.log(`├─ ${manifestLine} ✅ ${browserType} Ready`)
-      console.log(`├─ ${assetLine} ✅ Optimized`)
-      console.log(`└─ ${bundleLine} ✅ Compressed\n`)
-    }
   }
 
   /**
@@ -191,9 +175,8 @@ export class BuildReporter {
         if (fs.existsSync(filePath)) {
           const size = fs.statSync(filePath).size
           const sizeStr = formatFileSize(size)
-          const improvement = this.calculateImprovement(file, size)
           const fileAligned = this.padRight(`${this.getFileIcon(file)} ${file}`, LABEL_WIDTH - 3)
-          console.log(`├─ ${fileAligned} → ${sizeStr.padStart(9)} ${improvement}`)
+          console.log(`├─ ${fileAligned} → ${sizeStr.padStart(9)}`)
         }
       })
 
@@ -203,24 +186,21 @@ export class BuildReporter {
         const jsFiles = this.getMainJSFiles(jsDir)
         jsFiles.forEach(({ file, size }) => {
           const sizeStr = formatFileSize(size)
-          const improvement = this.calculateImprovement(file, size)
           const fileAligned = this.padRight(`${this.getFileIcon(file)} ${file}`, LABEL_WIDTH - 3)
-          console.log(`├─ ${fileAligned} → ${sizeStr.padStart(9)} ${improvement}`)
+          console.log(`├─ ${fileAligned} → ${sizeStr.padStart(9)}`)
         })
       }
 
       // Calculate total
       const totalStats = this.calculateTotalSize(buildPath)
       const totalSizeStr = formatFileSize(totalStats.totalSize)
-      const totalImprovement = this.calculateImprovement('total', totalStats.totalSize)
-
       const totalAligned = this.padRight(`📊 Total Size:`, LABEL_WIDTH - 3)
-      console.log(`└─ ${totalAligned} → ${totalSizeStr.padStart(9)} ${totalImprovement}\n`)
+      console.log(`└─ ${totalAligned} → ${totalSizeStr.padStart(9)}\n`)
       
       return totalStats
     } catch (error) {
       logError('Failed to analyze build:', error.message)
-      return { totalSize: 0, fileCount: 0 }
+      return null
     }
   }
 
@@ -283,31 +263,6 @@ export class BuildReporter {
   }
 
   /**
-   * Calculate improvement percentage (mock data for now)
-   */
-  calculateImprovement(file, size) {
-    // Mock webpack sizes for comparison
-    const webpackSizes = {
-      'popup.html': 20480,      // 20KB
-      'options.html': 23552,    // 23KB  
-      'sidepanel.html': 24576,  // 24KB
-      'popup.js': 1048576,      // 1MB
-      'options.js': 1310720,    // 1.25MB
-      'sidepanel.js': 1179648,  // 1.125MB
-      'total': 5242880          // 5MB
-    }
-
-    const oldSize = webpackSizes[file] || size * 2
-    const improvement = Math.max(0, Math.round(((oldSize - size) / oldSize) * 100))
-    
-    if (improvement > 0) {
-      return `(↓${improvement}% from webpack)`
-    }
-    return '(new)'
-  }
-
-  
-  /**
    * Get file icon based on type
    */
   getFileIcon(file) {
@@ -323,19 +278,14 @@ export class BuildReporter {
    * Show final success message
    */
   success(buildStats) {
-    const duration = ((Date.now() - this.startTime) / 1000).toFixed(1)
+    const duration = formatDuration(Date.now() - this.startTime)
     const browserName = this.browser.toUpperCase()
-    const storeName = this.browser === 'chrome' ? 'Chrome Web Store' : 'Firefox Add-ons'
-
     console.log('╔════════════════════════════════════════════════════════════════╗')
 
-    const centeredText = this.centerText('✅ BUILD SUCCESSFUL')
+    const centeredText = this.centerText(`✅ ${browserName} BUILD SUCCESSFUL`)
     console.log(`║${centeredText}║`)
 
-    const storeLine = `${this.browserIcon} Ready for ${storeName} submission!`
-    console.log(`║${this.centerText(storeLine)}║`)
-
-    const timeLine = `⏱ Build completed in ${duration}s`
+    const timeLine = `⏱ Build completed in ${duration}`
     console.log(`║${this.centerText(timeLine)}║`)
 
     if (buildStats) {

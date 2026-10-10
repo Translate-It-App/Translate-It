@@ -214,3 +214,20 @@ gate, not a development-time check.
 3.  **Audit Non-Whitelisted Warnings**: If a warning appears during compilation, inspect it immediately — it represents a real dependency conflict or bundling mistake.
 
 **Last Updated:** May 2026
+
+## Firefox Validation — Known Warnings
+
+The Firefox addons-linter warning summary is concise by default: it reports the total and known/new counts, keeps new warning details visible, and reports baseline entries that were not observed. Known warning details are shown with `--verbose`:
+
+```sh
+pnpm run validate:firefox
+pnpm run validate:firefox -- --verbose
+```
+
+The aggregate validator forwards the verbose flag to Firefox:
+
+```sh
+pnpm run validate -- --verbose
+```
+
+The inventory is `scripts/validate/firefox-known-warnings.json`. **Known** means a warning matches its code, stable message prefix, file, and allowed count; **New** includes unmatched or excess warnings. A known warning is not necessarily safe. Investigate warnings before changing the baseline, and update it only after review. Local validation success does not imply Mozilla Add-ons store acceptance.
