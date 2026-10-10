@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * Utility for creating centered console boxes
  */

@@ -99,13 +99,12 @@ function runAggregate(workspace, args = [], { failFirefox = false } = {}) {
     '}',
     'syncBuiltinESMExports()'
   ].join('\n'))
-  return spawnSync(process.execPath, ['scripts/validate/validate-all.mjs', ...args], {
+  return spawnSync(process.execPath, ['--require', preload, 'scripts/validate/validate-all.mjs', ...args], {
     cwd: workspace,
     env: {
       ...process.env,
       AGGREGATE_CALLS: callsFile,
-      AGGREGATE_FAIL_FIREFOX: failFirefox ? '1' : '0',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require="${preload}"`.trim()
+      AGGREGATE_FAIL_FIREFOX: failFirefox ? '1' : '0'
     },
     encoding: 'utf8'
   })

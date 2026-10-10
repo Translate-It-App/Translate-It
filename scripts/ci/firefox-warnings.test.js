@@ -65,8 +65,8 @@ function run(warnings, { errors = 0, notices = 0, raw, errorCodes, linterExitCod
   let stdout = ''
   let status = 0
   try {
-    stdout = execFileSync(process.execPath, [path.join(root, 'scripts/validate/validate-firefox.mjs'), ...(verbose ? ['--verbose'] : [])], {
-      encoding: 'utf8', env: { ...process.env, FIREFOX_BUILD_DIR: build, LINTER_OUTPUT: output, LINTER_EXIT_CODE: String(linterExitCode), LINTER_SIGNAL: linterSignal ?? '', LINTER_STDERR: linterStderr, LINTER_ERROR_MESSAGE: linterErrorMessage ?? '', NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require="${preload}"`.trim() }
+    stdout = execFileSync(process.execPath, ['--require', preload, path.join(root, 'scripts/validate/validate-firefox.mjs'), ...(verbose ? ['--verbose'] : [])], {
+      encoding: 'utf8', env: { ...process.env, FIREFOX_BUILD_DIR: build, LINTER_OUTPUT: output, LINTER_EXIT_CODE: String(linterExitCode), LINTER_SIGNAL: linterSignal ?? '', LINTER_STDERR: linterStderr, LINTER_ERROR_MESSAGE: linterErrorMessage ?? '' }
     })
   } catch (error) {
     stdout = error.stdout || ''
