@@ -4,11 +4,11 @@
 
 - Improved the Settings page layout, navigation, and usability across desktop and mobile devices.
 - Improved Auto Page Translation controls and rule management.
-- Improved AI-powered Page Translation performance.
+- Improved AI-powered Page Translation performance. (by [@H4M4CHi-ttr](https://github.com/H4M4CHi-ttr))
 
 ##### Fixed
 
-- Fixed Page Translation issues on websites with dynamic navigation.
+- Fixed Page Translation issues on websites with dynamic navigation. (by [@H4M4CHi-ttr](https://github.com/H4M4CHi-ttr))
 - Improved keyboard shortcut reliability for Select Element and Text Field translation.
 - Fixed Text-to-Speech button visibility and language flag display issues.
 
