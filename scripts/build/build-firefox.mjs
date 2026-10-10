@@ -5,7 +5,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { BuildReporter } from '../shared/build-reporter.mjs'
-import { logStep, logSuccess, logError } from '../shared/logger.mjs'
+import { logStep, logError } from '../shared/logger.mjs'
 import { formatPackageSize } from '../shared/box-utils.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -61,17 +61,13 @@ async function buildFirefoxExtension() {
     
     const zipStats = fs.statSync(path.join(rootDir, FIREFOX_ZIP_PATH))
     const sizeStr = formatPackageSize(zipStats.size)
-    logSuccess(`Firefox package created: ${sizeStr}`)
+    logStep(`ZIP created: ${FIREFOX_ZIP_PATH} (${sizeStr})`)
 
     // Step 4: Analyze build output
     const buildStats = reporter.analyzeBuild(path.join(rootDir, FIREFOX_BUILD_DIR))
 
     // Step 5: Success
     reporter.success(buildStats)
-    
-    logSuccess('Firefox extension build completed successfully!')
-    logStep(`Build location: ${FIREFOX_BUILD_DIR}`)
-    logStep(`Package location: ${FIREFOX_ZIP_PATH}`)
     
   } catch (error) {
     reporter.error(error.message)

@@ -5,7 +5,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { BuildReporter } from '../shared/build-reporter.mjs'
-import { logStep, logSuccess, logError } from '../shared/logger.mjs'
+import { logStep, logError } from '../shared/logger.mjs'
 import { formatPackageSize } from '../shared/box-utils.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -60,17 +60,13 @@ async function buildChromeExtension() {
     
     const zipStats = fs.statSync(path.join(rootDir, CHROME_ZIP_PATH))
     const sizeStr = formatPackageSize(zipStats.size)
-    logSuccess(`Chrome package created: ${sizeStr}`)
+    logStep(`ZIP created: ${CHROME_ZIP_PATH} (${sizeStr})`)
 
     // Step 4: Analyze build output
     const buildStats = reporter.analyzeBuild(path.join(rootDir, CHROME_BUILD_DIR))
 
     // Step 5: Success
     reporter.success(buildStats)
-    
-    logSuccess('Chrome extension build completed successfully!')
-    logStep(`Build location: ${CHROME_BUILD_DIR}`)
-    logStep(`Package location: ${CHROME_ZIP_PATH}`)
     
   } catch (error) {
     reporter.error(error.message)
