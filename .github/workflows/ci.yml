@@ -73,6 +73,9 @@ jobs:
       - name: Lint styles
         run: pnpm run lint:styles
 
+      - name: Validate localization catalogs
+        run: pnpm run i18n:validate
+
       - name: Run tests
         run: pnpm run test:run
 

@@ -29,6 +29,7 @@
     "setup:chrome-validator": "pnpm add -D web-ext",
     "i18n:sync:status": "node scripts/localization/sync-i18n.cjs",
     "i18n:sync:fix": "node scripts/localization/sync-i18n.cjs --fix",
+    "i18n:validate": "node scripts/localization/validate-i18n.cjs",
     "i18n:check": "node scripts/localization/check-i18n.cjs",
     "i18n:check:fix": "node scripts/localization/check-i18n.cjs --remove",
     "i18n:purge": "node scripts/localization/purge-notes.cjs",
