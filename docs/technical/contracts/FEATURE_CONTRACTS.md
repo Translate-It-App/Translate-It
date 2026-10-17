@@ -70,7 +70,7 @@ Additional invariants:
 
 | Feature | Mutation owner | Partial success | Revert support | Timeout owner | Cancellation owner |
 | ------- | -------------- | --------------- | -------------- | ------------- | ------------------ |
-| Selection Window | none (read-only overlay) | n/a (single result) | not needed | `TranslationHandler` (window manager) | `WindowsManager.cancelCurrentTranslation` |
+| Selection Window | none (read-only overlay) | n/a (single result) | not needed (source page unchanged) | `TranslationHandler` (window manager) | `WindowsManager.cancelCurrentTranslation` |
 | Inline Selection | none (tooltip overlay) | n/a (single result) | not needed | `TranslationHandler.performTranslation` | `HoverTranslationManager._cancelPendingHover` |
 | Select Element | `DomTranslatorAdapter` + `BlockGroupReconstructor` | yes (per-unit, A/B/C kept) | manual via `SelectElementManager.revertTranslations` | pipeline (`ErrorTypes.TRANSLATION_TIMEOUT`) | selection: single Esc via `SelectElementManager`; global cancellation/revert: non-consuming Double Esc |
 | Field | smart-handler replacement service | n/a (single value) | no (write-on-apply) | shared pipeline | `cancelTranslation` via `useUnifiedTranslation` / `dataStore.abortExistingRequest` |
@@ -98,6 +98,9 @@ Modes: text-selection window (`SelectionWindow`), `Selection`/`Selection_Window`
 - **Closed or stale window must not accept late results.** `useWindowsManager.handleUpdateWindow` drops updates whose `id` is no longer present ("Window was closed before translation completed"); a late result cannot recreate a dismissed window. `TranslationHandler` also keys on `messageId` and returns `false` for unmatched results.
 - **No revert needed** because the source is never mutated.
 - **Source-equal translation remains valid.** It is non-destructive and stored as normal content.
+- **Original source is editable in the window.** Enter confirms a changed, nonblank source; Shift+Enter inserts a newline, Escape restores the current source, and Enter during IME composition does not submit. The page source remains untouched.
+- **Successful snapshots can be navigated within the window.** The window keeps its successful source/result and provider/language context in memory; previous/next restores that snapshot without a translation request or changing a global preference. Repeating the current snapshot is deduplicated, while a successful translation after navigating backward starts a new branch and discards the forward branch. Failed translations are not added; Retry uses the currently edited source.
+- **Request lifetime remains window-scoped.** A confirmed source change, newer request, or history navigation makes prior work stale; cancellation or closing the window prevents late results from updating it. Pinned and docked windows reuse the same window state and history.
 
 ---
 

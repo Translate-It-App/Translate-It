@@ -8,7 +8,9 @@ import { TranslationHandler as WindowsTranslationHandler } from "./translation/T
 import { ClickManager } from "./interaction/ClickManager.js";
 import { ThemeManager } from "./theme/ThemeManager.js";
 import { ErrorHandler } from "@/shared/error-management/ErrorHandler.js";
+import { ErrorTypes } from "@/shared/error-management/ErrorTypes.js";
 import ResourceTracker from '@/core/memory/ResourceTracker.js';
+import { WindowsManagerEvents } from '@/core/PageEventBus.js';
 
 // New specialized managers
 import { DisplayManager } from "./display/DisplayManager.js";
@@ -160,20 +162,65 @@ export class WindowsManager extends ResourceTracker {
   }
 
   async _startTranslationProcess(selectedText, windowId = null, options = {}) {
+    const requestId = (this.state.translationGeneration || 0) + 1;
+    this.state.translationGeneration = requestId;
+    this.translationHandler.cancelAllTranslations?.();
+    const isCurrent = () => this.state.translationGeneration === requestId;
     try {
       const translationOptions = { ...options, windowId };
       if (this.state.provider && !options.provider) {
         translationOptions.provider = this.state.provider;
       }
+      translationOptions.isCurrent = isCurrent;
       const result = await this.translationHandler.performTranslation(selectedText, translationOptions);
-      if (this.state.isTranslationCancelled) return null;
-      return result;
+      if (!isCurrent() || this.state.isTranslationCancelled || result?.cancelled) return null;
+      if (result?.success === false || typeof result?.translatedText !== 'string' || !result.translatedText.trim()) {
+        const error = new Error(ErrorTypes.API_RESPONSE_INVALID);
+        error.type = ErrorTypes.API_RESPONSE_INVALID;
+        throw error;
+      }
+      if (windowId) this.state.commitTranslation?.(selectedText, result, options);
+      return { ...result, _requestId: requestId };
     } catch (error) {
-      if (this.state.isTranslationCancelled || error.message === 'Translation cancelled') {
+      if (!isCurrent() || this.state.isTranslationCancelled || error.message === 'Translation cancelled') {
         return null;
       }
+      error._requestId = requestId;
       throw error;
     }
+  }
+
+  _isCurrentTranslation(requestId) {
+    return this.state.translationGeneration === requestId;
+  }
+
+  _historyUpdate(entry) {
+    if (!entry) return {};
+    return {
+      selectedText: entry.sourceText,
+      historyIndex: this.state.historyIndex,
+      historyLength: this.state.translationHistory.length,
+      historyProvider: entry.provider || '',
+    };
+  }
+
+  _navigateTranslationHistory(id, direction) {
+    const nextIndex = this.state.historyIndex + (direction === 'previous' ? -1 : 1);
+    if (nextIndex < 0 || nextIndex >= this.state.translationHistory.length) return;
+    const entry = this.state.navigateHistory(direction);
+    if (!entry) return;
+    ++this.state.translationGeneration;
+    this.translationHandler.cancelAllTranslations?.();
+    WindowsManagerEvents.updateWindow(id, {
+      isLoading: false, isStreaming: false, isError: false,
+      initialTranslatedText: entry.translatedText,
+      provider: entry.provider,
+      sourceLanguage: entry.sourceLanguage,
+      detectedSourceLanguage: entry.detectedSourceLanguage,
+      targetLanguage: entry.targetLanguage,
+      mode: entry.mode,
+      ...this._historyUpdate(entry),
+    });
   }
 
   isTextFieldElement(element) {

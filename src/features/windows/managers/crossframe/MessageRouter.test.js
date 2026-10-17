@@ -211,6 +211,35 @@ describe('MessageRouter', () => {
       }), '*');
     });
 
+    it('broadcastOutsideClick forwards bounded gesture identity into the payload', () => {
+      mockFrameRegistry.isInIframe = true;
+      const parentPostMessage = vi.fn();
+      vi.stubGlobal('parent', { postMessage: parentPostMessage });
+
+      messageRouter.broadcastOutsideClick(
+        { target: { tagName: 'DIV', className: 'test' }, pointerId: 3 },
+        { pointerId: 3, fromCrossDocumentGesture: true },
+      );
+
+      const [message] = parentPostMessage.mock.calls[0];
+      expect(message.pointerId).toBe(3);
+      expect(message.fromCrossDocumentGesture).toBe(true);
+    });
+
+    it('broadcastOutsideClick defaults identity fields to non-suppressing values', () => {
+      mockFrameRegistry.isInIframe = true;
+      const parentPostMessage = vi.fn();
+      vi.stubGlobal('parent', { postMessage: parentPostMessage });
+
+      messageRouter.broadcastOutsideClick({
+        target: { tagName: 'DIV', className: '' },
+      });
+
+      const [message] = parentPostMessage.mock.calls[0];
+      expect(message.pointerId).toBe(null);
+      expect(message.fromCrossDocumentGesture).toBe(false);
+    });
+
     it('requestWindowCreation should send to parent', () => {
       const parentPostMessage = vi.fn();
       vi.stubGlobal('parent', { postMessage: parentPostMessage });

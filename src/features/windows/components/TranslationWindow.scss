@@ -102,6 +102,86 @@
     overflow: visible !important; 
   }
 
+  .ti-window-history-subheader {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    min-height: 34px;
+    padding: 2px 12px;
+    border-bottom: 1px solid;
+    user-select: none;
+    gap: 0;
+
+    &.ti-window-history-subheader-light {
+      color: #68717d;
+      border-color: #eee;
+    }
+
+    &.ti-window-history-subheader-dark {
+      color: #b8c0ca;
+      border-color: #424242;
+    }
+  }
+
+  .ti-window-history-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .ti-window-history-button {
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+
+    &[disabled] {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+  }
+
+  .ti-window-history-counter {
+    min-width: 7ch;
+    text-align: center;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    direction: ltr;
+    unicode-bidi: isolate;
+  }
+
+  .ti-window-history-divider {
+    align-self: stretch;
+    width: 1px;
+    flex: 0 0 1px;
+    margin: 7px 10px;
+    background-color: currentcolor;
+    opacity: 0.2;
+  }
+
+  .ti-window-history-provider {
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ti-window-history-previous .ti-toolbar-icon {
+    transform: rotate(180deg);
+  }
+
+  &:dir(rtl) {
+    .ti-window-history-previous .ti-toolbar-icon {
+      transform: none;
+    }
+
+    .ti-window-history-next .ti-toolbar-icon {
+      transform: rotate(180deg);
+    }
+  }
+
   // Window Body
   .ti-window-body {
     padding: 12px !important;
@@ -112,6 +192,36 @@
     overflow-x: hidden !important;
     flex: 1 !important; // Fill remaining height
     min-height: 0 !important; // Allow shrinking to enable scroll
+  }
+
+  .ti-window-source-input {
+    box-sizing: border-box !important;
+    width: 100% !important;
+    min-height: 1.45em !important;
+    max-height: 150px !important;
+    resize: none !important;
+    overflow-y: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    outline: none !important;
+    background: transparent !important;
+    color: inherit !important;
+    font: inherit !important;
+    font-size: inherit !important;
+    font-weight: inherit !important;
+    line-height: inherit !important;
+    unicode-bidi: plaintext !important;
+    field-sizing: content !important;
+
+    &.ti-window-source-overflow {
+      overflow-y: auto !important;
+    }
+
+    &:focus-visible {
+      box-shadow: 0 2px 0 rgba(59, 130, 246, 0.65) !important;
+    }
   }
 
   // Accordion Wrapper for Original Text
@@ -147,8 +257,6 @@
     border-bottom: 1px dashed var(--color-border, #e8e8e8) !important;
     font-size: 0.9em !important;
     opacity: 0.8 !important;
-    max-height: 150px !important;
-    overflow-y: auto !important;
   }
 
   .ti-window-translation-display {

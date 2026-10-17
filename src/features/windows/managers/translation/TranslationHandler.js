@@ -47,6 +47,7 @@ export class TranslationHandler {
    * Perform translation request
    */
   async performTranslation(selectedText, options = {}) {
+    const { isCurrent, ...translationOptions } = options;
     // 1. Character Limit Validation
     const selectionMaxChars = settingsManager.get('SELECTION_MAX_CHARS', 5000);
     if (selectedText && selectedText.length > selectionMaxChars) {
@@ -91,7 +92,7 @@ export class TranslationHandler {
         messageId: messageId,
         mode: translationMode,
         contextMetadata: isAIContextEnabled ? { pageTitle: document.title } : null,
-        options: { ...options }
+        options: translationOptions
       };
 
       this.logger.debug("Sending translation request", payload);
@@ -99,11 +100,15 @@ export class TranslationHandler {
       // Track accumulated streaming results
       const accumulatedResults = new Map();
       const windowId = options.windowId;
+      const isRequestCurrent = () => !isCurrent || isCurrent();
+      let requestFinished = false;
+      const requestInfo = { cancelled: false, settled: false };
 
       // Register for streaming and result updates via Unified System
       const resultPromise = new Promise((resolve, reject) => {
         registerTranslation(messageId, {
           onStreamUpdate: (data) => {
+            if (requestFinished || !isRequestCurrent() || !this.activeRequests.has(messageId)) return;
             if (data.data) {
               const batchText = Array.isArray(data.data) ? data.data.join('') : String(data.data);
               
@@ -130,7 +135,9 @@ export class TranslationHandler {
             }
           },
           onStreamEnd: (data) => {
+            if (requestFinished || !isRequestCurrent() || !this.activeRequests.has(messageId)) return;
             if (!data.success) {
+              requestFinished = true;
               const errorSource = isStructuredTranslationError(data?.errorDetails)
                 ? data.errorDetails
                 : (data.error || 'Streaming failed');
@@ -143,6 +150,7 @@ export class TranslationHandler {
             const finalText = sortedIndices.map(i => accumulatedResults.get(i)).join('');
 
             // Resolve with accumulated text
+            requestFinished = true;
             resolve({
               translatedText: finalText,
               sourceLanguage: data.sourceLanguage || data.detectedSourceLanguage,
@@ -153,11 +161,14 @@ export class TranslationHandler {
             });
           },
           onTranslationResult: (data) => {
+            if (requestFinished || !isRequestCurrent() || !this.activeRequests.has(messageId)) return;
             // Handle result (direct or final streaming result)
             // If we have translatedText, we can resolve even if marked as streaming (fallback for coordinator results)
             if (data.success && (data.translatedText || !data.streaming)) {
+              requestFinished = true;
               resolve(data);
             } else if (!data.success) {
+              requestFinished = true;
               const errorSource = isStructuredTranslationError(data?.errorDetails)
                 ? data.errorDetails
                 : (data.error || 'Translation failed');
@@ -165,6 +176,8 @@ export class TranslationHandler {
             }
           },
           onError: (error) => {
+            if (requestFinished || !isRequestCurrent() || !this.activeRequests.has(messageId)) return;
+            requestFinished = true;
             reject(error);
           }
         });
@@ -172,6 +185,7 @@ export class TranslationHandler {
         // Set safety timeout for the coordination phase
         const timeout = setTimeout(() => {
           if (this.activeRequests.has(messageId)) {
+            requestInfo.settled = true;
             const timeoutError = new Error('Translation timeout');
             timeoutError.type = ErrorTypes.TRANSLATION_TIMEOUT;
             import("@/shared/messaging/core/ContentScriptIntegration.js").then(m => {
@@ -182,7 +196,8 @@ export class TranslationHandler {
           }
         }, WindowsConfig.TIMEOUTS.TRANSLATION_TIMEOUT);
 
-        this.activeRequests.set(messageId, { resolve, reject, timeout, startTime: Date.now() });
+        Object.assign(requestInfo, { resolve, reject, timeout, startTime: Date.now() });
+        this.activeRequests.set(messageId, requestInfo);
       });
 
       // CRITICAL: Attach a silent catch handler to avoid "Uncaught (in promise)" 
@@ -211,8 +226,23 @@ export class TranslationHandler {
 
         this.logger.debug("sendUnifiedTranslation response:", response);
 
+        if (!isRequestCurrent() || requestInfo.cancelled) {
+          this._cleanupRequest(messageId);
+          return { cancelled: true };
+        }
+        if (!this.activeRequests.has(messageId)) {
+          if (!requestInfo.settled) return { cancelled: true };
+          const settledResult = await resultPromise;
+          return {
+            ...settledResult,
+            provider: settledResult.provider || payload.provider,
+            mode: settledResult.mode || payload.mode,
+          };
+        }
+
         // If it's already finished (direct result), return it
         if (response && response.success && response.translatedText && !response.streaming) {
+          requestFinished = true;
           this.logger.operation("Translation completed successfully (direct result)");
           this._cleanupRequest(messageId);
           return {
@@ -227,6 +257,7 @@ export class TranslationHandler {
         // Wait for streaming completion or final result message
         const finalResult = await resultPromise;
         this.logger.operation("Translation completed successfully (unified)");
+        this._cleanupRequest(messageId);
         
         return {
           ...finalResult,
@@ -264,6 +295,7 @@ export class TranslationHandler {
     if (!request) return;
 
     this._cleanupRequest(messageId);
+    request.cancelled = true;
     
     // Notify unified system to cancel
     import("@/shared/messaging/core/ContentScriptIntegration.js").then(m => {
@@ -289,10 +321,12 @@ export class TranslationHandler {
       : message.data?.error;
 
     if (errorSource) {
+      request.settled = true;
       request.reject(reconstructTranslationError(errorSource));
       this._cleanupRequest(messageId);
       return true;
     } else if (message.data?.translatedText) {
+      request.settled = true;
       request.resolve({
         translatedText: message.data.translatedText,
         sourceLanguage: message.data.sourceLanguage || message.data.detectedSourceLanguage,

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from 'vue';
 import browser from 'webextension-polyfill';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
+import { ENVIRONMENTS } from '@/core/contextCore.js';
 
 let useSelectElementTranslation;
 let useSidepanelActions;
@@ -13,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   handlers: new Map(),
   messageListeners: new Set(),
   activatedListeners: new Set(),
+  environment: 'sidepanel',
 }));
 
 vi.mock('webextension-polyfill', () => ({
@@ -35,6 +37,15 @@ vi.mock('webextension-polyfill', () => ({
 
 vi.mock('@/shared/logging/logger.js', () => ({
   getScopedLogger: vi.fn(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() })),
+}));
+
+vi.mock('@/core/contextCore.js', () => ({
+  ENVIRONMENTS: {
+    CONTENT: 'content',
+    POPUP: 'popup',
+    SIDEPANEL: 'sidepanel',
+  },
+  getActiveEnvironment: () => mocks.environment,
 }));
 
 vi.mock('@/shared/messaging/composables/useMessaging.js', () => ({
@@ -68,6 +79,7 @@ vi.mock('@/features/element-selection/utils/activationError.js', () => ({
 }));
 
 const mountedApps = new Set();
+let originalTabs;
 
 function deferred() {
   let resolve;
@@ -98,7 +110,7 @@ describe('useTranslationModes', () => {
   beforeEach(async () => {
     vi.resetModules();
     ({ useSelectElementTranslation, useSidepanelActions } = await import('./useTranslationModes.js'));
-    window.history.pushState({}, '', '/sidepanel.html');
+    mocks.environment = ENVIRONMENTS.SIDEPANEL;
     mocks.sendMessage.mockReset();
     mocks.sendMessageViaMessaging.mockReset();
     mocks.createMessage.mockClear();
@@ -106,6 +118,7 @@ describe('useTranslationModes', () => {
     mocks.messageListeners.clear();
     mocks.activatedListeners.clear();
     browser.tabs.query.mockReset().mockResolvedValue([{ id: 1, windowId: 10 }]);
+    originalTabs = browser.tabs;
     browser.runtime.onMessage.addListener.mockClear();
     browser.runtime.onMessage.removeListener.mockClear();
     browser.tabs.onActivated.addListener.mockClear();
@@ -113,12 +126,102 @@ describe('useTranslationModes', () => {
   });
 
   afterEach(() => {
+    browser.tabs = originalTabs;
     for (const app of mountedApps) app.unmount();
     mountedApps.clear();
     mocks.handlers.clear();
     mocks.messageListeners.clear();
     mocks.activatedListeners.clear();
     vi.clearAllMocks();
+  });
+
+  it('does not access Tabs APIs or register listeners in Content Scripts with multiple subscribers', async () => {
+    mocks.environment = ENVIRONMENTS.CONTENT;
+    mocks.sendMessage.mockResolvedValue({ success: true });
+    const original = browser.tabs;
+    const query = vi.spyOn(original, 'query');
+    browser.tabs = undefined;
+    try {
+      const [first, firstApp] = withSetup(useSelectElementTranslation);
+      const [second, secondApp] = withSetup(useSelectElementTranslation);
+      await flushMicrotasks();
+
+      expect(await first.deactivateSelectMode()).toBe(true);
+      expect(first.isSelectModeActive).toBe(second.isSelectModeActive);
+      expect(query).not.toHaveBeenCalled();
+      expect(mocks.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+        action: MessageActions.DEACTIVATE_SELECT_ELEMENT_MODE,
+        data: { active: false },
+      }));
+      expect(mocks.sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+        action: MessageActions.GET_SELECT_ELEMENT_STATE,
+      }));
+      expect(mocks.activatedListeners.size).toBe(0);
+      expect(mocks.messageListeners.size).toBe(0);
+      expect(mocks.handlers.has(MessageActions.SELECT_ELEMENT_STATE_CHANGED)).toBe(false);
+
+      firstApp.unmount();
+      secondApp.unmount();
+      mountedApps.delete(firstApp);
+      mountedApps.delete(secondApp);
+      expect(mocks.activatedListeners.size).toBe(0);
+      expect(mocks.messageListeners.size).toBe(0);
+    } finally {
+      browser.tabs = original;
+    }
+  });
+
+  it.each([ENVIRONMENTS.POPUP, ENVIRONMENTS.SIDEPANEL])('%s keeps startup, broadcast, activation, and cleanup behavior', async (environment) => {
+    mocks.environment = environment;
+    mocks.sendMessage.mockImplementation(({ data }) => ({
+      success: true,
+      active: data?.tabId === 2,
+      tabId: data?.tabId,
+    }));
+    const [composable, app] = withSetup(useSelectElementTranslation);
+    await flushMicrotasks();
+
+    expect(browser.tabs.query).toHaveBeenCalledWith({ active: true, currentWindow: true });
+    expect(mocks.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      action: MessageActions.GET_SELECT_ELEMENT_STATE,
+      data: { tabId: 1 },
+    }));
+    expect(mocks.messageListeners.size).toBe(1);
+    expect(mocks.activatedListeners.size).toBe(1);
+    broadcast(1, true);
+    expect(composable.isSelectModeActive.value).toBe(true);
+
+    const [onActivated] = mocks.activatedListeners;
+    await onActivated({ tabId: 2, windowId: 10 });
+    expect(composable.isSelectModeActive.value).toBe(true);
+    expect(await composable.deactivateSelectMode()).toBe(true);
+    expect(browser.tabs.query).toHaveBeenCalledTimes(2);
+    expect(mocks.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      action: MessageActions.DEACTIVATE_SELECT_ELEMENT_MODE,
+      data: { active: false, tabId: 1 },
+    }));
+
+    app.unmount();
+    mountedApps.delete(app);
+    expect(mocks.messageListeners.size).toBe(0);
+    expect(mocks.activatedListeners.size).toBe(0);
+  });
+
+  it('ignores a stale deferred Popup state response after a newer broadcast', async () => {
+    mocks.environment = ENVIRONMENTS.POPUP;
+    const initial = deferred();
+    mocks.sendMessage.mockReturnValue(initial.promise);
+    const [composable, app] = withSetup(useSelectElementTranslation);
+    await flushMicrotasks();
+
+    broadcast(1, true);
+    initial.resolve({ success: true, active: false, tabId: 1 });
+    await flushMicrotasks();
+
+    expect(composable.isSelectModeActive.value).toBe(true);
+    app.unmount();
+    mountedApps.delete(app);
+    expect(mocks.activatedListeners.size).toBe(0);
   });
 
   it('keeps a broadcast received during initial GET instead of replacing it with stale state', async () => {

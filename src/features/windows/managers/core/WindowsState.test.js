@@ -119,4 +119,33 @@ describe('WindowsState', () => {
     expect(snapshot.hasOriginalText).toBe(true);
     expect(snapshot.frameId).toBe(frameId);
   });
+
+  it('records successful snapshots, deduplicates the current result, and truncates forward history on a new branch', () => {
+    const first = state.commitTranslation('one', {
+      translatedText: 'uno', provider: 'p1', sourceLanguage: 'en', targetLanguage: 'es', mode: 'selection',
+    });
+    expect(state.commitTranslation('one', {
+      translatedText: 'uno', provider: 'p1', sourceLanguage: 'en', targetLanguage: 'es', mode: 'selection',
+    })).toBe(first);
+    state.commitTranslation('two', { translatedText: 'dos', provider: 'p2', targetLanguage: 'fr' });
+    expect(state.navigateHistory('previous')).toMatchObject({ sourceText: 'one', translatedText: 'uno' });
+    state.commitTranslation('branch', { translatedText: 'branche', provider: 'p3' });
+    expect(state.translationHistory.map(({ sourceText }) => sourceText)).toEqual(['one', 'branch']);
+    expect(state.historyIndex).toBe(1);
+  });
+
+  it('restores provider, source, languages and mode when navigating history', () => {
+    state.commitTranslation('source', {
+      translatedText: 'result', provider: 'chosen', sourceLanguage: 'de', targetLanguage: 'it', mode: 'selection',
+    });
+    state.commitTranslation('later', { translatedText: 'later result', provider: 'other' });
+    state.setProvider('another');
+    const restored = state.navigateHistory('previous');
+    expect(restored).toMatchObject({
+      sourceText: 'source', translatedText: 'result', provider: 'chosen',
+      sourceLanguage: 'de', targetLanguage: 'it', mode: 'selection',
+    });
+    expect(state.originalText).toBe('source');
+    expect(state.provider).toBe('chosen');
+  });
 });

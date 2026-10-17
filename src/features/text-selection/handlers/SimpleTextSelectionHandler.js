@@ -8,8 +8,17 @@ import ElementDetectionService from '@/shared/services/ElementDetectionService.j
 import { settingsManager } from '@/shared/managers/SettingsManager.js';
 import { INPUT_TYPES } from '@/shared/constants/detection.js';
 import { SelectionTranslationMode } from '@/shared/config/config.js';
+import { COMBINED_SELECTORS } from '@/shared/services/ElementDetectionConfig.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.TEXT_SELECTION, 'SimpleTextSelectionHandler');
+
+// Bounded window (ms) during which a pointerdown inside extension UI protects
+// the floating window from empty-selection dismissal. Selection processing is
+// debounced (~100ms) and can run before the mouseup is recorded, or the
+// mouseup may never reach the bubble-phase listener when it is stopped inside
+// the UI's shadow DOM. Any new pointerdown overwrites this context, so a
+// genuine outside click still dismisses immediately.
+const UI_INTERACTION_CONTEXT_MS = 1000;
 
 // Singleton instance for SimpleTextSelectionHandler
 let simpleTextSelectionHandlerInstance = null;
@@ -64,6 +73,14 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this.mouseDownTime = 0;
     this.lastMouseUpEvent = null;
 
+    // Diagnostic metadata captured synchronously during mouseup dispatch
+    // (composedPath() is unreliable once dispatch has finished).
+    this._lastMouseUpDiagnostics = null;
+
+    // Bounded interaction context: start of the latest pointer interaction,
+    // classified read-only during the capture phase. { insideUi, timestamp }.
+    this._lastUiPointerInteraction = null;
+
     // Simplified triple-click + drag support
     this.lastTripleClickTime = 0;
     this.isWaitingForDragEnd = false;
@@ -97,6 +114,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this.handleKeyUp = this.handleKeyUp.bind(this);
     this.handleMouseDown = this.handleMouseDown.bind(this);
     this.handleMouseUp = this.handleMouseUp.bind(this);
+    this.handleUiPointerDownCapture = this.handleUiPointerDownCapture.bind(this);
     this.handleMouseMove = this.handleMouseMove.bind(this);
     this.handleInput = this.handleInput.bind(this);
 
@@ -137,6 +155,10 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
 
     try {
       logger.debug('Activating SimpleTextSelectionHandler');
+
+      // Start from a clean interaction context; never inherit stale state
+      this._lastUiPointerInteraction = null;
+      this._lastMouseUpDiagnostics = null;
 
       // If selectionManager already exists, clean it up first
       if (this.selectionManager) {
@@ -196,6 +218,10 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       // 2. Clear any pending timeouts and animation frames
       this._clearAllTimers();
 
+      // 2.5 Clear interaction context so reactivation cannot inherit stale state
+      this._lastUiPointerInteraction = null;
+      this._lastMouseUpDiagnostics = null;
+
       // 3. Clean up settings listeners
       this._settingsListeners.forEach(unsubscribe => {
         if (unsubscribe) unsubscribe();
@@ -230,6 +256,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
   _removeDOMListeners() {
     // Use exact same targets and options as setupEventListeners
     document.removeEventListener('selectionchange', this.handleSelectionChange);
+    window.removeEventListener('pointerdown', this.handleUiPointerDownCapture, { capture: true });
     window.removeEventListener('mousedown', this.handleMouseDown, { critical: true });
     window.removeEventListener('mouseup', this.handleMouseUp, { critical: true });
     window.removeEventListener('mousemove', this.handleMouseMove, { critical: true });
@@ -260,6 +287,13 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       });
 
       // Simple drag detection - use window to prevent duplicate events
+      // Capture-phase pointerdown: records the start of pointer interaction
+      // inside extension UI before any shadow-DOM stopPropagation can hide
+      // the event from the bubble-phase listeners.
+      this.addEventListener(window, 'pointerdown', this.handleUiPointerDownCapture, {
+        capture: true,
+        critical: true
+      });
       this.addEventListener(window, 'mousedown', this.handleMouseDown, {
         critical: true
       });
@@ -504,8 +538,24 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
           return;
         }
 
+        // Bounded interaction context from the capture-phase pointerdown.
+        // Reliable even when the mouseup is not yet recorded or never reaches
+        // this handler (stopped inside the UI's shadow DOM).
+        const interaction = this._hasRecentUiInteraction();
+
+        // The interaction began inside extension UI: never dismiss
+        if (interaction && interaction.insideUi) {
+          logger.debug('Recent pointer interaction inside extension UI - skipping dismissal', {
+            ageMs: interaction.ageMs
+          });
+          return;
+        }
+
+        // Stale-mouseup fallback: only trusted when no recent interaction
+        // refutes it (a genuine outside click dismisses immediately).
         // No text selected, check if user clicked inside translation window
-        if (this.isClickInsideTranslationWindow()) {
+        const insideTranslationWindow = !interaction && this.isClickInsideTranslationWindow();
+        if (insideTranslationWindow) {
           logger.debug('Click inside translation window, not dismissing');
           return;
         }
@@ -518,11 +568,19 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
 
         // Skip dismissal during Shift+Click operations
         if (this.shiftKeyPressed) {
+          logger.debug('Shift+Click in progress with no text selected, skipping dismissal');
           return;
         }
 
         // No text selected and click outside translation window, dismiss
         if (this.selectionManager) {
+          logger.debug('Empty selection dismissing window', {
+            preservationActive: this._isPreservationActive(),
+            isDragging: this.isDragging,
+            shiftPressed: this.shiftKeyPressed,
+            insideTranslationWindow,
+            recentInteraction: interaction ? 'outside-ui' : null
+          });
           this.selectionManager.dismissWindow();
         }
         return;
@@ -873,6 +931,16 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
    */
   handleKeyDown(event) {
     this.lastKeyEventTime = Date.now();
+
+    // A keyboard interaction originating outside extension UI refutes any
+    // recent inside-UI pointer context, so keyboard-driven selection clearing
+    // still dismisses the window within the bounded context window. Keyboard
+    // interaction inside the UI (e.g. source textarea editing) keeps it.
+    // Classification is read-only (no detection cache).
+    if (this._classifyComposedPath(event) === false) {
+      this._lastUiPointerInteraction = { insideUi: false, timestamp: Date.now() };
+    }
+
     if (event.ctrlKey || event.metaKey) {
       this.ctrlKeyPressed = true;
       // logger.debug('Ctrl key pressed down');
@@ -1016,6 +1084,10 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
   handleMouseUp(event) {
     this.lastMouseEventTime = Date.now();
     this.lastMouseUpEvent = event; // Store for translation window detection
+    this._lastMouseUpDiagnostics = {
+      timestamp: this.lastMouseEventTime,
+      composedPathHasUi: this._classifyComposedPath(event)
+    };
 
     // Update modifier states from mouse event (Sync both TRUE and FALSE states)
     this.ctrlKeyPressed = event.ctrlKey || event.metaKey;
@@ -1151,16 +1223,30 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
    * Check if the last click was inside a translation window
    */
   isClickInsideTranslationWindow() {
-    if (!this.lastMouseUpEvent) return false;
+    const lastMouseUp = this.lastMouseUpEvent;
+    if (!lastMouseUp) {
+      logger.debug('Inside-window check: no mouseup event recorded');
+      return false;
+    }
+
+    // Diagnostic only: target element type (no page content), mouseup age, and
+    // the composed-path classification captured during mouseup dispatch.
+    const diagnostics = this._lastMouseUpDiagnostics;
+    const mouseUpAgeMs = diagnostics?.timestamp ? Date.now() - diagnostics.timestamp : null;
+    const targetTag = lastMouseUp.target?.tagName ?? null;
+    const composedPathHasUi = diagnostics ? diagnostics.composedPathHasUi : null;
 
     // Use ElementDetectionService to check if click is on UI element
     try {
-      const uiElement = this.elementDetection.getClickedUIElement(this.lastMouseUpEvent);
+      const uiElement = this.elementDetection.getClickedUIElement(lastMouseUp);
+      logger.debug('Inside-window check', {
+        hasLastMouseUp: true,
+        mouseUpAgeMs,
+        targetTag,
+        uiElementType: uiElement?.type ?? null,
+        composedPathHasUi,
+      });
       if (uiElement) {
-        logger.debug('Click detected inside UI element', {
-          elementType: uiElement.type,
-          elementTag: uiElement.element?.tagName
-        });
         return true;
       }
 
@@ -1173,6 +1259,57 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     }
 
     return false;
+  }
+
+  /**
+   * Capture-phase pointerdown handler: records whether the current pointer
+   * interaction began inside extension UI. Read-only classification (no
+   * detection cache); stores primitives only.
+   */
+  handleUiPointerDownCapture(event) {
+    this._lastUiPointerInteraction = {
+      insideUi: this._classifyComposedPath(event) === true,
+      timestamp: Date.now()
+    };
+  }
+
+  /**
+   * Returns the bounded interaction context ({ insideUi, ageMs }) when a
+   * pointerdown was recorded within UI_INTERACTION_CONTEXT_MS, else null.
+   */
+  _hasRecentUiInteraction() {
+    const interaction = this._lastUiPointerInteraction;
+    if (!interaction) return null;
+    const ageMs = Date.now() - interaction.timestamp;
+    if (ageMs >= UI_INTERACTION_CONTEXT_MS) return null;
+    return { insideUi: interaction.insideUi, ageMs };
+  }
+
+  /**
+   * Classify the event's composed path synchronously during dispatch.
+   * Diagnostic only and side-effect-free: uses direct Element.matches()
+   * against the shared UI_ELEMENTS selector instead of
+   * ElementDetectionService, so the detection cache is never populated.
+   * Returns whether any path node is extension UI, or null when the path
+   * cannot be classified. Stores no DOM nodes.
+   */
+  _classifyComposedPath(event) {
+    try {
+      if (typeof event?.composedPath !== 'function') return null;
+      const path = event.composedPath();
+      if (!Array.isArray(path)) return null;
+      return path.some((node) => {
+        try {
+          return node instanceof Element
+            && typeof node.matches === 'function'
+            && node.matches(COMBINED_SELECTORS.UI_ELEMENTS);
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      return null;
+    }
   }
 
   /**

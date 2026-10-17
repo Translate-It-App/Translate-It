@@ -51,6 +51,8 @@ vi.mock('@/features/windows/managers/core/WindowsState.js', () => ({
   WindowsState: vi.fn().mockImplementation(function() {
     this.isVisible = false;
     this.isIconMode = false;
+    this.translationHistory = [];
+    this.historyIndex = -1;
     this.reset = vi.fn(() => {
       this.isVisible = false;
       this.isIconMode = false;
@@ -58,12 +60,14 @@ vi.mock('@/features/windows/managers/core/WindowsState.js', () => ({
     this.setVisible = vi.fn((v) => { this.isVisible = v; });
     this.setIconMode = vi.fn((v) => { this.isIconMode = v; });
     this.setOriginalText = vi.fn();
+    this.clearTranslationHistory = vi.fn();
     this.setProvider = vi.fn();
     this.setActiveWindowId = vi.fn();
     this.setProcessing = vi.fn();
     this.clearIconClickContext = vi.fn();
     this.setIconClickContext = vi.fn();
     this.setTranslationCancelled = vi.fn();
+    this.commitTranslation = vi.fn();
     this.setRequestingFrameId = vi.fn();
     this.hasActiveElements = true;
     this.iconClickContext = { iconId: 'test-icon' };
@@ -128,7 +132,9 @@ vi.mock('@/shared/config/config.js', () => ({
 }));
 
 vi.mock('@/shared/error-management/ErrorHandler.js');
-vi.mock('@/shared/error-management/ErrorTypes.js');
+vi.mock('@/shared/error-management/ErrorTypes.js', () => ({
+  ErrorTypes: { API_RESPONSE_INVALID: 'API_RESPONSE_INVALID' }
+}));
 
 vi.mock('@/core/extensionContext.js', () => ({ 
   default: { isValidSync: vi.fn().mockReturnValue(true), isContextError: vi.fn().mockReturnValue(false) } 
@@ -268,10 +274,69 @@ describe('WindowsManager', () => {
 
   describe('Translation Flow', () => {
     it('should perform two-phase loading', async () => {
+      windowsManager.translationHandler.performTranslation.mockResolvedValue({ translatedText: 'translated content' });
       const promise = windowsManager._showWindow('text', {x:1, y:1});
       expect(mockWindowsManagerEvents.showWindow).toHaveBeenCalledWith(expect.objectContaining({ isLoading: true }));
       await promise;
       expect(mockWindowsManagerEvents.updateWindow).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ isLoading: false, initialTranslatedText: 'translated content' }));
+    });
+
+    it.each([
+      ['missing result', undefined],
+      ['missing translatedText', { success: true }],
+      ['non-string translatedText', { translatedText: 42 }],
+      ['blank translatedText', { translatedText: ' \t\n' }],
+      ['explicit failure with text', { success: false, translatedText: 'bad' }],
+    ])('rejects %s without committing translation history', async (_label, result) => {
+      windowsManager.translationHandler.performTranslation.mockResolvedValue(result);
+
+      await expect(windowsManager._startTranslationProcess('source', 'window-1'))
+        .rejects.toMatchObject({ type: 'API_RESPONSE_INVALID' });
+
+      expect(windowsManager.state.commitTranslation).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['source-equal output', 'source'],
+      ['meaningful surrounding whitespace', '  translated  '],
+    ])('accepts %s unchanged', async (_label, translatedText) => {
+      const result = { translatedText };
+      windowsManager.translationHandler.performTranslation.mockResolvedValue(result);
+
+      await expect(windowsManager._startTranslationProcess('source', 'window-1'))
+        .resolves.toMatchObject({ translatedText });
+
+      expect(windowsManager.state.commitTranslation).toHaveBeenCalledWith('source', result, {});
+    });
+
+    it('does not cancel a pending translation when history navigation is already at its boundary', () => {
+      windowsManager.state.translationHistory = [{ sourceText: 'only entry' }];
+      windowsManager.state.historyIndex = 0;
+      const generation = windowsManager.state.translationGeneration;
+
+      windowsManager._navigateTranslationHistory('window-1', 'previous');
+
+      expect(windowsManager.state.translationGeneration).toBe(generation);
+      expect(windowsManager.translationHandler.cancelAllTranslations).not.toHaveBeenCalled();
+    });
+
+    it('includes the selected history snapshot provider in navigation updates', () => {
+      const entry = { sourceText: 'source', translatedText: 'result', provider: 'snapshot-provider' };
+      windowsManager.state.translationHistory = [entry];
+      windowsManager.state.historyIndex = -1;
+      windowsManager.state.navigateHistory = vi.fn(() => {
+        windowsManager.state.historyIndex = 0;
+        return entry;
+      });
+
+      windowsManager._navigateTranslationHistory('window-1', 'next');
+
+      expect(mockWindowsManagerEvents.updateWindow).toHaveBeenCalledWith('window-1', expect.objectContaining({
+        provider: 'snapshot-provider',
+        historyProvider: 'snapshot-provider',
+        historyIndex: 0,
+        historyLength: 1,
+      }));
     });
 
     it('cleans DisplayManager delayed activation before destroy', async () => {

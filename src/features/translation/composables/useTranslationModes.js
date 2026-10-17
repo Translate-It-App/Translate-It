@@ -11,6 +11,7 @@ import { createMessageHandler } from '@/shared/messaging/core/MessageHandler.js'
 import { matchErrorToType } from '@/shared/error-management/ErrorMatcher.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import { getSelectElementActivationErrorMessage } from '@/features/element-selection/utils/activationError.js';
+import { ENVIRONMENTS, getActiveEnvironment } from '@/core/contextCore.js';
 
 // Lazy logger to avoid TDZ ReferenceErrors when bundled
 const logger = new Proxy({}, {
@@ -35,6 +36,11 @@ let _selectStateLifecycle = 0;
 let _toggleInFlight = false;
 let _pendingSelectBroadcast = null;
 const _pendingTabActivations = new Map();
+
+const _isSelectStateUiEnvironment = () => {
+  const environment = getActiveEnvironment();
+  return environment === ENVIRONMENTS.POPUP || environment === ENVIRONMENTS.SIDEPANEL;
+};
 
 const _requestSelectState = async (tabId, generation) => {
   try {
@@ -79,17 +85,14 @@ const _registerSelectStateListener = () => {
 
   try {
     // Create UI-specific MessageHandler instance
-    // Only activate in sidepanel/popup context, not in background or content scripts
-    if (typeof window !== 'undefined' && (window.location?.pathname?.includes(MessageContexts.SIDEPANEL) || window.location?.pathname?.includes(MessageContexts.POPUP))) {
-      if (!_uiMessageHandler) {
-        _uiMessageHandler = createMessageHandler();
-      }
-      _uiMessageHandler.registerHandler(MessageActions.SELECT_ELEMENT_STATE_CHANGED, _selectStateHandler);
+    if (!_uiMessageHandler) {
+      _uiMessageHandler = createMessageHandler();
+    }
+    _uiMessageHandler.registerHandler(MessageActions.SELECT_ELEMENT_STATE_CHANGED, _selectStateHandler);
 
-      if (!_uiMessageHandler.isListenerActive) {
-        _uiMessageHandler.listen();
-        logger.debug('[useTranslationModes] UI MessageHandler activated');
-      }
+    if (!_uiMessageHandler.isListenerActive) {
+      _uiMessageHandler.listen();
+      logger.debug('[useTranslationModes] UI MessageHandler activated');
     }
   } catch (e) {
     logger.warn('[useSelectElementTranslation] Could not register with MessageHandler:', e);
@@ -137,12 +140,15 @@ const _unregisterSelectStateListener = () => {
 export function useSelectElementTranslation() {
   const isActivating = ref(false);
   const error = ref(null);
+  let isStateSubscriber = false;
 
   // Use shared reactive ref so multiple components reflect same state
   const isSelectModeActive = sharedIsSelectModeActive;
 
   // Lifecycle-aware subscription: increment subscriber count on mount, decrement on unmount
   onMounted(() => {
+    if (!_isSelectStateUiEnvironment()) return;
+    isStateSubscriber = true;
     _selectStateSubscriberCount++;
     if (_selectStateSubscriberCount === 1) {
       _registerSelectStateListener();
@@ -171,6 +177,8 @@ export function useSelectElementTranslation() {
   // No need for separate ESC listener in sidepanel - ShortcutManager handles all ESC events
 
   onUnmounted(() => {
+    if (!isStateSubscriber) return;
+    isStateSubscriber = false;
     _selectStateSubscriberCount = Math.max(0, _selectStateSubscriberCount - 1);
     if (_selectStateSubscriberCount === 0) {
       _unregisterSelectStateListener();
@@ -240,11 +248,15 @@ export function useSelectElementTranslation() {
 
   const deactivateSelectMode = async () => {
     try {
-      const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
-      const tabId = activeTab?.id;
-      if (!Number.isInteger(tabId)) {
-        error.value = 'Could not determine active tab';
-        return false;
+      const data = { active: false };
+      if (_isSelectStateUiEnvironment()) {
+        const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+        const tabId = activeTab?.id;
+        if (!Number.isInteger(tabId)) {
+          error.value = 'Could not determine active tab';
+          return false;
+        }
+        data.tabId = tabId;
       }
 
       logger.debug('Deactivating select element mode');
@@ -252,7 +264,7 @@ export function useSelectElementTranslation() {
         action: MessageActions.DEACTIVATE_SELECT_ELEMENT_MODE,
         context: MessageContexts.SIDEPANEL,
         timestamp: Date.now(),
-        data: { active: false, tabId }
+        data
       });
 
       if (result?.success === false) {

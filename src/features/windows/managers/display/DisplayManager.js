@@ -267,7 +267,7 @@ export class DisplayManager {
         options,
       );
 
-      if (!translationResult || this.state.isTranslationCancelled) {
+      if (!translationResult || this.state.isTranslationCancelled || (this.facade._isCurrentTranslation && !this.facade._isCurrentTranslation(translationResult._requestId))) {
         this.logger.info("Existing window translation cancelled or null");
         return;
       }
@@ -282,6 +282,7 @@ export class DisplayManager {
         targetLanguage: translationResult.targetLanguage,
         provider: translationResult.provider,
         mode: translationResult.mode,
+        ...this.facade._historyUpdate(this.state.translationHistory[this.state.historyIndex]),
       });
 
       this.state.setProvider(translationResult.provider);
@@ -301,7 +302,7 @@ export class DisplayManager {
         "windows-translation",
         this.errorHandler,
       );
-      if (!presentation) return;
+      if (!presentation || (this.facade._isCurrentTranslation && !this.facade._isCurrentTranslation(error._requestId))) return;
 
       const { errorInfo } = presentation;
       const fallbackProvider = this.translationHandler.getEffectiveProvider(
@@ -354,7 +355,7 @@ export class DisplayManager {
         options,
       );
 
-      if (!translationResult) {
+      if (!translationResult || (this.facade._isCurrentTranslation && !this.facade._isCurrentTranslation(translationResult._requestId))) {
         this.logger.info("Mobile translation cancelled");
         return;
       }
@@ -378,7 +379,7 @@ export class DisplayManager {
         "mobile-translation",
         this.errorHandler,
       );
-      if (!presentation) return;
+      if (!presentation || (this.facade._isCurrentTranslation && !this.facade._isCurrentTranslation(error._requestId))) return;
 
       const { errorInfo } = presentation;
 
@@ -486,6 +487,8 @@ export class DisplayManager {
 
     const windowId = `translation-window-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
+    this.state.clearTranslationHistory();
+
     WindowsManagerEvents.showWindow({
       id: windowId,
       selectedText,
@@ -494,6 +497,8 @@ export class DisplayManager {
       initialSize: "small",
       isLoading: true,
       frameId: this.crossFrameManager.frameId,
+      historyIndex: this.state.historyIndex,
+      historyLength: this.state.translationHistory?.length || 0,
     });
 
     this.state.setActiveWindowId(windowId);
@@ -519,7 +524,7 @@ export class DisplayManager {
         options,
       );
 
-      if (!translationResult) {
+      if (!translationResult || (this.facade._isCurrentTranslation && !this.facade._isCurrentTranslation(translationResult._requestId))) {
         this.logger.info("Translation cancelled by user");
         return;
       }
@@ -534,6 +539,7 @@ export class DisplayManager {
         targetLanguage: translationResult.targetLanguage,
         provider: translationResult.provider,
         mode: translationResult.mode,
+        ...this.facade._historyUpdate(this.state.translationHistory[this.state.historyIndex]),
       });
 
       this.state.setProvider(translationResult.provider);
@@ -546,7 +552,7 @@ export class DisplayManager {
         "windows-translation",
         this.errorHandler,
       );
-      if (!presentation) return;
+      if (!presentation || (this.facade._isCurrentTranslation && !this.facade._isCurrentTranslation(error._requestId))) return;
 
       const { errorInfo } = presentation;
       const fallbackProvider = this.translationHandler.getEffectiveProvider(

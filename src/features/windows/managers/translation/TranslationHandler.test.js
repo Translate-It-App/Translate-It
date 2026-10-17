@@ -138,6 +138,24 @@ describe('TranslationHandler', () => {
     expect(sendUnifiedTranslation).toHaveBeenCalled();
   });
 
+  it('keeps request identity callbacks out of the serialized translation payload', async () => {
+    sendUnifiedTranslation.mockResolvedValue({
+      success: true, translatedText: 'translated', streaming: false,
+    });
+    const isCurrent = vi.fn(() => true);
+
+    await handler.performTranslation('hello', { windowId: 'window-1', isCurrent });
+
+    const outbound = sendUnifiedTranslation.mock.calls[0][0].data;
+    expect(outbound.options).not.toHaveProperty('isCurrent');
+    const containsFunction = (value) => {
+      if (typeof value === 'function') return true;
+      if (!value || typeof value !== 'object') return false;
+      return Object.values(value).some(containsFunction);
+    };
+    expect(containsFunction(outbound)).toBe(false);
+  });
+
   it('should handle streaming translation result', async () => {
     // 1. Setup sendUnifiedTranslation to return streaming status
     sendUnifiedTranslation.mockResolvedValue({ success: true, streaming: true });
@@ -195,6 +213,28 @@ describe('TranslationHandler', () => {
 
     const result = await translationPromise;
     expect(result.cancelled).toBe(true);
+  });
+
+  it('ignores a direct response that arrives after cancellation and cleans request timers', async () => {
+    let resolveSend;
+    sendUnifiedTranslation.mockImplementation(() => new Promise((resolve) => { resolveSend = resolve; }));
+    const pending = handler.performTranslation('hello');
+    handler.cancelTranslation('mock-msg-id');
+    resolveSend({ success: true, translatedText: 'late result', streaming: false });
+    await expect(pending).resolves.toMatchObject({ cancelled: true });
+    expect(handler.getActiveRequestCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cleans the timeout after a successful stream', async () => {
+    let callbacks;
+    registerTranslation.mockImplementation((id, registeredCallbacks) => { callbacks = registeredCallbacks; });
+    sendUnifiedTranslation.mockResolvedValue({ success: true, streaming: true });
+    const pending = handler.performTranslation('hello');
+    callbacks.onStreamEnd({ success: true });
+    await expect(pending).resolves.toMatchObject({ translatedText: '' });
+    expect(handler.getActiveRequestCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('should handle translation error message', async () => {

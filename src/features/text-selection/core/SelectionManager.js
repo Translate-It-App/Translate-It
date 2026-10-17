@@ -298,6 +298,7 @@ export class SelectionManager extends ResourceTracker {
   dismissWindow() {
     // 1. Emit global clear event (Coordinator Pattern)
     // This allows any module (WindowsManager, FAB, etc.) to clear its state
+    this.logger.debug('Emitting GLOBAL_SELECTION_CLEAR', { reason: 'selection_cleared' });
     pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CLEAR, {
       reason: 'selection_cleared'
     });

@@ -189,8 +189,13 @@ export class MessageRouter {
 
   /**
    * Broadcast outside click to other frames
+   *
+   * `gestureIdentity` (optional, from CrossFrameManager's local pointer
+   * observation) carries bounded gesture identity for the OUTGOING payload:
+   * `{ pointerId, fromCrossDocumentGesture }`. The incoming side never parses
+   * beyond these two fields.
    */
-  broadcastOutsideClick(originalEvent) {
+  broadcastOutsideClick(originalEvent, gestureIdentity = null) {
     try {
       const message = {
         type: WindowsConfig.CROSS_FRAME.OUTSIDE_CLICK,
@@ -204,7 +209,13 @@ export class MessageRouter {
           className: (typeof originalEvent.target.className === 'string' 
             ? originalEvent.target.className 
             : originalEvent.target.getAttribute?.('class') || '').substring(0, 50)
-        }
+        },
+        // Bounded gesture identity (unmatched value defaults to false: an
+        // unknown flag must never suppress a dismissal).
+        pointerId: gestureIdentity?.pointerId ?? originalEvent?.pointerId ?? null,
+        fromCrossDocumentGesture: gestureIdentity
+          ? gestureIdentity.fromCrossDocumentGesture === true
+          : false
       };
 
       // Broadcast to parent/top if in iframe

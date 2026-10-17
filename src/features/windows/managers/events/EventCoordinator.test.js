@@ -71,7 +71,20 @@ vi.mock("@/features/text-selection/events/SelectionEvents.js", () => ({
   },
 }));
 
+// The real Interaction ClickManager is used in the gesture-identity tests; its
+// only non-trivial dependency (ResourceTracker/MemoryManager) is stubbed.
+vi.mock("@/core/memory/ResourceTracker.js", () => ({
+  default: class ResourceTracker {
+    constructor() {
+      this.addEventListener = vi.fn();
+      this.removeEventListener = vi.fn();
+    }
+    cleanup() {}
+  },
+}));
+
 import { EventCoordinator } from "./EventCoordinator.js";
+import { ClickManager } from "../interaction/ClickManager.js";
 import { getTextSelectionWindowRelay } from "../crossframe/TextSelectionWindowRelay.js";
 import { pageEventBus, WINDOWS_MANAGER_EVENTS } from "@/core/PageEventBus.js";
 import { SELECTION_EVENTS } from "@/features/text-selection/events/SelectionEvents.js";
@@ -247,6 +260,303 @@ describe("EventCoordinator relay sink ownership", () => {
   });
 });
 
+describe("EventCoordinator cross-frame outside-click resize handling", () => {
+  let facade;
+  let coordinator;
+  let state;
+  let handlers;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPageEventBus.reset();
+    window.__TRANSLATION_WINDOW_IS_DRAGGING = false;
+    window.__TRANSLATION_WINDOW_JUST_DRAGGED = false;
+    window.__TRANSLATION_WINDOW_IS_RESIZING = false;
+    window.__TRANSLATION_WINDOW_JUST_RESIZED = false;
+    state = { hasActiveElements: true };
+    facade = {
+      dismiss: vi.fn().mockResolvedValue(undefined),
+      displayManager: { shouldUseMobileUI: vi.fn(() => false) },
+    };
+    coordinator = new EventCoordinator(facade, {
+      state,
+      crossFrameManager: {
+        isTopFrame: true,
+        setEventHandlers: vi.fn((registered) => { handlers = registered; }),
+      },
+      translationHandler: {},
+      errorHandler: {},
+      clickManager: { setHandlers: vi.fn() },
+      themeManager: {},
+      positionCalculator: {},
+    });
+    coordinator.setup();
+  });
+
+  afterEach(() => {
+    coordinator.cleanup();
+    mockPageEventBus.reset();
+    getTextSelectionWindowRelay().destroy();
+    window.__TRANSLATION_WINDOW_IS_DRAGGING = false;
+    window.__TRANSLATION_WINDOW_JUST_DRAGGED = false;
+    window.__TRANSLATION_WINDOW_IS_RESIZING = false;
+    window.__TRANSLATION_WINDOW_JUST_RESIZED = false;
+    vi.restoreAllMocks();
+  });
+
+  it("dismisses an independent cross-frame click after resize completion", async () => {
+    window.__TRANSLATION_WINDOW_JUST_RESIZED = true;
+
+    await handlers.onOutsideClick();
+
+    expect(facade.dismiss).toHaveBeenCalledWith(true);
+    expect(window.__TRANSLATION_WINDOW_JUST_RESIZED).toBe(true);
+  });
+
+  it("leaves local resize-completion protection intact when a cross-frame click arrives first", async () => {
+    window.__TRANSLATION_WINDOW_JUST_RESIZED = true;
+
+    await handlers.onOutsideClick();
+    await coordinator._handleOutsideClick();
+
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+    expect(window.__TRANSLATION_WINDOW_JUST_RESIZED).toBe(true);
+  });
+
+  it("keeps dismissal when the incoming relay lacks a resolve-capable manager", async () => {
+    // The beforeEach coordinator uses a legacy mock clickManager without the
+    // resolve API: absent identity must default to allow (no suppression).
+    await handlers.onOutsideClick();
+    expect(facade.dismiss).toHaveBeenCalledWith(true);
+  });
+
+  it("ignores cross-frame clicks during an active resize", async () => {
+    window.__TRANSLATION_WINDOW_IS_RESIZING = true;
+
+    await handlers.onOutsideClick();
+
+    expect(facade.dismiss).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["dragging", "__TRANSLATION_WINDOW_IS_DRAGGING"],
+    ["just dragged", "__TRANSLATION_WINDOW_JUST_DRAGGED"],
+  ])("preserves cross-frame click protection when %s", async (_label, flag) => {
+    window[flag] = true;
+
+    await handlers.onOutsideClick();
+
+    expect(facade.dismiss).not.toHaveBeenCalled();
+  });
+});
+
+describe("EventCoordinator cross-frame gesture identity with a real ClickManager", () => {
+  let facade;
+  let state;
+  let relayHandlers;
+  let clickManager;
+  let coordinator;
+
+  const makePointerEvent = (type, { composedPath = [], pointerId = 1 } = {}) => {
+    const event = new Event(type, { bubbles: true, composed: true });
+    Object.defineProperty(event, "pointerId", { value: pointerId });
+    Object.defineProperty(event, "composedPath", {
+      value: () => composedPath,
+    });
+    return event;
+  };
+
+  // Builds a real EventCoordinator wired to a real ClickManager, and relays
+  // cross-frame outside-click payloads through the real registered handler.
+  const createRealCoordinator = () => {
+    facade = {
+      dismiss: vi.fn().mockResolvedValue(undefined),
+      displayManager: { shouldUseMobileUI: vi.fn(() => false) },
+    };
+    state = { hasActiveElements: true };
+    clickManager = new ClickManager(
+      {
+        enableGlobalClickBroadcast: vi.fn(),
+        disableGlobalClickBroadcast: vi.fn(),
+        requestGlobalClickRelay: vi.fn(),
+      },
+      state,
+    );
+    coordinator = new EventCoordinator(facade, {
+      state,
+      crossFrameManager: {
+        isTopFrame: true,
+        setEventHandlers: vi.fn((registered) => { relayHandlers = registered; }),
+      },
+      translationHandler: {},
+      errorHandler: {},
+      clickManager,
+      themeManager: {},
+      positionCalculator: {},
+    });
+    coordinator.setup();
+    return coordinator;
+  };
+
+  const relay = (fields) =>
+    relayHandlers.onOutsideClick({
+      data: { type: "translateit-outside-click", ...fields },
+    });
+
+  const setupWindow = () => {
+    const windowEl = document.createElement("div");
+    windowEl.className = "ti-window";
+    const inner = document.createElement("button");
+    windowEl.appendChild(inner);
+    document.body.appendChild(windowEl);
+    return { windowEl, inner };
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPageEventBus.reset();
+    window.__TRANSLATION_WINDOW_IS_DRAGGING = false;
+    window.__TRANSLATION_WINDOW_JUST_DRAGGED = false;
+    window.__TRANSLATION_WINDOW_IS_RESIZING = false;
+    window.__TRANSLATION_WINDOW_JUST_RESIZED = false;
+    document.body.innerHTML = "";
+  });
+
+  afterEach(() => {
+    coordinator?.cleanup();
+    mockPageEventBus.reset();
+    getTextSelectionWindowRelay().destroy();
+    document.body.innerHTML = "";
+    window.__TRANSLATION_WINDOW_IS_DRAGGING = false;
+    window.__TRANSLATION_WINDOW_JUST_DRAGGED = false;
+    window.__TRANSLATION_WINDOW_IS_RESIZING = false;
+    window.__TRANSLATION_WINDOW_JUST_RESIZED = false;
+    vi.restoreAllMocks();
+  });
+
+  it("immediately dismisses an independent iframe click after a local inside click completes the gesture", async () => {
+    createRealCoordinator();
+    const { windowEl, inner } = setupWindow();
+
+    // Local gesture: press inside, release inside, completion click inside.
+    clickManager._onWindowPointerDown(
+      makePointerEvent("pointerdown", { composedPath: [inner, windowEl], pointerId: 1 }),
+    );
+    clickManager._onWindowCaptureClick(new MouseEvent("click", { bubbles: true }));
+    expect(clickManager._armedGesture?.completed).toBe(true);
+
+    // Independent iframe click: not a cross-document gesture for pid 2.
+    await relay({ pointerId: 2, fromCrossDocumentGesture: false });
+
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+    expect(clickManager._armedGesture).toBeNull();
+  });
+
+  it("suppresses the matching relay of a locally completed gesture once, then dismisses the next independent click", async () => {
+    createRealCoordinator();
+    const { windowEl, inner } = setupWindow();
+
+    // Firefox-like origin: press inside; the origin observes the retargeted
+    // local completion click (arm completed).
+    clickManager._onWindowPointerDown(
+      makePointerEvent("pointerdown", { composedPath: [inner, windowEl], pointerId: 1 }),
+    );
+    clickManager._onWindowCaptureClick(new MouseEvent("click", { bubbles: true }));
+
+    // Duplicate relay of our own completion click.
+    await relay({ pointerId: 1, fromCrossDocumentGesture: true });
+    expect(facade.dismiss).not.toHaveBeenCalled();
+    expect(clickManager._armedGesture).toBeNull();
+
+    // A subsequent independent iframe click dismisses.
+    await relay({ pointerId: 5, fromCrossDocumentGesture: false });
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses a matching relay while the arm is still pending (missed local completion)", async () => {
+    createRealCoordinator();
+    const { windowEl } = setupWindow();
+
+    clickManager._onWindowPointerDown(
+      makePointerEvent("pointerdown", { composedPath: [windowEl], pointerId: 1 }),
+    );
+    expect(clickManager.isGestureProtectionActive()).toBe(true);
+
+    // The remote frame saw the completion click; the origin did not.
+    await relay({ pointerId: 1, fromCrossDocumentGesture: true });
+    expect(facade.dismiss).not.toHaveBeenCalled();
+    expect(clickManager._armedGesture).toBeNull();
+
+    // The next independent cross-frame click dismisses.
+    await relay({ pointerId: 3, fromCrossDocumentGesture: false });
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not suppress a flagged relay with a mismatching pid against a completed arm", async () => {
+    createRealCoordinator();
+    const { windowEl } = setupWindow();
+
+    clickManager._onWindowPointerDown(
+      makePointerEvent("pointerdown", { composedPath: [windowEl], pointerId: 1 }),
+    );
+    clickManager._onWindowCaptureClick(new MouseEvent("click", { bubbles: true }));
+
+    await relay({ pointerId: 2, fromCrossDocumentGesture: true });
+
+    // Stale completed arm is cleared and dismissal proceeds immediately.
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+    expect(clickManager._armedGesture).toBeNull();
+  });
+
+  it("does not suppress a flagged relay without a pointerId while the arm is pending", async () => {
+    createRealCoordinator();
+    const { windowEl } = setupWindow();
+
+    clickManager._onWindowPointerDown(
+      makePointerEvent("pointerdown", { composedPath: [windowEl], pointerId: 1 }),
+    );
+
+    await relay({ pointerId: null, fromCrossDocumentGesture: true });
+
+    // Flag alone must not match: the identity-less relay is allowed to
+    // dismiss, and the still-pending arm is kept.
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+    expect(clickManager._armedGesture?.completed).toBe(false);
+    expect(clickManager.isGestureProtectionActive()).toBe(true);
+  });
+
+  it("dismisses a flagged relay when no arm exists (e.g. after pointercancel)", async () => {
+    createRealCoordinator();
+    const { windowEl } = setupWindow();
+    clickManager._onWindowPointerDown(
+      makePointerEvent("pointerdown", { composedPath: [windowEl], pointerId: 1 }),
+    );
+    clickManager._onWindowPointerCancel(
+      makePointerEvent("pointercancel", { composedPath: [windowEl], pointerId: 1 }),
+    );
+
+    await relay({ pointerId: 1, fromCrossDocumentGesture: true });
+
+    expect(clickManager._armedGesture).toBeNull();
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses nothing for a relay without identity fields (legacy payload)", async () => {
+    createRealCoordinator();
+    const { windowEl } = setupWindow();
+
+    clickManager._onWindowPointerDown(
+      makePointerEvent("pointerdown", { composedPath: [windowEl], pointerId: 1 }),
+    );
+
+    await relay({});
+    // The identity-less relay does not resolve the still-pending arm, and the
+    // legacy payload still dismisses.
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+    expect(clickManager.isGestureProtectionActive()).toBe(true);
+  });
+});
+
 describe("EventCoordinator PageEventBus listener ownership", () => {
   let coordinators;
 
@@ -317,6 +627,8 @@ describe("EventCoordinator PageEventBus listener ownership", () => {
       ["translation-window-speak", facade._speakRequestHandler],
       ["translation-window-retry", facade._retryRequestHandler],
       ["translation-window-change-provider", facade._changeProviderRequestHandler],
+      ["translation-window-history-navigate", facade._historyNavigateHandler],
+      ["translation-window-confirm-source", facade._confirmSourceHandler],
       [WINDOWS_MANAGER_EVENTS.DISMISS_WINDOW, facade._dismissRequestHandler],
       [WINDOWS_MANAGER_EVENTS.DISMISS_ICON, facade._dismissRequestHandler],
       [SELECTION_EVENTS.GLOBAL_SELECTION_TRIGGER, facade._selectionTriggerHandler],
@@ -420,6 +732,8 @@ describe("EventCoordinator iframe window creation error boundary", () => {
       setTranslationCancelled: vi.fn(),
       setIconMode: vi.fn(),
       setVisible: vi.fn(),
+      clearTranslationHistory: vi.fn(),
+      setActiveWindowId: vi.fn(),
     };
     crossFrameManager = {
       isTopFrame: true,
@@ -467,6 +781,8 @@ describe("EventCoordinator iframe window creation error boundary", () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
 
     expect(facade._startTranslationProcess).toHaveBeenCalled();
+    expect(state.clearTranslationHistory).toHaveBeenCalledTimes(1);
+    expect(state.setActiveWindowId).toHaveBeenCalledWith(expect.any(String));
     expect(mockShowWindow).toHaveBeenCalled();
     expect(mockGetPresentation).toHaveBeenCalledWith(
       canonicalError,
@@ -501,6 +817,22 @@ describe("EventCoordinator iframe window creation error boundary", () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
 
     expect(mockGetPresentation).toHaveBeenCalled();
+    expect(mockUpdateWindow).not.toHaveBeenCalled();
+  });
+
+  it("does not display a stale cross-frame translation result", async () => {
+    facade._startTranslationProcess.mockResolvedValue({
+      _requestId: 1, translatedText: "stale", provider: "provider",
+    });
+    facade._isCurrentTranslation = vi.fn(() => false);
+
+    await coordinator._handleWindowCreationRequest({
+      selectedText: "selected text",
+      position: { x: 10, y: 20 },
+      frameId: "frame-1",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
     expect(mockUpdateWindow).not.toHaveBeenCalled();
   });
 });
@@ -611,6 +943,8 @@ describe("EventCoordinator retry error boundary", () => {
     facade._startTranslationProcess.mockResolvedValue({
       translatedText: "translated text",
       sourceLanguage: "en",
+      targetLanguage: "it",
+      mode: "selection",
       provider: "fallback-provider",
     });
 
@@ -625,9 +959,32 @@ describe("EventCoordinator retry error boundary", () => {
         isStreaming: false,
         isError: false,
         initialTranslatedText: "translated text",
+        targetLanguage: "it",
+        mode: "selection",
         provider: "fallback-provider",
       }),
     ]);
+  });
+
+  it("publishes current history navigation metadata on retry success", async () => {
+    state.translationHistory = [{ sourceText: "restored source" }, { sourceText: "newer source" }];
+    state.historyIndex = 0;
+    facade._historyUpdate = vi.fn((entry) => ({
+      selectedText: entry.sourceText,
+      historyIndex: state.historyIndex,
+      historyLength: state.translationHistory.length,
+    }));
+    facade._startTranslationProcess.mockResolvedValue({
+      translatedText: "retried result", provider: "provider", targetLanguage: "it", mode: "selection",
+    });
+
+    await coordinator._handleRetryRequest({ id: "window-1" });
+
+    expect(mockUpdateWindow.mock.calls[1][1]).toMatchObject({
+      selectedText: "restored source",
+      historyIndex: 0,
+      historyLength: 2,
+    });
   });
 });
 
@@ -757,5 +1114,49 @@ describe("EventCoordinator provider-change error boundary", () => {
         provider: "new-provider",
       }),
     ]);
+  });
+});
+
+describe("EventCoordinator committed source", () => {
+  it("keeps edited whitespace verbatim and retry uses the committed source", async () => {
+    const state = {
+      activeWindowId: "window-1",
+      originalText: "meaningful text",
+      translationHistory: [],
+      historyIndex: -1,
+      setOriginalText(text) { this.originalText = text; },
+    };
+    const facade = {
+      _startTranslationProcess: vi.fn().mockResolvedValue({
+        translatedText: "translated", provider: "provider", sourceLanguage: "en", targetLanguage: "fa",
+      }),
+    };
+    const coordinator = new EventCoordinator(facade, {
+      state,
+      crossFrameManager: { isTopFrame: true },
+      translationHandler: {},
+      errorHandler: {},
+      clickManager: {},
+      themeManager: {},
+    });
+
+    const edited = " meaningful text\n";
+    await coordinator._handleConfirmSource({ id: "window-1", text: edited });
+    expect(state.originalText).toBe(edited);
+    expect(facade._startTranslationProcess).toHaveBeenCalledWith(edited, "window-1");
+
+    facade._startTranslationProcess.mockClear();
+    await coordinator._handleRetryRequest({ id: "window-1", text: "stale UI text" });
+    expect(facade._startTranslationProcess).toHaveBeenCalledWith(edited, "window-1");
+  });
+
+  it("ignores empty and whitespace-only source confirmations", async () => {
+    const state = { activeWindowId: "window-1", originalText: "source" };
+    const facade = { _startTranslationProcess: vi.fn() };
+    const coordinator = new EventCoordinator(facade, {
+      state, crossFrameManager: {}, translationHandler: {}, errorHandler: {}, clickManager: {}, themeManager: {},
+    });
+    await coordinator._handleConfirmSource({ id: "window-1", text: "  \n " });
+    expect(facade._startTranslationProcess).not.toHaveBeenCalled();
   });
 });

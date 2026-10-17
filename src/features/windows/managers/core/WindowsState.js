@@ -43,6 +43,9 @@ export class WindowsState {
     this.activeWindowId = null;
     this.isProcessing = false;
     this.provider = null;
+    this.translationHistory = [];
+    this.historyIndex = -1;
+    this.translationGeneration = (this.translationGeneration || 0) + 1;
 
     // Click tracking
     this._lastClickWasInsideWindow = false;
@@ -89,6 +92,44 @@ export class WindowsState {
   
   setProvider(provider) {
     this.provider = provider;
+  }
+
+  clearTranslationHistory() {
+    this.translationHistory = [];
+    this.historyIndex = -1;
+    this.provider = null;
+  }
+
+  commitTranslation(sourceText, result, metadata = {}) {
+    const entry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      sourceText,
+      translatedText: result.translatedText,
+      provider: result.provider || null,
+      sourceLanguage: result.sourceLanguage || 'auto',
+      detectedSourceLanguage: result.sourceLanguage || null,
+      targetLanguage: result.targetLanguage || 'auto',
+      mode: result.mode || metadata.mode || null,
+    };
+    const current = this.translationHistory[this.historyIndex];
+    if (current && ['sourceText', 'translatedText', 'provider', 'sourceLanguage', 'targetLanguage', 'mode']
+      .every(key => current[key] === entry[key])) return current;
+    this.translationHistory = this.translationHistory.slice(0, this.historyIndex + 1);
+    this.translationHistory.push(entry);
+    this.historyIndex = this.translationHistory.length - 1;
+    this.originalText = sourceText;
+    this.provider = entry.provider;
+    return entry;
+  }
+
+  navigateHistory(direction) {
+    const next = this.historyIndex + (direction === 'previous' ? -1 : 1);
+    if (next < 0 || next >= this.translationHistory.length) return null;
+    this.historyIndex = next;
+    const entry = this.translationHistory[next];
+    this.originalText = entry.sourceText;
+    this.provider = entry.provider;
+    return entry;
   }
 
   setTranslationCancelled(cancelled) {

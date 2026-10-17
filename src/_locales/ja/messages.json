@@ -1630,14 +1630,20 @@
   "model_catalog_sort_output_asc": { "message": "出力価格（安い順）" },
   "model_catalog_sort_output_desc": { "message": "出力価格（高い順）" },
   "model_catalog_results_label": { "message": "利用可能なモデル" },
-  "model_catalog_showing_count": { "message": "全 {total} 件中 {shown} 件を表示" },
-  "model_catalog_no_matches": { "message": "検索に一致するモデルはありません。" },
+  "model_catalog_showing_count": {
+    "message": "全 {total} 件中 {shown} 件を表示"
+  },
+  "model_catalog_no_matches": {
+    "message": "検索に一致するモデルはありません。"
+  },
   "model_catalog_input_price": { "message": "入力" },
   "model_catalog_output_price": { "message": "出力" },
   "model_catalog_free": { "message": "無料" },
   "model_catalog_unavailable": { "message": "該当なし" },
   "model_catalog_variable": { "message": "変動" },
-  "model_catalog_base_rates_note": { "message": "基本料金は100万トークンあたりの米ドル表示です。料金は変動する場合があり、追加料金が発生することがあります。" },
+  "model_catalog_base_rates_note": {
+    "message": "基本料金は100万トークンあたりの米ドル表示です。料金は変動する場合があり、追加料金が発生することがあります。"
+  },
   "model_catalog_per_million": { "message": "/ 100万トークン" },
   "model_catalog_browse": { "message": "モデルを探す" },
   "model_catalog_column_model": { "message": "モデル" },
@@ -3075,6 +3081,9 @@
   "window_translation_placeholder": {
     "message": "翻訳がここに表示されます..."
   },
+  "window_edit_source": { "message": "原文を編集" },
+  "window_history_previous": { "message": "前へ" },
+  "window_history_next": { "message": "次へ" },
   "window_pin": {
     "message": "ウィンドウを固定"
   },

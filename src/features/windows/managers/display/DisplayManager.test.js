@@ -92,18 +92,25 @@ const createState = () => ({
   activeWindowId: null,
   originalText: null,
   provider: "original-provider",
+  translationHistory: [],
+  historyIndex: -1,
   isTranslationCancelled: false,
   pendingTranslationWindow: false,
   hasActiveElements: true,
   setActiveWindowId: vi.fn((id) => {
     state.activeWindowId = id;
   }),
-  setOriginalText: vi.fn(),
+  setOriginalText: vi.fn((text) => { state.originalText = text; }),
   setTranslationCancelled: vi.fn(),
   setVisible: vi.fn(),
   setIconMode: vi.fn(),
   setProcessing: vi.fn(),
   setProvider: vi.fn(),
+  clearTranslationHistory: vi.fn(() => {
+    state.translationHistory = [];
+    state.historyIndex = -1;
+    state.provider = null;
+  }),
 });
 
 let state;
@@ -145,6 +152,12 @@ beforeEach(() => {
     dismiss: vi.fn().mockResolvedValue(),
     _addDismissListener: vi.fn(),
     _startTranslationProcess: vi.fn().mockRejectedValue(canonicalError()),
+    _isCurrentTranslation: vi.fn(() => true),
+    _historyUpdate: vi.fn((entry) => entry ? {
+      selectedText: entry.sourceText,
+      historyIndex: state.historyIndex,
+      historyLength: state.translationHistory.length,
+    } : {}),
   };
   errorHandler = {
     getErrorForUI: vi.fn(),
@@ -204,6 +217,57 @@ describe("DisplayManager Selection Window error boundary", () => {
     expect(
       mocks.events.updateWindow.mock.calls[0][1].initialTranslatedText,
     ).not.toContain("raw");
+  });
+
+  it("clears prior history and provider before creating an independent window", async () => {
+    facade._startTranslationProcess.mockResolvedValue({
+      translatedText: "new result", provider: "new-provider", sourceLanguage: "en", targetLanguage: "fa",
+    });
+
+    await manager._showWindow("new source", { x: 10, y: 20 });
+
+    expect(state.clearTranslationHistory).toHaveBeenCalledTimes(1);
+    expect(state.provider).toBeNull();
+    expect(mocks.events.showWindow.mock.calls[0][0]).toMatchObject({ historyIndex: -1, historyLength: 0 });
+  });
+
+  it("publishes history metadata after an initial successful translation", async () => {
+    facade._startTranslationProcess.mockImplementation(async (sourceText) => {
+      state.translationHistory = [{ sourceText, translatedText: "result" }];
+      state.historyIndex = 0;
+      return { translatedText: "result", provider: "provider", sourceLanguage: "en", targetLanguage: "fa" };
+    });
+
+    await manager._showWindow("initial source", { x: 10, y: 20 });
+
+    expect(mocks.events.updateWindow).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ selectedText: "initial source", historyIndex: 0, historyLength: 1 }),
+    );
+  });
+
+  it.each(["pinned", "docked"])("publishes advancing history metadata on successful %s-window reuses", async (reuseMode) => {
+    state.isVisible = true;
+    if (reuseMode === "pinned") state.isPinned = true;
+    else state.dockMode = "right";
+    state.activeWindowId = "pinned-window";
+    state.originalText = "initial source";
+    facade._startTranslationProcess.mockImplementation(async (sourceText) => {
+      state.translationHistory.push({ sourceText, translatedText: `result:${sourceText}` });
+      state.historyIndex = state.translationHistory.length - 1;
+      return { translatedText: `result:${sourceText}`, provider: "provider" };
+    });
+
+    await manager.show("first source", { x: 10, y: 20 });
+    await manager.show("second source", { x: 30, y: 40 });
+
+    const successfulUpdates = mocks.events.updateWindow.mock.calls.filter(([, payload]) => payload.isLoading === false);
+    expect(successfulUpdates).toHaveLength(2);
+    expect(successfulUpdates.map(([id]) => id)).toEqual(["pinned-window", "pinned-window"]);
+    expect(successfulUpdates.map(([, payload]) => [payload.selectedText, payload.historyIndex, payload.historyLength])).toEqual([
+      ["first source", 0, 1],
+      ["second source", 1, 2],
+    ]);
   });
 
   it("cancels delayed click activation during cleanup", async () => {
@@ -271,6 +335,19 @@ describe("DisplayManager Selection Window error boundary", () => {
     expect(
       mocks.events.updateWindow.mock.calls[1][1].initialTranslatedText,
     ).not.toContain("raw");
+  });
+
+  it("keeps the failed reused-window source instead of restoring history source", async () => {
+    state.activeWindowId = "existing-window";
+    state.translationHistory = [{ sourceText: "old history source" }];
+    state.historyIndex = 0;
+    facade._startTranslationProcess.mockRejectedValue(canonicalError());
+
+    await manager._updateExistingWindow("new committed source");
+
+    expect(state.originalText).toBe("new committed source");
+    expect(mocks.events.updateWindow.mock.calls[1][1]).not.toHaveProperty("selectedText");
+    expect(facade._historyUpdate).not.toHaveBeenCalled();
   });
 
   it("sanitizes mobile sheet error payload without creating a toast", async () => {

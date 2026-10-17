@@ -36,3 +36,11 @@ describe('ContentApp desktop FAB visibility gate', () => {
     expect(source).toContain('registeredDesktopFabCore?.desktopFabController === desktopFabController');
   });
 });
+
+describe('ContentApp translation window history props', () => {
+  it('passes window-owned history position to the floating window', () => {
+    const source = readFileSync('src/apps/content/ContentApp.vue', 'utf8');
+    expect(source).toContain(':history-index="window.historyIndex"');
+    expect(source).toContain(':history-length="window.historyLength"');
+  });
+});

@@ -1620,7 +1620,9 @@
     "message": "مدل ذخیره‌شده"
   },
   "model_catalog_search_label": { "message": "جستجوی مدل‌ها" },
-  "model_catalog_search_placeholder": { "message": "جستجو بر اساس شناسه یا نام مدل" },
+  "model_catalog_search_placeholder": {
+    "message": "جستجو بر اساس شناسه یا نام مدل"
+  },
   "model_catalog_sort_label": { "message": "مرتب‌سازی بر اساس" },
   "model_catalog_sort_api": { "message": "ترتیب API" },
   "model_catalog_sort_name_asc": { "message": "نام (الف تا ی)" },
@@ -1637,7 +1639,9 @@
   "model_catalog_free": { "message": "رایگان" },
   "model_catalog_unavailable": { "message": "ناموجود" },
   "model_catalog_variable": { "message": "متغیر" },
-  "model_catalog_base_rates_note": { "message": "قیمت پایه به دلار آمریکا برای هر یک میلیون توکن است؛ قیمت‌ها ممکن است متفاوت باشند و هزینه‌های اضافی اعمال شوند." },
+  "model_catalog_base_rates_note": {
+    "message": "قیمت پایه به دلار آمریکا برای هر یک میلیون توکن است؛ قیمت‌ها ممکن است متفاوت باشند و هزینه‌های اضافی اعمال شوند."
+  },
   "model_catalog_per_million": { "message": "برای هر یک میلیون توکن" },
   "model_catalog_browse": { "message": "مرور در مدل‌ها" },
   "model_catalog_column_model": { "message": "مدل" },
@@ -3075,6 +3079,9 @@
   "window_translation_placeholder": {
     "message": "ترجمه اینجا نمایش داده می‌شود"
   },
+  "window_edit_source": { "message": "ویرایش متن مبدأ" },
+  "window_history_previous": { "message": "قبلی" },
+  "window_history_next": { "message": "بعدی" },
   "window_pin": {
     "message": "ثابت کردن پنجره"
   },

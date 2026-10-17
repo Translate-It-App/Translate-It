@@ -115,7 +115,9 @@
     <div class="ti-header-close">
       <span
         v-if="targetLanguageLabel"
+        :ref="setTargetLabelElement"
         class="ti-target-language-label"
+        :title="targetLabelTitle || undefined"
         data-testid="translation-window-toolbar-target-language"
       >
         {{ targetLanguageLabel }}
@@ -123,7 +125,9 @@
 
       <span
         v-if="detectedLanguageLabel"
+        :ref="setDetectedLabelElement"
         class="ti-detected-language-label"
+        :title="detectedLabelTitle || undefined"
         data-testid="translation-window-toolbar-detected-language"
       >
         {{ detectedLanguageLabel }}
@@ -156,7 +160,7 @@
 </template>
 
 <script setup>
-import { ref } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import "./TranslationWindowToolbar.scss";
 import ProviderSelector from "@/components/shared/ProviderSelector.vue";
 import TTSButton from "@/components/shared/TTSButton.vue";
@@ -165,7 +169,7 @@ defineOptions({
   name: "TranslationWindowToolbar",
 });
 
-defineProps({
+const props = defineProps({
   provider: { type: String, default: "" },
   theme: { type: String, default: "light" },
   isPinned: { type: Boolean, default: false },
@@ -212,6 +216,55 @@ const emit = defineEmits([
 
 const lastProviderChangeValue = ref("");
 const ttsButtonRef = ref(null);
+const targetLabelElement = ref(null);
+const detectedLabelElement = ref(null);
+const targetLabelTitle = ref("");
+const detectedLabelTitle = ref("");
+let labelResizeObserver = null;
+
+const setTargetLabelElement = (element) => {
+  targetLabelElement.value = element;
+};
+const setDetectedLabelElement = (element) => {
+  detectedLabelElement.value = element;
+};
+
+const updateLabelTitles = () => {
+  targetLabelTitle.value = targetLabelElement.value &&
+    targetLabelElement.value.scrollWidth > targetLabelElement.value.clientWidth + 1
+    ? props.targetLanguageLabel
+    : "";
+  detectedLabelTitle.value = detectedLabelElement.value &&
+    detectedLabelElement.value.scrollWidth > detectedLabelElement.value.clientWidth + 1
+    ? props.detectedLanguageLabel
+    : "";
+};
+
+watch(
+  [targetLabelElement, detectedLabelElement, () => props.targetLanguageLabel, () => props.detectedLanguageLabel],
+  ([targetElement, detectedElement], previous = []) => {
+    const [previousTarget, previousDetected] = previous;
+    if (labelResizeObserver) {
+      if (previousTarget && previousTarget !== targetElement) labelResizeObserver.unobserve(previousTarget);
+      if (previousDetected && previousDetected !== detectedElement) labelResizeObserver.unobserve(previousDetected);
+    }
+    updateLabelTitles();
+    if (labelResizeObserver) {
+      if (targetElement) labelResizeObserver.observe(targetElement);
+      if (detectedElement) labelResizeObserver.observe(detectedElement);
+    }
+  },
+  { flush: "post" },
+);
+
+if (typeof ResizeObserver !== "undefined") {
+  labelResizeObserver = new ResizeObserver(() => updateLabelTitles());
+}
+
+onBeforeUnmount(() => {
+  labelResizeObserver?.disconnect();
+  labelResizeObserver = null;
+});
 
 const handleProviderChange = (newProvider) => {
   const normalizedProvider =

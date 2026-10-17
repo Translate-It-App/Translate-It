@@ -34,7 +34,7 @@
     <div
       v-if="dockMode !== 'none'"
       class="ti-dock-resize-handle"
-      @mousedown.stop="startResize"
+      @mousedown.prevent.stop="startResize"
       @touchstart.stop="startResize"
     />
 
@@ -67,6 +67,53 @@
       />
     </div>
 
+    <div
+      v-if="props.historyLength > 1"
+      class="ti-window-history-subheader"
+      :class="`ti-window-history-subheader-${shellTheme}`"
+      data-testid="translation-window-history-subheader"
+      @mousedown.stop
+      @touchstart.stop
+      @click.stop
+    >
+      <div class="ti-window-history-controls">
+        <IconButton
+          icon="arrow-next.svg"
+          type="toolbar"
+          mask
+          class="ti-window-history-button ti-window-history-previous"
+          :title="t('window_history_previous')"
+          :alt="t('window_history_previous')"
+          :disabled="props.historyIndex <= 0"
+          data-testid="translation-window-history-previous"
+          @click="navigateHistory('previous')"
+        />
+        <span
+          class="ti-window-history-counter"
+          data-testid="translation-window-history-counter"
+        >{{ props.historyIndex + 1 }} / {{ props.historyLength }}</span>
+        <IconButton
+          icon="arrow-next.svg"
+          type="toolbar"
+          mask
+          class="ti-window-history-button ti-window-history-next"
+          :title="t('window_history_next')"
+          :alt="t('window_history_next')"
+          :disabled="props.historyIndex < 0 || props.historyIndex >= props.historyLength - 1"
+          data-testid="translation-window-history-next"
+          @click="navigateHistory('next')"
+        />
+      </div>
+      <span
+        class="ti-window-history-divider"
+        aria-hidden="true"
+      />
+      <span
+        class="ti-window-history-provider"
+        data-testid="translation-window-history-provider"
+      >{{ activeHistoryProvider }}</span>
+    </div>
+
     <div class="ti-window-body">
       <div
         class="ti-original-text-wrapper"
@@ -74,7 +121,21 @@
       >
         <div class="ti-original-text-section">
           <div class="ti-original-text">
-            {{ originalText }}
+            <textarea
+              v-show="showOriginal && !isLoading"
+              :id="`translation-window-source-${props.id}`"
+              ref="sourceTextarea"
+              v-model="sourceDraft"
+              class="ti-window-source-input"
+              :class="{ 'ti-window-source-overflow': sourceHasOverflow }"
+              :aria-label="t('window_edit_source')"
+              :lang="props.sourceLanguage !== 'auto' ? props.sourceLanguage : undefined"
+              dir="auto"
+              rows="1"
+              @mousedown.stop
+              @touchstart.stop
+              @keydown="handleSourceKeydown"
+            />
           </div>
         </div>
       </div>
@@ -103,7 +164,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch, nextTick } from 'vue';
 import { injectStylesToShadowRoot } from '@/utils/ui/styleInjector.js';
 import { pageEventBus, WINDOWS_MANAGER_EVENTS } from '@/core/PageEventBus.js';
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js';
@@ -122,6 +183,8 @@ import { useSettingsStore } from '@/features/settings/stores/settings.js';
 import { TranslationMode } from '@/shared/config/config.js';
 import { SimpleMarkdown, ExtractionStrategy } from '@/shared/utils/text/markdown.js';
 import { getLanguageNameFromCode } from '@/shared/config/languageConstants.js';
+import { getProviderById } from '@/core/provider-registry.js';
+import IconButton from '@/components/shared/IconButton.vue';
 
 // Import adjacent SCSS
 import './TranslationWindow.scss';
@@ -144,6 +207,9 @@ const props = defineProps({
   initialSize: { type: String, default: 'normal' }, 
   targetLanguage: { type: String, default: 'auto' }, 
   sourceLanguage: { type: String, default: 'auto' },
+  historyIndex: { type: Number, default: -1 },
+  historyLength: { type: Number, default: 0 },
+  historyProvider: { type: String, default: '' },
   detectedSourceLanguage: { type: String, default: undefined },
   provider: { type: String, default: '' },
   translationMode: { type: String, default: null }
@@ -171,6 +237,10 @@ const resolveShellTheme = () => {
 };
 
 const shellTheme = computed(() => resolveShellTheme());
+const activeHistoryProvider = computed(() => {
+  const provider = props.historyProvider || props.provider;
+  return getProviderById(provider)?.name || provider || '';
+});
 
 // Pinned and Docked states
 const isPinned = ref(settings.getSetting('WINDOW_IS_PINNED', false));
@@ -233,12 +303,31 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  sourceResizeObserver?.disconnect();
+  sourceResizeObserver = null;
+
   if (removeSystemThemeListener) {
     removeSystemThemeListener();
     removeSystemThemeListener = null;
   }
 
+  // Never leak resize coordination state or capture listeners if unmounted
+  // mid-protection (removed with matching capture semantics).
+  disarmResizeCompletionProtection();
+  window.__TRANSLATION_WINDOW_IS_RESIZING = false;
+  window.__TRANSLATION_WINDOW_JUST_RESIZED = false;
+
   systemThemeMediaQuery = null;
+});
+
+// Gesture protection teardown runs before unmount, while the template ref
+// still holds this window's root element (Vue nulls template refs during
+// unmount, before onUnmounted hooks run).
+onBeforeUnmount(() => {
+  const windowsManager = window.windowsManagerInstance;
+  if (windowsManager?.clickManager && windowElement.value) {
+    windowsManager.clickManager.clearGestureFor(windowElement.value);
+  }
 });
 
 const togglePin = () => {
@@ -266,6 +355,10 @@ const isVisible = ref(false);
 const currentSize = ref(props.initialSize); 
 const translatedText = computed(() => props.isError ? '' : props.initialTranslatedText);
 const originalText = ref(props.selectedText);
+const sourceDraft = ref(props.selectedText);
+const sourceTextarea = ref(null);
+const sourceHasOverflow = ref(false);
+let sourceResizeObserver = null;
 const errorMessage = computed(() => props.isError ? props.initialTranslatedText : '');
 
 // Check if current translation is in dictionary mode
@@ -288,11 +381,13 @@ const detectedLanguageName = computed(() => {
 });
 
 // Watch for prop changes to sync internal state
-watch(() => props.selectedText, (newText) => {
-  if (newText) {
-    logger.debug('selectedText updated:', newText);
-    originalText.value = newText;
-  }
+watch(() => [props.selectedText, props.historyIndex], ([newText]) => {
+  originalText.value = newText;
+  sourceDraft.value = newText;
+});
+
+watch(() => props.isError, (isError) => {
+  if (isError) sourceDraft.value = originalText.value;
 });
 
 watch(() => props.sourceLanguage, (newLang) => {
@@ -323,6 +418,37 @@ const handleProviderChange = (newProvider) => {
 };
 
 const showOriginal = ref(false);
+const updateSourceOverflow = (textarea = sourceTextarea.value) => {
+  if (textarea && sourceTextarea.value === textarea) {
+    sourceHasOverflow.value = textarea.scrollHeight > textarea.clientHeight;
+  }
+};
+
+watch([sourceDraft, showOriginal, isLoading], () => {
+  nextTick(updateSourceOverflow);
+});
+
+watch(sourceTextarea, (textarea) => {
+  sourceResizeObserver?.disconnect();
+  sourceResizeObserver = null;
+
+  if (!textarea) {
+    sourceHasOverflow.value = false;
+    return;
+  }
+
+  updateSourceOverflow();
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(() => {
+      if (sourceTextarea.value === textarea && sourceResizeObserver === observer) {
+        updateSourceOverflow(textarea);
+      }
+    });
+    sourceResizeObserver = observer;
+    observer.observe(textarea);
+  }
+}, { flush: 'post' });
+
 const currentWidth = computed(() => currentSize.value === 'small' ? 28 : null);
 const currentHeight = computed(() => currentSize.value === 'small' ? 28 : null);
 
@@ -411,6 +537,9 @@ onMounted(async () => {
     console.warn('[TranslationWindow] Failed to load lazy styles:', error);
   }
 
+  await nextTick();
+  updateSourceOverflow();
+
   requestAnimationFrame(() => {
     isVisible.value = true;
   });
@@ -426,12 +555,77 @@ onMounted(async () => {
 });
 
 const handleClose = () => emit('close', props.id);
-const toggleShowOriginal = () => { showOriginal.value = !showOriginal.value; };
+const toggleShowOriginal = () => {
+  if (showOriginal.value) document.activeElement?.blur?.();
+  showOriginal.value = !showOriginal.value;
+};
+
+const navigateHistory = (direction) => {
+  pageEventBus.emit('translation-window-history-navigate', { id: props.id, direction });
+};
+
+const handleSourceKeydown = (event) => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    sourceDraft.value = originalText.value;
+    return;
+  }
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  if (!sourceDraft.value.trim() || sourceDraft.value === originalText.value) return;
+  pageEventBus.emit('translation-window-confirm-source', { id: props.id, text: sourceDraft.value });
+};
 
 // Resize logic for docked mode
 const isResizing = ref(false);
+let resizeCompletionToken = null;
+
+// Event-scoped resize completion protection. These listeners are managed
+// manually (not via ResourceTracker) so capture/bubble removal matches setup.
+// The window capture listener binds protection to one click; document bubble
+// cleanup runs after all dismissal consumers have read the marker.
+const stopResizeCompletionClick = (event) => {
+  const completionToken = resizeCompletionToken;
+  if (!completionToken) return;
+
+  if (completionToken.clickEvent && completionToken.clickEvent !== event) {
+    clearResizeCompletionMarker();
+    return;
+  }
+
+  completionToken.clickEvent = event;
+  document.addEventListener('click', clearResizeCompletionAfterClick, { capture: false });
+};
+const clearResizeCompletionAfterClick = (event) => {
+  if (resizeCompletionToken?.clickEvent === event) {
+    clearResizeCompletionMarker();
+  }
+};
+const clearResizeCompletionMarker = () => {
+  resizeCompletionToken = null;
+  window.__TRANSLATION_WINDOW_JUST_RESIZED = false;
+  window.removeEventListener('click', stopResizeCompletionClick, { capture: true });
+  document.removeEventListener('click', clearResizeCompletionAfterClick, { capture: false });
+  document.removeEventListener('pointerdown', clearResizeCompletionMarker, { capture: true });
+};
+const armResizeCompletionProtection = () => {
+  window.addEventListener('click', stopResizeCompletionClick, { capture: true });
+  document.addEventListener('pointerdown', clearResizeCompletionMarker, { capture: true, once: true });
+};
+const disarmResizeCompletionProtection = () => {
+  resizeCompletionToken = null;
+  window.removeEventListener('click', stopResizeCompletionClick, { capture: true });
+  document.removeEventListener('click', clearResizeCompletionAfterClick, { capture: false });
+  document.removeEventListener('pointerdown', clearResizeCompletionMarker, { capture: true });
+};
+
 const startResize = (event) => {
   isResizing.value = true;
+  // Coordinate with outside-click dismissal (same pattern as window dragging):
+  // the click generated by completing the resize must not dismiss the window,
+  // even when the mouse is released outside it.
+  window.__TRANSLATION_WINDOW_IS_RESIZING = true;
   const startX = event.type === 'touchstart' ? event.touches[0].clientX : event.clientX;
   const startWidth = dockedWidth.value;
 
@@ -456,8 +650,21 @@ const startResize = (event) => {
     updateDockedWidth(newWidth);
   };
 
-  const stopResize = () => {
+  const stopResize = (event) => {
     isResizing.value = false;
+    window.__TRANSLATION_WINDOW_IS_RESIZING = false;
+    if (event.type === 'touchcancel') {
+      // A cancelled gesture has no completion click to suppress.
+      window.__TRANSLATION_WINDOW_JUST_RESIZED = false;
+      disarmResizeCompletionProtection();
+    } else {
+      // Suppress the dismissal triggered by the click that completes the resize;
+      // the marker is cleared after that click's dispatch or by the next
+      // pointerdown — whichever comes first (no timers).
+      window.__TRANSLATION_WINDOW_JUST_RESIZED = true;
+      resizeCompletionToken = {};
+      armResizeCompletionProtection();
+    }
     void settings.updateSettingAndPersist('WINDOW_DOCKED_WIDTH', dockedWidth.value).catch(error => {
       logger.warn('Failed to persist WINDOW_DOCKED_WIDTH:', error);
     });
