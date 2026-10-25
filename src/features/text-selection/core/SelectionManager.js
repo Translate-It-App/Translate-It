@@ -229,7 +229,7 @@ export class SelectionManager extends ResourceTracker {
           const descendantRoots = this.getDescendantSelectionShadowRoots(selection);
           const expandedRoots = new Set([...shadowRoots, ...descendantRoots]);
           if (descendantRoots.length > 0) {
-            const expandedPosition = this.getComposedRangePosition(selection, [...expandedRoots]);
+            const expandedPosition = this.getComposedRangePosition(selection, [...expandedRoots], false, true);
             if (expandedPosition) return expandedPosition;
           } else if (shadowRoots.length === 0) {
             const documentPosition = this.getComposedRangePosition(selection, shadowRoots, true);
@@ -301,10 +301,10 @@ export class SelectionManager extends ResourceTracker {
     return [...roots];
   }
 
-  getComposedRangePosition(selection, shadowRoots, allowDocumentRange = false) {
+  getComposedRangePosition(selection, shadowRoots, allowDocumentRange = false, allowElementRange = false) {
     for (const range of selection.getComposedRanges({ shadowRoots })) {
       if (!range || range.collapsed || this.isExtensionUiRange(range) ||
-          !this.isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange)) continue;
+          !this.isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange, allowElementRange)) continue;
 
       const measurableRange = this.createRangeFromStaticRange(range);
       if (!measurableRange) continue;
@@ -325,7 +325,7 @@ export class SelectionManager extends ResourceTracker {
     return null;
   }
 
-  isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange) {
+  isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange, allowElementRange) {
     const roots = new Set(shadowRoots);
     const startRoot = range.startContainer.getRootNode();
     const endRoot = range.endContainer.getRootNode();
@@ -334,13 +334,23 @@ export class SelectionManager extends ResourceTracker {
 
       const anchorRoot = selection.anchorNode?.getRootNode();
       const focusRoot = selection.focusNode?.getRootNode();
-      if (anchorRoot !== startRoot || focusRoot !== startRoot) return false;
-
       const matchesBoundaries = (startNode, startOffset, endNode, endOffset) =>
         range.startContainer === startNode && range.startOffset === startOffset &&
         range.endContainer === endNode && range.endOffset === endOffset;
-      return matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
+      const boundariesMatch = matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
         matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset);
+
+      if (anchorRoot === startRoot && focusRoot === startRoot && boundariesMatch &&
+          !this.rangeContainsNestedShadowHost(range, startRoot)) return true;
+
+      if (!allowElementRange || range.startContainer.nodeType !== Node.ELEMENT_NODE ||
+          range.endContainer !== range.startContainer || this.hasNestedShadowHost(range.startContainer, startRoot, roots)) return false;
+
+      if (anchorRoot !== startRoot || focusRoot !== startRoot) {
+        return range.startOffset === 0 && range.endOffset === range.startContainer.childNodes.length;
+      }
+
+      return boundariesMatch;
     }
 
     if (!allowDocumentRange || roots.size > 0 || startRoot !== document || endRoot !== document) return false;
@@ -350,6 +360,27 @@ export class SelectionManager extends ResourceTracker {
 
     return matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
       matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset);
+  }
+
+  hasNestedShadowHost(container, rangeRoot, roots) {
+    return [...roots].some((root) => root !== rangeRoot && container.contains(root.host));
+  }
+
+  rangeContainsNestedShadowHost(range, rangeRoot) {
+    const container = range.startContainer;
+    if (container.nodeType !== Node.ELEMENT_NODE || range.endContainer !== container) return false;
+    if (container.shadowRoot && container.shadowRoot !== rangeRoot) return true;
+
+    for (let index = range.startOffset; index < range.endOffset; index += 1) {
+      const child = container.childNodes[index];
+      if (child?.nodeType !== Node.ELEMENT_NODE) continue;
+      let hasNestedRoot = false;
+      walkOpenShadowTree(child, (element) => {
+        if (element.shadowRoot && element.shadowRoot !== rangeRoot) hasNestedRoot = true;
+      });
+      if (hasNestedRoot) return true;
+    }
+    return false;
   }
 
   isExtensionUiRange(range) {
