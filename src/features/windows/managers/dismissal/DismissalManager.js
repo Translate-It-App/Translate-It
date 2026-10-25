@@ -283,7 +283,7 @@ export class DismissalManager {
 
     this.facade._dismissHandler = (event) => {
       if (!this.state.isIconMode && !this.state.isVisible) return;
-      if (this.state.isPinned) return;
+      if (this.state.isPinned && !this.state.isInitialLoadingWindow?.(this.state.activeWindowId)) return;
       if (window.__TRANSLATION_WINDOW_IS_DRAGGING === true || window.__TRANSLATION_WINDOW_JUST_DRAGGED === true) return;
       if (window.__TRANSLATION_WINDOW_IS_RESIZING === true || window.__TRANSLATION_WINDOW_JUST_RESIZED === true) return;
       if (this.facade._isInShiftClickOperation || window.translateItShiftClickOperation) return;

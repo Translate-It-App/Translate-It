@@ -19,9 +19,10 @@ import { WindowsManagerEvents } from "@/core/PageEventBus.js";
  * Handles translation requests and responses for WindowsManager
  */
 export class TranslationHandler {
-  constructor() {
+  constructor(state = null) {
     this.logger = getScopedLogger(LOG_COMPONENTS.WINDOWS, 'TranslationHandler');
     this.activeRequests = new Map();
+    this.state = state;
   }
 
   /**
@@ -123,6 +124,7 @@ export class TranslationHandler {
               
               // Progressive UI update for streaming
               if (windowId) {
+                this.state?.clearInitialLoadingWindow?.(windowId);
                 WindowsManagerEvents.updateWindow(windowId, {
                   translatedText: partialText,
                   initialTranslatedText: partialText,

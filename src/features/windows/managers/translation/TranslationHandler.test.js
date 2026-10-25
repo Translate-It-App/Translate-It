@@ -157,6 +157,8 @@ describe('TranslationHandler', () => {
   });
 
   it('should handle streaming translation result', async () => {
+    const state = { clearInitialLoadingWindow: vi.fn() };
+    handler.state = state;
     // 1. Setup sendUnifiedTranslation to return streaming status
     sendUnifiedTranslation.mockResolvedValue({ success: true, streaming: true });
 
@@ -181,6 +183,7 @@ describe('TranslationHandler', () => {
     const result = await translationPromise;
 
     expect(result.translatedText).toBe('سلام');
+    expect(state.clearInitialLoadingWindow).toHaveBeenCalledWith('win-123');
     expect(pageEventBus.emit).toHaveBeenCalledWith(WINDOWS_MANAGER_EVENTS.UPDATE_WINDOW, expect.objectContaining({
       id: 'win-123',
       initialTranslatedText: 'سلام'
@@ -221,6 +224,10 @@ describe('TranslationHandler', () => {
     const pending = handler.performTranslation('hello');
     handler.cancelTranslation('mock-msg-id');
     resolveSend({ success: true, translatedText: 'late result', streaming: false });
+    expect(handler.handleTranslationResult({
+      messageId: 'mock-msg-id',
+      data: { error: { message: 'late error' } },
+    })).toBe(false);
     await expect(pending).resolves.toMatchObject({ cancelled: true });
     expect(handler.getActiveRequestCount()).toBe(0);
     expect(vi.getTimerCount()).toBe(0);

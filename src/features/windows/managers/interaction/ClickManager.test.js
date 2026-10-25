@@ -79,6 +79,9 @@ describe('ClickManager', () => {
     mockState = {
       hasActiveElements: false,
       shouldPreventDismissal: false,
+      isPinned: false,
+      activeWindowId: 'window-1',
+      isInitialLoadingWindow: vi.fn(() => false),
       setPendingTranslationWindow: vi.fn()
     };
 
@@ -130,6 +133,30 @@ describe('ClickManager', () => {
   });
 
   describe('Outside Click Detection Logic', () => {
+    it.each([
+      ['initial spinner', true],
+      ['completed window', false],
+    ])('pin decision for %s', (_label, initialLoading) => {
+      mockState.isPinned = true;
+      mockState.isInitialLoadingWindow.mockReturnValue(initialLoading);
+      vi.spyOn(clickManager, '_shouldDismissOnOutsideClick').mockReturnValue(true);
+
+      clickManager._handleOutsideClick(new MouseEvent('click'));
+
+      if (initialLoading) expect(mockHandlers.onOutsideClick).toHaveBeenCalledTimes(1);
+      else expect(mockHandlers.onOutsideClick).not.toHaveBeenCalled();
+    });
+
+    it('keeps pinned initial spinner protected during icon-to-window transition', () => {
+      mockState.isPinned = true;
+      mockState.isInitialLoadingWindow.mockReturnValue(true);
+      mockState.shouldPreventDismissal = true;
+
+      clickManager._handleOutsideClick(new MouseEvent('click'));
+
+      expect(mockHandlers.onOutsideClick).not.toHaveBeenCalled();
+    });
+
     it('should NOT dismiss if shouldPreventDismissal is true', () => {
       mockState.shouldPreventDismissal = true;
       const event = new MouseEvent('click');
@@ -251,10 +278,10 @@ describe('ClickManager', () => {
   });
 
   describe('Resize completion click coordination', () => {
-    const setupDismissalConsumers = () => {
+    const setupDismissalConsumers = (state = { isIconMode: false, isVisible: true, isPinned: false }) => {
       const facade = {};
       const dismissalManager = new DismissalManager(facade, {
-        state: { isIconMode: false, isVisible: true, isPinned: false },
+        state,
         crossFrameManager: mockCrossFrameManager,
         translationHandler: null,
         tts: null
@@ -263,6 +290,29 @@ describe('ClickManager', () => {
       dismissalManager._addDismissListener();
       return { facade, dismissSpy };
     };
+
+    it.each([
+      ['initial spinner', true],
+      ['completed window', false],
+    ])('DismissalManager pin decision for %s', (_label, initialLoading) => {
+      const state = {
+        isIconMode: false,
+        isVisible: true,
+        isPinned: true,
+        activeWindowId: 'window-1',
+        isInitialLoadingWindow: vi.fn(() => initialLoading),
+      };
+      const { facade, dismissSpy } = setupDismissalConsumers(state);
+      const outsideTarget = document.createElement('div');
+      document.body.appendChild(outsideTarget);
+
+      facade._dismissHandler({ button: 0, target: outsideTarget });
+
+      if (initialLoading) expect(dismissSpy).toHaveBeenCalledTimes(1);
+      else expect(dismissSpy).not.toHaveBeenCalled();
+      document.removeEventListener('click', facade._dismissHandler);
+      document.removeEventListener('keydown', facade._escapeKeyHandler);
+    });
 
     const setupClickManagerCapture = () => {
       // ResourceTracker is mocked in this file, so attach the production

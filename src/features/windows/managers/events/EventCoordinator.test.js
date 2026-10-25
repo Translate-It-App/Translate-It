@@ -273,10 +273,23 @@ describe("EventCoordinator cross-frame outside-click resize handling", () => {
     window.__TRANSLATION_WINDOW_JUST_DRAGGED = false;
     window.__TRANSLATION_WINDOW_IS_RESIZING = false;
     window.__TRANSLATION_WINDOW_JUST_RESIZED = false;
-    state = { hasActiveElements: true };
+    state = {
+      hasActiveElements: true,
+      isPinned: false,
+      activeWindowId: "window-1",
+      shouldPreventDismissal: false,
+      isInitialLoadingWindow: vi.fn(() => false),
+      setPendingTranslationWindow(pending) { this.shouldPreventDismissal = pending; },
+      setProcessing: vi.fn(),
+      setIconMode: vi.fn(),
+    };
     facade = {
       dismiss: vi.fn().mockResolvedValue(undefined),
-      displayManager: { shouldUseMobileUI: vi.fn(() => false) },
+      displayManager: {
+        shouldUseMobileUI: vi.fn(() => false),
+        _showWindow: vi.fn().mockResolvedValue(undefined),
+      },
+      dismissalManager: { _removeDismissListener: vi.fn() },
     };
     coordinator = new EventCoordinator(facade, {
       state,
@@ -286,7 +299,11 @@ describe("EventCoordinator cross-frame outside-click resize handling", () => {
       },
       translationHandler: {},
       errorHandler: {},
-      clickManager: { setHandlers: vi.fn() },
+      clickManager: {
+        setHandlers: vi.fn(),
+        resolveCrossFrameOutsideClick: vi.fn(() => ({ suppress: false })),
+        completeIconTransition: vi.fn(() => setTimeout(() => state.setPendingTranslationWindow(false), 500)),
+      },
       themeManager: {},
       positionCalculator: {},
     });
@@ -311,6 +328,108 @@ describe("EventCoordinator cross-frame outside-click resize handling", () => {
 
     expect(facade.dismiss).toHaveBeenCalledWith(true);
     expect(window.__TRANSLATION_WINDOW_JUST_RESIZED).toBe(true);
+  });
+
+  it("allows cross-frame dismissal of a pinned initial spinner but not a completed pinned window", async () => {
+    state.isPinned = true;
+    state.isInitialLoadingWindow.mockReturnValue(true);
+    await coordinator._handleCrossFrameOutsideClick({ data: {} });
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+
+    facade.dismiss.mockClear();
+    state.isInitialLoadingWindow.mockReturnValue(false);
+    await coordinator._handleCrossFrameOutsideClick({ data: {} });
+    expect(facade.dismiss).not.toHaveBeenCalled();
+  });
+
+  it("allows local dismissal of a pinned initial spinner and preserves transition protection", async () => {
+    state.isPinned = true;
+    state.isInitialLoadingWindow.mockReturnValue(true);
+    await coordinator._handleOutsideClick();
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+
+    facade.dismiss.mockClear();
+    state.shouldPreventDismissal = true;
+    await coordinator._handleOutsideClick();
+    expect(facade.dismiss).not.toHaveBeenCalled();
+  });
+
+  it("resolves cross-frame gesture identity before blocking a pending transition, then allows an independent click", async () => {
+    state.shouldPreventDismissal = true;
+    const resolveGesture = coordinator.clickManager.resolveCrossFrameOutsideClick;
+
+    await coordinator._handleCrossFrameOutsideClick({ data: { pointerId: 7 } });
+    expect(resolveGesture).toHaveBeenCalledWith({ pointerId: 7, fromCrossDocumentGesture: undefined });
+    expect(facade.dismiss).not.toHaveBeenCalled();
+
+    state.shouldPreventDismissal = false;
+    await coordinator._handleCrossFrameOutsideClick({ data: { pointerId: 8 } });
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks selection clear during transition but permits independent selection clear and outside click afterward", async () => {
+    state.shouldPreventDismissal = true;
+    state.isVisible = true;
+    facade._selectionClearHandler();
+    expect(facade.dismiss).not.toHaveBeenCalled();
+
+    state.shouldPreventDismissal = false;
+    facade._selectionClearHandler();
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+
+    facade.dismiss.mockClear();
+    state.shouldPreventDismissal = true;
+    await coordinator._handleOutsideClick();
+    expect(facade.dismiss).not.toHaveBeenCalled();
+    state.shouldPreventDismissal = false;
+    await coordinator._handleOutsideClick();
+    expect(facade.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks selection clear during the Vue icon transition", () => {
+    facade._isIconToWindowTransition = true;
+
+    facade._selectionClearHandler();
+
+    expect(facade.dismiss).not.toHaveBeenCalled();
+  });
+
+  it("bounds Vue icon transition protection and allows the next independent cross-frame click", async () => {
+    vi.useFakeTimers();
+    try {
+      await coordinator._handleIconClickFromVue({
+        id: "icon-1", text: "selected text", position: { x: 1, y: 2 },
+      });
+
+      expect(state.shouldPreventDismissal).toBe(true);
+      expect(coordinator.clickManager.completeIconTransition).toHaveBeenCalledTimes(1);
+
+      await coordinator._handleCrossFrameOutsideClick({ data: { pointerId: 11 } });
+      expect(coordinator.clickManager.resolveCrossFrameOutsideClick).toHaveBeenCalledWith({
+        pointerId: 11, fromCrossDocumentGesture: undefined,
+      });
+      expect(facade.dismiss).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(state.shouldPreventDismissal).toBe(false);
+      await coordinator._handleCrossFrameOutsideClick({ data: { pointerId: 12 } });
+      expect(facade.dismiss).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["dragging", "__TRANSLATION_WINDOW_IS_DRAGGING"],
+    ["resizing", "__TRANSLATION_WINDOW_IS_RESIZING"],
+  ])("preserves local %s protection for a pinned initial spinner", async (_label, flag) => {
+    state.isPinned = true;
+    state.isInitialLoadingWindow.mockReturnValue(true);
+    window[flag] = true;
+
+    await coordinator._handleOutsideClick();
+
+    expect(facade.dismiss).not.toHaveBeenCalled();
   });
 
   it("leaves local resize-completion protection intact when a cross-frame click arrives first", async () => {
@@ -588,6 +707,9 @@ describe("EventCoordinator PageEventBus listener ownership", () => {
       setIconMode: vi.fn((value) => {
         state.isIconMode = value;
       }),
+      setPendingTranslationWindow: vi.fn((value) => {
+        state.shouldPreventDismissal = value;
+      }),
     };
     const facade = {
       _isIconToWindowTransition: false,
@@ -609,7 +731,7 @@ describe("EventCoordinator PageEventBus listener ownership", () => {
       },
       translationHandler: {},
       errorHandler: {},
-      clickManager: { setHandlers: vi.fn() },
+      clickManager: { setHandlers: vi.fn(), completeIconTransition: vi.fn() },
       themeManager: {},
       positionCalculator: {},
     });

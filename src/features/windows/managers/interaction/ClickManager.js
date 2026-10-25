@@ -264,7 +264,7 @@ export class ClickManager extends ResourceTracker {
     }
 
     // Prevent dismissal if the window is pinned
-    if (this.state.isPinned) {
+    if (this.state.isPinned && !this.state.isInitialLoadingWindow?.(this.state.activeWindowId)) {
       this.logger.debug('Outside click ignored: Window is pinned');
       return;
     }

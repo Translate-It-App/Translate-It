@@ -245,6 +245,8 @@ export class DisplayManager {
       return;
     }
 
+    const isInitialLoadingWindow = this.state.isInitialLoadingWindow?.(windowId) === true;
+
     this.logger.info("Updating existing window with new text", {
       windowId,
       textLength: selectedText.length,
@@ -273,6 +275,7 @@ export class DisplayManager {
       }
 
       WindowsManagerEvents.updateWindow(windowId, {
+        ...(isInitialLoadingWindow ? { initialSize: "normal" } : {}),
         isLoading: false,
         isStreaming: false,
         isError: false,
@@ -284,6 +287,7 @@ export class DisplayManager {
         mode: translationResult.mode,
         ...this.facade._historyUpdate(this.state.translationHistory[this.state.historyIndex]),
       });
+      if (isInitialLoadingWindow) this.state.clearInitialLoadingWindow?.(windowId);
 
       this.state.setProvider(translationResult.provider);
     } catch (error) {
@@ -311,6 +315,7 @@ export class DisplayManager {
       );
 
       WindowsManagerEvents.updateWindow(windowId, {
+        ...(isInitialLoadingWindow ? { initialSize: "normal" } : {}),
         isLoading: false,
         isStreaming: false,
         isError: true,
@@ -320,6 +325,7 @@ export class DisplayManager {
         initialTranslatedText: errorInfo.message,
         provider: fallbackProvider,
       });
+      if (isInitialLoadingWindow) this.state.clearInitialLoadingWindow?.(windowId);
     } finally {
       this.state.setProcessing(false);
     }
@@ -488,6 +494,7 @@ export class DisplayManager {
     const windowId = `translation-window-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     this.state.clearTranslationHistory();
+    this.state.setInitialLoadingWindow?.(windowId);
 
     WindowsManagerEvents.showWindow({
       id: windowId,
@@ -511,9 +518,7 @@ export class DisplayManager {
     }
 
     this._clearOutsideClickActivationTimer();
-    if (!this.facade._isIconToWindowTransition) {
-      this._scheduleOutsideClickActivation();
-    }
+    this._scheduleOutsideClickActivation();
 
     this.logger.info("Translation window created successfully", { windowId });
 
@@ -541,6 +546,7 @@ export class DisplayManager {
         mode: translationResult.mode,
         ...this.facade._historyUpdate(this.state.translationHistory[this.state.historyIndex]),
       });
+      this.state.clearInitialLoadingWindow?.(windowId);
 
       this.state.setProvider(translationResult.provider);
       this.logger.info("Window updated with translation result", { windowId });
@@ -571,6 +577,7 @@ export class DisplayManager {
         initialTranslatedText: errorInfo.message,
         provider: fallbackProvider,
       });
+      this.state.clearInitialLoadingWindow?.(windowId);
     }
   }
 

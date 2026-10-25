@@ -1,7 +1,6 @@
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import { WindowsManager } from '@/features/windows/managers/WindowsManager.js';
-import { TranslationHandler as WindowsTranslationHandler } from '@/features/windows/managers/translation/TranslationHandler.js';
 import { ClickManager } from '@/features/windows/managers/interaction/ClickManager.js';
 import { WindowsState } from '@/features/windows/managers/core/WindowsState.js';
 import { CrossFrameManager } from '@/features/windows/managers/crossframe/CrossFrameManager.js';
@@ -86,9 +85,8 @@ export class WindowsManagerHandler extends ResourceTracker {
       }
 
 
-      // Create WindowsManager instance with its own TranslationHandler
-      const translationHandler = new WindowsTranslationHandler();
-      this.windowsManager = WindowsManager.getInstance({ translationHandler });
+      // Let WindowsManager construct its translation handler with its own state.
+      this.windowsManager = WindowsManager.getInstance();
       
       // Crucial: Wait for async initialization (theme loading, event setup) to finish
       // to avoid race conditions when the feature is lazy-loaded (e.g., from OCR)

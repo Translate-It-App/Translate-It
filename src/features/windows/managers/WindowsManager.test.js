@@ -189,6 +189,7 @@ vi.mock('@/features/tts/TTSFactory.js', () => {
 });
 
 import { WindowsManager } from './WindowsManager.js';
+import { TranslationHandler } from '@/features/windows/managers/translation/TranslationHandler.js';
 import { SELECTION_EVENTS } from '@/features/text-selection/events/SelectionEvents.js';
 import settingsManager from '@/shared/managers/SettingsManager.js';
 
@@ -210,6 +211,11 @@ describe('WindowsManager', () => {
 
   it('should be a singleton', () => {
     expect(windowsManager).toBe(WindowsManager.getInstance());
+  });
+
+  it('constructs the default TranslationHandler with this manager state', () => {
+    expect(TranslationHandler).toHaveBeenCalledWith(windowsManager.state);
+    expect(windowsManager.translationHandler).toBeDefined();
   });
 
   describe('Selection Handling', () => {

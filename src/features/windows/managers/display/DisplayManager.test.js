@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorTypes } from "@/shared/error-management/ErrorTypes.js";
+import { WindowsConfig } from "../core/WindowsConfig.js";
 import { DisplayManager } from "./DisplayManager.js";
 
 const mocks = vi.hoisted(() => ({
@@ -90,6 +91,7 @@ const createState = () => ({
   isPinned: false,
   dockMode: "none",
   activeWindowId: null,
+  initialLoadingWindowId: null,
   originalText: null,
   provider: "original-provider",
   translationHistory: [],
@@ -100,8 +102,16 @@ const createState = () => ({
   setActiveWindowId: vi.fn((id) => {
     state.activeWindowId = id;
   }),
+  setInitialLoadingWindow: vi.fn((id) => { state.initialLoadingWindowId = id; }),
+  clearInitialLoadingWindow: vi.fn((id) => {
+    if (state.initialLoadingWindowId !== id) return false;
+    state.initialLoadingWindowId = null;
+    return true;
+  }),
+  isInitialLoadingWindow: (id = state.activeWindowId) => state.initialLoadingWindowId === id,
   setOriginalText: vi.fn((text) => { state.originalText = text; }),
   setTranslationCancelled: vi.fn(),
+  setPendingTranslationWindow: vi.fn((pending) => { state.pendingTranslationWindow = pending; }),
   setVisible: vi.fn(),
   setIconMode: vi.fn(),
   setProcessing: vi.fn(),
@@ -184,6 +194,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllTimers();
+  WindowsConfig.TIMEOUTS.OUTSIDE_CLICK_DELAY = 1;
   vi.useRealTimers();
 });
 
@@ -195,6 +206,10 @@ describe("DisplayManager Selection Window error boundary", () => {
     await manager._showWindow("selected text", { x: 10, y: 20 });
 
     const windowId = mocks.events.showWindow.mock.calls[0][0].id;
+    expect(state.initialLoadingWindowId).toBeNull();
+    expect(mocks.events.showWindow.mock.calls[0][0]).toMatchObject({ initialSize: "small", isLoading: true });
+    expect(state.setInitialLoadingWindow).toHaveBeenCalledWith(windowId);
+    expect(state.clearInitialLoadingWindow).toHaveBeenCalledWith(windowId);
     expect(mocks.getPresentation).toHaveBeenCalledWith(
       error,
       "windows-translation",
@@ -229,9 +244,14 @@ describe("DisplayManager Selection Window error boundary", () => {
     expect(state.clearTranslationHistory).toHaveBeenCalledTimes(1);
     expect(state.provider).toBeNull();
     expect(mocks.events.showWindow.mock.calls[0][0]).toMatchObject({ historyIndex: -1, historyLength: 0 });
+    expect(state.setInitialLoadingWindow).toHaveBeenCalledWith(state.activeWindowId);
+    expect(state.clearInitialLoadingWindow).toHaveBeenCalledWith(state.activeWindowId);
   });
 
   it("publishes history metadata after an initial successful translation", async () => {
+    mocks.events.showWindow.mockImplementationOnce((payload) => {
+      expect(state.isInitialLoadingWindow(payload.id)).toBe(true);
+    });
     facade._startTranslationProcess.mockImplementation(async (sourceText) => {
       state.translationHistory = [{ sourceText, translatedText: "result" }];
       state.historyIndex = 0;
@@ -240,8 +260,11 @@ describe("DisplayManager Selection Window error boundary", () => {
 
     await manager._showWindow("initial source", { x: 10, y: 20 });
 
+    const windowId = mocks.events.showWindow.mock.calls[0][0].id;
+    expect(state.setInitialLoadingWindow).toHaveBeenCalledWith(windowId);
+    expect(state.clearInitialLoadingWindow).toHaveBeenCalledWith(windowId);
     expect(mocks.events.updateWindow).toHaveBeenCalledWith(
-      expect.any(String),
+      windowId,
       expect.objectContaining({ selectedText: "initial source", historyIndex: 0, historyLength: 1 }),
     );
   });
@@ -268,6 +291,69 @@ describe("DisplayManager Selection Window error boundary", () => {
       ["first source", 0, 1],
       ["second source", 1, 2],
     ]);
+    expect(state.setInitialLoadingWindow).not.toHaveBeenCalled();
+  });
+
+  it("completes a pinned initial spinner reuse with normal presentation and clears its marker", async () => {
+    state.isVisible = true;
+    state.isPinned = true;
+    state.activeWindowId = "spinner-window";
+    state.setInitialLoadingWindow("spinner-window");
+    facade._startTranslationProcess.mockResolvedValue({
+      translatedText: "translated", provider: "provider", _requestId: 1,
+    });
+
+    await manager.show("new selected text", { x: 1, y: 2 });
+
+    expect(facade._startTranslationProcess).toHaveBeenCalledWith("new selected text", "spinner-window", {});
+    expect(mocks.events.updateWindow).toHaveBeenLastCalledWith("spinner-window", expect.objectContaining({
+      initialSize: "normal", isLoading: false, initialTranslatedText: "translated",
+    }));
+    expect(state.clearInitialLoadingWindow).toHaveBeenCalledWith("spinner-window");
+    expect(state.isInitialLoadingWindow("spinner-window")).toBe(false);
+  });
+
+  it("completes a pinned initial spinner reuse error with normal presentation and clears its marker", async () => {
+    state.isVisible = true;
+    state.isPinned = true;
+    state.activeWindowId = "spinner-window";
+    state.setInitialLoadingWindow("spinner-window");
+    facade._startTranslationProcess.mockRejectedValue(canonicalError());
+
+    await manager.show("new selected text", { x: 1, y: 2 });
+
+    expect(mocks.events.updateWindow).toHaveBeenLastCalledWith("spinner-window", expect.objectContaining({
+      initialSize: "normal", isLoading: false, isError: true,
+    }));
+    expect(state.clearInitialLoadingWindow).toHaveBeenCalledWith("spinner-window");
+    expect(state.isInitialLoadingWindow("spinner-window")).toBe(false);
+  });
+
+  it("does not update or clear a reopened window when an initial-spinner result becomes stale", async () => {
+    state.isVisible = true;
+    state.isPinned = true;
+    state.activeWindowId = "spinner-window";
+    state.setInitialLoadingWindow("spinner-window");
+    let resolveTranslation;
+    facade._startTranslationProcess.mockReturnValue(new Promise((resolve) => { resolveTranslation = resolve; }));
+
+    const pendingUpdate = manager._updateExistingWindow("new selected text");
+    state.activeWindowId = "reopened-window";
+    state.setInitialLoadingWindow("reopened-window");
+    facade._isCurrentTranslation.mockReturnValue(false);
+    resolveTranslation({ translatedText: "stale", _requestId: 1 });
+    await pendingUpdate;
+
+    expect(mocks.events.updateWindow).toHaveBeenCalledTimes(1);
+    expect(mocks.events.updateWindow).toHaveBeenCalledWith("spinner-window", expect.objectContaining({ isLoading: true }));
+    expect(state.clearInitialLoadingWindow).not.toHaveBeenCalledWith("spinner-window");
+    expect(state.isInitialLoadingWindow("reopened-window")).toBe(true);
+  });
+
+  it("does not let a stale clear remove a reopened window marker", async () => {
+    state.setInitialLoadingWindow("reopened-window");
+    expect(state.clearInitialLoadingWindow("prior-window")).toBe(false);
+    expect(state.isInitialLoadingWindow("reopened-window")).toBe(true);
   });
 
   it("cancels delayed click activation during cleanup", async () => {
@@ -299,14 +385,24 @@ describe("DisplayManager Selection Window error boundary", () => {
     expect(mocks.messageRouter._broadcastToAllIframes).toHaveBeenCalledTimes(1);
   });
 
-  it("cancels pending activation during icon-to-window transition", async () => {
+  it("activates once after bounded icon transition protection across rapid icon clicks", async () => {
+    WindowsConfig.TIMEOUTS.OUTSIDE_CLICK_DELAY = 600;
     await manager._showWindow("initial text", { x: 10, y: 20 });
     facade._isIconToWindowTransition = true;
-    await manager._showWindow("transition text", { x: 30, y: 40 });
+    state.setPendingTranslationWindow(true);
+    const first = manager._showWindow("transition text", { x: 30, y: 40 });
+    const second = manager._showWindow("second icon click", { x: 40, y: 50 });
+    await Promise.all([first, second]);
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(manager.clickManager.addOutsideClickListener).not.toHaveBeenCalled();
+    state.setPendingTranslationWindow(false);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(manager.clickManager.addOutsideClickListener).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
 
-    expect(manager.clickManager.addOutsideClickListener).not.toHaveBeenCalled();
-    expect(mocks.messageRouter._broadcastToAllIframes).not.toHaveBeenCalled();
+    expect(manager.clickManager.addOutsideClickListener).toHaveBeenCalledTimes(1);
+    expect(mocks.messageRouter._broadcastToAllIframes).toHaveBeenCalledTimes(1);
   });
 
   it("uses safe presentation for existing-window update and preserves action fields", async () => {

@@ -41,6 +41,7 @@ export class WindowsState {
     this.requestingFrameId = null;
     this.mainDocumentWindowId = null;
     this.activeWindowId = null;
+    this.initialLoadingWindowId = null;
     this.isProcessing = false;
     this.provider = null;
     this.translationHistory = [];
@@ -168,6 +169,20 @@ export class WindowsState {
   setActiveWindowId(id) {
     this.activeWindowId = id;
     this.logger.debug('Active window ID set', { id });
+  }
+
+  setInitialLoadingWindow(id) {
+    this.initialLoadingWindowId = id;
+  }
+
+  clearInitialLoadingWindow(id) {
+    if (this.initialLoadingWindowId !== id) return false;
+    this.initialLoadingWindowId = null;
+    return true;
+  }
+
+  isInitialLoadingWindow(id = this.activeWindowId) {
+    return id != null && this.initialLoadingWindowId === id;
   }
 
   setProcessing(isProcessing) {

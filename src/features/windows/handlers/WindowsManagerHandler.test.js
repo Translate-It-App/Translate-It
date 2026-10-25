@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { WindowsManagerHandler } from './WindowsManagerHandler.js';
 import { WindowsManager } from '@/features/windows/managers/WindowsManager.js';
+import { TranslationHandler } from '@/features/windows/managers/translation/TranslationHandler.js';
 
 // Mock dependencies
 vi.mock('@/shared/logging/logger.js', () => ({
@@ -84,7 +85,8 @@ describe('WindowsManagerHandler', () => {
 
     expect(success).toBe(true);
     expect(handler.getIsActive()).toBe(true);
-    expect(WindowsManager.getInstance).toHaveBeenCalled();
+    expect(WindowsManager.getInstance).toHaveBeenCalledWith();
+    expect(TranslationHandler).not.toHaveBeenCalled();
     expect(global.window.windowsManagerInstance).toBeDefined();
   });
 

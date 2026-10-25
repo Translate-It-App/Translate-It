@@ -110,7 +110,8 @@ export class EventCoordinator {
 
       this.facade._selectionClearHandler = () => {
         if (this.state.isVisible || this.state.isIconMode) {
-          if (this.state.isPinned) return;
+          if (this.state.shouldPreventDismissal || this.facade._isIconToWindowTransition) return;
+          if (this.state.isPinned && !this.state.isInitialLoadingWindow?.(this.state.activeWindowId)) return;
           this.logger.debug('Window dismissal requested', {
             path: 'selection-clear',
             isVisible: this.state.isVisible,
@@ -445,6 +446,8 @@ export class EventCoordinator {
       fromCrossDocumentGesture: data?.fromCrossDocumentGesture,
     });
     if (decision?.suppress === true) return;
+    if (this.state.shouldPreventDismissal) return;
+    if (this.state.isPinned && !this.state.isInitialLoadingWindow?.(this.state.activeWindowId)) return;
     if (this.state.hasActiveElements) {
       this.logger.debug('Window dismissal requested', {
         path: 'cross-frame-click',
@@ -458,6 +461,7 @@ export class EventCoordinator {
    * Handle outside click
    */
   async _handleOutsideClick() {
+    if (this.state.isPinned && !this.state.isInitialLoadingWindow?.(this.state.activeWindowId)) return;
     if (this.state.shouldPreventDismissal) return;
     if (
       window.__TRANSLATION_WINDOW_IS_DRAGGING === true ||
@@ -552,6 +556,8 @@ export class EventCoordinator {
     }
 
     this.facade._isIconToWindowTransition = true;
+    this.state.setPendingTranslationWindow(true);
+    this.clickManager.completeIconTransition();
     const showPromise = this.facade.displayManager._showWindow(text, position);
 
     setTimeout(() => {
@@ -586,12 +592,15 @@ export class EventCoordinator {
 
       this.state.clearTranslationHistory();
       this.state.setActiveWindowId(windowId);
+      this.state.setInitialLoadingWindow?.(windowId);
 
       WindowsManagerEvents.showWindow({
         id: windowId,
         selectedText: data.selectedText,
         position: adjustedPosition,
         mode: "window",
+        initialSize: "small",
+        isLoading: true,
       });
 
       this.state.setOriginalText(data.selectedText);
@@ -613,6 +622,7 @@ export class EventCoordinator {
               provider: result.provider,
               ...this.facade._historyUpdate?.(this.state.translationHistory?.[this.state.historyIndex]),
             });
+            this.state.clearInitialLoadingWindow?.(windowId);
           }
         })
         .catch(async (error) => {
@@ -632,6 +642,7 @@ export class EventCoordinator {
             errorType: errorInfo.type,
             initialTranslatedText: errorInfo.message,
           });
+          this.state.clearInitialLoadingWindow?.(windowId);
         });
 
       this.crossFrameManager.notifyWindowCreated(data.frameId, true, windowId);

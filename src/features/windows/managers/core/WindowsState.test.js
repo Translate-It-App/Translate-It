@@ -44,6 +44,17 @@ describe('WindowsState', () => {
     expect(state.provider).toBe(null);
   });
 
+  it('tracks initial loading by window ID and ignores stale clears', () => {
+    state.setActiveWindowId('window-1');
+    state.setInitialLoadingWindow('window-1');
+    expect(state.isInitialLoadingWindow()).toBe(true);
+    state.setInitialLoadingWindow('window-2');
+    expect(state.clearInitialLoadingWindow('window-1')).toBe(false);
+    expect(state.isInitialLoadingWindow('window-2')).toBe(true);
+    state.reset();
+    expect(state.isInitialLoadingWindow('window-2')).toBe(false);
+  });
+
   it('should update visibility and log changes', () => {
     state.setVisible(true);
     expect(state.isVisible).toBe(true);

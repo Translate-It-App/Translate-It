@@ -43,7 +43,7 @@ export class WindowsManager extends ResourceTracker {
     this.state = new WindowsState(this.crossFrameManager.frameId);
     
     // 2. Initialize specialized logic modules
-    this.translationHandler = options.translationHandler || new WindowsTranslationHandler();
+    this.translationHandler = options.translationHandler || new WindowsTranslationHandler(this.state);
     this.translationHandler.errorHandler = options.translationHandler?.errorHandler || ErrorHandler.getInstance();
     this.errorHandler = ErrorHandler.getInstance();
     this.clickManager = new ClickManager(this.crossFrameManager, this.state);
