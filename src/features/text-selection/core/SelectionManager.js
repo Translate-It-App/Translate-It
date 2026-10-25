@@ -301,9 +301,10 @@ export class SelectionManager extends ResourceTracker {
     for (const range of selection.getComposedRanges({ shadowRoots })) {
       if (!range || range.collapsed || this.isExtensionUiRange(range)) continue;
 
-      const rect = range.getBoundingClientRect
-        ? range.getBoundingClientRect()
-        : this.createRangeFromStaticRange(range)?.getBoundingClientRect();
+      const measurableRange = this.createRangeFromStaticRange(range);
+      if (!measurableRange || measurableRange.toString() !== selection.toString()) continue;
+
+      const rect = measurableRange.getBoundingClientRect();
       if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.bottom) ||
           !Number.isFinite(rect.width) || !Number.isFinite(rect.height) ||
           (rect.width === 0 && rect.height === 0)) continue;

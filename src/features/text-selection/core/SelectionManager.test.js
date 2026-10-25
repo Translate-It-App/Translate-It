@@ -41,6 +41,7 @@ describe('SelectionManager selection geometry', () => {
     const createRange = vi.spyOn(document, 'createRange').mockImplementation(() => ({
       setStart: vi.fn(),
       setEnd: vi.fn(),
+      toString: () => 'selected',
       getBoundingClientRect: () => rect(30, 50, 20, 8)
     }));
 
@@ -63,7 +64,8 @@ describe('SelectionManager selection geometry', () => {
       toString: () => 'selected'
     };
     vi.spyOn(document, 'createRange').mockImplementation(() => ({
-      setStart: vi.fn(), setEnd: vi.fn(), getBoundingClientRect: () => rect(30, 50, 20, 8)
+      setStart: vi.fn(), setEnd: vi.fn(), toString: () => 'selected',
+      getBoundingClientRect: () => rect(30, 50, 20, 8)
     }));
     const discoverDescendants = vi.spyOn(manager, 'getDescendantSelectionShadowRoots');
 
@@ -87,19 +89,23 @@ describe('SelectionManager selection geometry', () => {
     activeElement.focus();
 
     const staticRange = { startContainer: text, startOffset: 0, endContainer: text, endOffset: 8, collapsed: false };
+    const hostRange = { startContainer: figure, startOffset: 0, endContainer: figure, endOffset: 1, collapsed: false };
     const selection = {
       rangeCount: 1,
       anchorNode: figure,
       focusNode: figure,
       getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
-      getComposedRanges: vi.fn(({ shadowRoots }) => shadowRoots.includes(root) ? [staticRange] : []),
+      getComposedRanges: vi.fn(({ shadowRoots }) => [shadowRoots.includes(root) ? staticRange : hostRange]),
       toString: () => 'selected'
     };
-    vi.spyOn(document, 'createRange').mockImplementation(() => ({
-      setStart: vi.fn(),
-      setEnd: vi.fn(),
-      getBoundingClientRect: () => rect(30, 50, 20, 8)
-    }));
+    const createRange = document.createRange.bind(document);
+    vi.spyOn(document, 'createRange').mockImplementation(() => {
+      const range = createRange();
+      range.getBoundingClientRect = () => range.startContainer === figure
+        ? rect(1, 20, 200, 80)
+        : rect(30, 50, 20, 8);
+      return range;
+    });
 
     try {
       expect(document.activeElement).toBe(activeElement);
@@ -134,7 +140,8 @@ describe('SelectionManager selection geometry', () => {
       ]), toString: () => 'selected'
     };
     vi.spyOn(document, 'createRange').mockImplementation(() => ({
-      setStart: vi.fn(), setEnd: vi.fn(), getBoundingClientRect: () => rect(0, 0, 0, 0)
+      setStart: vi.fn(), setEnd: vi.fn(), toString: () => 'selected',
+      getBoundingClientRect: () => rect(0, 0, 0, 0)
     }));
     expect(manager.calculateSelectionPosition(selection)).toBeNull();
     expect(selection.getComposedRanges).toHaveBeenCalledOnce();
