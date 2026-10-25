@@ -226,10 +226,14 @@ export class SelectionManager extends ResourceTracker {
           const position = this.getComposedRangePosition(selection, shadowRoots);
           if (position) return position;
 
-          const expandedRoots = new Set([...shadowRoots, ...this.getDescendantSelectionShadowRoots(selection)]);
-          if (expandedRoots.size > shadowRoots.length) {
+          const descendantRoots = this.getDescendantSelectionShadowRoots(selection);
+          const expandedRoots = new Set([...shadowRoots, ...descendantRoots]);
+          if (descendantRoots.length > 0) {
             const expandedPosition = this.getComposedRangePosition(selection, [...expandedRoots]);
             if (expandedPosition) return expandedPosition;
+          } else if (shadowRoots.length === 0) {
+            const documentPosition = this.getComposedRangePosition(selection, shadowRoots, true);
+            if (documentPosition) return documentPosition;
           }
         }
 
@@ -297,12 +301,13 @@ export class SelectionManager extends ResourceTracker {
     return [...roots];
   }
 
-  getComposedRangePosition(selection, shadowRoots) {
+  getComposedRangePosition(selection, shadowRoots, allowDocumentRange = false) {
     for (const range of selection.getComposedRanges({ shadowRoots })) {
-      if (!range || range.collapsed || this.isExtensionUiRange(range)) continue;
+      if (!range || range.collapsed || this.isExtensionUiRange(range) ||
+          !this.isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange)) continue;
 
       const measurableRange = this.createRangeFromStaticRange(range);
-      if (!measurableRange || measurableRange.toString() !== selection.toString()) continue;
+      if (!measurableRange) continue;
 
       const rect = measurableRange.getBoundingClientRect();
       if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.bottom) ||
@@ -318,6 +323,33 @@ export class SelectionManager extends ResourceTracker {
       };
     }
     return null;
+  }
+
+  isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange) {
+    const roots = new Set(shadowRoots);
+    const startRoot = range.startContainer.getRootNode();
+    const endRoot = range.endContainer.getRootNode();
+    if (startRoot === endRoot && roots.has(startRoot)) {
+      if (range.startContainer.nodeType === Node.TEXT_NODE && range.endContainer.nodeType === Node.TEXT_NODE) return true;
+
+      const anchorRoot = selection.anchorNode?.getRootNode();
+      const focusRoot = selection.focusNode?.getRootNode();
+      if (anchorRoot !== startRoot || focusRoot !== startRoot) return false;
+
+      const matchesBoundaries = (startNode, startOffset, endNode, endOffset) =>
+        range.startContainer === startNode && range.startOffset === startOffset &&
+        range.endContainer === endNode && range.endOffset === endOffset;
+      return matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
+        matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset);
+    }
+
+    if (!allowDocumentRange || roots.size > 0 || startRoot !== document || endRoot !== document) return false;
+    const matchesBoundaries = (startNode, startOffset, endNode, endOffset) =>
+      range.startContainer === startNode && range.startOffset === startOffset &&
+      range.endContainer === endNode && range.endOffset === endOffset;
+
+    return matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
+      matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset);
   }
 
   isExtensionUiRange(range) {

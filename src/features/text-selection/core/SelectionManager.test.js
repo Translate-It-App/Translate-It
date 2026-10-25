@@ -33,7 +33,9 @@ describe('SelectionManager selection geometry', () => {
     const selection = {
       rangeCount: 1,
       anchorNode: text,
+      anchorOffset: 0,
       focusNode: text,
+      focusOffset: 8,
       getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
       getComposedRanges: composedSpy,
       toString: () => 'selected'
@@ -56,9 +58,9 @@ describe('SelectionManager selection geometry', () => {
     const root = host.attachShadow({ mode: 'open' });
     const text = document.createTextNode('selected');
     root.append(text);
-    const range = { startContainer: text, collapsed: false };
+    const range = { startContainer: text, startOffset: 0, endContainer: text, endOffset: 8, collapsed: false };
     const selection = {
-      rangeCount: 1, anchorNode: text, focusNode: text,
+      rangeCount: 1, anchorNode: text, anchorOffset: 0, focusNode: text, focusOffset: 8,
       getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
       getComposedRanges: vi.fn(({ shadowRoots }) => shadowRoots.includes(root) ? [range] : []),
       toString: () => 'selected'
@@ -72,6 +74,122 @@ describe('SelectionManager selection geometry', () => {
     expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
     expect(selection.getComposedRanges).toHaveBeenCalledOnce();
     expect(discoverDescendants).not.toHaveBeenCalled();
+  });
+
+  it('retries when a supplied outer root yields a range around a nested ShadowRoot host', () => {
+    const outerHost = document.createElement('div');
+    outerHost.tabIndex = 0;
+    document.body.append(outerHost);
+    outerHost.focus();
+    const outerRoot = outerHost.attachShadow({ mode: 'open' });
+    const innerHost = document.createElement('gallery-caption');
+    const innerRoot = innerHost.attachShadow({ mode: 'open' });
+    const selectedText = document.createTextNode('selected');
+    innerRoot.append(selectedText);
+
+    const container = document.createElement('div');
+    const before = document.createTextNode('before');
+    const after = document.createTextNode('after');
+    container.append(before, innerHost, after);
+    outerRoot.append(container);
+
+    const hostRange = { startContainer: container, startOffset: 1, endContainer: container, endOffset: 2, collapsed: false };
+    const innerRange = { startContainer: selectedText, startOffset: 0, endContainer: selectedText, endOffset: 8, collapsed: false };
+    const selection = {
+      rangeCount: 1,
+      anchorNode: outerHost,
+      anchorOffset: 0,
+      focusNode: outerHost,
+      focusOffset: 1,
+      getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
+      getComposedRanges: vi.fn(({ shadowRoots }) => [shadowRoots.includes(innerRoot) ? innerRange : hostRange]),
+      toString: () => 'selected'
+    };
+    const createRange = document.createRange.bind(document);
+    vi.spyOn(document, 'createRange').mockImplementation(() => {
+      const range = createRange();
+      range.getBoundingClientRect = () => range.startContainer === container
+        ? rect(1, 20, 200, 80)
+        : rect(30, 50, 20, 8);
+      return range;
+    });
+
+    try {
+      expect(document.activeElement).toBe(outerHost);
+      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(1, { shadowRoots: [outerRoot] });
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(2, { shadowRoots: [outerRoot, innerRoot] });
+    } finally {
+      outerHost.remove();
+    }
+  });
+
+  it('accepts a valid multiline BR range when Selection and Range text serialization differ', () => {
+    const host = document.createElement('div');
+    const root = host.attachShadow({ mode: 'open' });
+    const paragraph = document.createElement('p');
+    const first = document.createTextNode('first');
+    const second = document.createTextNode('second');
+    paragraph.append(first, document.createElement('br'), second);
+    root.append(paragraph);
+    const composedRange = { startContainer: first, startOffset: 0, endContainer: second, endOffset: 6, collapsed: false };
+    const selection = {
+      rangeCount: 1, anchorNode: first, anchorOffset: 0, focusNode: second, focusOffset: 6,
+      getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
+      getComposedRanges: () => [composedRange], toString: () => 'first\nsecond'
+    };
+    const createRange = document.createRange.bind(document);
+    vi.spyOn(document, 'createRange').mockImplementation(() => {
+      const range = createRange();
+      range.getBoundingClientRect = () => rect(30, 50, 20, 8);
+      return range;
+    });
+
+    try {
+      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+      const nativeRange = createRange();
+      nativeRange.setStart(first, 0);
+      nativeRange.setEnd(second, 6);
+      expect(selection.toString()).not.toBe(nativeRange.toString());
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('accepts a range spanning block elements independent of text serialization', () => {
+    const host = document.createElement('div');
+    const root = host.attachShadow({ mode: 'open' });
+    const container = document.createElement('div');
+    const first = document.createElement('p');
+    const second = document.createElement('p');
+    first.append(document.createTextNode('first'));
+    second.append(document.createTextNode('second'));
+    container.append(first, second);
+    root.append(container);
+    const firstText = first.firstChild;
+    const secondText = second.firstChild;
+    const composedRange = { startContainer: firstText, startOffset: 0, endContainer: secondText, endOffset: 6, collapsed: false };
+    const selection = {
+      rangeCount: 1, anchorNode: firstText, anchorOffset: 0, focusNode: secondText, focusOffset: 6,
+      getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
+      getComposedRanges: () => [composedRange], toString: () => 'first\nsecond'
+    };
+    const createRange = document.createRange.bind(document);
+    vi.spyOn(document, 'createRange').mockImplementation(() => {
+      const range = createRange();
+      range.getBoundingClientRect = () => rect(30, 50, 20, 8);
+      return range;
+    });
+
+    try {
+      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+      const nativeRange = createRange();
+      nativeRange.setStart(firstText, 0);
+      nativeRange.setEnd(secondText, 6);
+      expect(selection.toString()).not.toBe(nativeRange.toString());
+    } finally {
+      host.remove();
+    }
   });
 
   it('discovers a descendant ShadowRoot when selection endpoints are retargeted to an ancestor', () => {
@@ -93,7 +211,9 @@ describe('SelectionManager selection geometry', () => {
     const selection = {
       rangeCount: 1,
       anchorNode: figure,
+      anchorOffset: 0,
       focusNode: figure,
+      focusOffset: 1,
       getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
       getComposedRanges: vi.fn(({ shadowRoots }) => [shadowRoots.includes(root) ? staticRange : hostRange]),
       toString: () => 'selected'
