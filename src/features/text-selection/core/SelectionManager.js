@@ -302,6 +302,7 @@ export class SelectionManager extends ResourceTracker {
   }
 
   getComposedRangePosition(selection, shadowRoots, allowDocumentRange = false, allowElementRange = false) {
+    let elementPosition = null;
     for (const range of selection.getComposedRanges({ shadowRoots })) {
       if (!range || range.collapsed || this.isExtensionUiRange(range) ||
           !this.isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange, allowElementRange)) continue;
@@ -316,13 +317,15 @@ export class SelectionManager extends ResourceTracker {
 
       const iconSize = WindowsConfig.POSITIONING.ICON_SIZE || 32;
       const isTopFrame = window === window.top;
-      return {
+      const position = {
         x: rect.left + rect.width / 2 - (iconSize / 2) + (isTopFrame ? window.scrollX : 0),
         y: rect.bottom + (WindowsConfig.POSITIONING.SELECTION_OFFSET || 10) + (isTopFrame ? window.scrollY : 0),
         _isViewportRelative: !isTopFrame
       };
+      if (range.startContainer.nodeType === Node.TEXT_NODE && range.endContainer.nodeType === Node.TEXT_NODE) return position;
+      elementPosition ||= position;
     }
-    return null;
+    return elementPosition;
   }
 
   isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange, allowElementRange) {
@@ -339,9 +342,19 @@ export class SelectionManager extends ResourceTracker {
         range.endContainer === endNode && range.endOffset === endOffset;
       const boundariesMatch = matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
         matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset);
+      const containsNestedHost = this.rangeContainsNestedShadowHost(range, startRoot);
 
       if (anchorRoot === startRoot && focusRoot === startRoot && boundariesMatch &&
-          !this.rangeContainsNestedShadowHost(range, startRoot)) return true;
+          !containsNestedHost) return true;
+
+      if (allowElementRange && anchorRoot === startRoot && focusRoot === startRoot && boundariesMatch &&
+          range.startContainer.nodeType === Node.ELEMENT_NODE && range.endContainer === range.startContainer &&
+          containsNestedHost && this.hasLightDomTextOutsideNestedHosts(
+            range.startContainer, startRoot, range.startOffset, range.endOffset
+          )) {
+        return true;
+      }
+      if (containsNestedHost) return false;
 
       if (!allowElementRange || range.startContainer.nodeType !== Node.ELEMENT_NODE ||
           range.endContainer !== range.startContainer || this.hasNestedShadowHost(range.startContainer, startRoot, roots)) return false;
@@ -381,6 +394,15 @@ export class SelectionManager extends ResourceTracker {
       if (hasNestedRoot) return true;
     }
     return false;
+  }
+
+  hasLightDomTextOutsideNestedHosts(container, rangeRoot, startOffset, endOffset) {
+    const hasText = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) return !!node.textContent?.trim();
+      if (node.nodeType !== Node.ELEMENT_NODE || (node.shadowRoot && node.shadowRoot !== rangeRoot)) return false;
+      return [...node.childNodes].some(hasText);
+    };
+    return [...container.childNodes].slice(startOffset, endOffset).some(hasText);
   }
 
   isExtensionUiRange(range) {

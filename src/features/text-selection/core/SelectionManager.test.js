@@ -222,6 +222,131 @@ describe('SelectionManager selection geometry', () => {
     }
   });
 
+  it('accepts a matching mixed-content range around a nested ShadowRoot after descendant discovery', () => {
+    const outerHost = document.createElement('div');
+    outerHost.tabIndex = 0;
+    document.body.append(outerHost);
+    outerHost.focus();
+    const outerRoot = outerHost.attachShadow({ mode: 'open' });
+    const innerHost = document.createElement('gallery-caption');
+    const innerRoot = innerHost.attachShadow({ mode: 'open' });
+    innerRoot.append(document.createTextNode('nested text'));
+    const container = document.createElement('div');
+    container.append(document.createTextNode('before'), innerHost, document.createTextNode('after'));
+    outerRoot.append(container);
+
+    const nativeRange = document.createRange();
+    nativeRange.selectNodeContents(container);
+    const asStaticRange = () => ({
+      startContainer: nativeRange.startContainer,
+      startOffset: nativeRange.startOffset,
+      endContainer: nativeRange.endContainer,
+      endOffset: nativeRange.endOffset,
+      collapsed: nativeRange.collapsed
+    });
+    const hostFallback = asStaticRange();
+    const matchingRange = asStaticRange();
+    const selection = {
+      rangeCount: 1,
+      anchorNode: container,
+      anchorOffset: nativeRange.startOffset,
+      focusNode: container,
+      focusOffset: nativeRange.endOffset,
+      getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
+      getComposedRanges: vi.fn(({ shadowRoots }) => [shadowRoots.includes(innerRoot) ? matchingRange : hostFallback]),
+      toString: () => 'before nested text after'
+    };
+    const createRangeFromStaticRange = manager.createRangeFromStaticRange.bind(manager);
+    vi.spyOn(manager, 'createRangeFromStaticRange').mockImplementation((staticRange) => {
+      const range = createRangeFromStaticRange(staticRange);
+      range.getBoundingClientRect = () => rect(30, 50, 20, 8);
+      return range;
+    });
+
+    try {
+      expect(document.activeElement).toBe(outerHost);
+      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(1, { shadowRoots: [outerRoot] });
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(2, { shadowRoots: [outerRoot, innerRoot] });
+    } finally {
+      outerHost.remove();
+    }
+  });
+
+  it('rejects a nested-host-only range despite unselected light-DOM text outside its boundaries', () => {
+    const outerHost = document.createElement('div');
+    outerHost.tabIndex = 0;
+    document.body.append(outerHost);
+    outerHost.focus();
+    const outerRoot = outerHost.attachShadow({ mode: 'open' });
+    const innerHost = document.createElement('gallery-caption');
+    const innerRoot = innerHost.attachShadow({ mode: 'open' });
+    innerRoot.append(document.createTextNode('nested text'));
+    const container = document.createElement('div');
+    container.append(document.createTextNode('unselected before'), innerHost, document.createTextNode('unselected after'));
+    outerRoot.append(container);
+    const hostOnlyRange = { startContainer: container, startOffset: 1, endContainer: container, endOffset: 2, collapsed: false };
+    const selection = {
+      rangeCount: 1,
+      anchorNode: container, anchorOffset: 1,
+      focusNode: container, focusOffset: 2,
+      getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
+      getComposedRanges: vi.fn(() => [hostOnlyRange]),
+      toString: () => 'nested text'
+    };
+    const createRange = document.createRange.bind(document);
+    vi.spyOn(document, 'createRange').mockImplementation(() => {
+      const range = createRange();
+      range.getBoundingClientRect = () => rect(1, 20, 200, 80);
+      return range;
+    });
+
+    try {
+      expect(manager.calculateSelectionPosition(selection)).toBeNull();
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(1, { shadowRoots: [outerRoot] });
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(2, { shadowRoots: [outerRoot, innerRoot] });
+    } finally {
+      outerHost.remove();
+    }
+  });
+
+  it('accepts a partial mixed-content range containing a nested ShadowRoot host', () => {
+    const outerHost = document.createElement('div');
+    outerHost.tabIndex = 0;
+    document.body.append(outerHost);
+    outerHost.focus();
+    const outerRoot = outerHost.attachShadow({ mode: 'open' });
+    const innerHost = document.createElement('gallery-caption');
+    const innerRoot = innerHost.attachShadow({ mode: 'open' });
+    innerRoot.append(document.createTextNode('nested text'));
+    const container = document.createElement('div');
+    container.append(document.createTextNode('selected before'), innerHost, document.createTextNode('unselected after'));
+    outerRoot.append(container);
+    const partialRange = { startContainer: container, startOffset: 0, endContainer: container, endOffset: 2, collapsed: false };
+    const selection = {
+      rangeCount: 1,
+      anchorNode: container, anchorOffset: 0,
+      focusNode: container, focusOffset: 2,
+      getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
+      getComposedRanges: vi.fn(() => [partialRange]),
+      toString: () => 'selected before nested text'
+    };
+    const createRange = document.createRange.bind(document);
+    vi.spyOn(document, 'createRange').mockImplementation(() => {
+      const range = createRange();
+      range.getBoundingClientRect = () => rect(30, 50, 20, 8);
+      return range;
+    });
+
+    try {
+      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(1, { shadowRoots: [outerRoot] });
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(2, { shadowRoots: [outerRoot, innerRoot] });
+    } finally {
+      outerHost.remove();
+    }
+  });
+
   it('rejects a host-level range when the nested ShadowRoot host is below the range children', () => {
     const outerHost = document.createElement('div');
     const outerRoot = outerHost.attachShadow({ mode: 'open' });
