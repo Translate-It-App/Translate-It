@@ -31,6 +31,10 @@ const logger = getScopedLogger(LOG_COMPONENTS.CONTENT, 'LazyVueApp');
 let vueApp = null;
 let pinia = null;
 
+function stopFocusInPropagation(event) {
+  event.stopPropagation();
+}
+
 function isSuitableEnvironmentForVue() {
   if (!document.body) return false;
   const isBrowserXMLViewer =
@@ -164,7 +168,9 @@ async function createMountPoint() {
     document.documentElement.appendChild(hostElement);
   }
 
-  return hostElement.shadowRoot.getElementById(UI_HOST_IDS.APP_CONTAINER);
+  const shadowRoot = hostElement.shadowRoot;
+  shadowRoot.addEventListener('focusin', stopFocusInPropagation);
+  return shadowRoot.getElementById(UI_HOST_IDS.APP_CONTAINER);
 }
 
 export function cleanupVueApp() {
