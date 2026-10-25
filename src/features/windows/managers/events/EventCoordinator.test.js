@@ -386,12 +386,53 @@ describe("EventCoordinator cross-frame outside-click resize handling", () => {
     expect(facade.dismiss).toHaveBeenCalledTimes(1);
   });
 
-  it("blocks selection clear during the Vue icon transition", () => {
-    facade._isIconToWindowTransition = true;
+  it("allows selection clear after bounded Vue transition while translation remains pending", async () => {
+    vi.useFakeTimers();
+    let resolveTranslation;
+    let translationResolved = false;
+    facade.displayManager._showWindow.mockReturnValue(new Promise((resolve) => {
+      resolveTranslation = resolve;
+    }));
+    facade.dismiss.mockImplementation(() => {
+      state.isVisible = false;
+      state.isInitialLoadingWindow.mockReturnValue(false);
+    });
+    state.isVisible = true;
+    state.isPinned = true;
+    state.isInitialLoadingWindow.mockReturnValue(true);
 
-    facade._selectionClearHandler();
+    try {
+      const iconTransition = coordinator._handleIconClickFromVue({
+        id: "icon-1", text: "selected text", position: { x: 1, y: 2 },
+      });
 
-    expect(facade.dismiss).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(499);
+      facade._selectionClearHandler();
+      expect(facade.dismiss).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(facade._isIconToWindowTransition).toBe(true);
+      expect(state.shouldPreventDismissal).toBe(false);
+      facade._selectionClearHandler();
+      expect(facade.dismiss).toHaveBeenCalledWith(false);
+      expect(translationResolved).toBe(false);
+      expect(state.isVisible).toBe(false);
+
+      translationResolved = true;
+      resolveTranslation();
+      await iconTransition;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(state.isVisible).toBe(false);
+
+      facade.dismiss.mockClear();
+      state.isVisible = true;
+      state.isInitialLoadingWindow.mockReturnValue(false);
+      facade._selectionClearHandler();
+      expect(facade.dismiss).not.toHaveBeenCalled();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("bounds Vue icon transition protection and allows the next independent cross-frame click", async () => {

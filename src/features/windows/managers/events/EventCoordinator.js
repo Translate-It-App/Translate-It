@@ -110,7 +110,7 @@ export class EventCoordinator {
 
       this.facade._selectionClearHandler = () => {
         if (this.state.isVisible || this.state.isIconMode) {
-          if (this.state.shouldPreventDismissal || this.facade._isIconToWindowTransition) return;
+          if (this.state.shouldPreventDismissal) return;
           if (this.state.isPinned && !this.state.isInitialLoadingWindow?.(this.state.activeWindowId)) return;
           this.logger.debug('Window dismissal requested', {
             path: 'selection-clear',
