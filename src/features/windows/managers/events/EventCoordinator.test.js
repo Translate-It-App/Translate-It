@@ -132,14 +132,22 @@ describe("EventCoordinator cross-frame coordinate adjustment", () => {
     ]);
 
     await coordinator._handleTextSelectionWindowRequest(
-      { position: { x: 100, y: 200 }, selectedText: "hello", options: {} },
+      {
+        position: { x: 100, y: 200 },
+        toolbarPosition: { x: 25, y: 35, _isViewportRelative: true },
+        selectedText: "hello",
+        options: {}
+      },
       sourceWindow,
     );
 
     expect(facade.show).toHaveBeenCalledTimes(1);
-    const [, position] = facade.show.mock.calls[0];
+    const [, position, , toolbarPosition] = facade.show.mock.calls[0];
     expect(position.x).toBe(250); // 100 + 150, added once
     expect(position.y).toBe(500); // 200 + 300, added once
+    expect(toolbarPosition).toEqual({
+      x: 175, y: 335, _isViewportRelative: true, _isAbsolute: false
+    });
   });
 
   it("marks the adjusted position as viewport-relative and non-absolute", async () => {
@@ -151,7 +159,12 @@ describe("EventCoordinator cross-frame coordinate adjustment", () => {
     ]);
 
     await coordinator._handleTextSelectionWindowRequest(
-      { position: { x: 100, y: 200 }, selectedText: "hello", options: {} },
+      {
+        position: { x: 100, y: 200 },
+        toolbarPosition: { x: 25, y: 35, _isViewportRelative: true },
+        selectedText: "hello",
+        options: {}
+      },
       sourceWindow,
     );
 
@@ -171,7 +184,12 @@ describe("EventCoordinator cross-frame coordinate adjustment", () => {
     ]);
 
     await coordinator._handleTextSelectionWindowRequest(
-      { position: { x: 100, y: 200 }, selectedText: "hello", options: {} },
+      {
+        position: { x: 100, y: 200 },
+        toolbarPosition: { x: 25, y: 35, _isViewportRelative: true },
+        selectedText: "hello",
+        options: {}
+      },
       sourceWindow,
     );
 
@@ -190,7 +208,12 @@ describe("EventCoordinator cross-frame coordinate adjustment", () => {
     ]);
 
     await coordinator._handleTextSelectionWindowRequest(
-      { position: { x: 100, y: 200 }, selectedText: "hello", options: {} },
+      {
+        position: { x: 100, y: 200 },
+        toolbarPosition: { x: 25, y: 35, _isViewportRelative: true },
+        selectedText: "hello",
+        options: {}
+      },
       sourceWindow,
     );
 
@@ -198,6 +221,7 @@ describe("EventCoordinator cross-frame coordinate adjustment", () => {
     const [, position] = facade.show.mock.calls[0];
     expect(position).toEqual({ x: 100, y: 200 });
     expect(position._isViewportRelative).toBeUndefined();
+    expect(facade.show.mock.calls[0][3]).toEqual({ x: 25, y: 35, _isViewportRelative: true });
   });
 
   it("ignores the request when not running in the top frame", async () => {

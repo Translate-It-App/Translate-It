@@ -40,6 +40,7 @@ const tracker = useResourceTracker('translation-icon');
 const props = defineProps({
   id: { type: String, required: true },
   position: { type: Object, required: true, default: () => ({ top: 0, left: 0 }) },
+  selectionPosition: { type: Object, default: null },
   text: { type: String, default: '' },
   disabled: { type: Boolean, default: false },
 });
@@ -155,7 +156,7 @@ const ttsTitle = computed(() => {
 const handleTranslateClick = () => {
   if (props.disabled) return;
 
-  const clickData = { id: props.id, text: props.text, position: props.position };
+  const clickData = { id: props.id, text: props.text, position: props.selectionPosition || props.position };
   emit('click', clickData);
 };
 

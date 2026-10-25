@@ -111,11 +111,13 @@ export class SelectionManager extends ResourceTracker {
     // 1. Emit global selection event (Coordinator Pattern)
     // This allows any module (like FAB or TTS) to react independently
     const selectionTranslationMode = settingsManager.get('selectionTranslationMode', SelectionTranslationMode.ON_CLICK);
+    const { toolbarPosition, ...selectionOptions } = options;
     pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, {
       text: selectedText,
       position: position,
+      ...(toolbarPosition ? { toolbarPosition } : {}),
       mode: selectionTranslationMode,
-      options: options, // Pass keyboard state (ctrlPressed, shiftPressed)
+      options: selectionOptions, // Pass keyboard state (ctrlPressed, shiftPressed)
       context: {
         frameId: this.frameId,
         isIframe: window !== window.top
@@ -162,7 +164,7 @@ export class SelectionManager extends ResourceTracker {
     });
 
     // Show translation UI (This part is still dependent on WindowsManager being allowed)
-    await this.showTranslationUI(selectedText, position);
+    await this.showTranslationUI(selectedText, position, selectionOptions, toolbarPosition);
 
     // Track this selection
     this.lastProcessedText = selectedText;
@@ -431,7 +433,7 @@ export class SelectionManager extends ResourceTracker {
   /**
    * Show translation UI (icon or window based on settings)
    */
-  async showTranslationUI(selectedText, position, options = {}) {
+  async showTranslationUI(selectedText, position, options = {}, toolbarPosition = null) {
     // Note: We no longer call WindowsManager.show() directly here.
     // The GLOBAL_SELECTION_CHANGE event emitted in processSelection() 
     // triggers all UI managers independently (Decoupled Architecture).
@@ -445,20 +447,21 @@ export class SelectionManager extends ResourceTracker {
         textLength: selectedText.length
       });
 
-      this.requestWindowCreationInMainFrame(selectedText, position, options);
+      this.requestWindowCreationInMainFrame(selectedText, position, options, toolbarPosition);
     }
   }
 
   /**
    * Request window creation in main frame (for iframe context)
    */
-  requestWindowCreationInMainFrame(selectedText, position, options = {}) {
+  requestWindowCreationInMainFrame(selectedText, position, options = {}, toolbarPosition = null) {
     try {
       const message = {
         type: WindowsConfig.CROSS_FRAME.TEXT_SELECTION_WINDOW_REQUEST,
         frameId: this.frameId,
         selectedText: selectedText,
         position: position,
+        ...(toolbarPosition ? { toolbarPosition } : {}),
         options: options, // Pass keyboard state
         timestamp: Date.now()
       };

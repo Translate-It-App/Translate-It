@@ -140,7 +140,14 @@ export class TextSelectionWindowRelay {
       return;
     }
 
-    const forwarded = { ...data, position: adjustedPosition };
+    const adjustedToolbarPosition = data.toolbarPosition
+      ? adjustForDirectChild(event.source, data.toolbarPosition)
+      : null;
+    const forwarded = {
+      ...data,
+      position: adjustedPosition,
+      ...(adjustedToolbarPosition ? { toolbarPosition: adjustedToolbarPosition } : {})
+    };
     window.parent.postMessage(forwarded, '*');
     logger.debug('Forwarded text selection window request to parent frame');
   }

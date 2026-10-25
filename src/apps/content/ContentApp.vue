@@ -57,6 +57,7 @@
         :id="icon.id"
         :key="icon.id"
         :position="icon.position"
+        :selection-position="icon.selectionPosition"
         :text="icon.text"
         @click="onTranslationIconClick"
         @close="onTranslationIconClose"

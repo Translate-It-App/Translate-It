@@ -568,4 +568,20 @@ describe('SelectionManager selection geometry', () => {
     };
     expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 13, y: 43, _isViewportRelative: true });
   });
+
+  it('relays iframe toolbarPosition separately from the selection position and options', () => {
+    const postMessage = vi.fn();
+    vi.spyOn(window, 'top', 'get').mockReturnValue({});
+    vi.spyOn(window, 'parent', 'get').mockReturnValue({ postMessage });
+    const position = { x: 10, y: 20, _isViewportRelative: true };
+    const toolbarPosition = { x: 30, y: 40, _isViewportRelative: true };
+
+    manager.requestWindowCreationInMainFrame('selected', position, { ctrlPressed: false }, toolbarPosition);
+
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      position,
+      toolbarPosition,
+      options: { ctrlPressed: false }
+    }), '*');
+  });
 });

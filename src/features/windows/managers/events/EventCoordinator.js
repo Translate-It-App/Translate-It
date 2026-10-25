@@ -126,7 +126,7 @@ export class EventCoordinator {
       );
 
       this.facade._selectionChangeHandler = (detail) => {
-        this.facade.show(detail.text, detail.position, detail.options);
+        this.facade.show(detail.text, detail.position, detail.options, detail.toolbarPosition);
       };
       pageEventBus.on(
         SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE,
@@ -682,8 +682,11 @@ export class EventCoordinator {
         sourceWindow,
         data.position,
       ) ?? { ...data.position };
+      const adjustedToolbarPosition = data.toolbarPosition
+        ? adjustForDirectChild(sourceWindow, data.toolbarPosition) ?? data.toolbarPosition
+        : null;
 
-      await this.facade.show(data.selectedText, adjustedPosition, data.options);
+      await this.facade.show(data.selectedText, adjustedPosition, data.options, adjustedToolbarPosition);
     } catch (error) {
       this.logger.warn(
         "Failed to handle text selection window request from iframe:",

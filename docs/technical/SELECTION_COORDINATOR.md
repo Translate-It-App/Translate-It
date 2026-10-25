@@ -39,7 +39,8 @@ The system is built around three distinct roles: **Detectors**, the **Coordinato
 The system uses three primary events defined in `src/features/text-selection/events/SelectionEvents.js`:
 
 *   **`GLOBAL_SELECTION_CHANGE`**: Broadcasted when new text is selected.
-    *   *Payload*: `{ text, position, mode, options, context }`
+    *   *Payload*: `{ text, position, mode, options, context, toolbarPosition? }`
+    *   `position` remains the selection-derived position for subscribers and translation windows. `toolbarPosition` is an optional recent primary mouse-release position, used only to place the ON_CLICK icon; keyboard selections and other display modes fall back to `position`. Iframe requests carry it separately and accumulate direct-child iframe offsets like `position` while preserving viewport-relative coordinates.
 *   **`GLOBAL_SELECTION_CLEAR`**: Unified signal to hide selection-aware UI elements.
     *   *Payload*: `{ reason, mode }`
 *   **`GLOBAL_SELECTION_TRIGGER`**: Emitted by a UI (like FAB) to request a full translation display.
@@ -84,4 +85,3 @@ Both platforms now follow the exact same architectural pattern. A selection in a
 2.  `WindowsManager` will automatically pick up the request and handle the display.
 
 ---
-

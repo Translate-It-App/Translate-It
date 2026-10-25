@@ -93,7 +93,8 @@ export function useWindowsManager() {
     translationIcons.value.push({
       id: detail.id,
       text: detail.text,
-      position: detail.position
+      position: detail.position,
+      selectionPosition: detail.selectionPosition ?? detail.position
     });
   };
 

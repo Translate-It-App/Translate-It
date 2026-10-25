@@ -80,7 +80,7 @@ export class DisplayManager {
   /**
    * Show translation window or icon for selected text
    */
-  async show(selectedText, position, options = {}) {
+  async show(selectedText, position, options = {}, toolbarPosition = null) {
     if (!ExtensionContextManager.isValidSync()) {
       this.logger.debug("Extension context invalid, aborting show()");
       return;
@@ -224,7 +224,7 @@ export class DisplayManager {
       } else if (
         selectionTranslationMode === SelectionTranslationMode.ON_CLICK
       ) {
-        await this._showIcon(selectedText, position);
+        await this._showIcon(selectedText, toolbarPosition || position, position);
       } else {
         await this._showWindow(selectedText, position, options);
       }
@@ -429,7 +429,7 @@ export class DisplayManager {
   /**
    * Show translate icon
    */
-  async _showIcon(selectedText, position) {
+  async _showIcon(selectedText, position, selectionPosition = position) {
     if (!ExtensionContextManager.isValidSync()) {
       this.logger.debug("Extension context invalid, cannot create icon");
       return;
@@ -458,12 +458,13 @@ export class DisplayManager {
       id: iconId,
       text: selectedText,
       position: positionToUse,
+      selectionPosition,
       frameId: this.crossFrameManager.frameId,
     });
 
     this.state.setIconClickContext({
       text: selectedText,
-      position,
+      position: selectionPosition,
       iconId,
     });
 

@@ -19,6 +19,7 @@ const logger = getScopedLogger(LOG_COMPONENTS.TEXT_SELECTION, 'SimpleTextSelecti
 // the UI's shadow DOM. Any new pointerdown overwrites this context, so a
 // genuine outside click still dismisses immediately.
 const UI_INTERACTION_CONTEXT_MS = 1000;
+const TOOLBAR_RELEASE_FRESHNESS_MS = 1200;
 
 // Singleton instance for SimpleTextSelectionHandler
 let simpleTextSelectionHandlerInstance = null;
@@ -72,6 +73,9 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this.isDragging = false;
     this.mouseDownTime = 0;
     this.lastMouseUpEvent = null;
+    this._selectionChangeVersion = 0;
+    this._primaryMouseDown = null;
+    this._toolbarReleaseCandidate = null;
 
     // Diagnostic metadata captured synchronously during mouseup dispatch
     // (composedPath() is unreliable once dispatch has finished).
@@ -159,6 +163,8 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       // Start from a clean interaction context; never inherit stale state
       this._lastUiPointerInteraction = null;
       this._lastMouseUpDiagnostics = null;
+      this._primaryMouseDown = null;
+      this._toolbarReleaseCandidate = null;
 
       // If selectionManager already exists, clean it up first
       if (this.selectionManager) {
@@ -221,6 +227,8 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       // 2.5 Clear interaction context so reactivation cannot inherit stale state
       this._lastUiPointerInteraction = null;
       this._lastMouseUpDiagnostics = null;
+      this._primaryMouseDown = null;
+      this._toolbarReleaseCandidate = null;
 
       // 3. Clean up settings listeners
       this._settingsListeners.forEach(unsubscribe => {
@@ -488,6 +496,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
    */
   handleSelectionChange() {
     if (!this.isActive || !this.selectionManager) return;
+    this._selectionChangeVersion += 1;
 
     // Clear existing timeout
     if (this.selectionTimeout) {
@@ -649,9 +658,11 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
         });
         
         // Pass the keyboard state to selection manager
+        const toolbarPosition = this._consumeToolbarReleasePosition(selectedText);
         await this.selectionManager.processSelection(selectedText, selection, {
           ctrlPressed: this.ctrlKeyPressed,
-          shiftPressed: this.shiftKeyPressed
+          shiftPressed: this.shiftKeyPressed,
+          ...(toolbarPosition ? { toolbarPosition } : {})
         });
       } else {
         logger.warn('SelectionManager is null - this should not happen with critical protection');
@@ -931,6 +942,8 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
    */
   handleKeyDown(event) {
     this.lastKeyEventTime = Date.now();
+    this._primaryMouseDown = null;
+    this._toolbarReleaseCandidate = null;
 
     // A keyboard interaction originating outside extension UI refutes any
     // recent inside-UI pointer context, so keyboard-driven selection clearing
@@ -1045,6 +1058,12 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this.lastMouseEventTime = Date.now();
     this.isDragging = true;
     this.mouseDownTime = Date.now();
+    const currentSelection = window.getSelection()?.toString().trim() || '';
+    this._primaryMouseDown = event.button === 0 ? {
+      selectionChangeVersion: this._selectionChangeVersion,
+      selectedText: currentSelection
+    } : null;
+    this._toolbarReleaseCandidate = null;
 
     // Update modifier states from mouse event (Sync both TRUE and FALSE states)
     this.ctrlKeyPressed = event.ctrlKey || event.metaKey;
@@ -1084,6 +1103,20 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
   handleMouseUp(event) {
     this.lastMouseEventTime = Date.now();
     this.lastMouseUpEvent = event; // Store for translation window detection
+    const mouseDown = this._primaryMouseDown;
+    this._primaryMouseDown = null;
+    const currentSelection = window.getSelection()?.toString().trim() || '';
+    this._toolbarReleaseCandidate = event.button === 0 && mouseDown &&
+      Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+      ? {
+          x: event.clientX,
+          y: event.clientY,
+          timestamp: Date.now(),
+          selectionChangeVersion: mouseDown.selectionChangeVersion,
+          selectedTextAtRelease: currentSelection,
+          selectedTextAtPress: mouseDown.selectedText
+        }
+      : null;
     this._lastMouseUpDiagnostics = {
       timestamp: this.lastMouseEventTime,
       composedPathHasUi: this._classifyComposedPath(event)
@@ -1143,6 +1176,26 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
         this._mouseUpAnimationFrame = null;
       }, delay);
     });
+  }
+
+  _consumeToolbarReleasePosition(selectedText) {
+    const candidate = this._toolbarReleaseCandidate;
+    this._toolbarReleaseCandidate = null;
+    if (!candidate || Date.now() - candidate.timestamp > TOOLBAR_RELEASE_FRESHNESS_MS ||
+        candidate.selectionChangeVersion === this._selectionChangeVersion ||
+        !selectedText || selectedText === candidate.selectedTextAtPress ||
+        (candidate.selectedTextAtRelease && candidate.selectedTextAtRelease !== selectedText)) {
+      return null;
+    }
+
+    const isTopFrame = window === window.top;
+    const scrollX = isTopFrame ? window.scrollX : 0;
+    const scrollY = isTopFrame ? window.scrollY : 0;
+    return {
+      x: candidate.x + scrollX,
+      y: candidate.y + 10 + scrollY,
+      _isViewportRelative: !isTopFrame
+    };
   }
 
   /**

@@ -6,6 +6,7 @@ import { DisplayManager } from "./DisplayManager.js";
 const mocks = vi.hoisted(() => ({
   events: {
     showWindow: vi.fn(),
+    showIcon: vi.fn(),
     updateWindow: vi.fn(),
     showMobileSheet: vi.fn(),
   },
@@ -116,6 +117,7 @@ const createState = () => ({
   setIconMode: vi.fn(),
   setProcessing: vi.fn(),
   setProvider: vi.fn(),
+  setIconClickContext: vi.fn((context) => { state.iconClickContext = context; }),
   clearTranslationHistory: vi.fn(() => {
     state.translationHistory = [];
     state.historyIndex = -1;
@@ -199,6 +201,23 @@ afterEach(() => {
 });
 
 describe("DisplayManager Selection Window error boundary", () => {
+  it("uses release coordinates for the icon and retains selection coordinates for Translate", async () => {
+    const selectionPosition = { x: 10, y: 20, _isViewportRelative: false };
+    const toolbarPosition = { x: 80, y: 110, _isViewportRelative: false };
+
+    await manager.show("selected text", selectionPosition, {}, toolbarPosition);
+
+    expect(mocks.events.showIcon).toHaveBeenCalledWith(expect.objectContaining({
+      text: "selected text",
+      position: toolbarPosition,
+      selectionPosition,
+    }));
+    expect(state.iconClickContext).toMatchObject({
+      text: "selected text",
+      position: selectionPosition,
+    });
+  });
+
   it("sanitizes desktop initial failure and updates same window once", async () => {
     const error = canonicalError(ErrorTypes.HTTP_ERROR);
     facade._startTranslationProcess.mockRejectedValue(error);

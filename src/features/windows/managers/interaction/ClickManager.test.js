@@ -791,12 +791,14 @@ describe('ClickManager', () => {
     });
 
     it('should handle icon click and transition state', () => {
-      const context = { text: 'test', position: { x: 10, y: 20 } };
+      const selectionPosition = { x: 10, y: 20 };
+      const context = { text: 'test', position: selectionPosition };
       
       const result = clickManager.handleIconClick(context);
       
       expect(mockState.setPendingTranslationWindow).toHaveBeenCalledWith(true);
       expect(result).toEqual(context);
+      expect(result.position).toBe(selectionPosition);
     });
 
     it('should complete icon transition after timeout', () => {

@@ -105,6 +105,177 @@ describe('SimpleTextSelectionHandler diagnostic capture', () => {
   });
 });
 
+describe('SimpleTextSelectionHandler toolbar release position', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('uses a recent primary release after delayed selectionchange, including frame coordinates', () => {
+    const handler = new SimpleTextSelectionHandler();
+    let selectedText = '';
+    vi.spyOn(window, 'getSelection').mockImplementation(() => ({ toString: () => selectedText }));
+    vi.spyOn(window, 'top', 'get').mockReturnValue({});
+    vi.spyOn(window, 'scrollX', 'get').mockReturnValue(40);
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(70);
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 25, clientY: 35 }));
+    selectedText = 'selected';
+    handler.isActive = true;
+    handler.selectionManager = {};
+    handler.handleSelectionChange();
+    clearTimeout(handler.selectionTimeout);
+
+    expect(handler._consumeToolbarReleasePosition(selectedText)).toEqual({
+      x: 25,
+      y: 45,
+      _isViewportRelative: true
+    });
+    expect(handler._toolbarReleaseCandidate).toBeNull();
+  });
+
+  it('adds page scroll only for top-frame cursor coordinates', () => {
+    const handler = new SimpleTextSelectionHandler();
+    vi.spyOn(window, 'top', 'get').mockReturnValue(window);
+    vi.spyOn(window, 'scrollX', 'get').mockReturnValue(40);
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(70);
+    handler._toolbarReleaseCandidate = {
+      x: 25, y: 35, timestamp: Date.now(), selectionChangeVersion: 1,
+      selectedTextAtRelease: 'selected', selectedTextAtPress: ''
+    };
+    handler._selectionChangeVersion = 2;
+
+    expect(handler._consumeToolbarReleasePosition('selected')).toEqual({
+      x: 65,
+      y: 115,
+      _isViewportRelative: false
+    });
+  });
+
+  it.each([2, 3])('accepts a current selection release from a %s-click sequence', (clickCount) => {
+    const handler = new SimpleTextSelectionHandler();
+    let selectedText = '';
+    vi.spyOn(window, 'getSelection').mockImplementation(() => ({ toString: () => selectedText }));
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, detail: clickCount }));
+    selectedText = 'selected';
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, detail: clickCount, clientX: 8, clientY: 9 }));
+
+    expect(handler._consumeToolbarReleasePosition(selectedText)).toEqual({
+      x: 8,
+      y: 19,
+      _isViewportRelative: false
+    });
+  });
+
+  it('uses release coordinates after a primary drag lasting longer than 1200ms', () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    let selectedText = '';
+    vi.spyOn(window, 'getSelection').mockImplementation(() => ({ toString: () => selectedText }));
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    vi.advanceTimersByTime(1201);
+    selectedText = 'long drag selection';
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 18, clientY: 24 }));
+
+    expect(handler._consumeToolbarReleasePosition(selectedText)).toEqual({
+      x: 18,
+      y: 34,
+      _isViewportRelative: false
+    });
+  });
+
+  it('expires a release candidate before delayed processing', () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    let selectedText = '';
+    vi.spyOn(window, 'getSelection').mockImplementation(() => ({ toString: () => selectedText }));
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    selectedText = 'selection';
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 18, clientY: 24 }));
+    vi.advanceTimersByTime(1201);
+
+    expect(handler._consumeToolbarReleasePosition(selectedText)).toBeNull();
+  });
+
+  it('invalidates a release candidate after keyboard interaction', () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    let selectedText = '';
+    vi.spyOn(window, 'getSelection').mockImplementation(() => ({ toString: () => selectedText }));
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    selectedText = 'selection';
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 18, clientY: 24 }));
+    handler.handleKeyDown(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+
+    expect(handler._consumeToolbarReleasePosition(selectedText)).toBeNull();
+  });
+
+  it('rejects unchanged selections, stale releases, secondary clicks, and candidates after key interaction', () => {
+    const handler = new SimpleTextSelectionHandler();
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => 'same' });
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 1, clientY: 2 }));
+    handler._selectionChangeVersion += 1;
+    expect(handler._consumeToolbarReleasePosition('same')).toBeNull();
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 2 }));
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 2, clientX: 3, clientY: 4 }));
+    expect(handler._toolbarReleaseCandidate).toBeNull();
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 5, clientY: 6 }));
+    handler._selectionChangeVersion += 1;
+    handler._toolbarReleaseCandidate.timestamp -= 1201;
+    expect(handler._consumeToolbarReleasePosition('new selection')).toBeNull();
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 5, clientY: 6 }));
+    handler.handleKeyDown(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    expect(handler._consumeToolbarReleasePosition('new selection')).toBeNull();
+  });
+
+  it('hands cursor coordinates to the manager while preserving the selected text', async () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    const selection = { toString: () => 'selected text', rangeCount: 1 };
+    const processSelection = vi.fn().mockResolvedValue();
+    handler.isActive = true;
+    handler.selectionManager = { processSelection };
+    handler._toolbarReleaseCandidate = {
+      x: 10, y: 20, timestamp: Date.now(), selectionChangeVersion: 0,
+      selectedTextAtRelease: 'selected text', selectedTextAtPress: ''
+    };
+    handler._selectionChangeVersion = 1;
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+
+    try {
+      await handler.processSelection();
+
+      expect(handler._preservationState.active).toBe(true);
+      expect(processSelection).toHaveBeenCalledWith('selected text', selection, {
+        ctrlPressed: false,
+        shiftPressed: false,
+        toolbarPosition: { x: 10, y: 30, _isViewportRelative: false }
+      });
+    } finally {
+      handler._clearPreservationTimer();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+});
+
 /**
  * Regression tests for the floating Translation Window Body click dismissal bug.
  *

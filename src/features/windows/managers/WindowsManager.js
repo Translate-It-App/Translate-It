@@ -117,8 +117,8 @@ export class WindowsManager extends ResourceTracker {
 
   // --- Public API Delegation ---
 
-  async show(selectedText, position, options = {}) {
-    return this.displayManager.show(selectedText, position, options);
+  async show(selectedText, position, options = {}, toolbarPosition = null) {
+    return this.displayManager.show(selectedText, position, options, toolbarPosition);
   }
 
   async dismiss(withFadeOut = true, preserveSelection = false) {

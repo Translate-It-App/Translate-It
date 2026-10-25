@@ -139,7 +139,10 @@ describe('TextSelectionWindowRelay', () => {
         getBoundingClientRect: () => ({ left: 150, top: 300 })
       }]);
 
-      relay._handleMessage(requestMessage({ frameId: 'leaf' }, sourceWindow));
+      relay._handleMessage(requestMessage({
+        frameId: 'leaf',
+        toolbarPosition: { x: 25, y: 35, _isViewportRelative: true }
+      }, sourceWindow));
 
       expect(parentPostMessage).toHaveBeenCalledTimes(1);
       const [forwarded, target] = parentPostMessage.mock.calls[0];
@@ -149,6 +152,12 @@ describe('TextSelectionWindowRelay', () => {
       expect(forwarded.position).toEqual({
         x: 250,
         y: 500,
+        _isViewportRelative: true,
+        _isAbsolute: false
+      });
+      expect(forwarded.toolbarPosition).toEqual({
+        x: 175,
+        y: 335,
         _isViewportRelative: true,
         _isAbsolute: false
       });
@@ -191,7 +200,11 @@ describe('TextSelectionWindowRelay', () => {
         contentWindow: childB,
         getBoundingClientRect: () => ({ left: 50, top: 80 })
       }]);
-      intermediate._handleMessage(requestMessage({ frameId: 'leaf', position: { x: 10, y: 20 } }, childB));
+      intermediate._handleMessage(requestMessage({
+        frameId: 'leaf',
+        position: { x: 10, y: 20 },
+        toolbarPosition: { x: 15, y: 25, _isViewportRelative: true }
+      }, childB));
 
       const [forwarded] = parentPostMessage.mock.calls[0];
 
@@ -201,7 +214,8 @@ describe('TextSelectionWindowRelay', () => {
         deliveries.push({
           data,
           source,
-          position: adjustForDirectChild(source, data.position) ?? { ...data.position }
+          position: adjustForDirectChild(source, data.position) ?? { ...data.position },
+          toolbarPosition: adjustForDirectChild(source, data.toolbarPosition) ?? { ...data.toolbarPosition }
         });
       });
 
@@ -215,6 +229,12 @@ describe('TextSelectionWindowRelay', () => {
       expect(deliveries[0].position).toEqual({
         x: 10 + 50 + 200,
         y: 20 + 80 + 300,
+        _isViewportRelative: true,
+        _isAbsolute: false
+      });
+      expect(deliveries[0].toolbarPosition).toEqual({
+        x: 15 + 50 + 200,
+        y: 25 + 80 + 300,
         _isViewportRelative: true,
         _isAbsolute: false
       });
