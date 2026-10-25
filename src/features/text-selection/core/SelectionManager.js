@@ -9,6 +9,7 @@ import { pageEventBus } from '@/core/PageEventBus.js';
 import { SELECTION_EVENTS } from '@/features/text-selection/events/SelectionEvents.js';
 import settingsManager from '@/shared/managers/SettingsManager.js';
 import { SelectionTranslationMode } from '@/shared/config/config.js';
+import { walkOpenShadowTree } from '@/utils/dom/walkOpenShadowTree.js';
 
 /**
  * SelectionManager - Simplified text selection management
@@ -219,6 +220,30 @@ export class SelectionManager extends ResourceTracker {
           };
         }
 
+        const selectedText = selection.toString();
+        if (selectedText && typeof selection.getComposedRanges === 'function') {
+          const shadowRoots = this.getSelectionShadowRoots(selection);
+          const composedRanges = selection.getComposedRanges({ shadowRoots });
+          for (const composedRange of composedRanges) {
+            if (!composedRange || composedRange.collapsed || this.isExtensionUiRange(composedRange)) continue;
+
+            const composedRect = composedRange.getBoundingClientRect
+              ? composedRange.getBoundingClientRect()
+              : this.createRangeFromStaticRange(composedRange)?.getBoundingClientRect();
+            if (!composedRect || !Number.isFinite(composedRect.left) || !Number.isFinite(composedRect.bottom) ||
+                !Number.isFinite(composedRect.width) || !Number.isFinite(composedRect.height) ||
+                (composedRect.width === 0 && composedRect.height === 0)) continue;
+
+            const iconSize = WindowsConfig.POSITIONING.ICON_SIZE || 32;
+            const isTopFrame = window === window.top;
+            return {
+              x: composedRect.left + composedRect.width / 2 - (iconSize / 2) + (isTopFrame ? window.scrollX : 0),
+              y: composedRect.bottom + (WindowsConfig.POSITIONING.SELECTION_OFFSET || 10) + (isTopFrame ? window.scrollY : 0),
+              _isViewportRelative: !isTopFrame
+            };
+          }
+        }
+
         this.logger.debug('Position calculation failed: Empty rectangle and not input field', {
           rect: rect,
           activeElement: activeElement?.tagName,
@@ -243,6 +268,60 @@ export class SelectionManager extends ResourceTracker {
 
     } catch (error) {
       this.logger.error('Error calculating selection position:', error);
+      return null;
+    }
+  }
+
+  getSelectionShadowRoots(selection) {
+    const roots = new Set();
+    const addRoot = (node) => {
+      let root = node?.getRootNode?.();
+      while (root instanceof ShadowRoot && root.mode === 'open' && root.host.shadowRoot === root) {
+        roots.add(root);
+        root = root.host.getRootNode();
+      }
+    };
+
+    addRoot(selection.anchorNode);
+    addRoot(selection.focusNode);
+    for (const node of [selection.anchorNode, selection.focusNode, document.activeElement]) {
+      const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+      if (element?.shadowRoot?.mode === 'open') addRoot(element.shadowRoot);
+    }
+
+    const scopes = new Set(
+      [selection.anchorNode, selection.focusNode]
+        .map((node) => node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement)
+        .filter(Boolean)
+    );
+    for (const scope of scopes) {
+      walkOpenShadowTree(scope, (element) => {
+        if (element.shadowRoot?.mode === 'open') addRoot(element.shadowRoot);
+      });
+    }
+
+    return [...roots];
+  }
+
+  isExtensionUiRange(range) {
+    let node = range.startContainer;
+    while (node) {
+      const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+      if (element?.id && Object.values(UI_HOST_IDS).includes(element.id)) return true;
+      const root = node.getRootNode?.();
+      if (!(root instanceof ShadowRoot)) break;
+      node = root.host;
+    }
+    return false;
+  }
+
+  createRangeFromStaticRange(staticRange) {
+    try {
+      const range = document.createRange();
+      range.setStart(staticRange.startContainer, staticRange.startOffset);
+      range.setEnd(staticRange.endContainer, staticRange.endOffset);
+      return range;
+    } catch {
       return null;
     }
   }
