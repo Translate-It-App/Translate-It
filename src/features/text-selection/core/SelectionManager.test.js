@@ -50,6 +50,28 @@ describe('SelectionManager selection geometry', () => {
     expect(selection.getRangeAt(0).collapsed).toBeUndefined();
   });
 
+  it('skips descendant discovery when a directly supplied root provides usable geometry', () => {
+    const host = document.createElement('div');
+    const root = host.attachShadow({ mode: 'open' });
+    const text = document.createTextNode('selected');
+    root.append(text);
+    const range = { startContainer: text, collapsed: false };
+    const selection = {
+      rangeCount: 1, anchorNode: text, focusNode: text,
+      getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
+      getComposedRanges: vi.fn(({ shadowRoots }) => shadowRoots.includes(root) ? [range] : []),
+      toString: () => 'selected'
+    };
+    vi.spyOn(document, 'createRange').mockImplementation(() => ({
+      setStart: vi.fn(), setEnd: vi.fn(), getBoundingClientRect: () => rect(30, 50, 20, 8)
+    }));
+    const discoverDescendants = vi.spyOn(manager, 'getDescendantSelectionShadowRoots');
+
+    expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+    expect(selection.getComposedRanges).toHaveBeenCalledOnce();
+    expect(discoverDescendants).not.toHaveBeenCalled();
+  });
+
   it('discovers a descendant ShadowRoot when selection endpoints are retargeted to an ancestor', () => {
     const figure = document.createElement('figure');
     const caption = document.createElement('gallery-caption');
@@ -82,7 +104,8 @@ describe('SelectionManager selection geometry', () => {
     try {
       expect(document.activeElement).toBe(activeElement);
       expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
-      expect(selection.getComposedRanges).toHaveBeenCalledWith({ shadowRoots: [root] });
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(1, { shadowRoots: [] });
+      expect(selection.getComposedRanges).toHaveBeenNthCalledWith(2, { shadowRoots: [root] });
     } finally {
       figure.remove();
       activeElement.remove();
@@ -105,15 +128,16 @@ describe('SelectionManager selection geometry', () => {
     const selection = {
       rangeCount: 1, anchorNode: text, focusNode: text,
       getRangeAt: () => ({ getBoundingClientRect: () => rect(0, 0, 0, 0) }),
-      getComposedRanges: () => [
+      getComposedRanges: vi.fn(() => [
         { startContainer: text, collapsed: true },
         { startContainer: text, collapsed: false }
-      ], toString: () => 'selected'
+      ]), toString: () => 'selected'
     };
     vi.spyOn(document, 'createRange').mockImplementation(() => ({
       setStart: vi.fn(), setEnd: vi.fn(), getBoundingClientRect: () => rect(0, 0, 0, 0)
     }));
     expect(manager.calculateSelectionPosition(selection)).toBeNull();
+    expect(selection.getComposedRanges).toHaveBeenCalledOnce();
   });
 
   it('rejects composed ranges inside an extension UI host', () => {

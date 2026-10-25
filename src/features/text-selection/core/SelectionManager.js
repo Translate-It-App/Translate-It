@@ -223,24 +223,13 @@ export class SelectionManager extends ResourceTracker {
         const selectedText = selection.toString();
         if (selectedText && typeof selection.getComposedRanges === 'function') {
           const shadowRoots = this.getSelectionShadowRoots(selection);
-          const composedRanges = selection.getComposedRanges({ shadowRoots });
-          for (const composedRange of composedRanges) {
-            if (!composedRange || composedRange.collapsed || this.isExtensionUiRange(composedRange)) continue;
+          const position = this.getComposedRangePosition(selection, shadowRoots);
+          if (position) return position;
 
-            const composedRect = composedRange.getBoundingClientRect
-              ? composedRange.getBoundingClientRect()
-              : this.createRangeFromStaticRange(composedRange)?.getBoundingClientRect();
-            if (!composedRect || !Number.isFinite(composedRect.left) || !Number.isFinite(composedRect.bottom) ||
-                !Number.isFinite(composedRect.width) || !Number.isFinite(composedRect.height) ||
-                (composedRect.width === 0 && composedRect.height === 0)) continue;
-
-            const iconSize = WindowsConfig.POSITIONING.ICON_SIZE || 32;
-            const isTopFrame = window === window.top;
-            return {
-              x: composedRect.left + composedRect.width / 2 - (iconSize / 2) + (isTopFrame ? window.scrollX : 0),
-              y: composedRect.bottom + (WindowsConfig.POSITIONING.SELECTION_OFFSET || 10) + (isTopFrame ? window.scrollY : 0),
-              _isViewportRelative: !isTopFrame
-            };
+          const expandedRoots = new Set([...shadowRoots, ...this.getDescendantSelectionShadowRoots(selection)]);
+          if (expandedRoots.size > shadowRoots.length) {
+            const expandedPosition = this.getComposedRangePosition(selection, [...expandedRoots]);
+            if (expandedPosition) return expandedPosition;
           }
         }
 
@@ -289,6 +278,11 @@ export class SelectionManager extends ResourceTracker {
       if (element?.shadowRoot?.mode === 'open') addRoot(element.shadowRoot);
     }
 
+    return [...roots];
+  }
+
+  getDescendantSelectionShadowRoots(selection) {
+    const roots = new Set();
     const scopes = new Set(
       [selection.anchorNode, selection.focusNode]
         .map((node) => node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement)
@@ -296,11 +290,33 @@ export class SelectionManager extends ResourceTracker {
     );
     for (const scope of scopes) {
       walkOpenShadowTree(scope, (element) => {
-        if (element.shadowRoot?.mode === 'open') addRoot(element.shadowRoot);
+        if (element.shadowRoot?.mode === 'open') roots.add(element.shadowRoot);
       });
     }
 
     return [...roots];
+  }
+
+  getComposedRangePosition(selection, shadowRoots) {
+    for (const range of selection.getComposedRanges({ shadowRoots })) {
+      if (!range || range.collapsed || this.isExtensionUiRange(range)) continue;
+
+      const rect = range.getBoundingClientRect
+        ? range.getBoundingClientRect()
+        : this.createRangeFromStaticRange(range)?.getBoundingClientRect();
+      if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.bottom) ||
+          !Number.isFinite(rect.width) || !Number.isFinite(rect.height) ||
+          (rect.width === 0 && rect.height === 0)) continue;
+
+      const iconSize = WindowsConfig.POSITIONING.ICON_SIZE || 32;
+      const isTopFrame = window === window.top;
+      return {
+        x: rect.left + rect.width / 2 - (iconSize / 2) + (isTopFrame ? window.scrollX : 0),
+        y: rect.bottom + (WindowsConfig.POSITIONING.SELECTION_OFFSET || 10) + (isTopFrame ? window.scrollY : 0),
+        _isViewportRelative: !isTopFrame
+      };
+    }
+    return null;
   }
 
   isExtensionUiRange(range) {
