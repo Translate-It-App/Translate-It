@@ -286,7 +286,7 @@ describe("DisplayManager Selection Window error boundary", () => {
     expect(mocks.events.showIcon).toHaveBeenCalledTimes(1);
   });
 
-  it("updates a matching Toolbar continuation in place with current text and both coordinates", async () => {
+  it("locks the position of a matching Toolbar continuation while updating text and selection geometry", async () => {
     const token = { originFrameId: "frame-1", sequence: 9 };
     state.isIconMode = true;
     await manager._showIcon("word", { x: 5, y: 6 }, { x: 7, y: 8 }, token);
@@ -301,10 +301,47 @@ describe("DisplayManager Selection Window error boundary", () => {
     expect(mocks.events.showIcon.mock.calls[1][0]).toMatchObject({
       id: originalId,
       text: "full paragraph",
-      position: { x: 10, y: 20 },
       selectionPosition: { x: 30, y: 40 },
       selectionContinuationToken: token,
     });
+    expect(mocks.events.showIcon.mock.calls[1][0]).not.toHaveProperty("position");
+  });
+
+  it("uses the latest valid cursor position for a continuation before an icon is active", async () => {
+    const token = { originFrameId: "frame-1", sequence: 16 };
+    const selectionPosition = { x: 30, y: 40 };
+    const toolbarPosition = { x: 10, y: 20 };
+    state.isIconMode = false;
+
+    await manager.show("pending selection", selectionPosition, {
+      displayInteraction: "multi-click",
+      selectionContinuationToken: token,
+    }, toolbarPosition);
+    expect(mocks.events.showIcon).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(mocks.events.showIcon).toHaveBeenCalledOnce();
+    expect(mocks.events.showIcon.mock.calls[0][0]).toMatchObject({
+      position: toolbarPosition,
+      selectionPosition,
+    });
+  });
+
+  it("uses an independent selection's position instead of the previous Toolbar position", async () => {
+    const oldToken = { originFrameId: "frame-1", sequence: 17 };
+    const oldPosition = { x: 5, y: 6 };
+    const selectionPosition = { x: 30, y: 40 };
+    const toolbarPosition = { x: 90, y: 100 };
+    state.isIconMode = true;
+    await manager._showIcon("word", oldPosition, { x: 7, y: 8 }, oldToken);
+    const oldIconId = mocks.events.showIcon.mock.calls[0][0].id;
+
+    await manager.show("independent selection", selectionPosition, {}, toolbarPosition);
+    await vi.advanceTimersByTimeAsync(100);
+
+    const independentIcon = mocks.events.showIcon.mock.calls[1][0];
+    expect(independentIcon.id).not.toBe(oldIconId);
+    expect(independentIcon).toMatchObject({ position: toolbarPosition, selectionPosition });
   });
 
   it("omits missing cursor coordinates for a verified continuation and keeps selection geometry separate", async () => {

@@ -198,7 +198,6 @@ describe('TranslationIcon selection-position event flow', () => {
     manager.setupEventListeners();
     const token = { originFrameId: 'source-frame', sequence: 17 };
     const firstCursor = { x: 20, y: 30 };
-    const paragraphCursor = { x: 70, y: 80 };
     const selectionPosition = { x: 11, y: 22 };
     const state = {
       isIconMode: true,
@@ -250,8 +249,11 @@ describe('TranslationIcon selection-position event flow', () => {
     paragraphRange.selectNodeContents(paragraph);
     const selection = window.getSelection();
     selection.removeAllRanges();
-    selection.addRange(paragraphRange);
+    selection.addRange(wordRange);
     window.iframeClickManager = { crossFrameManager: { frameId: token.originFrameId } };
+    vi.spyOn(window, 'top', 'get').mockReturnValue(window);
+    vi.spyOn(window, 'scrollX', 'get').mockReturnValue(0);
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(0);
     const selectionHandler = new SimpleTextSelectionHandler();
     selectionHandler._lastSelectionRange = wordRange.cloneRange();
     selectionHandler._lastSelectionTarget = span;
@@ -259,15 +261,27 @@ describe('TranslationIcon selection-position event flow', () => {
     const mouseDown = new MouseEvent('mousedown', { bubbles: true, button: 0, detail: 3 });
     Object.defineProperty(mouseDown, 'target', { value: paragraph });
     selectionHandler.handleMouseDown(mouseDown);
-    const mouseUp = new MouseEvent('mouseup', { bubbles: true, button: 0, detail: 3 });
+    selection.removeAllRanges();
+    selection.addRange(paragraphRange);
+    const mouseUp = new MouseEvent('mouseup', {
+      bubbles: true, button: 0, detail: 3, clientX: 70, clientY: 70,
+    });
     Object.defineProperty(mouseUp, 'target', { value: paragraph });
     selectionHandler.handleMouseUp(mouseUp);
+    expect(selectionHandler._toolbarReleaseCandidate).toMatchObject({ interactionId: 1, x: 70, y: 70 });
     paragraph.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 3, button: 0 }));
+    expect(selectionHandler._selectionContinuationToken).toEqual(token);
     expect(window.__translateItPendingSelectionContinuationToken).toBeNull();
     expect(outsideDismiss).not.toHaveBeenCalled();
+    expect(selectionHandler._consumeToolbarReleasePosition(
+      'word then rest', selectionHandler._selectionContinuationToken,
+    )).toEqual({
+      x: 70, y: 80, _isViewportRelative: false,
+    });
 
+    const positioningCallsBeforeContinuation = testMocks.initializePosition.mock.calls.length;
     WindowsManagerEvents.showIcon({
-      id: 'stable-toolbar', text: 'full paragraph', position: paragraphCursor,
+      id: 'stable-toolbar', text: 'full paragraph',
       selectionPosition: { x: 55, y: 66 }, selectionContinuationToken: token,
     });
     await nextTick();
@@ -277,10 +291,10 @@ describe('TranslationIcon selection-position event flow', () => {
     expect(updatedComponent.element).toBe(originalDom);
     expect(updatedComponent.props('text')).toBe('full paragraph');
     expect(manager.translationIcons.value[0]).toMatchObject({
-      id: 'stable-toolbar', text: 'full paragraph', position: paragraphCursor,
+      id: 'stable-toolbar', text: 'full paragraph', position: firstCursor,
       selectionPosition: { x: 55, y: 66 },
     });
-    expect(testMocks.initializePosition).toHaveBeenCalledWith(paragraphCursor);
+    expect(testMocks.initializePosition).toHaveBeenCalledTimes(positioningCallsBeforeContinuation);
     expect(testMocks.stop).toHaveBeenCalled();
 
     const positioningCalls = testMocks.initializePosition.mock.calls.length;
@@ -289,7 +303,7 @@ describe('TranslationIcon selection-position event flow', () => {
       selectionContinuationToken: token,
     });
     await nextTick();
-    expect(manager.translationIcons.value[0].position).toEqual(paragraphCursor);
+    expect(manager.translationIcons.value[0].position).toEqual(firstCursor);
     expect(testMocks.initializePosition).toHaveBeenCalledTimes(positioningCalls);
 
     const translateDetails = [];

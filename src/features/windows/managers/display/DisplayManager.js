@@ -279,7 +279,7 @@ export class DisplayManager {
       } else if (selectionTranslationMode === SelectionTranslationMode.ON_CLICK) {
         await this._showIcon(
           selectedText,
-          toolbarPosition || (continuesVisibleIcon ? null : position),
+          continuesVisibleIcon ? null : toolbarPosition || position,
           position,
           continuationToken,
         );
