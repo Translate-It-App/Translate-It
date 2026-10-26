@@ -71,6 +71,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this.lastMouseUpEvent = null;
     this._selectionChangeVersion = 0;
     this._primaryMouseDown = null;
+    this._lastReleasedPrimaryMouseDown = null;
     this._primaryMouseInteractionSequence = 0;
     this._lastMouseUpInteractionId = null;
     this._lastSelectionInteractionId = null;
@@ -173,6 +174,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       this._lastUiPointerInteraction = null;
       this._lastMouseUpDiagnostics = null;
       this._primaryMouseDown = null;
+      this._lastReleasedPrimaryMouseDown = null;
       this._toolbarReleaseCandidate = null;
       this._clearSelectionContinuation();
 
@@ -235,6 +237,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       this._lastUiPointerInteraction = null;
       this._lastMouseUpDiagnostics = null;
       this._primaryMouseDown = null;
+      this._lastReleasedPrimaryMouseDown = null;
       this._toolbarReleaseCandidate = null;
       this._clearSelectionContinuation();
 
@@ -553,6 +556,10 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     try {
       const selection = window.getSelection();
       const selectedText = selection ? selection.toString().trim() : '';
+      const currentRange = selection?.rangeCount && typeof selection.getRangeAt === 'function'
+        ? selection.getRangeAt(0)
+        : null;
+      const currentRangeSnapshot = currentRange?.cloneRange?.() ?? currentRange;
 
       logger.debug('Processing selection', {
         hasText: !!selectedText,
@@ -671,6 +678,37 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
         return;
       }
 
+      let pendingDisplayRestore = null;
+      const releasedInteraction = this._lastReleasedPrimaryMouseDown;
+      const isUnchangedPriorSelection = selectedText === this._lastSelectionText && currentRange &&
+        this._lastSelectionRange && this._isSameRange(currentRange, this._lastSelectionRange);
+      if (releasedInteraction && !releasedInteraction.restoreConsumed && isUnchangedPriorSelection &&
+          releasedInteraction.selectionInteractionId === this._lastSelectionInteractionId) {
+        releasedInteraction.restoreConsumed = true;
+        let restoreResult = null;
+        try {
+          restoreResult = await releasedInteraction.invalidationResult;
+        } catch {
+          // An unavailable owner response never authorizes display recovery.
+        }
+        const latestSelection = window.getSelection();
+        const latestRange = latestSelection?.rangeCount && typeof latestSelection.getRangeAt === 'function'
+          ? latestSelection.getRangeAt(0)
+          : null;
+        if (!this.isActive || this.isDragging || this._lastReleasedPrimaryMouseDown !== releasedInteraction ||
+            this._lastSelectionInteractionId !== releasedInteraction.selectionInteractionId ||
+            latestSelection?.toString().trim() !== selectedText || !latestRange ||
+            !this._isSameRange(latestRange, currentRangeSnapshot)) return;
+        if (restoreResult?.valid === true && restoreResult.cancelledPendingDisplay === true &&
+            restoreResult.canRestore === true && Number.isInteger(restoreResult.requestVersion)) {
+          pendingDisplayRestore = {
+            canRestore: true,
+            requestVersion: restoreResult.requestVersion,
+            selectionInteractionId: releasedInteraction.selectionInteractionId,
+          };
+        }
+      }
+
       this._startSelectionPreservation(selectionType);
 
       // Process the selection
@@ -684,13 +722,11 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
         
         // Pass the keyboard state to selection manager
         const continuationToken = this._selectionContinuationToken;
-        const currentRange = selection?.rangeCount && typeof selection.getRangeAt === 'function'
-          ? selection.getRangeAt(0)
-          : null;
         const toolbarPosition = this._consumeToolbarReleasePosition(
           selectedText,
           continuationToken,
           currentRange,
+          !!pendingDisplayRestore,
         );
         const selectionUnchanged = selectedText === this._lastSelectionText && currentRange &&
           this._lastSelectionRange && this._isSameRange(currentRange, this._lastSelectionRange);
@@ -704,9 +740,10 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
         const displayed = await this.selectionManager.processSelection(selectedText, selection, {
           ctrlPressed: this.ctrlKeyPressed,
           shiftPressed: this.shiftKeyPressed,
-          ...(this._lastSelectionInteractionId !== null && (!selectionUnchanged || continuationToken)
+          ...(this._lastSelectionInteractionId !== null && (!selectionUnchanged || continuationToken || pendingDisplayRestore)
             ? { selectionInteractionId: this._lastSelectionInteractionId }
             : {}),
+          ...(pendingDisplayRestore ? { pendingDisplayRestore } : {}),
           ...(toolbarPosition ? { toolbarPosition } : {}),
           ...(originToken ? { selectionContinuationToken: originToken } : {}),
           ...(displayInteraction ? { displayInteraction } : {})
@@ -1009,6 +1046,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this._clearSelectionContinuation();
     if (this.isWaitingForDragEnd && !this.isDragging) this.isWaitingForDragEnd = false;
     this._primaryMouseDown = null;
+    this._lastReleasedPrimaryMouseDown = null;
     this._lastSelectionInteractionId = null;
     this._toolbarReleaseCandidate = null;
 
@@ -1124,10 +1162,11 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
   handleMouseDown(event) {
     const eligibleSelectionInteraction = event.isTrusted === true && event.button === 0 && !event.shiftKey &&
       this._classifyComposedPath(event) !== true;
+    let invalidationResult = null;
     if (eligibleSelectionInteraction) {
       const timestamp = Date.now();
       const windowsManager = this.getWindowsManager();
-      windowsManager?.invalidatePendingShows(timestamp);
+      invalidationResult = windowsManager?.invalidatePendingShows(timestamp) ?? null;
 
       let crossOriginTop = false;
       try {
@@ -1135,7 +1174,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
           try {
             const topWindowsManager = window.top.windowsManagerInstance;
             if (topWindowsManager && topWindowsManager !== windowsManager) {
-              topWindowsManager.invalidatePendingShows(timestamp);
+              invalidationResult = topWindowsManager.invalidatePendingShows(timestamp);
             }
           } catch {
             crossOriginTop = true;
@@ -1146,10 +1185,11 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       }
 
       if (crossOriginTop) {
-        void sendMessage({
+        invalidationResult = sendMessage({
           action: MessageActions.INVALIDATE_PENDING_DISPLAY,
           data: { timestamp },
-        }, { silent: true }).catch(() => {});
+        }, { silent: true }).then((response) => response?.success === true ? response.result : null)
+          .catch(() => null);
       }
     }
 
@@ -1161,6 +1201,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this._lastNativeClickContext = null;
     this.lastMouseEventTime = Date.now();
     this._lastMouseUpInteractionId = null;
+    this._lastReleasedPrimaryMouseDown = null;
     this._lastSelectionInteractionId = null;
     this.isDragging = true;
     this.mouseDownTime = Date.now();
@@ -1168,6 +1209,8 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this._primaryMouseDown = event.button === 0 ? {
       interactionId: ++this._primaryMouseInteractionSequence,
       selectionInteractionId: eligibleSelectionInteraction ? this._primaryMouseInteractionSequence : null,
+      invalidationResult: eligibleSelectionInteraction ? Promise.resolve(invalidationResult) : null,
+      restoreConsumed: false,
       selectionChangeVersion: this._selectionChangeVersion,
       selectedText: currentSelection
     } : null;
@@ -1275,6 +1318,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this.lastMouseUpEvent = event; // Store for translation window detection
     const mouseDown = this._primaryMouseDown;
     this._primaryMouseDown = null;
+    this._lastReleasedPrimaryMouseDown = event.button === 0 ? mouseDown : null;
     this._lastMouseUpInteractionId = event.button === 0 ? mouseDown?.interactionId ?? null : null;
     this._lastSelectionInteractionId = event.button === 0
       ? mouseDown?.selectionInteractionId ?? null
@@ -1454,7 +1498,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     }
   }
 
-  _consumeToolbarReleasePosition(selectedText, continuationToken = null, currentRange = null) {
+  _consumeToolbarReleasePosition(selectedText, continuationToken = null, currentRange = null, allowUnchangedRecovery = false) {
     const candidate = this._toolbarReleaseCandidate;
     if (!candidate) return null;
 
@@ -1467,11 +1511,14 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       candidate.selectionInteractionId === this._lastSelectionInteractionId &&
       currentRange && this._lastSelectionRange &&
       !this._isSameRange(currentRange, this._lastSelectionRange);
+    const restoredSameRange = allowUnchangedRecovery && selectedText === this._lastSelectionText &&
+      selectedText === candidate.selectedTextAtPress && selectedText === candidate.selectedTextAtRelease &&
+      currentRange && this._lastSelectionRange && this._isSameRange(currentRange, this._lastSelectionRange);
     const validCandidate = Date.now() - candidate.timestamp <= TOOLBAR_RELEASE_FRESHNESS_MS &&
       Number.isInteger(candidate.interactionId) &&
       candidate.interactionId === this._lastMouseUpInteractionId &&
       Number.isFinite(candidate.x) && Number.isFinite(candidate.y) && !!selectedText &&
-      (verifiedContinuation || (
+      (verifiedContinuation || restoredSameRange || (
         candidate.selectionChangeVersion !== this._selectionChangeVersion &&
         (selectedText !== candidate.selectedTextAtPress || independentSameTextSelection) &&
         (!candidate.selectedTextAtRelease || candidate.selectedTextAtRelease === selectedText)

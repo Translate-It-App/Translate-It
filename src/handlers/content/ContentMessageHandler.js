@@ -1164,8 +1164,8 @@ export class ContentMessageHandler extends ResourceTracker {
       return { success: false, error: 'Invalid pending-display timestamp' };
     }
 
-    window.windowsManagerInstance?.invalidatePendingShows(timestamp);
-    return { success: true };
+    const result = window.windowsManagerInstance?.invalidatePendingShows(timestamp);
+    return { success: true, result };
   }
 
   handleMouseHoverFrameFeedback(message) {

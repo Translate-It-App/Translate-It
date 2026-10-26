@@ -25,11 +25,14 @@ export async function handlePendingDisplayInvalidation(message, sender) {
     if (!frame || (typeof frame.url === 'string' && extensionUrl && frame.url.startsWith(extensionUrl))) {
       return { success: false, error: 'Unknown content frame' };
     }
-    await browser.tabs.sendMessage(tabId, {
+    const response = await browser.tabs.sendMessage(tabId, {
       action: MessageActions.INVALIDATE_PENDING_DISPLAY,
       data: { timestamp },
     }, { frameId: 0 });
-    return { success: true };
+    if (!response?.success || !response.result || typeof response.result !== 'object') {
+      return { success: false, error: 'Pending-display owner rejected invalidation' };
+    }
+    return { success: true, result: response.result };
   } catch {
     return { success: false, error: 'Pending-display relay failed' };
   }

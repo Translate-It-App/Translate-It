@@ -127,7 +127,8 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
   });
 
   it('accepts a trusted background invalidation only in the top frame', () => {
-    const invalidatePendingShows = vi.fn();
+    const ownerResult = { valid: true, cancelledPendingDisplay: true, canRestore: true, requestVersion: 4 };
+    const invalidatePendingShows = vi.fn(() => ownerResult);
     const dismiss = vi.fn();
     window.windowsManagerInstance = { invalidatePendingShows, dismiss };
     handler.initialize();
@@ -136,7 +137,7 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
 
     try {
       expect(handler.handlers.has(MessageActions.INVALIDATE_PENDING_DISPLAY)).toBe(true);
-      expect(handler.handlePendingDisplayInvalidation({ data: { timestamp } }, sender)).toEqual({ success: true });
+      expect(handler.handlePendingDisplayInvalidation({ data: { timestamp } }, sender)).toEqual({ success: true, result: ownerResult });
       expect(invalidatePendingShows).toHaveBeenCalledWith(timestamp);
       expect(dismiss).not.toHaveBeenCalled();
     } finally {

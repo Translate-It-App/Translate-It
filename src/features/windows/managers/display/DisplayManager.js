@@ -73,11 +73,20 @@ export class DisplayManager {
   invalidatePendingShows(beforeTimestamp) {
     if (beforeTimestamp !== undefined &&
         (!Number.isFinite(beforeTimestamp) || beforeTimestamp < 0 || beforeTimestamp > Date.now() ||
-         this._latestShowRequestTimestamp > beforeTimestamp)) return false;
+         this._latestShowRequestTimestamp > beforeTimestamp)) {
+      return { valid: false, cancelledPendingDisplay: false, requestVersion: this._showRequestVersion, canRestore: false };
+    }
 
     this._showRequestVersion += 1;
+    const cancelledPendingDisplay = this._pendingOnClickDisplay !== null;
     this._cancelPendingOnClickDisplay();
-    return true;
+    const isUiVisible = this.state.isVisible || this.state.isIconMode;
+    return {
+      valid: true,
+      cancelledPendingDisplay,
+      requestVersion: this._showRequestVersion,
+      canRestore: cancelledPendingDisplay && !isUiVisible,
+    };
   }
 
   isCurrentShowRequest(requestVersion) {
@@ -108,6 +117,14 @@ export class DisplayManager {
    * Show translation window or icon for selected text
    */
   async show(selectedText, position, options = {}, toolbarPosition = null) {
+    const restore = options.pendingDisplayRestore;
+    const isRecovery = restore !== undefined;
+    if (isRecovery && (!restore || restore.canRestore !== true ||
+        !Number.isInteger(restore.requestVersion) || restore.requestVersion !== this._showRequestVersion ||
+        !Number.isInteger(restore.selectionInteractionId) ||
+        restore.selectionInteractionId !== options.selectionInteractionId ||
+        this.state.isVisible || this.state.isIconMode)) return;
+
     this._latestShowRequestTimestamp = Date.now();
     const requestVersion = ++this._showRequestVersion;
     this._cancelPendingOnClickDisplay();
@@ -135,6 +152,7 @@ export class DisplayManager {
     const exclusionChecker = ExclusionChecker.getInstance();
     const isAllowed = await exclusionChecker.isFeatureAllowed("windowsManager");
     if (requestVersion !== this._showRequestVersion) return;
+    if (isRecovery && (this.state.isVisible || this.state.isIconMode)) return;
     if (!isAllowed) {
       this.logger.debug("WindowsManager not allowed: Permission check failed");
       return;

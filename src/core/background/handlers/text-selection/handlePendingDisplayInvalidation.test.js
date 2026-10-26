@@ -26,7 +26,10 @@ describe('trusted pending-display invalidation relay', () => {
     vi.clearAllMocks();
     vi.spyOn(Date, 'now').mockReturnValue(timestamp + 10);
     browser.webNavigation.getFrame.mockResolvedValue({ frameId: 3, parentFrameId: 2, url: 'https://example.test/' });
-    browser.tabs.sendMessage.mockResolvedValue({ success: true });
+    browser.tabs.sendMessage.mockResolvedValue({
+      success: true,
+      result: { valid: true, cancelledPendingDisplay: true, canRestore: true, requestVersion: 4 },
+    });
   });
 
   afterEach(() => vi.restoreAllMocks());
@@ -69,13 +72,24 @@ describe('trusted pending-display invalidation relay', () => {
     const source = sender({ frameId });
     browser.webNavigation.getFrame.mockResolvedValue({ frameId, parentFrameId: frameId === 3 ? 0 : 3 });
 
-    expect(await handlePendingDisplayInvalidation(message, source)).toEqual({ success: true });
+    expect(await handlePendingDisplayInvalidation(message, source)).toEqual({
+      success: true,
+      result: { valid: true, cancelledPendingDisplay: true, canRestore: true, requestVersion: 4 },
+    });
     expect(browser.webNavigation.getFrame).toHaveBeenCalledWith({ tabId: 8, frameId });
     expect(browser.tabs.sendMessage).toHaveBeenCalledOnce();
     expect(browser.tabs.sendMessage).toHaveBeenCalledWith(8, {
       action: MessageActions.INVALIDATE_PENDING_DISPLAY,
       data: { timestamp },
     }, { frameId: 0 });
+  });
+
+  it('does not grant permission when the top-frame reply is missing or malformed', async () => {
+    browser.tabs.sendMessage.mockResolvedValueOnce({ success: true });
+    expect(await handlePendingDisplayInvalidation(message, sender())).toMatchObject({ success: false });
+
+    browser.tabs.sendMessage.mockResolvedValueOnce({ success: false, result: { canRestore: true } });
+    expect(await handlePendingDisplayInvalidation(message, sender())).toMatchObject({ success: false });
   });
 
   it('ignores message-claimed frame and tab identities', async () => {

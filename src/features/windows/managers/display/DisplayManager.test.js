@@ -292,7 +292,9 @@ describe("DisplayManager Selection Window error boundary", () => {
 
     await vi.advanceTimersByTimeAsync(10);
     const pressTimestamp = Date.now();
-    expect(manager.invalidatePendingShows(pressTimestamp)).toBe(true);
+    const invalidation = manager.invalidatePendingShows(pressTimestamp);
+    expect(invalidation).toMatchObject({ valid: true, cancelledPendingDisplay: true, canRestore: true });
+    expect(Number.isInteger(invalidation.requestVersion)).toBe(true);
     expect(manager._pendingOnClickDisplay).toBeNull();
     expect(facade.dismiss).not.toHaveBeenCalled();
 
@@ -300,7 +302,9 @@ describe("DisplayManager Selection Window error boundary", () => {
     await manager.show("newer selection", { x: 30, y: 40 });
     const newerPendingDisplay = manager._pendingOnClickDisplay;
 
-    expect(manager.invalidatePendingShows(pressTimestamp)).toBe(false);
+    expect(manager.invalidatePendingShows(pressTimestamp)).toMatchObject({
+      valid: false, cancelledPendingDisplay: false, canRestore: false,
+    });
     expect(manager._pendingOnClickDisplay).toBe(newerPendingDisplay);
     await vi.advanceTimersByTimeAsync(100);
 
@@ -309,6 +313,81 @@ describe("DisplayManager Selection Window error boundary", () => {
       text: "newer selection",
       position: { x: 30, y: 40 },
     });
+  });
+
+  it('does not grant restore eligibility when no delayed display was canceled', () => {
+    expect(manager.invalidatePendingShows(Date.now())).toMatchObject({
+      valid: true,
+      cancelledPendingDisplay: false,
+      canRestore: false,
+    });
+  });
+
+  it('restores one cancelled Toolbar for a version-matched recovery request', async () => {
+    await manager.show('same selection', { x: 30, y: 40 });
+    const invalidation = manager.invalidatePendingShows(Date.now());
+    expect(invalidation.canRestore).toBe(true);
+
+    await manager.show('same selection', { x: 30, y: 40 }, {
+      selectionInteractionId: 12,
+      pendingDisplayRestore: { ...invalidation, selectionInteractionId: 12 },
+    }, { x: 10, y: 20 });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(mocks.events.showIcon).toHaveBeenCalledOnce();
+    expect(mocks.events.showIcon.mock.calls[0][0]).toMatchObject({
+      text: 'same selection',
+      position: { x: 10, y: 20 },
+    });
+  });
+
+  it('rejects stale and visible-UI recovery before changing newer display work', async () => {
+    await manager.show('old selection', { x: 1, y: 2 });
+    const invalidation = manager.invalidatePendingShows(Date.now());
+    await manager.show('new selection', { x: 30, y: 40 });
+    const newerPendingDisplay = manager._pendingOnClickDisplay;
+    const currentVersion = manager._showRequestVersion;
+
+    await manager.show('old selection', { x: 1, y: 2 }, {
+      selectionInteractionId: 13,
+      pendingDisplayRestore: { ...invalidation, selectionInteractionId: 13 },
+    });
+    expect(manager._showRequestVersion).toBe(currentVersion);
+    expect(manager._pendingOnClickDisplay).toBe(newerPendingDisplay);
+
+    manager.state.isVisible = true;
+    manager.state.isPinned = true;
+    await manager.show('old selection', { x: 1, y: 2 }, {
+      selectionInteractionId: 13,
+      pendingDisplayRestore: {
+        canRestore: true,
+        requestVersion: currentVersion,
+        selectionInteractionId: 13,
+      },
+    });
+    expect(manager._showRequestVersion).toBe(currentVersion);
+    expect(mocks.events.showWindow).not.toHaveBeenCalled();
+  });
+
+  it('does not update pinned UI when visibility changes during recovery permission checks', async () => {
+    await manager.show('same selection', { x: 30, y: 40 });
+    const invalidation = manager.invalidatePendingShows(Date.now());
+    let resolvePermission;
+    mocks.isFeatureAllowed.mockReturnValueOnce(new Promise((resolve) => { resolvePermission = resolve; }));
+
+    const recovery = manager.show('same selection', { x: 30, y: 40 }, {
+      selectionInteractionId: 14,
+      pendingDisplayRestore: { ...invalidation, selectionInteractionId: 14 },
+    });
+    state.isVisible = true;
+    state.isPinned = true;
+    state.originalText = 'same selection';
+    resolvePermission(true);
+    await recovery;
+
+    expect(facade._startTranslationProcess).not.toHaveBeenCalled();
+    expect(mocks.events.updateWindow).not.toHaveBeenCalled();
+    expect(manager._pendingOnClickDisplay).toBeNull();
   });
 
   it("locks the position of a matching Toolbar continuation while updating text and selection geometry", async () => {
