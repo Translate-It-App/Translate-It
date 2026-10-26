@@ -135,16 +135,111 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     expect(handler._toolbarReleaseCandidate).toBeNull();
   });
 
+  it.each([
+    ['selectionchange-before-mouseup', true],
+    ['selectionchange-before-mouseup', false],
+    ['selectionchange-after-mouseup', true],
+    ['selectionchange-after-mouseup', false],
+  ])('uses the verified triple-click release for an expanded selection (%s, topFrame=%s)', async (order, isTopFrame) => {
+    vi.useFakeTimers();
+    SimpleTextSelectionHandler.resetInstance();
+    const handler = new SimpleTextSelectionHandler();
+    const paragraph = document.createElement('p');
+    const span = document.createElement('span');
+    const textNode = document.createTextNode('word then rest');
+    span.append(textNode);
+    paragraph.append(span);
+    document.body.append(paragraph);
+
+    const wordRange = document.createRange();
+    wordRange.setStart(textNode, 0);
+    wordRange.setEnd(textNode, 4);
+    const paragraphRange = document.createRange();
+    paragraphRange.selectNodeContents(paragraph);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(wordRange);
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(window, 'top', 'get').mockReturnValue(isTopFrame ? window : {});
+    vi.spyOn(window, 'scrollX', 'get').mockReturnValue(40);
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(70);
+
+    const token = { originFrameId: 'release-frame', sequence: 31 };
+    const processSelection = vi.fn().mockResolvedValue(false);
+    handler.isActive = true;
+    handler.isDragging = false;
+    handler.shiftKeyPressed = false;
+    handler.selectionManager = { processSelection };
+    handler._selectionChangeVersion = 0;
+    handler._activeSelectionToken = token;
+    handler._lastSelectionText = 'word';
+    handler._lastSelectionRange = wordRange.cloneRange();
+    handler._lastSelectionTarget = span;
+    handler._lastMouseUpEvent = { target: span };
+    window.iframeClickManager = { crossFrameManager: { frameId: token.originFrameId } };
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
+
+    const mouseDown = new MouseEvent('mousedown', { button: 0, detail: 3 });
+    Object.defineProperty(mouseDown, 'target', { value: paragraph });
+    handler.handleMouseDown(mouseDown);
+
+    if (order === 'selectionchange-before-mouseup') {
+      selection.removeAllRanges();
+      selection.addRange(paragraphRange);
+      handler.handleSelectionChange();
+    }
+
+    const mouseUp = new MouseEvent('mouseup', {
+      button: 0, clientX: 25, clientY: 35,
+      detail: order === 'selectionchange-before-mouseup' ? 3 : 0,
+    });
+    Object.defineProperty(mouseUp, 'target', { value: paragraph });
+    handler.handleMouseUp(mouseUp);
+
+    if (order === 'selectionchange-after-mouseup') {
+      selection.removeAllRanges();
+      selection.addRange(paragraphRange);
+    }
+    const click = new MouseEvent('click', { button: 0, detail: 3 });
+    Object.defineProperty(click, 'target', { value: paragraph });
+    handler.handleClick(click);
+    expect(handler.getSelectionContinuationTokenForClick(click)).toBe(token);
+    if (order === 'selectionchange-after-mouseup') handler.handleSelectionChange();
+    if (handler.selectionTimeout) clearTimeout(handler.selectionTimeout);
+
+    try {
+      await handler.processSelection();
+      expect(processSelection).toHaveBeenCalledWith('word then rest', selection, expect.objectContaining({
+        toolbarPosition: isTopFrame
+          ? { x: 65, y: 115, _isViewportRelative: false }
+          : { x: 25, y: 45, _isViewportRelative: true },
+        selectionContinuationToken: token,
+      }));
+      expect(handler._toolbarReleaseCandidate).toBeNull();
+    } finally {
+      handler._clearAllTimers();
+      handler.destroy();
+      delete window.iframeClickManager;
+      paragraph.remove();
+    }
+  });
+
   it('adds page scroll only for top-frame cursor coordinates', () => {
     const handler = new SimpleTextSelectionHandler();
     vi.spyOn(window, 'top', 'get').mockReturnValue(window);
     vi.spyOn(window, 'scrollX', 'get').mockReturnValue(40);
     vi.spyOn(window, 'scrollY', 'get').mockReturnValue(70);
     handler._toolbarReleaseCandidate = {
+      interactionId: 1,
       x: 25, y: 35, timestamp: Date.now(), selectionChangeVersion: 1,
       selectedTextAtRelease: 'selected', selectedTextAtPress: ''
     };
     handler._selectionChangeVersion = 2;
+    handler._lastMouseUpInteractionId = 1;
 
     expect(handler._consumeToolbarReleasePosition('selected')).toEqual({
       x: 65,
@@ -253,9 +348,11 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     handler.lastMouseUpEvent = null;
     handler.selectionManager = { processSelection };
     handler._toolbarReleaseCandidate = {
+      interactionId: 1,
       x: 10, y: 20, timestamp: Date.now(), selectionChangeVersion: 0,
       selectedTextAtRelease: 'selected text', selectedTextAtPress: ''
     };
+    handler._lastMouseUpInteractionId = 1;
     handler._selectionChangeVersion = 1;
     vi.spyOn(window, 'getSelection').mockReturnValue(selection);
     vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);

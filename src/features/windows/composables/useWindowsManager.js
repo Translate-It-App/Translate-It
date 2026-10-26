@@ -86,12 +86,20 @@ export function useWindowsManager() {
 
     logger.debug('Show icon event received', { id: detail.id, frameId: detail.frameId });
 
+    const currentIcon = translationIcons.value.find(icon => icon.id === detail.id);
+    const continuationToken = detail.selectionContinuationToken;
+    const isMatchingContinuation = currentIcon && continuationToken && currentIcon.selectionContinuationToken &&
+      continuationToken.originFrameId === currentIcon.selectionContinuationToken.originFrameId &&
+      continuationToken.sequence === currentIcon.selectionContinuationToken.sequence;
+    const position = detail.position || (isMatchingContinuation ? currentIcon.position : null);
+    if (!position) return;
+
     const updatedIcon = {
       id: detail.id,
       text: detail.text,
-      position: detail.position,
-      selectionPosition: detail.selectionPosition ?? detail.position,
-      selectionContinuationToken: detail.selectionContinuationToken ?? null,
+      position,
+      selectionPosition: detail.selectionPosition ?? position,
+      selectionContinuationToken: continuationToken ?? null,
     };
     const existingIndex = translationIcons.value.findIndex(icon => icon.id === detail.id);
     if (existingIndex >= 0) {

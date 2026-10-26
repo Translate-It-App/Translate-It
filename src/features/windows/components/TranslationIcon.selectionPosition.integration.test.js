@@ -283,6 +283,15 @@ describe('TranslationIcon selection-position event flow', () => {
     expect(testMocks.initializePosition).toHaveBeenCalledWith(paragraphCursor);
     expect(testMocks.stop).toHaveBeenCalled();
 
+    const positioningCalls = testMocks.initializePosition.mock.calls.length;
+    WindowsManagerEvents.showIcon({
+      id: 'stable-toolbar', text: 'full paragraph', selectionPosition: { x: 55, y: 66 },
+      selectionContinuationToken: token,
+    });
+    await nextTick();
+    expect(manager.translationIcons.value[0].position).toEqual(paragraphCursor);
+    expect(testMocks.initializePosition).toHaveBeenCalledTimes(positioningCalls);
+
     const translateDetails = [];
     const captureTranslate = (detail) => translateDetails.push(detail);
     pageEventBus.on(WINDOWS_MANAGER_EVENTS.ICON_CLICKED, captureTranslate);

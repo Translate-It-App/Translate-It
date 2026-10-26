@@ -307,6 +307,25 @@ describe("DisplayManager Selection Window error boundary", () => {
     });
   });
 
+  it("omits missing cursor coordinates for a verified continuation and keeps selection geometry separate", async () => {
+    const token = { originFrameId: "frame-1", sequence: 15 };
+    const firstToolbarPosition = { x: 12, y: 18 };
+    const selectionPosition = { x: 70, y: 80 };
+    state.isIconMode = true;
+    await manager._showIcon("word", firstToolbarPosition, { x: 4, y: 8 }, token);
+    const id = mocks.events.showIcon.mock.calls[0][0].id;
+
+    await manager.show("expanded paragraph", selectionPosition, {
+      selectionContinuationToken: token,
+    });
+    await vi.advanceTimersByTimeAsync(100);
+
+    const update = mocks.events.showIcon.mock.calls[1][0];
+    expect(update.id).toBe(id);
+    expect(update).not.toHaveProperty("position");
+    expect(update.selectionPosition).toBe(selectionPosition);
+  });
+
   it("does not reuse a stale icon ID when the Toolbar is no longer active", async () => {
     const token = { originFrameId: "frame-1", sequence: 11 };
     state.isIconMode = false;

@@ -277,7 +277,12 @@ export class DisplayManager {
         this.state.setOriginalText(selectedText);
         this.facade._addDismissListener();
       } else if (selectionTranslationMode === SelectionTranslationMode.ON_CLICK) {
-        await this._showIcon(selectedText, toolbarPosition || position, position, continuationToken);
+        await this._showIcon(
+          selectedText,
+          toolbarPosition || (continuesVisibleIcon ? null : position),
+          position,
+          continuationToken,
+        );
       } else {
         await this._showWindow(selectedText, position, options);
       }
@@ -488,27 +493,27 @@ export class DisplayManager {
       return;
     }
 
-    if (!position) {
+    const sameContinuation = this.state.isIconMode === true && this.state.activeIconId &&
+      selectionContinuationToken && this.state.selectionContinuationToken &&
+      selectionContinuationToken.originFrameId === this.state.selectionContinuationToken.originFrameId &&
+      selectionContinuationToken.sequence === this.state.selectionContinuationToken.sequence;
+    if (!position && !sameContinuation) {
       this.logger.debug("Aborting _showIcon(): Missing position");
       return;
     }
 
     this.logger.debug("Creating translation icon", {
       textLength: selectedText.length,
-      position: {
+      position: position ? {
         x: Math.round(position.x || 0),
         y: Math.round(position.y || 0),
-      },
+      } : null,
     });
 
-    const sameContinuation = this.state.isIconMode === true && this.state.activeIconId &&
-      selectionContinuationToken && this.state.selectionContinuationToken &&
-      selectionContinuationToken.originFrameId === this.state.selectionContinuationToken.originFrameId &&
-      selectionContinuationToken.sequence === this.state.selectionContinuationToken.sequence;
     const iconId = sameContinuation && this.state.activeIconId
       ? this.state.activeIconId
       : `translation-icon-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const positionToUse = position.finalPosition || position;
+    const positionToUse = position ? position.finalPosition || position : null;
 
     this.state.setIconMode(true);
     this.state.setOriginalText(selectedText);
@@ -516,7 +521,7 @@ export class DisplayManager {
     WindowsManagerEvents.showIcon({
       id: iconId,
       text: selectedText,
-      position: positionToUse,
+      ...(positionToUse ? { position: positionToUse } : {}),
       selectionPosition,
       ...(selectionContinuationToken ? { selectionContinuationToken } : {}),
       frameId: this.crossFrameManager.frameId,

@@ -99,4 +99,40 @@ describe('useWindowsManager toolbar continuation updates', () => {
     });
     manager.cleanupEventListeners();
   });
+
+  it('retains rendered cursor position only for a matching same-ID continuation with no new position', () => {
+    const manager = useWindowsManager();
+    manager.setupEventListeners();
+    const token = { originFrameId: 'frame-a', sequence: 8 };
+    const toolbarPosition = { x: 42, y: 53 };
+    const selectionPosition = { x: 11, y: 22 };
+    eventBus.emit(WINDOWS_MANAGER_EVENTS.SHOW_ICON, {
+      id: 'toolbar-current', text: 'word', position: toolbarPosition,
+      selectionPosition, selectionContinuationToken: token,
+    });
+
+    eventBus.emit(WINDOWS_MANAGER_EVENTS.SHOW_ICON, {
+      id: 'toolbar-current', text: 'expanded paragraph', selectionPosition,
+      selectionContinuationToken: token,
+    });
+
+    expect(manager.translationIcons.value).toHaveLength(1);
+    expect(manager.translationIcons.value[0]).toMatchObject({
+      id: 'toolbar-current', text: 'expanded paragraph', position: toolbarPosition, selectionPosition,
+    });
+
+    eventBus.emit(WINDOWS_MANAGER_EVENTS.SHOW_ICON, {
+      id: 'toolbar-current', text: 'unrelated', selectionPosition,
+      selectionContinuationToken: { originFrameId: 'frame-a', sequence: 9 },
+    });
+    eventBus.emit(WINDOWS_MANAGER_EVENTS.SHOW_ICON, {
+      id: 'new-toolbar', text: 'new selection', selectionPosition,
+      selectionContinuationToken: token,
+    });
+
+    expect(manager.translationIcons.value).toMatchObject([
+      { id: 'toolbar-current', text: 'expanded paragraph', position: toolbarPosition },
+    ]);
+    manager.cleanupEventListeners();
+  });
 });
