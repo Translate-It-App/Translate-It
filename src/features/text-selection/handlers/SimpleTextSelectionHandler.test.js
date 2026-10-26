@@ -354,7 +354,7 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     expect(handler._consumeToolbarReleasePosition('new selection')).toBeNull();
   });
 
-  it('accepts a fresh same-text range only for a new primary interaction', async () => {
+  it('only passes a new interaction ID for a changed range or verified continuation', async () => {
     vi.useFakeTimers();
     const handler = new SimpleTextSelectionHandler();
     const text = document.createTextNode('same text same text');
@@ -402,7 +402,94 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
       handler._selectionChangeVersion += 1;
       handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 50, clientY: 60 }));
       await handler.processSelection();
+      expect(processSelection.mock.calls[1][2]).not.toHaveProperty('selectionInteractionId');
       expect(processSelection.mock.calls[1][2]).not.toHaveProperty('toolbarPosition');
+
+      handler.handleMouseDown(trustedMouseDown());
+      const nextRange = document.createRange();
+      nextRange.setStart(text, 0);
+      nextRange.setEnd(text, 9);
+      currentRange = nextRange;
+      handler._selectionChangeVersion += 1;
+      handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 70, clientY: 80 }));
+      await handler.processSelection();
+      expect(processSelection.mock.calls[2][2]).toMatchObject({
+        selectionInteractionId: handler._lastSelectionInteractionId,
+        toolbarPosition: { x: 70, y: 90, _isViewportRelative: false },
+      });
+    } finally {
+      handler._clearAllTimers();
+      vi.clearAllTimers();
+      text.remove();
+    }
+  });
+
+  it('preserves duplicate range identity across an unrelated target without preserving its continuation token', async () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    const text = document.createTextNode('same text same text');
+    const acceptedRange = document.createRange();
+    acceptedRange.setStart(text, 0);
+    acceptedRange.setEnd(text, 9);
+    let currentRange = acceptedRange;
+    const selection = {
+      anchorNode: text,
+      rangeCount: 1,
+      toString: () => 'same text',
+      getRangeAt: () => currentRange,
+    };
+    const priorTarget = document.createElement('span');
+    const unrelatedTarget = document.createElement('button');
+    const activeToken = { originFrameId: 'frame-1', sequence: 44 };
+    const processSelection = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    handler.isActive = true;
+    handler.isDragging = false;
+    handler.shiftKeyPressed = false;
+    handler.selectionManager = { processSelection };
+    handler._lastSelectionRange = acceptedRange.cloneRange();
+    handler._lastSelectionText = 'same text';
+    handler._lastSelectionTarget = priorTarget;
+    handler._activeSelectionToken = activeToken;
+    handler._continuationClickIssued = true;
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
+
+    try {
+      handler.handleMouseDown(trustedMouseDown());
+      handler._selectionChangeVersion += 1;
+      const duplicateMouseUp = new MouseEvent('mouseup', { button: 0 });
+      Object.defineProperty(duplicateMouseUp, 'target', { value: unrelatedTarget });
+      handler.handleMouseUp(duplicateMouseUp);
+      await handler.processSelection();
+
+      const duplicateOptions = processSelection.mock.calls[0][2];
+      expect(duplicateOptions).not.toHaveProperty('selectionInteractionId');
+      expect(handler._lastSelectionRange).not.toBeNull();
+      expect(handler._isSameRange(handler._lastSelectionRange, acceptedRange)).toBe(true);
+      expect(handler._lastSelectionText).toBe('same text');
+      expect(handler._lastSelectionTarget).toBeNull();
+      expect(handler._activeSelectionToken).toBeNull();
+      expect(handler._continuationClickIssued).toBe(false);
+
+      handler.handleMouseDown(trustedMouseDown());
+      const changedRange = document.createRange();
+      changedRange.setStart(text, 10);
+      changedRange.setEnd(text, 19);
+      currentRange = changedRange;
+      handler._selectionChangeVersion += 1;
+      handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 40, clientY: 50 }));
+      await handler.processSelection();
+
+      expect(processSelection.mock.calls[1][2]).toMatchObject({
+        selectionInteractionId: handler._lastSelectionInteractionId,
+        toolbarPosition: { x: 40, y: 60, _isViewportRelative: false },
+      });
     } finally {
       handler._clearAllTimers();
       vi.clearAllTimers();

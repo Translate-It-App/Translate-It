@@ -399,6 +399,23 @@ describe("DisplayManager Selection Window error boundary", () => {
     });
   });
 
+  it.each(["pinned", "docked"])("skips the same visible text for a %s window without an independent interaction", async (kind) => {
+    state.isVisible = true;
+    state.originalText = "same text";
+    state.isPinned = kind === "pinned";
+    state.dockMode = kind === "docked" ? "left" : "none";
+    const updateExistingWindow = vi.spyOn(manager, "_updateExistingWindow");
+
+    await manager.show("same text", { x: 30, y: 40 });
+
+    expect(translationHandler.cancelAllTranslations).not.toHaveBeenCalled();
+    expect(updateExistingWindow).not.toHaveBeenCalled();
+    expect(facade._startTranslationProcess).not.toHaveBeenCalled();
+    expect(mocks.events.updateWindow).not.toHaveBeenCalled();
+    expect(mocks.events.showWindow).not.toHaveBeenCalled();
+    expect(mocks.events.showIcon).not.toHaveBeenCalled();
+  });
+
   it("omits missing cursor coordinates for a verified continuation and keeps selection geometry separate", async () => {
     const token = { originFrameId: "frame-1", sequence: 15 };
     const firstToolbarPosition = { x: 12, y: 18 };

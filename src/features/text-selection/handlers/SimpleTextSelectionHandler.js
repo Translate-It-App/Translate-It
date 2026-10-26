@@ -692,8 +692,9 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
           continuationToken,
           currentRange,
         );
-        const samePriorSelection = selectedText === this._lastSelectionText && currentRange &&
-          this._lastSelectionRange && this._isSameRange(currentRange, this._lastSelectionRange) &&
+        const selectionUnchanged = selectedText === this._lastSelectionText && currentRange &&
+          this._lastSelectionRange && this._isSameRange(currentRange, this._lastSelectionRange);
+        const samePriorSelection = selectionUnchanged &&
           this._isRelatedSelectionTarget(this._lastSelectionTarget, this.lastMouseUpEvent?.target);
         const originToken = continuationToken ||
           (samePriorSelection ? this._activeSelectionToken : null) || this._newSelectionToken();
@@ -703,7 +704,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
         const displayed = await this.selectionManager.processSelection(selectedText, selection, {
           ctrlPressed: this.ctrlKeyPressed,
           shiftPressed: this.shiftKeyPressed,
-          ...(this._lastSelectionInteractionId !== null
+          ...(this._lastSelectionInteractionId !== null && (!selectionUnchanged || continuationToken)
             ? { selectionInteractionId: this._lastSelectionInteractionId }
             : {}),
           ...(toolbarPosition ? { toolbarPosition } : {}),
@@ -716,10 +717,14 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
           this._lastSelectionRange = selection.getRangeAt(0).cloneRange();
           this._lastSelectionTarget = this.lastMouseUpEvent?.target || null;
           this._lastSelectionText = selectedText;
-        } else if (!samePriorSelection) {
+        } else if (!selectionUnchanged) {
           this._lastSelectionRange = null;
-          this._lastSelectionTarget = null;
           this._lastSelectionText = null;
+          this._lastSelectionTarget = null;
+          this._activeSelectionToken = null;
+          this._continuationClickIssued = false;
+        } else if (!samePriorSelection) {
+          this._lastSelectionTarget = null;
           this._activeSelectionToken = null;
           this._continuationClickIssued = false;
         }

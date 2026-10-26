@@ -619,7 +619,7 @@ describe('SelectionManager duplicate selection events', () => {
       const selection = {};
       await manager.processSelection('same text', selection, { ctrlPressed: true });
       await vi.advanceTimersByTimeAsync(50);
-      await manager.processSelection('same text', selection, { ctrlPressed: true });
+      expect(await manager.processSelection('same text', selection, { ctrlPressed: true })).toBe(false);
 
       expect(onSelectionChange).toHaveBeenCalledTimes(2);
       const [first, duplicate] = onSelectionChange.mock.calls.map(([detail]) => detail);
