@@ -40,18 +40,29 @@ describe('TranslationLoadingIndicator.vue', () => {
     expect(label.nodes.map(({ prop }) => prop)).toEqual(expect.arrayContaining(['position', 'width', 'height', 'overflow', 'clip-path', 'white-space']));
     expect(label.nodes.map(({ prop, value }) => [prop, value])).toContainEqual(['position', 'absolute']);
 
-    expect(rule('.ti-translation-loading-indicator-eyes').nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['width', 'min(4.5rem * var(--ti-loading-size, 1), 100%)']);
-    expect(rule('.ti-translation-loading-indicator-eye').nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['width', 'min(1.75rem * var(--ti-loading-size, 1), 50%)']);
-    expect(rule('.ti-translation-loading-indicator-eyes').nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['height', 'calc(2rem * var(--ti-loading-size, 1))']);
-    expect(rule('.ti-translation-loading-indicator-eyes').nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['justify-content', 'center']);
-    expect(rule('.ti-translation-loading-indicator-eyes').nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['align-items', 'center']);
-    expect(rule('.ti-translation-loading-indicator-eye').nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['border', 'calc(2px * var(--ti-loading-size, 1)) solid var(--ti-loading-eye-color, currentcolor)']);
+    const eyes = rule('.ti-translation-loading-indicator-eyes');
+    const eye = rule('.ti-translation-loading-indicator-eye');
+    const declarations = (candidate) => Object.fromEntries(candidate.nodes.map(({ prop, value }) => [prop, value]));
+    const eyesStyles = declarations(eyes);
+    const eyeStyles = declarations(eye);
+    const defaultEyeWidth = 'calc(1.0625rem * var(--ti-loading-size, 1))';
+    const defaultEyeHeight = 'calc(1.6875rem * var(--ti-loading-size, 1))';
+
+    expect(eyesStyles.width).toBe('min(4.5rem * var(--ti-loading-size, 1), 100%)');
+    expect(eyesStyles['justify-content']).toBe('center');
+    expect(eyesStyles['align-items']).toBe('center');
+    expect(eyeStyles.width).toBeUndefined();
+    expect(eyeStyles.flex).toBe(`0 0 ${defaultEyeWidth}`);
+    expect(eyeStyles['box-sizing']).toBe('border-box');
+    expect(eyeStyles.height).toBe(defaultEyeHeight);
+    expect(eyeStyles.border).toBe('calc(2px * var(--ti-loading-size, 1)) solid var(--ti-loading-eye-color, currentcolor)');
+    const eyeWidthInRem = Number.parseFloat(defaultEyeWidth.match(/[\d.]+(?=rem)/)[0]);
+    const eyeHeightInRem = Number.parseFloat(defaultEyeHeight.match(/[\d.]+(?=rem)/)[0]);
+    expect(eyeWidthInRem).toBeLessThan(eyeHeightInRem);
+    expect(eyeWidthInRem / eyeHeightInRem).toBeCloseTo(0.63, 2);
+    expect(eyeStyles.animation).toBe('ti-translation-eye-blink var(--ti-loading-duration, 2.8s) infinite');
+    expect(declarations(rule('.ti-translation-loading-indicator-pupil')).animation)
+      .toBe('ti-translation-eye-look var(--ti-loading-duration, 2.8s) infinite ease-in-out');
 
     const darkIndicator = rule('.ti-translation-display[class~=theme-dark] .ti-translation-loading-indicator');
     expect(darkIndicator.nodes.map(({ prop, value }) => [prop, value]))

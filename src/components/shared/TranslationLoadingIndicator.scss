@@ -24,10 +24,10 @@
 
 .ti-translation-loading-indicator-eye {
   display: grid;
-  flex-shrink: 1;
+  box-sizing: border-box;
+  flex: 0 0 calc(1.0625rem * var(--ti-loading-size, 1));
   place-items: center;
-  width: min(calc(1.75rem * var(--ti-loading-size, 1)), 50%);
-  height: calc(1.45rem * var(--ti-loading-size, 1));
+  height: calc(1.6875rem * var(--ti-loading-size, 1));
   overflow: hidden;
   border: calc(2px * var(--ti-loading-size, 1)) solid var(--ti-loading-eye-color, currentcolor);
   border-radius: 50%;
