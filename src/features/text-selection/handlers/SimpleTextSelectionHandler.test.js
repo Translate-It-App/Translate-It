@@ -248,6 +248,156 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     }
   });
 
+  it('keeps the release candidate owned by the pending restore while duplicate processing arrives', async () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    const span = document.createElement('span');
+    const textNode = document.createTextNode('same selection');
+    span.append(textNode);
+    document.body.append(span);
+    const range = document.createRange();
+    range.selectNodeContents(textNode);
+    const selection = {
+      anchorNode: textNode,
+      rangeCount: 1,
+      toString: () => 'same selection',
+      getRangeAt: () => range,
+    };
+    let resolveInvalidation;
+    const invalidationResult = new Promise((resolve) => { resolveInvalidation = resolve; });
+    const processSelection = vi.fn().mockResolvedValue(false);
+    handler.isActive = true;
+    handler.selectionManager = { processSelection };
+    handler._lastSelectionRange = range.cloneRange();
+    handler._lastSelectionText = 'same selection';
+    handler._lastSelectionTarget = span;
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue({
+      invalidatePendingShows: vi.fn(() => invalidationResult),
+    });
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
+
+    try {
+      handler.handleMouseDown(trustedMouseDown());
+      const mouseUp = new MouseEvent('mouseup', { button: 0, clientX: 25, clientY: 35 });
+      Object.defineProperty(mouseUp, 'target', { value: span });
+      handler.handleMouseUp(mouseUp);
+      const releaseCandidate = handler._toolbarReleaseCandidate;
+      const owningSelection = handler.processSelection();
+
+      expect(handler._lastReleasedPrimaryMouseDown.restoreConsumed).toBe(true);
+      expect(handler._lastReleasedPrimaryMouseDown.restoreInProgress).toBe(true);
+      expect(releaseCandidate).not.toBeNull();
+
+      await handler.processSelection();
+      expect(processSelection).not.toHaveBeenCalled();
+      expect(handler._toolbarReleaseCandidate).toBe(releaseCandidate);
+
+      resolveInvalidation({
+        valid: true, cancelledPendingDisplay: true, canRestore: true, requestVersion: 27,
+      });
+      await owningSelection;
+
+      expect(processSelection).toHaveBeenCalledTimes(1);
+      expect(processSelection.mock.calls[0][2]).toMatchObject({
+        pendingDisplayRestore: {
+          canRestore: true,
+          requestVersion: 27,
+          selectionInteractionId: handler._lastSelectionInteractionId,
+        },
+        toolbarPosition: { x: 25, y: 45, _isViewportRelative: false },
+      });
+      expect(handler._toolbarReleaseCandidate).toBeNull();
+      expect(handler._lastReleasedPrimaryMouseDown.restoreInProgress).toBe(false);
+
+      await handler.processSelection();
+      expect(processSelection).toHaveBeenCalledTimes(2);
+      expect(processSelection.mock.calls[1][2]).not.toHaveProperty('pendingDisplayRestore');
+      expect(processSelection.mock.calls[1][2]).not.toHaveProperty('toolbarPosition');
+    } finally {
+      handler._clearAllTimers();
+      vi.clearAllTimers();
+      span.remove();
+    }
+  });
+
+  it('allows a new interaction while an older restore is pending and rejects the old reply', async () => {
+    const handler = new SimpleTextSelectionHandler();
+    const oldNode = document.createTextNode('old selection');
+    const newNode = document.createTextNode('new selection');
+    document.body.append(oldNode, newNode);
+    const oldRange = document.createRange();
+    oldRange.selectNodeContents(oldNode);
+    const newRange = document.createRange();
+    newRange.selectNodeContents(newNode);
+    let range = oldRange;
+    let text = 'old selection';
+    const selection = {
+      get anchorNode() { return range.startContainer; },
+      get rangeCount() { return 1; },
+      toString: () => text,
+      getRangeAt: () => range,
+    };
+    let resolveOldInvalidation;
+    const oldInvalidation = new Promise((resolve) => { resolveOldInvalidation = resolve; });
+    const successfulInvalidation = Promise.resolve({
+      valid: true, cancelledPendingDisplay: true, canRestore: true, requestVersion: 28,
+    });
+    const processSelection = vi.fn().mockResolvedValue(false);
+    handler.isActive = true;
+    handler.selectionManager = { processSelection };
+    handler._lastSelectionRange = oldRange.cloneRange();
+    handler._lastSelectionText = 'old selection';
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue({
+      invalidatePendingShows: vi.fn()
+        .mockReturnValueOnce(oldInvalidation)
+        .mockReturnValueOnce(successfulInvalidation),
+    });
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
+
+    try {
+      handler.handleMouseDown(trustedMouseDown());
+      handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 15, clientY: 25 }));
+      const oldRestore = handler.processSelection();
+
+      range = newRange;
+      text = 'new selection';
+      handler._lastSelectionRange = oldRange.cloneRange();
+      handler._lastSelectionText = 'old selection';
+      handler.handleMouseDown(trustedMouseDown());
+      handler._selectionChangeVersion += 1;
+      handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 45, clientY: 55 }));
+      await handler.processSelection();
+
+      expect(processSelection).toHaveBeenCalledTimes(1);
+      expect(processSelection.mock.calls[0][0]).toBe('new selection');
+      expect(processSelection.mock.calls[0][2]).toMatchObject({
+        toolbarPosition: { x: 45, y: 65, _isViewportRelative: false },
+      });
+      expect(processSelection.mock.calls[0][2]).not.toHaveProperty('pendingDisplayRestore');
+
+      resolveOldInvalidation({
+        valid: true, cancelledPendingDisplay: true, canRestore: true, requestVersion: 27,
+      });
+      await oldRestore;
+      expect(processSelection).toHaveBeenCalledTimes(1);
+      expect(handler._toolbarReleaseCandidate).toBeNull();
+    } finally {
+      handler._clearAllTimers();
+      oldNode.remove();
+      newNode.remove();
+    }
+  });
+
   it.each([
     ['selectionchange-before-mouseup', true],
     ['selectionchange-before-mouseup', false],

@@ -553,6 +553,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       return;
     }
 
+    let restoreOwner = null;
     try {
       const selection = window.getSelection();
       const selectedText = selection ? selection.toString().trim() : '';
@@ -560,6 +561,11 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
         ? selection.getRangeAt(0)
         : null;
       const currentRangeSnapshot = currentRange?.cloneRange?.() ?? currentRange;
+      const pendingRestoreOwner = this._lastReleasedPrimaryMouseDown;
+      if (pendingRestoreOwner?.restoreConsumed && pendingRestoreOwner.restoreInProgress &&
+          pendingRestoreOwner.selectionInteractionId === this._lastSelectionInteractionId &&
+          selectedText === this._lastSelectionText && currentRange && this._lastSelectionRange &&
+          this._isSameRange(currentRange, this._lastSelectionRange)) return;
 
       logger.debug('Processing selection', {
         hasText: !!selectedText,
@@ -685,6 +691,8 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       if (releasedInteraction && !releasedInteraction.restoreConsumed && isUnchangedPriorSelection &&
           releasedInteraction.selectionInteractionId === this._lastSelectionInteractionId) {
         releasedInteraction.restoreConsumed = true;
+        releasedInteraction.restoreInProgress = true;
+        restoreOwner = releasedInteraction;
         let restoreResult = null;
         try {
           restoreResult = await releasedInteraction.invalidationResult;
@@ -781,6 +789,8 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       } catch (handlerError) {
         logger.error('ErrorHandler not available when processing selection:', handlerError);
       }
+    } finally {
+      if (restoreOwner) restoreOwner.restoreInProgress = false;
     }
   }
 
@@ -1211,6 +1221,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       selectionInteractionId: eligibleSelectionInteraction ? this._primaryMouseInteractionSequence : null,
       invalidationResult: eligibleSelectionInteraction ? Promise.resolve(invalidationResult) : null,
       restoreConsumed: false,
+      restoreInProgress: false,
       selectionChangeVersion: this._selectionChangeVersion,
       selectedText: currentSelection
     } : null;

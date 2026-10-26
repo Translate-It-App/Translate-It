@@ -358,4 +358,101 @@ describe('TranslationIcon selection-position event flow', () => {
     expect(icon.props('text')).toBe('new paragraph');
     expect(icon.find('.ti-icon-btn--playing').exists()).toBe(false);
   });
+
+  it('mounts one Toolbar at the owning mouse release position while restore invalidation is pending', async () => {
+    const { mountIcon, selectionPosition } = setupFlow();
+    let resolveInvalidation;
+    const invalidationResult = new Promise((resolve) => { resolveInvalidation = resolve; });
+    const textNode = document.createTextNode('same selection');
+    const target = document.createElement('span');
+    target.append(textNode);
+    document.body.append(target);
+    const range = document.createRange();
+    range.selectNodeContents(textNode);
+    const selection = {
+      anchorNode: textNode,
+      rangeCount: 1,
+      toString: () => 'same selection',
+      getRangeAt: () => range,
+    };
+    const processSelection = vi.fn(async (_text, _selection, options) => {
+      if (options.pendingDisplayRestore) {
+        WindowsManagerEvents.dismissIcon('pending-toolbar');
+        WindowsManagerEvents.showIcon({
+          id: 'restored-toolbar',
+          text: 'same selection',
+          position: options.toolbarPosition,
+          selectionPosition,
+        });
+        return true;
+      }
+      return false;
+    });
+    const handler = new SimpleTextSelectionHandler();
+    handler.isActive = true;
+    handler.selectionManager = { processSelection };
+    handler._lastSelectionRange = range.cloneRange();
+    handler._lastSelectionText = 'same selection';
+    handler._lastSelectionTarget = target;
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue({
+      invalidatePendingShows: vi.fn(() => invalidationResult),
+    });
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
+
+    WindowsManagerEvents.showIcon({
+      id: 'pending-toolbar',
+      text: 'same selection',
+      position: { x: 3, y: 4 },
+      selectionPosition,
+    });
+    const wrapper = await mountIcon();
+    try {
+      handler.handleMouseDown({
+        button: 0, shiftKey: false, ctrlKey: false, metaKey: false,
+        isTrusted: true, composedPath: () => [],
+      });
+      const mouseUp = new MouseEvent('mouseup', { button: 0, clientX: 25, clientY: 35 });
+      Object.defineProperty(mouseUp, 'target', { value: target });
+      handler.handleMouseUp(mouseUp);
+      const owner = handler.processSelection();
+
+      expect(handler._toolbarReleaseCandidate).not.toBeNull();
+      await handler.processSelection();
+      expect(processSelection).not.toHaveBeenCalled();
+      expect(handler._toolbarReleaseCandidate).not.toBeNull();
+
+      resolveInvalidation({
+        valid: true, cancelledPendingDisplay: true, canRestore: true, requestVersion: 31,
+      });
+      await owner;
+      await nextTick();
+      await flushPromises();
+
+      expect(processSelection).toHaveBeenCalledTimes(1);
+      expect(processSelection.mock.calls[0][2]).toMatchObject({
+        pendingDisplayRestore: { canRestore: true, requestVersion: 31 },
+        toolbarPosition: { x: 25, y: 45, _isViewportRelative: false },
+      });
+      expect(manager.translationIcons.value).toHaveLength(1);
+      expect(manager.translationIcons.value[0]).toMatchObject({
+        id: 'restored-toolbar',
+        position: { x: 25, y: 45, _isViewportRelative: false },
+        selectionPosition,
+      });
+      expect(wrapper.findAllComponents(TranslationIcon)).toHaveLength(1);
+      expect(usePositioning).toHaveBeenCalledWith(
+        { x: 25, y: 45, _isViewportRelative: false },
+        expect.any(Object),
+      );
+    } finally {
+      handler._clearAllTimers();
+      handler.destroy();
+      target.remove();
+    }
+  });
 });
