@@ -33,12 +33,23 @@ describe('TranslationLoadingIndicator.vue', () => {
     expect(rule('.ti-translation-loading-indicator').nodes.map(({ prop, value }) => [prop, value]))
       .toContainEqual(['color', 'var(--text-color, #343a40)']);
     expect(rule('.ti-translation-loading-indicator-pupil').nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['box-shadow', '0 0 0 calc(2px * var(--ti-loading-size, 1)) var(--ti-loading-pupil-color, var(--bg-result-color, #fff))']);
+      .toContainEqual(['box-shadow', '0 0 0 calc(2px * var(--ti-loading-size, 1)) var(--ti-loading-pupil-color, transparent)']);
+
+    const label = rule('.ti-translation-loading-indicator-label');
+    expect(label).toBeDefined();
+    expect(label.nodes.map(({ prop }) => prop)).toEqual(expect.arrayContaining(['position', 'width', 'height', 'overflow', 'clip-path', 'white-space']));
+    expect(label.nodes.map(({ prop, value }) => [prop, value])).toContainEqual(['position', 'absolute']);
 
     expect(rule('.ti-translation-loading-indicator-eyes').nodes.map(({ prop, value }) => [prop, value]))
       .toContainEqual(['width', 'min(4.5rem * var(--ti-loading-size, 1), 100%)']);
     expect(rule('.ti-translation-loading-indicator-eye').nodes.map(({ prop, value }) => [prop, value]))
       .toContainEqual(['width', 'min(1.75rem * var(--ti-loading-size, 1), 50%)']);
+    expect(rule('.ti-translation-loading-indicator-eyes').nodes.map(({ prop, value }) => [prop, value]))
+      .toContainEqual(['height', 'calc(2rem * var(--ti-loading-size, 1))']);
+    expect(rule('.ti-translation-loading-indicator-eyes').nodes.map(({ prop, value }) => [prop, value]))
+      .toContainEqual(['justify-content', 'center']);
+    expect(rule('.ti-translation-loading-indicator-eyes').nodes.map(({ prop, value }) => [prop, value]))
+      .toContainEqual(['align-items', 'center']);
     expect(rule('.ti-translation-loading-indicator-eye').nodes.map(({ prop, value }) => [prop, value]))
       .toContainEqual(['border', 'calc(2px * var(--ti-loading-size, 1)) solid var(--ti-loading-eye-color, currentcolor)']);
 
@@ -47,7 +58,7 @@ describe('TranslationLoadingIndicator.vue', () => {
       .toContainEqual(['color', 'var(--text-color, #e8eaed)']);
     const darkPupil = rule('.ti-translation-display[class~=theme-dark] .ti-translation-loading-indicator-pupil');
     expect(darkPupil.nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['box-shadow', '0 0 0 calc(2px * var(--ti-loading-size, 1)) var(--ti-loading-pupil-color, #1a1a1a)']);
+      .toContainEqual(['box-shadow', '0 0 0 calc(2px * var(--ti-loading-size, 1)) var(--ti-loading-pupil-color, transparent)']);
 
     const reducedMotion = root.nodes.find((node) => node.type === 'atrule' && node.params === '(prefers-reduced-motion: reduce)');
     expect(reducedMotion).toBeDefined();

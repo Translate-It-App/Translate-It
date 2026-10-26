@@ -3,6 +3,8 @@ import { mount } from '@vue/test-utils';
 import { nextTick, ref } from 'vue';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { compile } from 'sass';
+import postcss from 'postcss';
 import TranslationDisplay from './TranslationDisplay.vue';
 import { SimpleMarkdown } from '@/shared/utils/text/markdown.js';
 import { TranslationMode } from '@/shared/config/config.js';
@@ -171,6 +173,36 @@ describe('TranslationDisplay.vue', () => {
       expect(source, file).toMatch(/import\s+TranslationDisplay\s+from\s+["'][^"']*components\/shared\/TranslationDisplay\.vue["']/);
       expect(source, file).toMatch(/<TranslationDisplay\b/);
     }
+  });
+
+  it('keeps the normal loading overlay geometry while making only popup, sidepanel, and window loading surfaces transparent', () => {
+    const cssPath = resolve(process.cwd(), 'src/components/shared/TranslationDisplay.scss');
+    const root = postcss.parse(compile(cssPath, {
+      importers: [{
+        findFileUrl(url) {
+          if (url.startsWith('@/')) return new URL(`file://${resolve(process.cwd(), 'src', url.slice(2))}`);
+          return null;
+        },
+      }],
+    }).css);
+    const rules = [];
+    root.walkRules((rule) => rules.push(rule));
+    const declarationFor = (selector, property) => rules
+      .filter((rule) => rule.selectors?.includes(selector))
+      .flatMap((rule) => rule.nodes.filter((node) => node.type === 'decl' && node.prop === property).map((node) => node.value));
+
+    expect(declarationFor('.ti-translation-display.is-loading', 'min-height')).toContain('120px');
+    expect(declarationFor('.ti-translation-display.is-loading .ti-loading-overlay', 'position')).toContain('absolute');
+    expect(declarationFor('.ti-translation-display.is-loading .ti-loading-overlay', 'width')).toContain('100%');
+    expect(declarationFor('.ti-translation-display.is-loading .ti-loading-overlay', 'height')).toContain('100%');
+
+    const transparentRules = rules.filter((rule) => rule.nodes.some((node) =>
+      node.type === 'decl' && node.value === 'transparent' && ['background', 'background-color', 'border', 'border-color'].includes(node.prop)));
+    const selectorText = transparentRules.map(({ selector }) => selector).join(',');
+    expect(selectorText).toContain('.popup-mode.is-loading');
+    expect(selectorText).toContain('.sidepanel-mode.is-loading');
+    expect(selectorText).toContain('.ti-window-translation-display.is-loading');
+    expect(selectorText).not.toMatch(/\.(?:standard|selection|mobile|compact)-mode\.is-loading/);
   });
 
   it('renders normalized Google bold-label markdown through the modern marked path', async () => {

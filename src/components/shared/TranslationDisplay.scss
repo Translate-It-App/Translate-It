@@ -32,6 +32,17 @@
     }
   }
 
+  &.popup-mode.is-loading,
+  &.sidepanel-mode.is-loading,
+  &.ti-window-translation-display.is-loading {
+    border-color: transparent !important;
+    background-color: transparent !important;
+
+    .ti-loading-overlay {
+      background-color: transparent !important;
+    }
+  }
+
   // Modes
   &.popup-mode {
     height: 100% !important;
