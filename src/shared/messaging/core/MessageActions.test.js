@@ -6,4 +6,9 @@ describe('MessageActions provider status removal', () => {
     expect(MessageActions).not.toHaveProperty('GET_PROVIDER_STATUS');
     expect(MessageActions.isValidAction('GET_PROVIDER_STATUS')).toBe(false);
   });
+
+  it('defines the pending-display invalidation runtime action', () => {
+    expect(MessageActions.INVALIDATE_PENDING_DISPLAY).toBe('INVALIDATE_PENDING_DISPLAY');
+    expect(MessageActions.isValidAction(MessageActions.INVALIDATE_PENDING_DISPLAY)).toBe(true);
+  });
 });

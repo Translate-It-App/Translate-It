@@ -99,6 +99,7 @@ describe('LifecycleManager translation text routing', () => {
     expect(registeredHandlers.has(LIVE_DUBBING_ACTIONS.GET_DUBBED_VOLUME_OFFSCREEN)).toBe(false)
     expect(registeredHandlers.get(MessageActions.IFRAME_SELECT_ELEMENT_FINISHED)).toEqual(expect.any(Function))
     expect(registeredHandlers.get(MessageActions.SELECT_ELEMENT_FRAME_READY)).toEqual(expect.any(Function))
+    expect(registeredHandlers.get(MessageActions.INVALIDATE_PENDING_DISPLAY)).toBe(Handlers.handlePendingDisplayInvalidation)
     expect(registeredHandlers.has(MessageActions.TRANSLATION_RESULT_UPDATE)).toBe(false)
     expect(registeredHandlers.has('providerStatus')).toBe(false)
     expect(registerHandlerMock.mock.calls.filter(([action]) => action === MessageActions.TRANSLATE_TEXT)).toHaveLength(1)

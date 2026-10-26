@@ -189,9 +189,20 @@ describe('TextSelectionWindowRelay', () => {
       relay._handleMessage({ data: { type: 'OTHER' } });
       relay._handleMessage({ data: { type: REQUEST, selectedText: '', position: { x: 1, y: 1 } } });
       relay._handleMessage({ data: null });
+      relay._handleMessage({ data: { type: 'translateit-invalidate-pending-display', timestamp: Date.now() } });
 
       expect(parentPostMessage).not.toHaveBeenCalled();
       relay.destroy();
+
+      const top = new TextSelectionWindowRelay();
+      const sink = vi.fn();
+      top.setSink(sink);
+      top._handleMessage({
+        data: { type: 'translateit-invalidate-pending-display', timestamp: Date.now() },
+        source: { forgedChild: true },
+      });
+      expect(sink).not.toHaveBeenCalled();
+      top.destroy();
     });
 
     it('accumulates offsets across a two-hop chain into the top frame', () => {

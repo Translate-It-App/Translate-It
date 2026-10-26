@@ -2,6 +2,12 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import ElementDetectionService from '@/shared/services/ElementDetectionService.js';
 import { settingsManager } from '@/shared/managers/SettingsManager.js';
 import { SimpleTextSelectionHandler } from './SimpleTextSelectionHandler.js';
+import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
+import { sendMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
+
+vi.mock('@/shared/messaging/core/UnifiedMessaging.js', () => ({
+  sendMessage: vi.fn().mockResolvedValue({ success: true }),
+}));
 
 vi.mock('@/shared/services/ElementDetectionService.js', () => ({
   default: {
@@ -9,6 +15,16 @@ vi.mock('@/shared/services/ElementDetectionService.js', () => ({
     getClickedUIElement: vi.fn(() => null)
   }
 }));
+
+const trustedMouseDown = (options = {}) => ({
+  button: 0,
+  shiftKey: false,
+  ctrlKey: false,
+  metaKey: false,
+  isTrusted: true,
+  composedPath: () => [],
+  ...options,
+});
 
 /**
  * Focused tests for diagnostic event-path capture in SimpleTextSelectionHandler.
@@ -367,7 +383,7 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
 
     try {
-      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+      handler.handleMouseDown(trustedMouseDown());
       const newRange = document.createRange();
       newRange.setStart(text, 10);
       newRange.setEnd(text, 19);
@@ -382,7 +398,7 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
         toolbarPosition: { x: 20, y: 40, _isViewportRelative: false },
       });
 
-      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+      handler.handleMouseDown(trustedMouseDown());
       handler._selectionChangeVersion += 1;
       handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 50, clientY: 60 }));
       await handler.processSelection();
@@ -439,6 +455,7 @@ describe('SimpleTextSelectionHandler pending display invalidation', () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    sendMessage.mockClear();
   });
 
   it('cancels a pending display on a new outside primary selection press while dragging', () => {
@@ -450,7 +467,7 @@ describe('SimpleTextSelectionHandler pending display invalidation', () => {
     vi.spyOn(handler, 'getWindowsManager').mockReturnValue({ invalidatePendingShows });
     vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
 
-    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    handler.handleMouseDown(trustedMouseDown());
     vi.advanceTimersByTime(101);
 
     expect(handler.isDragging).toBe(true);
@@ -465,9 +482,10 @@ describe('SimpleTextSelectionHandler pending display invalidation', () => {
     vi.spyOn(handler, 'getWindowsManager').mockReturnValue({ invalidatePendingShows });
     vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
 
-    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, shiftKey: true }));
-    const uiPress = new MouseEvent('mousedown', { button: 0 });
-    uiPress.composedPath = () => [Object.assign(document.createElement('div'), { className: 'translation-window' })];
+    handler.handleMouseDown(trustedMouseDown({ shiftKey: true }));
+    const uiPress = trustedMouseDown({
+      composedPath: () => [Object.assign(document.createElement('div'), { className: 'translation-window' })],
+    });
     handler.handleMouseDown(uiPress);
 
     expect(invalidatePendingShows).not.toHaveBeenCalled();
@@ -489,7 +507,7 @@ describe('SimpleTextSelectionHandler pending display invalidation', () => {
     vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
 
     try {
-      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+      handler.handleMouseDown(trustedMouseDown());
       handler.handleMouseUp(new MouseEvent('mouseup', { button: 0 }));
       const firstInteractionId = handler._lastSelectionInteractionId;
       await handler.processSelection();
@@ -499,7 +517,7 @@ describe('SimpleTextSelectionHandler pending display invalidation', () => {
       expect(processSelection.mock.calls[0][2].selectionInteractionId).toBe(firstInteractionId);
       expect(processSelection.mock.calls[1][2].selectionInteractionId).toBe(firstInteractionId);
 
-      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+      handler.handleMouseDown(trustedMouseDown());
       handler.handleMouseUp(new MouseEvent('mouseup', { button: 0 }));
       await handler.processSelection();
       const nextInteractionId = processSelection.mock.calls[2][2].selectionInteractionId;
@@ -538,6 +556,19 @@ describe('SimpleTextSelectionHandler pending display invalidation', () => {
     expect(handler._lastSelectionInteractionId).toBeNull();
   });
 
+  it('does not invalidate pending displays from page-dispatched synthetic mousedown events', () => {
+    const handler = new SimpleTextSelectionHandler();
+    const invalidatePendingShows = vi.fn();
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue({ invalidatePendingShows });
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+    sendMessage.mockClear();
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+
+    expect(invalidatePendingShows).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it('uses the top-frame manager from a same-origin child when no local manager exists', () => {
     const handler = new SimpleTextSelectionHandler();
     const invalidatePendingShows = vi.fn();
@@ -547,27 +578,46 @@ describe('SimpleTextSelectionHandler pending display invalidation', () => {
     vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
     const postMessage = vi.spyOn(window, 'postMessage');
 
-    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    handler.handleMouseDown(trustedMouseDown());
 
     expect(invalidatePendingShows).toHaveBeenCalledOnce();
     expect(topManager.dismiss).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
     expect(postMessage).not.toHaveBeenCalled();
   });
 
-  it('ignores inaccessible top-frame access when no local manager exists', () => {
+  it('invalidates locally and sends a trusted runtime request when top access is cross-origin', async () => {
     const handler = new SimpleTextSelectionHandler();
     const localInvalidate = vi.fn();
     vi.spyOn(window, 'top', 'get').mockImplementation(() => { throw new Error('cross-origin'); });
-    vi.spyOn(handler, 'getWindowsManager').mockReturnValue(null);
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue({ invalidatePendingShows: localInvalidate });
     vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
     const postMessage = vi.spyOn(window, 'postMessage');
+    sendMessage.mockClear();
 
-    expect(() => handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }))).not.toThrow();
-    expect(localInvalidate).not.toHaveBeenCalled();
+    expect(() => handler.handleMouseDown(trustedMouseDown())).not.toThrow();
+    expect(localInvalidate).toHaveBeenCalledOnce();
+    const timestamp = localInvalidate.mock.calls[0][0];
+    expect(timestamp).toBeTypeOf('number');
+    expect(sendMessage).toHaveBeenCalledWith({
+      action: MessageActions.INVALIDATE_PENDING_DISPLAY,
+      data: { timestamp },
+    }, { silent: true });
     expect(postMessage).not.toHaveBeenCalled();
   });
 
-  it('prefers the local manager when available and does not broadcast', () => {
+  it('swallows failures from the best-effort runtime invalidation request', () => {
+    const handler = new SimpleTextSelectionHandler();
+    vi.spyOn(window, 'top', 'get').mockImplementation(() => { throw new Error('cross-origin'); });
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue(null);
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+    sendMessage.mockRejectedValueOnce(new Error('runtime unavailable'));
+
+    expect(() => handler.handleMouseDown(trustedMouseDown())).not.toThrow();
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('invalidates both distinct accessible managers without broadcasting', () => {
     const handler = new SimpleTextSelectionHandler();
     const localInvalidate = vi.fn();
     const topInvalidate = vi.fn();
@@ -576,10 +626,12 @@ describe('SimpleTextSelectionHandler pending display invalidation', () => {
     vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
     const postMessage = vi.spyOn(window, 'postMessage');
 
-    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    handler.handleMouseDown(trustedMouseDown());
 
     expect(localInvalidate).toHaveBeenCalledOnce();
-    expect(topInvalidate).not.toHaveBeenCalled();
+    expect(topInvalidate).toHaveBeenCalledOnce();
+    expect(topInvalidate).toHaveBeenCalledWith(localInvalidate.mock.calls[0][0]);
+    expect(sendMessage).not.toHaveBeenCalled();
     expect(postMessage).not.toHaveBeenCalled();
   });
 
@@ -589,13 +641,18 @@ describe('SimpleTextSelectionHandler pending display invalidation', () => {
     vi.spyOn(window, 'top', 'get').mockReturnValue({ windowsManagerInstance: { invalidatePendingShows } });
     vi.spyOn(handler, 'getWindowsManager').mockReturnValue(null);
     vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+    const postMessage = vi.spyOn(window, 'postMessage');
 
-    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, shiftKey: true }));
-    const uiPress = new MouseEvent('mousedown', { button: 0 });
-    uiPress.composedPath = () => [Object.assign(document.createElement('div'), { className: 'translation-window' })];
+    handler.handleMouseDown(trustedMouseDown({ shiftKey: true }));
+    const uiPress = trustedMouseDown({
+      composedPath: () => [Object.assign(document.createElement('div'), { className: 'translation-window' })],
+    });
     handler.handleMouseDown(uiPress);
+    handler.handleMouseDown(trustedMouseDown({ button: 2 }));
 
     expect(invalidatePendingShows).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
   });
 });
 

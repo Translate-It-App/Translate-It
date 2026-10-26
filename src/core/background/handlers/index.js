@@ -26,6 +26,7 @@ export * from "./lazy/handleScreenCaptureLazy.js";
 
 // Text selection handlers
 export * from "./text-selection/handleGetSelectedText.js";
+export * from "./text-selection/handlePendingDisplayInvalidation.js";
 
 // Page exclusion handlers
 export * from "./page-exclusion/handleIsCurrentPageExcluded.js";

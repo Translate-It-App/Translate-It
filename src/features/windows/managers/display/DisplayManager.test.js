@@ -286,6 +286,31 @@ describe("DisplayManager Selection Window error boundary", () => {
     expect(mocks.events.showIcon).toHaveBeenCalledTimes(1);
   });
 
+  it("cancels an older pending display but ignores its stale invalidation after a newer show starts", async () => {
+    await manager.show("older selection", { x: 1, y: 2 });
+    expect(manager._pendingOnClickDisplay).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(10);
+    const pressTimestamp = Date.now();
+    expect(manager.invalidatePendingShows(pressTimestamp)).toBe(true);
+    expect(manager._pendingOnClickDisplay).toBeNull();
+    expect(facade.dismiss).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await manager.show("newer selection", { x: 30, y: 40 });
+    const newerPendingDisplay = manager._pendingOnClickDisplay;
+
+    expect(manager.invalidatePendingShows(pressTimestamp)).toBe(false);
+    expect(manager._pendingOnClickDisplay).toBe(newerPendingDisplay);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(mocks.events.showIcon).toHaveBeenCalledOnce();
+    expect(mocks.events.showIcon.mock.calls[0][0]).toMatchObject({
+      text: "newer selection",
+      position: { x: 30, y: 40 },
+    });
+  });
+
   it("locks the position of a matching Toolbar continuation while updating text and selection geometry", async () => {
     const token = { originFrameId: "frame-1", sequence: 9 };
     state.isIconMode = true;

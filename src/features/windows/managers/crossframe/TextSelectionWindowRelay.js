@@ -113,7 +113,9 @@ export class TextSelectionWindowRelay {
   _handleMessage(event) {
     const data = event.data;
 
-    if (!data || typeof data !== 'object' || data.type !== WindowsConfig.CROSS_FRAME.TEXT_SELECTION_WINDOW_REQUEST) {
+    if (!data || typeof data !== 'object') return;
+
+    if (data.type !== WindowsConfig.CROSS_FRAME.TEXT_SELECTION_WINDOW_REQUEST) {
       return;
     }
 

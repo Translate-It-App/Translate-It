@@ -61,6 +61,7 @@ export class MessageActions {
   static PAGE_AUTO_RESTORE_COMPLETE = 'page-auto-restore-complete'; // Auto-restore complete (NEW)
   static PAGE_TRANSLATION_FRAME_LIFECYCLE = 'page-translation-frame-lifecycle';
   static PAGE_TRANSLATION_FRAME_RETIRED = 'page-translation-frame-retired';
+  static INVALIDATE_PENDING_DISPLAY = 'INVALIDATE_PENDING_DISPLAY';
   static MOUSE_HOVER_FRAME_EVENT = 'MOUSE_HOVER_FRAME_EVENT';
   static MOUSE_HOVER_FRAME_FEEDBACK = 'MOUSE_HOVER_FRAME_FEEDBACK';
   static PAGE_TRANSLATION_FRAME_LIFECYCLE_ACTIONS = Object.freeze([

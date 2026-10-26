@@ -18,6 +18,8 @@ import {
 vi.mock('webextension-polyfill', () => ({
   default: {
     runtime: {
+      id: 'extension-id',
+      getURL: vi.fn(() => 'moz-extension://extension-id/'),
       sendMessage: vi.fn(),
     },
   },
@@ -122,6 +124,50 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
   it('does not expose legacy iframe Select Element activation route', async () => {
     expect(typeof handler.handleIFrameActivateSelectElement).toBe('undefined');
     expect(handler.handlers.has(MessageActions.IFRAME_ACTIVATE_SELECT_ELEMENT)).toBe(false);
+  });
+
+  it('accepts a trusted background invalidation only in the top frame', () => {
+    const invalidatePendingShows = vi.fn();
+    const dismiss = vi.fn();
+    window.windowsManagerInstance = { invalidatePendingShows, dismiss };
+    handler.initialize();
+    const timestamp = Date.now();
+    const sender = { id: browser.runtime.id, url: browser.runtime.getURL('background.js') };
+
+    try {
+      expect(handler.handlers.has(MessageActions.INVALIDATE_PENDING_DISPLAY)).toBe(true);
+      expect(handler.handlePendingDisplayInvalidation({ data: { timestamp } }, sender)).toEqual({ success: true });
+      expect(invalidatePendingShows).toHaveBeenCalledWith(timestamp);
+      expect(dismiss).not.toHaveBeenCalled();
+    } finally {
+      delete window.windowsManagerInstance;
+    }
+  });
+
+  it('rejects page-context, wrong-id, non-top, and invalid-timestamp invalidation senders', () => {
+    const invalidatePendingShows = vi.fn();
+    window.windowsManagerInstance = { invalidatePendingShows };
+    const timestamp = Date.now();
+    const backgroundSender = { id: browser.runtime.id, url: browser.runtime.getURL('background.js') };
+    const invalidMessages = [
+      [{ id: 'untrusted-extension', url: backgroundSender.url }, { timestamp }],
+      [{ ...backgroundSender, tab: { id: 1 }, frameId: 0, documentId: 'document-1' }, { timestamp }],
+      [backgroundSender, { timestamp: Number.NaN }],
+      [backgroundSender, { timestamp: Date.now() + 60_000 }],
+    ];
+
+    try {
+      invalidMessages.forEach(([sender, data]) => {
+        expect(handler.handlePendingDisplayInvalidation({ data }, sender)).toMatchObject({ success: false });
+      });
+      const top = vi.spyOn(window, 'top', 'get').mockReturnValue({});
+      expect(handler.handlePendingDisplayInvalidation({ data: { timestamp } }, backgroundSender))
+        .toMatchObject({ success: false });
+      top.mockRestore();
+      expect(invalidatePendingShows).not.toHaveBeenCalled();
+    } finally {
+      delete window.windowsManagerInstance;
+    }
   });
 
   it('bridges valid live dubbing transcript envelopes and rejects invalid ones', () => {

@@ -9,6 +9,8 @@ import { settingsManager } from '@/shared/managers/SettingsManager.js';
 import { INPUT_TYPES } from '@/shared/constants/detection.js';
 import { SelectionTranslationMode } from '@/shared/config/config.js';
 import { COMBINED_SELECTORS } from '@/shared/services/ElementDetectionConfig.js';
+import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
+import { sendMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.TEXT_SELECTION, 'SimpleTextSelectionHandler');
 
@@ -1115,20 +1117,34 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
    * Handle mouse down - start drag detection with triple-click support
    */
   handleMouseDown(event) {
-    const eligibleSelectionInteraction = event.button === 0 && !event.shiftKey &&
+    const eligibleSelectionInteraction = event.isTrusted === true && event.button === 0 && !event.shiftKey &&
       this._classifyComposedPath(event) !== true;
     if (eligibleSelectionInteraction) {
+      const timestamp = Date.now();
       const windowsManager = this.getWindowsManager();
-      if (windowsManager) {
-        windowsManager.invalidatePendingShows();
-      } else {
-        try {
-          if (window !== window.top) {
-            window.top.windowsManagerInstance?.invalidatePendingShows();
+      windowsManager?.invalidatePendingShows(timestamp);
+
+      let crossOriginTop = false;
+      try {
+        if (window !== window.top) {
+          try {
+            const topWindowsManager = window.top.windowsManagerInstance;
+            if (topWindowsManager && topWindowsManager !== windowsManager) {
+              topWindowsManager.invalidatePendingShows(timestamp);
+            }
+          } catch {
+            crossOriginTop = true;
           }
-        } catch {
-          // Cross-origin top-frame access is not available to this child frame.
         }
+      } catch {
+        crossOriginTop = true;
+      }
+
+      if (crossOriginTop) {
+        void sendMessage({
+          action: MessageActions.INVALIDATE_PENDING_DISPLAY,
+          data: { timestamp },
+        }, { silent: true }).catch(() => {});
       }
     }
 

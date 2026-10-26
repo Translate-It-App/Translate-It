@@ -218,9 +218,10 @@ describe('WindowsManager', () => {
 
   it('forwards pending-show invalidation to DisplayManager', () => {
     windowsManager.displayManager.invalidatePendingShows = vi.fn().mockReturnValue(7);
+    const timestamp = Date.now();
 
-    expect(windowsManager.invalidatePendingShows()).toBe(7);
-    expect(windowsManager.displayManager.invalidatePendingShows).toHaveBeenCalledOnce();
+    expect(windowsManager.invalidatePendingShows(timestamp)).toBe(7);
+    expect(windowsManager.displayManager.invalidatePendingShows).toHaveBeenCalledWith(timestamp);
   });
 
   it('constructs the default TranslationHandler with this manager state', () => {

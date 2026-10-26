@@ -33,6 +33,7 @@ export class DisplayManager {
     this._outsideClickActivationTimer = null;
     this._pendingOnClickDisplay = null;
     this._showRequestVersion = 0;
+    this._latestShowRequestTimestamp = 0;
   }
 
   _clearOutsideClickActivationTimer() {
@@ -69,9 +70,14 @@ export class DisplayManager {
     this.invalidatePendingShows();
   }
 
-  invalidatePendingShows() {
+  invalidatePendingShows(beforeTimestamp) {
+    if (beforeTimestamp !== undefined &&
+        (!Number.isFinite(beforeTimestamp) || beforeTimestamp < 0 || beforeTimestamp > Date.now() ||
+         this._latestShowRequestTimestamp > beforeTimestamp)) return false;
+
     this._showRequestVersion += 1;
     this._cancelPendingOnClickDisplay();
+    return true;
   }
 
   isCurrentShowRequest(requestVersion) {
@@ -102,6 +108,7 @@ export class DisplayManager {
    * Show translation window or icon for selected text
    */
   async show(selectedText, position, options = {}, toolbarPosition = null) {
+    this._latestShowRequestTimestamp = Date.now();
     const requestVersion = ++this._showRequestVersion;
     this._cancelPendingOnClickDisplay();
     if (!ExtensionContextManager.isValidSync()) {

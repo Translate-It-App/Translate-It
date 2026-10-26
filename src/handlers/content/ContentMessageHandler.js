@@ -362,6 +362,7 @@ export class ContentMessageHandler extends ResourceTracker {
     this.registerHandler(MessageActions.PAGE_TRANSLATION_FRAME_LIFECYCLE, this.handlePageTranslationLifecycle.bind(this));
     this.registerHandler(MessageActions.MOUSE_HOVER_FRAME_EVENT, this.handleMouseHoverFrameEvent.bind(this));
     this.registerHandler(MessageActions.MOUSE_HOVER_FRAME_FEEDBACK, this.handleMouseHoverFrameFeedback.bind(this));
+    this.registerHandler(MessageActions.INVALIDATE_PENDING_DISPLAY, this.handlePendingDisplayInvalidation.bind(this));
 
     // Live dubbing transcript is a display-only, session-fenced bridge. The
     // translated and original (source) transcript actions share one accept
@@ -1142,6 +1143,29 @@ export class ContentMessageHandler extends ResourceTracker {
     const coordinator = window.translateItContentCore?.mainFrameCoordinator;
     if (!coordinator?.handleHoverFrameEvent) return { success: false, error: 'Main frame coordinator unavailable' };
     return coordinator.handleHoverFrameEvent(message?.data || {});
+  }
+
+  handlePendingDisplayInvalidation(message, sender) {
+    const timestamp = message?.data?.timestamp;
+    let extensionUrl = null;
+    try {
+      extensionUrl = browser.runtime?.getURL?.('');
+    } catch {
+      return { success: false, error: 'Invalid background sender' };
+    }
+    const hasContentSenderContext = sender?.tab != null || sender?.frameId != null ||
+      sender?.documentId != null;
+    if (window !== window.top || !browser.runtime?.id || sender?.id !== browser.runtime.id ||
+        hasContentSenderContext || typeof sender?.url !== 'string' || !extensionUrl ||
+        !sender.url.startsWith(extensionUrl)) {
+      return { success: false, error: 'Invalid background sender' };
+    }
+    if (!Number.isFinite(timestamp) || timestamp < 0 || timestamp > Date.now()) {
+      return { success: false, error: 'Invalid pending-display timestamp' };
+    }
+
+    window.windowsManagerInstance?.invalidatePendingShows(timestamp);
+    return { success: true };
   }
 
   handleMouseHoverFrameFeedback(message) {

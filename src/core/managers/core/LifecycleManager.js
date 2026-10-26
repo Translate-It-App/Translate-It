@@ -287,6 +287,7 @@ class LifecycleManager {
       
       // Text selection handlers
       'getSelectedText': Handlers.handleGetSelectedText,
+      [MessageActions.INVALIDATE_PENDING_DISPLAY]: Handlers.handlePendingDisplayInvalidation,
       
       // Page exclusion handlers
       'isCurrentPageExcluded': Handlers.handleIsCurrentPageExcluded,
