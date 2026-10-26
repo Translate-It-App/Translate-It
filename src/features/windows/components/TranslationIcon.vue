@@ -20,7 +20,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { injectStylesToShadowRoot } from '@/utils/ui/styleInjector.js';
 import { usePositioning } from '@/composables/ui/usePositioning.js';
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js';
@@ -78,6 +78,7 @@ const isFullscreen = computed(() => mobileStore.isFullscreen);
 
 // Local state for the TTS play action
 const localTTSId = ref(null);
+let ttsActionVersion = 0;
 
 // Calculate exact dynamic width based on active buttons
 const calculatedWidth = computed(() => {
@@ -95,10 +96,21 @@ const calculatedWidth = computed(() => {
 });
 
 // Initialize position using calculated initial width
-const { positionStyle, cleanup: cleanupPositioning } = usePositioning(props.position, {
+const { positionStyle, initializePosition, cleanup: cleanupPositioning } = usePositioning(props.position, {
   defaultWidth: initialWidth,
   defaultHeight: 32,
   enableDragging: false
+});
+
+watch(() => props.position, (position) => initializePosition(position), { deep: true });
+
+watch(() => props.text, (text, previousText) => {
+  const pendingTTS = tts.ttsState.value === 'loading' && localTTSId.value?.startsWith('pending_');
+  if (text !== previousText && (isThisTTSActive.value || pendingTTS)) {
+    ttsActionVersion += 1;
+    void tts.stop();
+    localTTSId.value = null;
+  }
 });
 
 const dynamicStyle = computed(() => {
@@ -171,10 +183,13 @@ const handleTTSClick = async () => {
     return;
   }
 
+  const actionVersion = ++ttsActionVersion;
+  const text = props.text;
   try {
     if (effectiveTTSState.value === 'idle') {
       localTTSId.value = `pending_${Date.now()}`;
-      const success = await tts.speak(props.text, 'auto');
+      const success = await tts.speak(text, 'auto');
+      if (actionVersion !== ttsActionVersion) return;
       if (success) {
         localTTSId.value = tts.currentTTSId.value;
       } else {
@@ -182,12 +197,14 @@ const handleTTSClick = async () => {
       }
     } else if (effectiveTTSState.value === 'playing' || effectiveTTSState.value === 'loading') {
       const success = await tts.stop();
+      if (actionVersion !== ttsActionVersion) return;
       if (success) {
         localTTSId.value = null;
       }
     } else if (effectiveTTSState.value === 'error') {
       localTTSId.value = `pending_retry_${Date.now()}`;
-      const success = await tts.speak(props.text, 'auto');
+      const success = await tts.speak(text, 'auto');
+      if (actionVersion !== ttsActionVersion) return;
       if (success) {
         localTTSId.value = tts.currentTTSId.value;
       } else {
@@ -196,7 +213,7 @@ const handleTTSClick = async () => {
     }
   } catch (error) {
     console.warn('[TranslationIcon] TTS toggle error:', error);
-    localTTSId.value = null;
+    if (actionVersion === ttsActionVersion) localTTSId.value = null;
   }
 };
 

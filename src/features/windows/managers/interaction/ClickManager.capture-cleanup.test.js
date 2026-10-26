@@ -97,4 +97,51 @@ describe('ClickManager capture listener cleanup (real ResourceTracker)', () => {
     nextManager.cleanup();
     expect(listenerCounts()).toEqual({ pointerdown: 0, pointercancel: 0, windowClick: 0, documentClick: 0 });
   });
+
+  it('removes and re-adds the same outside-click handler exactly once', () => {
+    const onOutsideClick = vi.fn();
+    const manager = makeManager(onOutsideClick);
+    const handler = manager._handleOutsideClick;
+    const outsideTarget = document.createElement('div');
+    document.body.appendChild(outsideTarget);
+
+    manager.removeOutsideClickListener();
+    outsideTarget.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onOutsideClick).not.toHaveBeenCalled();
+
+    manager.addOutsideClickListener();
+    manager.addOutsideClickListener();
+    expect(listenerCounts().documentClick).toBe(1);
+    outsideTarget.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onOutsideClick).toHaveBeenCalledTimes(1);
+
+    const addCall = document.addEventListener.mock.calls.find(
+      ([type, listener]) => type === 'click' && listener === handler
+    );
+    const removeCall = document.removeEventListener.mock.calls.find(
+      ([type, listener]) => type === 'click' && listener === handler
+    );
+    expect(addCall).toEqual(['click', handler, { capture: true }]);
+    expect(removeCall).toEqual(['click', handler, { capture: true }]);
+
+    manager.cleanup();
+  });
+
+  it('continues dismissing outside clicks after toolbar and window creation', () => {
+    const onOutsideClick = vi.fn();
+    const manager = makeManager(onOutsideClick);
+    const toolbar = document.createElement('div');
+    toolbar.className = 'pdf-windows-host__toolbar';
+    const windowRoot = document.createElement('div');
+    windowRoot.className = 'ti-window';
+    toolbar.appendChild(windowRoot);
+    document.body.appendChild(toolbar);
+    const outsideTarget = document.createElement('div');
+    document.body.appendChild(outsideTarget);
+
+    outsideTarget.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(onOutsideClick).toHaveBeenCalledTimes(1);
+    manager.cleanup();
+  });
 });

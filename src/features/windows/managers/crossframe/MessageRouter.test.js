@@ -226,6 +226,25 @@ describe('MessageRouter', () => {
       expect(message.fromCrossDocumentGesture).toBe(true);
     });
 
+    it('forwards only the opaque selection continuation token with the outside click', () => {
+      mockFrameRegistry.isInIframe = true;
+      const parentPostMessage = vi.fn();
+      vi.stubGlobal('parent', { postMessage: parentPostMessage });
+      const token = { originFrameId: 'frame-a', sequence: 4 };
+
+      messageRouter.broadcastOutsideClick(
+        { target: { tagName: 'SPAN', className: 'selected' } },
+        null,
+        token,
+      );
+
+      const [message] = parentPostMessage.mock.calls[0];
+      expect(message.selectionContinuationToken).toEqual(token);
+      expect(message).not.toHaveProperty('text');
+      expect(message).not.toHaveProperty('selectedText');
+      expect(message).not.toHaveProperty('target.node');
+    });
+
     it('broadcastOutsideClick defaults identity fields to non-suppressing values', () => {
       mockFrameRegistry.isInIframe = true;
       const parentPostMessage = vi.fn();

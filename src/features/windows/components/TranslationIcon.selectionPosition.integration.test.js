@@ -6,6 +6,15 @@ import { useWindowsManager } from '../composables/useWindowsManager.js';
 import { EventCoordinator } from '../managers/events/EventCoordinator.js';
 import TranslationIcon from './TranslationIcon.vue';
 import { usePositioning } from '@/composables/ui/usePositioning.js';
+import { ClickManager } from '../managers/interaction/ClickManager.js';
+import { SimpleTextSelectionHandler } from '@/features/text-selection/handlers/SimpleTextSelectionHandler.js';
+
+const testMocks = vi.hoisted(() => ({
+  initializePosition: vi.fn(),
+  speak: vi.fn().mockResolvedValue(true),
+  stop: vi.fn().mockResolvedValue(true),
+  tts: null,
+}));
 
 vi.mock('@/shared/logging/logger.js', () => ({
   getScopedLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
@@ -14,6 +23,7 @@ vi.mock('@/shared/logging/logger.js', () => ({
 vi.mock('@/composables/ui/usePositioning.js', () => ({
   usePositioning: vi.fn((position) => ({
     positionStyle: ref({ left: `${position.x}px`, top: `${position.y}px` }),
+    initializePosition: testMocks.initializePosition,
     cleanup: vi.fn(),
   })),
 }));
@@ -34,10 +44,13 @@ vi.mock('@/features/settings/stores/settings.js', () => ({
 }));
 
 vi.mock('@/features/tts/composables/useTTSSmart.js', () => ({
-  useTTSSmart: () => ({
-    ttsState: ref('idle'), lastText: ref(''), currentTTSId: ref(null), detectedLanguage: ref(null),
-    errorMessage: ref(''), speak: vi.fn().mockResolvedValue(true), stop: vi.fn().mockResolvedValue(true),
-  }),
+  useTTSSmart: () => {
+    if (!testMocks.tts) testMocks.tts = {
+      ttsState: ref('idle'), lastText: ref(''), currentTTSId: ref(null), detectedLanguage: ref(null),
+      errorMessage: ref(''), speak: testMocks.speak, stop: testMocks.stop,
+    };
+    return testMocks.tts;
+  },
 }));
 
 vi.mock('@/composables/core/useResourceTracker.js', () => ({
@@ -55,6 +68,19 @@ describe('TranslationIcon selection-position event flow', () => {
   let iconClickListener;
   let originalWindowsManagerInstance;
 
+  const createHarness = () => defineComponent({
+    setup() {
+      return () => h('div', manager.translationIcons.value.map((icon) => h(TranslationIcon, {
+        key: icon.id,
+        id: icon.id,
+        text: icon.text,
+        position: icon.position,
+        selectionPosition: icon.selectionPosition,
+        onClick: manager.onTranslationIconClick,
+      })));
+    },
+  });
+
   afterEach(() => {
     wrappers.splice(0).forEach((wrapper) => wrapper.unmount());
     if (iconClickListener) pageEventBus.off(WINDOWS_MANAGER_EVENTS.ICON_CLICKED, iconClickListener);
@@ -68,6 +94,16 @@ describe('TranslationIcon selection-position event flow', () => {
     else window.windowsManagerInstance = originalWindowsManagerInstance;
     originalWindowsManagerInstance = undefined;
     vi.clearAllTimers();
+    testMocks.initializePosition.mockClear();
+    testMocks.speak.mockClear();
+    testMocks.stop.mockClear();
+    if (testMocks.tts) {
+      testMocks.tts.ttsState.value = 'idle';
+      testMocks.tts.lastText.value = '';
+      testMocks.tts.currentTTSId.value = null;
+    }
+    delete window.__translateItPendingSelectionContinuationToken;
+    delete window.__translateItClickContinuationRelayToken;
     vi.useRealTimers();
   });
 
@@ -104,17 +140,7 @@ describe('TranslationIcon selection-position event flow', () => {
     pageEventBus.on(WINDOWS_MANAGER_EVENTS.ICON_CLICKED, iconClickListener);
 
     const mountIcon = async () => {
-      const icon = manager.translationIcons.value[0];
-      const Harness = defineComponent({
-        render: () => h(TranslationIcon, {
-          id: icon.id,
-          text: icon.text,
-          position: icon.position,
-          selectionPosition: icon.selectionPosition,
-          onClick: manager.onTranslationIconClick,
-        }),
-      });
-      const wrapper = mount(Harness);
+      const wrapper = mount(createHarness());
       wrappers.push(wrapper);
       wrapper.findComponent(TranslationIcon).vm.animateIn();
       await flushPromises();
@@ -163,5 +189,150 @@ describe('TranslationIcon selection-position event flow', () => {
     await Promise.resolve();
 
     expect(facade.displayManager._showWindow).toHaveBeenCalledWith('selected', toolbarPosition);
+  });
+
+  it('keeps the mounted Toolbar through a verified third-click continuation and dismisses on the next outside click', async () => {
+    vi.useFakeTimers();
+    window.pageEventBus = pageEventBus;
+    manager = useWindowsManager();
+    manager.setupEventListeners();
+    const token = { originFrameId: 'source-frame', sequence: 17 };
+    const firstCursor = { x: 20, y: 30 };
+    const paragraphCursor = { x: 70, y: 80 };
+    const selectionPosition = { x: 11, y: 22 };
+    const state = {
+      isIconMode: true,
+      selectionContinuationToken: token,
+      hasActiveElements: true,
+      isPinned: false,
+      shouldPreventDismissal: false,
+      activeWindowId: 'toolbar-window',
+      isInitialLoadingWindow: vi.fn(() => false),
+    };
+    const outsideDismiss = vi.fn();
+    const crossFrame = {
+      frameId: 'top-frame', isTopFrame: true,
+      enableGlobalClickBroadcast: vi.fn(), disableGlobalClickBroadcast: vi.fn(),
+      requestGlobalClickRelay: vi.fn(),
+    };
+    const clickManager = new ClickManager(crossFrame, state);
+    clickManager.setHandlers({ onOutsideClick: outsideDismiss, onIconClick: vi.fn() });
+    clickManager.addOutsideClickListener();
+
+    WindowsManagerEvents.showIcon({
+      id: 'stable-toolbar', text: 'word', position: firstCursor,
+      selectionPosition, selectionContinuationToken: token,
+    });
+    const wrapper = mount(createHarness());
+    wrappers.push(wrapper);
+    await flushPromises();
+    await nextTick();
+    const firstComponent = wrapper.findComponent(TranslationIcon);
+    firstComponent.vm.animateIn();
+    await nextTick();
+    const originalDom = firstComponent.element;
+
+    testMocks.tts.currentTTSId.value = 'tts-word';
+    await firstComponent.findAll('.ti-icon-btn')[1].trigger('click');
+    await flushPromises();
+    testMocks.tts.ttsState.value = 'playing';
+
+    const paragraph = document.createElement('p');
+    const span = document.createElement('span');
+    const selectedNode = document.createTextNode('word then rest');
+    span.append(selectedNode);
+    paragraph.append(span);
+    document.body.append(paragraph);
+    const wordRange = document.createRange();
+    wordRange.setStart(selectedNode, 0);
+    wordRange.setEnd(selectedNode, 4);
+    const paragraphRange = document.createRange();
+    paragraphRange.selectNodeContents(paragraph);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(paragraphRange);
+    window.iframeClickManager = { crossFrameManager: { frameId: token.originFrameId } };
+    const selectionHandler = new SimpleTextSelectionHandler();
+    selectionHandler._lastSelectionRange = wordRange.cloneRange();
+    selectionHandler._lastSelectionTarget = span;
+    selectionHandler._activeSelectionToken = token;
+    const mouseDown = new MouseEvent('mousedown', { bubbles: true, button: 0, detail: 3 });
+    Object.defineProperty(mouseDown, 'target', { value: paragraph });
+    selectionHandler.handleMouseDown(mouseDown);
+    const mouseUp = new MouseEvent('mouseup', { bubbles: true, button: 0, detail: 3 });
+    Object.defineProperty(mouseUp, 'target', { value: paragraph });
+    selectionHandler.handleMouseUp(mouseUp);
+    paragraph.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 3, button: 0 }));
+    expect(window.__translateItPendingSelectionContinuationToken).toBeNull();
+    expect(outsideDismiss).not.toHaveBeenCalled();
+
+    WindowsManagerEvents.showIcon({
+      id: 'stable-toolbar', text: 'full paragraph', position: paragraphCursor,
+      selectionPosition: { x: 55, y: 66 }, selectionContinuationToken: token,
+    });
+    await nextTick();
+
+    const updatedComponent = wrapper.findComponent(TranslationIcon);
+    expect(updatedComponent.vm.$).toBe(firstComponent.vm.$);
+    expect(updatedComponent.element).toBe(originalDom);
+    expect(updatedComponent.props('text')).toBe('full paragraph');
+    expect(manager.translationIcons.value[0]).toMatchObject({
+      id: 'stable-toolbar', text: 'full paragraph', position: paragraphCursor,
+      selectionPosition: { x: 55, y: 66 },
+    });
+    expect(testMocks.initializePosition).toHaveBeenCalledWith(paragraphCursor);
+    expect(testMocks.stop).toHaveBeenCalled();
+
+    const translateDetails = [];
+    const captureTranslate = (detail) => translateDetails.push(detail);
+    pageEventBus.on(WINDOWS_MANAGER_EVENTS.ICON_CLICKED, captureTranslate);
+    await updatedComponent.find('.ti-icon-btn--translate').trigger('click');
+    expect(translateDetails.at(-1)).toMatchObject({
+      id: 'stable-toolbar', text: 'full paragraph', position: { x: 55, y: 66 },
+    });
+    pageEventBus.off(WINDOWS_MANAGER_EVENTS.ICON_CLICKED, captureTranslate);
+
+    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, button: 0 }));
+    expect(outsideDismiss).toHaveBeenCalledTimes(1);
+
+    clickManager.cleanup();
+    selectionHandler._clearAllTimers();
+    selectionHandler.destroy();
+    paragraph.remove();
+    delete window.iframeClickManager;
+  });
+
+  it('stops loading TTS on text replacement and ignores the old speak result', async () => {
+    const { toolbarPosition, mountIcon } = setupFlow();
+    let resolveSpeak;
+    WindowsManagerEvents.showIcon({ id: 'pending-tts', text: 'old word', position: toolbarPosition });
+    const wrapper = await mountIcon();
+    const icon = wrapper.findComponent(TranslationIcon);
+    testMocks.tts.ttsState.value = 'idle';
+    testMocks.tts.currentTTSId.value = null;
+    testMocks.speak.mockImplementationOnce(() => {
+      testMocks.tts.ttsState.value = 'loading';
+      return new Promise((resolve) => { resolveSpeak = resolve; });
+    });
+    testMocks.stop.mockImplementation(async () => {
+      testMocks.tts.ttsState.value = 'idle';
+      testMocks.tts.currentTTSId.value = null;
+      return true;
+    });
+    await icon.findAll('.ti-icon-btn')[1].trigger('click');
+    expect(testMocks.speak).toHaveBeenCalledWith('old word', 'auto');
+
+    WindowsManagerEvents.showIcon({ id: 'pending-tts', text: 'new paragraph', position: { x: 40, y: 50 } });
+    await nextTick();
+    await flushPromises();
+    expect(testMocks.stop).toHaveBeenCalled();
+
+    testMocks.tts.currentTTSId.value = 'stale-tts-id';
+    testMocks.tts.ttsState.value = 'playing';
+    resolveSpeak(true);
+    await flushPromises();
+
+    expect(icon.props('text')).toBe('new paragraph');
+    expect(icon.find('.ti-icon-btn--playing').exists()).toBe(false);
   });
 });

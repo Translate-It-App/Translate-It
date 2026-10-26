@@ -84,6 +84,8 @@ export class EventCoordinator {
       pageEventBus.on("translation-window-confirm-source", this.facade._confirmSourceHandler);
 
       this.facade._dismissRequestHandler = (detail) => {
+        if (this.facade._internalDisplayDismissRequestVersion !== null &&
+            this.facade._internalDisplayDismissRequestVersion !== undefined) return;
         if (detail?.id && this.state.activeWindowId && detail.id !== this.state.activeWindowId) return;
         if (this.facade._isIconToWindowTransition) {
           return;
@@ -109,6 +111,9 @@ export class EventCoordinator {
       );
 
       this.facade._selectionClearHandler = () => {
+        if (this.facade._internalDisplayDismissRequestVersion !== null &&
+            this.facade._internalDisplayDismissRequestVersion !== undefined) return;
+        this.facade.displayManager?.invalidatePendingShows?.();
         if (this.state.isVisible || this.state.isIconMode) {
           if (this.state.shouldPreventDismissal) return;
           if (this.state.isPinned && !this.state.isInitialLoadingWindow?.(this.state.activeWindowId)) return;
@@ -126,7 +131,20 @@ export class EventCoordinator {
       );
 
       this.facade._selectionChangeHandler = (detail) => {
-        this.facade.show(detail.text, detail.position, detail.options, detail.toolbarPosition);
+        const selectionContinuationToken = window.__translateItSelectionDisplayToken || null;
+        const displayInteraction = window.__translateItSelectionDisplayInteraction || null;
+        window.__translateItSelectionDisplayToken = null;
+        window.__translateItSelectionDisplayInteraction = null;
+        this.facade.show(
+          detail.text,
+          detail.position,
+          {
+            ...detail.options,
+            ...(selectionContinuationToken ? { selectionContinuationToken } : {}),
+            ...(displayInteraction ? { displayInteraction } : {}),
+          },
+          detail.toolbarPosition,
+        );
       };
       pageEventBus.on(
         SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE,
@@ -441,6 +459,7 @@ export class EventCoordinator {
     // from the relay's bounded gesture identity, not from any ignore-next
     // fallback. Legacy managers without the resolve API keep dismissal.
     const data = message?.data ?? message ?? {};
+    if (this._matchesActiveSelectionContinuation(data.selectionContinuationToken)) return;
     const decision = this.clickManager.resolveCrossFrameOutsideClick?.({
       pointerId: data?.pointerId ?? null,
       fromCrossDocumentGesture: data?.fromCrossDocumentGesture,
@@ -497,6 +516,12 @@ export class EventCoordinator {
       });
       await this.facade.dismiss(true);
     }
+  }
+
+  _matchesActiveSelectionContinuation(token) {
+    const active = this.state.selectionContinuationToken;
+    return !!(this.state.isIconMode && token && active &&
+      token.originFrameId === active.originFrameId && token.sequence === active.sequence);
   }
 
   /**

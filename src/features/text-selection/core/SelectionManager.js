@@ -111,7 +111,13 @@ export class SelectionManager extends ResourceTracker {
     // 1. Emit global selection event (Coordinator Pattern)
     // This allows any module (like FAB or TTS) to react independently
     const selectionTranslationMode = settingsManager.get('selectionTranslationMode', SelectionTranslationMode.ON_CLICK);
-    const { toolbarPosition, ...selectionOptions } = options;
+    const { toolbarPosition, selectionContinuationToken, displayInteraction, ...selectionOptions } = options;
+    if (selectionContinuationToken && window === window.top) {
+      window.__translateItSelectionDisplayToken = selectionContinuationToken;
+    }
+    if (displayInteraction && window === window.top) {
+      window.__translateItSelectionDisplayInteraction = displayInteraction;
+    }
     pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, {
       text: selectedText,
       position: position,
@@ -123,6 +129,12 @@ export class SelectionManager extends ResourceTracker {
         isIframe: window !== window.top
       }
     });
+    if (window.__translateItSelectionDisplayToken === selectionContinuationToken) {
+      window.__translateItSelectionDisplayToken = null;
+    }
+    if (window.__translateItSelectionDisplayInteraction === displayInteraction) {
+      window.__translateItSelectionDisplayInteraction = null;
+    }
 
     // 2. Check if we should skip showing our own UI (WindowsManager)
     const isTextSelectionEnabled = settingsManager.get('TRANSLATE_ON_TEXT_SELECTION', true);
@@ -155,7 +167,7 @@ export class SelectionManager extends ResourceTracker {
       this.logger.debug('Skipping duplicate selection UI display', {
         text: selectedText.substring(0, 30) + '...'
       });
-      return;
+      return false;
     }
 
     this.logger.debug('Processing new selection for UI', {
@@ -164,11 +176,16 @@ export class SelectionManager extends ResourceTracker {
     });
 
     // Show translation UI (This part is still dependent on WindowsManager being allowed)
-    await this.showTranslationUI(selectedText, position, selectionOptions, toolbarPosition);
+    await this.showTranslationUI(selectedText, position, {
+      ...selectionOptions,
+      ...(selectionContinuationToken ? { selectionContinuationToken } : {}),
+      ...(displayInteraction ? { displayInteraction } : {})
+    }, toolbarPosition);
 
     // Track this selection
     this.lastProcessedText = selectedText;
     this.lastProcessedTime = currentTime;
+    return true;
   }
 
   /**

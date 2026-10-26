@@ -134,6 +134,7 @@ describe('TextSelectionWindowRelay', () => {
       relay._isTopFrame = false;
 
       const sourceWindow = { iframe: true };
+      const continuationToken = { originFrameId: 'leaf-click-frame', sequence: 3 };
       stubIframes([{
         contentWindow: sourceWindow,
         getBoundingClientRect: () => ({ left: 150, top: 300 })
@@ -141,7 +142,8 @@ describe('TextSelectionWindowRelay', () => {
 
       relay._handleMessage(requestMessage({
         frameId: 'leaf',
-        toolbarPosition: { x: 25, y: 35, _isViewportRelative: true }
+        toolbarPosition: { x: 25, y: 35, _isViewportRelative: true },
+        options: { selectionContinuationToken: continuationToken }
       }, sourceWindow));
 
       expect(parentPostMessage).toHaveBeenCalledTimes(1);
@@ -161,6 +163,7 @@ describe('TextSelectionWindowRelay', () => {
         _isViewportRelative: true,
         _isAbsolute: false
       });
+      expect(forwarded.options).toEqual({ selectionContinuationToken: continuationToken });
       relay.destroy();
     });
 

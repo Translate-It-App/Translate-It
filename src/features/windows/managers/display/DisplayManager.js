@@ -13,6 +13,8 @@ import ExclusionChecker from "@/features/exclusion/core/ExclusionChecker.js";
 import { MOBILE_CONSTANTS } from "@/shared/constants/mobile.js";
 import { getSelectionWindowErrorPresentation } from "./SelectionWindowErrorPresenter.js";
 
+const ON_CLICK_DISPLAY_DELAY = 100;
+
 /**
  * Handles UI display logic for translation windows and icons
  */
@@ -29,6 +31,8 @@ export class DisplayManager {
     this.clickManager = dependencies.clickManager;
     this.themeManager = dependencies.themeManager;
     this._outsideClickActivationTimer = null;
+    this._pendingOnClickDisplay = null;
+    this._showRequestVersion = 0;
   }
 
   _clearOutsideClickActivationTimer() {
@@ -62,6 +66,23 @@ export class DisplayManager {
 
   cleanup() {
     this._clearOutsideClickActivationTimer();
+    this.invalidatePendingShows();
+  }
+
+  invalidatePendingShows() {
+    this._showRequestVersion += 1;
+    this._cancelPendingOnClickDisplay();
+  }
+
+  isCurrentShowRequest(requestVersion) {
+    return requestVersion === this._showRequestVersion;
+  }
+
+  _cancelPendingOnClickDisplay() {
+    if (this._pendingOnClickDisplay !== null) {
+      clearTimeout(this._pendingOnClickDisplay);
+      this._pendingOnClickDisplay = null;
+    }
   }
 
   /**
@@ -81,6 +102,8 @@ export class DisplayManager {
    * Show translation window or icon for selected text
    */
   async show(selectedText, position, options = {}, toolbarPosition = null) {
+    const requestVersion = ++this._showRequestVersion;
+    this._cancelPendingOnClickDisplay();
     if (!ExtensionContextManager.isValidSync()) {
       this.logger.debug("Extension context invalid, aborting show()");
       return;
@@ -104,6 +127,7 @@ export class DisplayManager {
     // 1. Check for structural permissions
     const exclusionChecker = ExclusionChecker.getInstance();
     const isAllowed = await exclusionChecker.isFeatureAllowed("windowsManager");
+    if (requestVersion !== this._showRequestVersion) return;
     if (!isAllowed) {
       this.logger.debug("WindowsManager not allowed: Permission check failed");
       return;
@@ -173,7 +197,7 @@ export class DisplayManager {
         "TRANSLATE_ON_TEXT_SELECTION is disabled, preserving for external modules",
       );
       this.state.setOriginalText(selectedText);
-      await this.facade.dismiss(false, true);
+      await this.facade.dismiss(false, true, requestVersion);
       return;
     }
 
@@ -202,11 +226,42 @@ export class DisplayManager {
       return;
     }
 
+    const isKnownNonClickInteraction = [
+      "regular-drag",
+      "shift-click",
+      "keyboard-selection",
+      "post-drag-selection",
+    ].includes(options.displayInteraction);
+    if (isOnClickMode && !isKnownNonClickInteraction) {
+      this._pendingOnClickDisplay = setTimeout(() => {
+        this._pendingOnClickDisplay = null;
+        if (requestVersion !== this._showRequestVersion) return;
+        this._commitShow(selectedText, position, options, toolbarPosition, selectionTranslationMode, preserveSelection, requestVersion)
+          .catch((error) => this.logger.error("Delayed display commit failed", error));
+      }, ON_CLICK_DISPLAY_DELAY);
+      return;
+    }
+
+    await this._commitShow(selectedText, position, options, toolbarPosition, selectionTranslationMode, preserveSelection, requestVersion);
+  }
+
+  async _commitShow(selectedText, position, options, toolbarPosition, selectionTranslationMode, preserveSelection, requestVersion) {
+    if (requestVersion !== this._showRequestVersion) return;
+    const continuationToken = options.selectionContinuationToken;
+    const continuesVisibleIcon = !!(
+      continuationToken && this.state.isIconMode && this.state.activeIconId && this.state.selectionContinuationToken &&
+      continuationToken.originFrameId === this.state.selectionContinuationToken.originFrameId &&
+      continuationToken.sequence === this.state.selectionContinuationToken.sequence
+    );
+
     if (!this.facade._isIconToWindowTransition) {
       this.state.setProvider(null);
     }
 
-    await this.facade.dismiss(false, preserveSelection);
+    if (!continuesVisibleIcon) {
+      await this.facade.dismiss(false, preserveSelection, requestVersion);
+      if (requestVersion !== this._showRequestVersion) return;
+    }
     this.facade._isIconToWindowTransition = false;
 
     if (!selectedText) return;
@@ -216,15 +271,13 @@ export class DisplayManager {
     try {
       if (
         selectionTranslationMode === SelectionTranslationMode.ON_FAB_CLICK &&
-        !isExplicitAction
+        !options.immediate
       ) {
         this.logger.info("onFabClick mode: selection handled by external UI");
         this.state.setOriginalText(selectedText);
         this.facade._addDismissListener();
-      } else if (
-        selectionTranslationMode === SelectionTranslationMode.ON_CLICK
-      ) {
-        await this._showIcon(selectedText, toolbarPosition || position, position);
+      } else if (selectionTranslationMode === SelectionTranslationMode.ON_CLICK) {
+        await this._showIcon(selectedText, toolbarPosition || position, position, continuationToken);
       } else {
         await this._showWindow(selectedText, position, options);
       }
@@ -429,7 +482,7 @@ export class DisplayManager {
   /**
    * Show translate icon
    */
-  async _showIcon(selectedText, position, selectionPosition = position) {
+  async _showIcon(selectedText, position, selectionPosition = position, selectionContinuationToken = null) {
     if (!ExtensionContextManager.isValidSync()) {
       this.logger.debug("Extension context invalid, cannot create icon");
       return;
@@ -448,19 +501,29 @@ export class DisplayManager {
       },
     });
 
+    const sameContinuation = this.state.isIconMode === true && this.state.activeIconId &&
+      selectionContinuationToken && this.state.selectionContinuationToken &&
+      selectionContinuationToken.originFrameId === this.state.selectionContinuationToken.originFrameId &&
+      selectionContinuationToken.sequence === this.state.selectionContinuationToken.sequence;
+    const iconId = sameContinuation && this.state.activeIconId
+      ? this.state.activeIconId
+      : `translation-icon-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const positionToUse = position.finalPosition || position;
+
     this.state.setIconMode(true);
     this.state.setOriginalText(selectedText);
-
-    const iconId = `translation-icon-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const positionToUse = position.finalPosition || position;
 
     WindowsManagerEvents.showIcon({
       id: iconId,
       text: selectedText,
       position: positionToUse,
       selectionPosition,
+      ...(selectionContinuationToken ? { selectionContinuationToken } : {}),
       frameId: this.crossFrameManager.frameId,
     });
+
+    this.state.activeIconId = iconId;
+    this.state.selectionContinuationToken = selectionContinuationToken || null;
 
     this.state.setIconClickContext({
       text: selectedText,

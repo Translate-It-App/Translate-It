@@ -133,6 +133,25 @@ describe('ClickManager', () => {
   });
 
   describe('Outside Click Detection Logic', () => {
+    it('suppresses only a matching active selection continuation click token', () => {
+      mockState.isIconMode = true;
+      mockState.selectionContinuationToken = { originFrameId: 'frame-a', sequence: 3 };
+      vi.spyOn(clickManager, '_shouldDismissOnOutsideClick').mockReturnValue(true);
+      const matching = new MouseEvent('click');
+      Object.defineProperty(matching, '__translateItSelectionContinuationToken', {
+        value: { originFrameId: 'frame-a', sequence: 3 }
+      });
+      clickManager._handleOutsideClick(matching);
+      expect(mockHandlers.onOutsideClick).not.toHaveBeenCalled();
+
+      const unrelated = new MouseEvent('click');
+      Object.defineProperty(unrelated, '__translateItSelectionContinuationToken', {
+        value: { originFrameId: 'frame-a', sequence: 4 }
+      });
+      clickManager._handleOutsideClick(unrelated);
+      expect(mockHandlers.onOutsideClick).toHaveBeenCalledTimes(1);
+    });
+
     it.each([
       ['initial spinner', true],
       ['completed window', false],

@@ -576,12 +576,15 @@ describe('SelectionManager selection geometry', () => {
     const position = { x: 10, y: 20, _isViewportRelative: true };
     const toolbarPosition = { x: 30, y: 40, _isViewportRelative: true };
 
-    manager.requestWindowCreationInMainFrame('selected', position, { ctrlPressed: false }, toolbarPosition);
+    manager.requestWindowCreationInMainFrame('selected', position, {
+      ctrlPressed: false,
+      displayInteraction: 'multi-click',
+    }, toolbarPosition);
 
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
       position,
       toolbarPosition,
-      options: { ctrlPressed: false }
+      options: { ctrlPressed: false, displayInteraction: 'multi-click' }
     }), '*');
   });
 });

@@ -195,8 +195,10 @@ export class MessageRouter {
    * `{ pointerId, fromCrossDocumentGesture }`. The incoming side never parses
    * beyond these two fields.
    */
-  broadcastOutsideClick(originalEvent, gestureIdentity = null) {
+  broadcastOutsideClick(originalEvent, gestureIdentity = null, selectionContinuationToken = null) {
     try {
+      selectionContinuationToken ||= window.__translateItClickContinuationRelayToken || null;
+      window.__translateItClickContinuationRelayToken = null;
       const message = {
         type: WindowsConfig.CROSS_FRAME.OUTSIDE_CLICK,
         frameId: this.frameRegistry.frameId,
@@ -215,7 +217,8 @@ export class MessageRouter {
         pointerId: gestureIdentity?.pointerId ?? originalEvent?.pointerId ?? null,
         fromCrossDocumentGesture: gestureIdentity
           ? gestureIdentity.fromCrossDocumentGesture === true
-          : false
+          : false,
+        ...(selectionContinuationToken ? { selectionContinuationToken } : {})
       };
 
       // Broadcast to parent/top if in iframe

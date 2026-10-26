@@ -62,3 +62,41 @@ describe('useWindowsManager history snapshot metadata', () => {
     manager.cleanupEventListeners();
   });
 });
+
+describe('useWindowsManager toolbar continuation updates', () => {
+  let listeners;
+  let eventBus;
+
+  beforeEach(() => {
+    listeners = new Map();
+    eventBus = {
+      on: vi.fn((name, callback) => listeners.set(name, callback)),
+      off: vi.fn((name) => listeners.delete(name)),
+      emit: vi.fn((name, detail) => listeners.get(name)?.(detail)),
+    };
+    window.pageEventBus = eventBus;
+  });
+
+  it('updates the same icon entry with current text and both positions without token payload leakage', () => {
+    const manager = useWindowsManager();
+    manager.setupEventListeners();
+    const token = { originFrameId: 'frame-a', sequence: 2 };
+    eventBus.emit(WINDOWS_MANAGER_EVENTS.SHOW_ICON, {
+      id: 'toolbar-1', text: 'word', position: { x: 1, y: 2 }, selectionPosition: { x: 3, y: 4 },
+      selectionContinuationToken: token,
+    });
+    const originalEntry = manager.translationIcons.value[0];
+
+    eventBus.emit(WINDOWS_MANAGER_EVENTS.SHOW_ICON, {
+      id: 'toolbar-1', text: 'full paragraph', position: { x: 10, y: 20 }, selectionPosition: { x: 30, y: 40 },
+      selectionContinuationToken: token,
+    });
+
+    expect(manager.translationIcons.value).toHaveLength(1);
+    expect(manager.translationIcons.value[0].id).toBe(originalEntry.id);
+    expect(manager.translationIcons.value[0]).toMatchObject({
+      text: 'full paragraph', position: { x: 10, y: 20 }, selectionPosition: { x: 30, y: 40 },
+    });
+    manager.cleanupEventListeners();
+  });
+});

@@ -33,7 +33,7 @@ vi.mock('@/features/windows/managers/translation/TranslationHandler.js', () => (
 
 vi.mock('@/features/windows/managers/interaction/ClickManager.js', () => ({
   ClickManager: vi.fn().mockImplementation(function() {
-    this.setHandlers = vi.fn();
+    this.setHandlers = vi.fn((handlers) => { this.handlers = handlers; });
     this.addOutsideClickListener = vi.fn();
     this.cleanup = vi.fn();
     return this;
@@ -49,6 +49,8 @@ vi.mock('@/features/windows/managers/crossframe/CrossFrameManager.js', () => ({
     this.messageRouter = {
       broadcastOutsideClick: vi.fn()
     };
+    this.enableGlobalClickBroadcast = vi.fn();
+    this.requestGlobalClickRelay = vi.fn();
     return this;
   })
 }));
@@ -107,6 +109,31 @@ describe('WindowsManagerHandler', () => {
     expect(handler.getIsActive()).toBe(true);
     expect(WindowsManager.getInstance).not.toHaveBeenCalled();
     expect(global.window.iframeClickManager).toBeDefined();
+  });
+
+  it('does not send an earlier untagged relay for a continuation click, but relays ordinary outside clicks', async () => {
+    const mockParent = { location: { href: 'http://parent.com' } };
+    global.window = {
+      location: { href: 'http://iframe.com' },
+      top: mockParent,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    await handler.activate();
+    const outsideClickHandler = handler.clickManager.handlers.onOutsideClick;
+
+    const tokenizedClick = new MouseEvent('click', { bubbles: true, detail: 3, button: 0 });
+    Object.defineProperty(tokenizedClick, '__translateItSelectionContinuationToken', {
+      value: { originFrameId: 'iframe-click-frame', sequence: 5 },
+    });
+    outsideClickHandler(tokenizedClick);
+    expect(handler.crossFrameManager.messageRouter.broadcastOutsideClick).not.toHaveBeenCalled();
+
+    outsideClickHandler(new MouseEvent('click', { bubbles: true, detail: 1, button: 0 }));
+    expect(handler.crossFrameManager.messageRouter.broadcastOutsideClick).toHaveBeenCalledTimes(1);
+    expect(handler.crossFrameManager.messageRouter.broadcastOutsideClick).toHaveBeenCalledWith({
+      target: { tagName: 'DIV', className: '' },
+    });
   });
 
   it('should deactivate and cleanup', async () => {

@@ -56,7 +56,11 @@ export class WindowsManagerHandler extends ResourceTracker {
 
         // Set up handlers for cross-frame communication
         this.clickManager.setHandlers({
-          onOutsideClick: () => {
+          onOutsideClick: (event) => {
+            // The CrossFrameManager capture listener runs after this ClickManager
+            // listener and relays the tagged continuation click itself. Avoid an
+            // earlier generic relay that would lose its one-use token.
+            if (event?.__translateItSelectionContinuationToken) return;
             // When click is detected in iframe, send message to parent
             this.crossFrameManager.messageRouter.broadcastOutsideClick({
               target: { tagName: 'DIV', className: '' }

@@ -61,6 +61,7 @@ export class WindowsManager extends ResourceTracker {
     this._isDismissing = false;
     this._lastDismissTime = 0;
     this._lastDismissedText = null;
+    this._internalDisplayDismissRequestVersion = null;
     this._isInShiftClickOperation = false;
 
     // Event handler references for cleanup
@@ -121,8 +122,21 @@ export class WindowsManager extends ResourceTracker {
     return this.displayManager.show(selectedText, position, options, toolbarPosition);
   }
 
-  async dismiss(withFadeOut = true, preserveSelection = false) {
-    return this.dismissalManager.dismiss(withFadeOut, preserveSelection);
+  async dismiss(withFadeOut = true, preserveSelection = false, displayRequestVersion = null) {
+    if (displayRequestVersion !== null) {
+      if (!this.displayManager.isCurrentShowRequest(displayRequestVersion)) return false;
+    } else {
+      this.displayManager.invalidatePendingShows();
+      return this.dismissalManager.dismiss(withFadeOut, preserveSelection);
+    }
+
+    const previousRequestVersion = this._internalDisplayDismissRequestVersion;
+    this._internalDisplayDismissRequestVersion = displayRequestVersion;
+    try {
+      return this.dismissalManager.dismiss(withFadeOut, preserveSelection);
+    } finally {
+      this._internalDisplayDismissRequestVersion = previousRequestVersion;
+    }
   }
 
   async cancelCurrentTranslation() {

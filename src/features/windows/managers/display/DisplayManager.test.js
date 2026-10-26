@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   messageRouter: {
     _broadcastToAllIframes: vi.fn(),
   },
+  isFeatureAllowed: vi.fn(),
   getPresentation: vi.fn(),
 }));
 
@@ -21,6 +22,7 @@ vi.mock("@/shared/logging/logger.js", () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
+    error: vi.fn(),
   })),
 }));
 
@@ -67,8 +69,8 @@ vi.mock("@/utils/browser/compatibility.js", () => ({
 
 vi.mock("@/features/exclusion/core/ExclusionChecker.js", () => ({
   default: {
-    getInstance: vi.fn(() => ({
-      isFeatureAllowed: vi.fn().mockResolvedValue(true),
+      getInstance: vi.fn(() => ({
+      isFeatureAllowed: mocks.isFeatureAllowed,
     })),
   },
 }));
@@ -192,6 +194,7 @@ beforeEach(() => {
     themeManager: { currentTheme: "dark" },
   });
   mocks.getPresentation.mockResolvedValue(safePresentation());
+  mocks.isFeatureAllowed.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -206,6 +209,7 @@ describe("DisplayManager Selection Window error boundary", () => {
     const toolbarPosition = { x: 80, y: 110, _isViewportRelative: false };
 
     await manager.show("selected text", selectionPosition, {}, toolbarPosition);
+    await vi.advanceTimersByTimeAsync(100);
 
     expect(mocks.events.showIcon).toHaveBeenCalledWith(expect.objectContaining({
       text: "selected text",
@@ -216,6 +220,102 @@ describe("DisplayManager Selection Window error boundary", () => {
       text: "selected text",
       position: selectionPosition,
     });
+  });
+
+  it.each(["double-click selection", "triple-click drag selection"])(
+    "shows only the final %s icon after replaceable toolbar delay",
+    async (text) => {
+      const first = manager.show("intermediate selection", { x: 1, y: 2 });
+      await first;
+      await vi.advanceTimersByTimeAsync(60);
+      await manager.show(text, { x: 30, y: 40 }, { displayInteraction: "multi-click" });
+
+      expect(mocks.events.showIcon).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(mocks.events.showIcon).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(mocks.events.showIcon).toHaveBeenCalledTimes(1);
+      expect(mocks.events.showIcon.mock.calls[0][0]).toMatchObject({
+        text,
+        position: { x: 30, y: 40 },
+      });
+      expect(facade.dismiss).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("ignores a permission result that resolves after a newer selection", async () => {
+    let resolveOldPermission;
+    mocks.isFeatureAllowed
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOldPermission = resolve; }))
+      .mockResolvedValueOnce(true);
+
+    const stale = manager.show("stale selection", { x: 1, y: 2 });
+    await manager.show("current selection", { x: 30, y: 40 });
+    resolveOldPermission(true);
+    await stale;
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(mocks.events.showIcon).toHaveBeenCalledTimes(1);
+    expect(mocks.events.showIcon.mock.calls[0][0]).toMatchObject({ text: "current selection" });
+  });
+
+  it("keeps explicit immediate displays immediate", async () => {
+    await manager.show("keyboard selection", { x: 30, y: 40 }, { immediate: true });
+
+    expect(mocks.events.showWindow).toHaveBeenCalledTimes(1);
+    expect(manager._pendingOnClickDisplay).toBeNull();
+  });
+
+  it.each(["regular-drag", "keyboard-selection"])(
+    "shows a positively identified %s selection without the click stabilization delay",
+    async (displayInteraction) => {
+      await manager.show("selected text", { x: 30, y: 40 }, { displayInteraction });
+
+      expect(mocks.events.showIcon).toHaveBeenCalledTimes(1);
+      expect(manager._pendingOnClickDisplay).toBeNull();
+    },
+  );
+
+  it("keeps unknown interaction context on the replaceable ON_CLICK fallback delay", async () => {
+    await manager.show("selected text", { x: 30, y: 40 }, { displayInteraction: "unknown" });
+
+    expect(mocks.events.showIcon).not.toHaveBeenCalled();
+    expect(manager._pendingOnClickDisplay).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(mocks.events.showIcon).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates a matching Toolbar continuation in place with current text and both coordinates", async () => {
+    const token = { originFrameId: "frame-1", sequence: 9 };
+    state.isIconMode = true;
+    await manager._showIcon("word", { x: 5, y: 6 }, { x: 7, y: 8 }, token);
+    const originalId = mocks.events.showIcon.mock.calls[0][0].id;
+    const dismissCount = facade.dismiss.mock.calls.length;
+
+    await manager.show("full paragraph", { x: 30, y: 40 }, { selectionContinuationToken: token }, { x: 10, y: 20 });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(facade.dismiss).toHaveBeenCalledTimes(dismissCount);
+    expect(mocks.events.showIcon).toHaveBeenCalledTimes(2);
+    expect(mocks.events.showIcon.mock.calls[1][0]).toMatchObject({
+      id: originalId,
+      text: "full paragraph",
+      position: { x: 10, y: 20 },
+      selectionPosition: { x: 30, y: 40 },
+      selectionContinuationToken: token,
+    });
+  });
+
+  it("does not reuse a stale icon ID when the Toolbar is no longer active", async () => {
+    const token = { originFrameId: "frame-1", sequence: 11 };
+    state.isIconMode = false;
+    state.activeIconId = "dismissed-icon";
+    state.selectionContinuationToken = token;
+
+    await manager._showIcon("new text", { x: 1, y: 2 }, { x: 3, y: 4 }, token);
+
+    expect(mocks.events.showIcon.mock.calls[0][0].id).not.toBe("dismissed-icon");
   });
 
   it("sanitizes desktop initial failure and updates same window once", async () => {

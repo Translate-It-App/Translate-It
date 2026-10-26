@@ -248,6 +248,9 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     const selection = { toString: () => 'selected text', rangeCount: 1 };
     const processSelection = vi.fn().mockResolvedValue();
     handler.isActive = true;
+    handler.isDragging = false;
+    handler.shiftKeyPressed = false;
+    handler.lastMouseUpEvent = null;
     handler.selectionManager = { processSelection };
     handler._toolbarReleaseCandidate = {
       x: 10, y: 20, timestamp: Date.now(), selectionChangeVersion: 0,
@@ -273,6 +276,283 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
       vi.clearAllTimers();
       vi.useRealTimers();
     }
+  });
+});
+
+describe('SimpleTextSelectionHandler enhanced triple-click waiting state', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('processes the final paragraph selection after a three-click drag and clears waiting state', async () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    handler.enhancedTripleClickDrag = true;
+    const selection = { toString: () => 'final paragraph', rangeCount: 1 };
+    const processSelection = vi.fn().mockResolvedValue();
+    handler.isActive = true;
+    handler.isDragging = false;
+    handler.shiftKeyPressed = false;
+    handler.selectionManager = { processSelection };
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    vi.advanceTimersByTime(10);
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    vi.advanceTimersByTime(10);
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    expect(handler.isWaitingForDragEnd).toBe(true);
+    handler.handleSelectionChange();
+    expect(handler.selectionTimeout).toBeNull();
+
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0 }));
+    await vi.runAllTimersAsync();
+    expect(handler.isWaitingForDragEnd).toBe(false);
+    expect(processSelection).toHaveBeenCalledWith('final paragraph', selection, expect.any(Object));
+    handler._clearPreservationTimer();
+  });
+
+  it('clears stale waiting state before independent mouse or keyboard selection', () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    handler.enhancedTripleClickDrag = true;
+    handler.lastTripleClickTime = Date.now() - 500;
+    handler.isWaitingForDragEnd = true;
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    expect(handler.isWaitingForDragEnd).toBe(false);
+
+    handler.isWaitingForDragEnd = true;
+    handler.isDragging = false;
+    handler.handleKeyDown(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    expect(handler.isWaitingForDragEnd).toBe(false);
+  });
+
+  it('does not enter the triple-click waiting state when the enhancement is disabled', () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    handler.enhancedTripleClickDrag = false;
+    handler.lastTripleClickTime = Date.now() - 10;
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    expect(handler.isWaitingForDragEnd).toBe(false);
+  });
+
+  it.each([true, false])('creates a continuation only from a primary native third-click expansion with enhancement=%s', (enhanced) => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    handler.enhancedTripleClickDrag = enhanced;
+    const paragraph = document.createElement('p');
+    const span = document.createElement('span');
+    const textNode = document.createTextNode('word then rest');
+    span.append(textNode);
+    paragraph.append(span);
+    document.body.append(paragraph);
+    const oldRange = document.createRange();
+    oldRange.setStart(textNode, 0);
+    oldRange.setEnd(textNode, 4);
+    handler._lastSelectionRange = oldRange.cloneRange();
+    handler._lastSelectionTarget = span;
+    handler._activeSelectionToken = { originFrameId: 'stable-frame', sequence: 12 };
+    window.iframeClickManager = { crossFrameManager: { frameId: 'stable-frame' } };
+    const expanded = document.createRange();
+    expanded.selectNodeContents(paragraph);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(expanded);
+
+    const click = new MouseEvent('click', { button: 0, detail: 3 });
+    Object.defineProperty(click, 'target', { value: paragraph });
+
+    expect(handler.getSelectionContinuationTokenForClick(click)).toEqual(handler._activeSelectionToken);
+    expect(window.__translateItPendingSelectionContinuationToken).toEqual(handler._activeSelectionToken);
+    expect(handler.getSelectionContinuationTokenForClick(click)).toBeNull();
+    expect(window.__translateItPendingSelectionContinuationToken).toBeNull();
+    handler._clearAllTimers();
+    delete window.iframeClickManager;
+    paragraph.remove();
+  });
+
+  it.each([
+    ['selectionchange-before-click', 2],
+    ['selectionchange-before-click', 3],
+    ['click-before-selectionchange', 2],
+    ['click-before-selectionchange', 3],
+  ])('routes multi-click stabilization through debounced processing (%s, detail %i)', async (order, detail) => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    const target = document.createElement('p');
+    document.body.append(target);
+    const text = document.createTextNode('selected text');
+    target.append(text);
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, text.length);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    handler.lastMouseUpEvent = { target };
+    handler._lastMouseUpInteractionId = 12;
+    handler.isActive = true;
+    handler.isDragging = false;
+    handler.isWaitingForDragEnd = false;
+    handler.shiftKeyPressed = false;
+    const selectionProcessing = vi.fn().mockResolvedValue(false);
+    handler.selectionManager = { processSelection: selectionProcessing };
+    handler._selectionChangeVersion = 4;
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    const click = new MouseEvent('click', { button: 0, detail });
+    Object.defineProperty(click, 'target', { value: target });
+
+    try {
+      if (order === 'selectionchange-before-click') handler.handleSelectionChange();
+      handler.handleClick(click);
+      if (order === 'click-before-selectionchange') handler.handleSelectionChange();
+
+      await vi.advanceTimersByTimeAsync(handler.debounceDelay);
+
+      expect(selectionProcessing).toHaveBeenCalledWith(
+        'selected text',
+        selection,
+        expect.objectContaining({ displayInteraction: 'multi-click' }),
+      );
+      expect(handler._lastNativeClickContext).toBeNull();
+    } finally {
+      handler._clearPreservationTimer();
+      vi.clearAllTimers();
+      target.remove();
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed for stale versions, mismatched selections, targets, or mouse interactions', () => {
+    const handler = new SimpleTextSelectionHandler();
+    const firstTarget = document.createElement('p');
+    const secondTarget = document.createElement('p');
+    const firstText = document.createTextNode('first');
+    const secondText = document.createTextNode('second');
+    firstTarget.append(firstText);
+    secondTarget.append(secondText);
+    document.body.append(firstTarget, secondTarget);
+    const firstRange = document.createRange();
+    firstRange.selectNodeContents(firstTarget);
+    const secondRange = document.createRange();
+    secondRange.selectNodeContents(secondTarget);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(firstRange);
+    handler.lastMouseUpEvent = { target: firstTarget };
+    handler._lastMouseUpInteractionId = 9;
+    handler._selectionChangeVersion = 3;
+    const click = new MouseEvent('click', { button: 0, detail: 2 });
+    Object.defineProperty(click, 'target', { value: firstTarget });
+    handler.handleClick(click);
+
+    selection.removeAllRanges();
+    selection.addRange(secondRange);
+    handler._selectionChangeVersion += 2;
+    handler.lastMouseEventTime = Date.now();
+    expect(handler._getDisplayInteraction('post-drag-selection', selection)).toBeNull();
+
+    handler.lastMouseUpEvent = { target: secondTarget };
+    handler._lastMouseUpInteractionId = 10;
+    handler.handleClick(click);
+    expect(handler._lastNativeClickContext).toBeNull();
+    expect(handler._getDisplayInteraction('regular-drag', selection)).toBe('regular-drag');
+    expect(handler._getDisplayInteraction('shift-click', selection)).toBe('shift-click');
+    expect(handler._getDisplayInteraction('keyboard-selection')).toBe('keyboard-selection');
+    firstTarget.remove();
+    secondTarget.remove();
+  });
+
+  it('retains the active icon token and range when duplicate selection processing does not display a new icon', async () => {
+    const handler = new SimpleTextSelectionHandler();
+    const token = { originFrameId: 'stable-frame', sequence: 22 };
+    const target = document.createElement('p');
+    const textNode = document.createTextNode('word then rest');
+    target.append(textNode);
+    document.body.append(target);
+    const priorRange = document.createRange();
+    priorRange.setStart(textNode, 0);
+    priorRange.setEnd(textNode, 4);
+    handler._activeSelectionToken = token;
+    handler._lastSelectionText = 'word';
+    handler._lastSelectionRange = priorRange.cloneRange();
+    handler._lastSelectionTarget = target;
+    handler.lastMouseUpEvent = { target };
+    handler._lastMouseUpInteractionId = 5;
+    handler._lastNativeClickContext = {
+      detail: 2, target, range: priorRange.cloneRange(), text: 'word', timestamp: Date.now(),
+      interactionId: 5, selectionChangeVersion: handler._selectionChangeVersion,
+    };
+    handler.isActive = true;
+    handler.isDragging = false;
+    handler.shiftKeyPressed = false;
+    handler.lastKeyEventTime = 0;
+    handler.lastMouseEventTime = Date.now();
+    handler.selectionManager = { processSelection: vi.fn().mockResolvedValue(false) };
+    window.iframeClickManager = { crossFrameManager: { frameId: 'stable-frame' } };
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(priorRange);
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
+
+    await handler.processSelection();
+
+    expect(handler._activeSelectionToken).toEqual(token);
+    expect(handler._lastSelectionRange.toString()).toBe('word');
+    expect(handler.selectionManager.processSelection).toHaveBeenCalledWith(
+      'word', selection, expect.objectContaining({ displayInteraction: 'multi-click' }),
+    );
+    const expanded = document.createRange();
+    expanded.selectNodeContents(target);
+    selection.removeAllRanges();
+    selection.addRange(expanded);
+    const click = new MouseEvent('click', { button: 0, detail: 3 });
+    Object.defineProperty(click, 'target', { value: target });
+    expect(handler.getSelectionContinuationTokenForClick(click)).toEqual(token);
+    target.remove();
+    delete window.iframeClickManager;
+    handler._clearPreservationTimer();
+  });
+
+  it('clears waiting state when mouseup processing rejects and on deactivation', async () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    handler.isWaitingForDragEnd = true;
+    handler.isDragging = false;
+    handler.selectionManager = {};
+    handler.isActive = true;
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => 'selected' });
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
+    vi.spyOn(handler, 'processSelection').mockRejectedValue(new Error('failed'));
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0 }));
+    await vi.runAllTimersAsync();
+    expect(handler.isWaitingForDragEnd).toBe(false);
+
+    handler.isWaitingForDragEnd = true;
+    handler._activeSelectionToken = { originFrameId: 'frame', sequence: 1 };
+    handler._lastSelectionTarget = document.body;
+    handler.selectionManager = { dismissWindow: vi.fn(), cleanup: vi.fn() };
+    await handler.deactivate();
+    expect(handler.isWaitingForDragEnd).toBe(false);
+    expect(handler._activeSelectionToken).toBeNull();
+    expect(handler._lastSelectionTarget).toBeNull();
   });
 });
 

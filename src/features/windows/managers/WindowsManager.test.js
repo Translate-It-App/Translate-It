@@ -18,14 +18,16 @@ const { mockWindowsManagerEvents, mockPageEventBus, mockDeviceDetector } = vi.ho
       on: vi.fn((event, cb) => {
         listeners[event] = cb;
       }),
-      off: vi.fn(() => {
+      off: vi.fn((event, cb) => {
+        if (listeners[event] === cb) delete listeners[event];
       }),
       emit: vi.fn(async (event, data) => {
         if (listeners[event]) {
           const res = listeners[event](data);
           if (res instanceof Promise) await res;
         }
-      })
+      }),
+      reset: () => Object.keys(listeners).forEach((event) => delete listeners[event]),
     },
     mockDeviceDetector: {
       shouldEnableMobileUI: vi.fn().mockReturnValue(false)
@@ -199,6 +201,7 @@ describe('WindowsManager', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    mockPageEventBus.reset();
     WindowsManager.resetInstance();
     windowsManager = WindowsManager.getInstance();
     windowsManager.positionCalculator = { calculateAdjustedPositionForIframe: vi.fn((pos) => pos) };
@@ -225,7 +228,95 @@ describe('WindowsManager', () => {
         return def;
       });
       await windowsManager.show('hello', { x: 1, y: 1 });
+      await vi.advanceTimersByTimeAsync(100);
       expect(mockWindowsManagerEvents.showIcon).toHaveBeenCalled();
+    });
+
+    it('cancels the delayed Toolbar when selection clears before UI is visible', async () => {
+      vi.mocked(settingsManager.get).mockImplementation((key, def) => {
+        if (key === 'selectionTranslationMode') return 'onClick';
+        return def;
+      });
+
+      await windowsManager.show('cleared selection', { x: 1, y: 1 });
+      expect(windowsManager.state.isVisible).toBe(false);
+      expect(windowsManager.state.isIconMode).toBe(false);
+      expect(mockWindowsManagerEvents.showIcon).not.toHaveBeenCalled();
+
+      await mockPageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CLEAR, { reason: 'selection-cleared' });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(mockWindowsManagerEvents.showIcon).not.toHaveBeenCalled();
+    });
+
+    it('cancels a queued continuation when an external dismissal occurs', async () => {
+      vi.mocked(settingsManager.get).mockImplementation((key, def) => {
+        if (key === 'selectionTranslationMode') return 'onClick';
+        return def;
+      });
+
+      await windowsManager.show('pending continuation', { x: 1, y: 1 });
+      expect(mockWindowsManagerEvents.showIcon).not.toHaveBeenCalled();
+
+      await windowsManager.dismiss(false);
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(mockWindowsManagerEvents.showIcon).not.toHaveBeenCalled();
+    });
+
+    it('does not commit an in-flight internal display after a concurrent external dismissal', async () => {
+      vi.mocked(settingsManager.get).mockImplementation((key, def) => {
+        if (key === 'selectionTranslationMode') return 'onClick';
+        return def;
+      });
+      let resolveInternalDismiss;
+      let dismissalCalls = 0;
+      windowsManager.dismissalManager.dismiss = vi.fn(() => {
+        dismissalCalls += 1;
+        return dismissalCalls === 1
+          ? new Promise((resolve) => { resolveInternalDismiss = resolve; })
+          : Promise.resolve();
+      });
+
+      await windowsManager.show('pending continuation', { x: 1, y: 1 });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(windowsManager.dismissalManager.dismiss).toHaveBeenCalledTimes(1);
+      expect(mockWindowsManagerEvents.showIcon).not.toHaveBeenCalled();
+
+      await windowsManager.dismiss(false);
+      resolveInternalDismiss();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockWindowsManagerEvents.showIcon).not.toHaveBeenCalled();
+    });
+
+    it('ignores synchronous internal cleanup echoes but honors later external selection clear', async () => {
+      vi.mocked(settingsManager.get).mockImplementation((key, def) => {
+        if (key === 'selectionTranslationMode') return 'immediate';
+        return def;
+      });
+      await windowsManager.ensureInitialized();
+      windowsManager.state.isIconMode = true;
+      mockWindowsManagerEvents.dismissIcon.mockImplementationOnce((id) =>
+        mockPageEventBus.emit('di', { id }),
+      );
+
+      const internalRequestVersion = windowsManager.displayManager._showRequestVersion + 1;
+      await windowsManager.show('replacement window', { x: 1, y: 1 });
+      expect(mockWindowsManagerEvents.showWindow).toHaveBeenCalled();
+      expect(windowsManager.displayManager.isCurrentShowRequest(internalRequestVersion)).toBe(true);
+
+      vi.mocked(settingsManager.get).mockImplementation((key, def) => {
+        if (key === 'selectionTranslationMode') return 'onClick';
+        return def;
+      });
+      const iconsBeforeExternalClear = mockWindowsManagerEvents.showIcon.mock.calls.length;
+      await windowsManager.show('queued continuation', { x: 2, y: 2 });
+      await mockPageEventBus.emit('gsl', { reason: 'external-clear' });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(mockWindowsManagerEvents.showIcon).toHaveBeenCalledTimes(iconsBeforeExternalClear);
     });
 
     it('should handle GLOBAL_SELECTION_CHANGE', async () => {

@@ -319,9 +319,12 @@ export class CrossFrameManager {
    * Broadcast outside click to other frames
    */
   _broadcastOutsideClick(originalEvent) {
+    const identity = this._consumeClickGestureIdentity(originalEvent);
+    const continuationToken = originalEvent?.__translateItSelectionContinuationToken;
     this.messageRouter.broadcastOutsideClick(
       originalEvent,
-      this._consumeClickGestureIdentity(originalEvent),
+      identity,
+      ...(continuationToken ? [continuationToken] : []),
     );
   }
 

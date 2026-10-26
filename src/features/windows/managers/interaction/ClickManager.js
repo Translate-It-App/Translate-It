@@ -33,11 +33,13 @@ export class ClickManager extends ResourceTracker {
 
     // Click listener
     this.removeMouseDownListener = null;
+    this._outsideClickListenerRegistered = false;
 
     // Gesture protection state: armed by a pointerdown whose composed path
     // contains this window's root element; cleared on completion marking,
     // an independent click, pointercancel, or per-window teardown. No timers.
     this._armedGesture = null;
+    this._continuationRelayTokenTimer = null;
 
     // Bound methods
     this._handleOutsideClick = this._handleOutsideClick.bind(this);
@@ -68,11 +70,10 @@ export class ClickManager extends ResourceTracker {
    * Add outside click listener
    */
   addOutsideClickListener() {
-    // Remove existing listener first
-    this.removeOutsideClickListener();
-
-    // Add local click listener using ResourceTracker
-    this.addEventListener(document, "click", this._handleOutsideClick, { capture: true });
+    if (!this._outsideClickListenerRegistered) {
+      this.addEventListener(document, 'click', this._handleOutsideClick, { capture: true });
+      this._outsideClickListenerRegistered = true;
+    }
 
     // Enable cross-frame broadcasting
     this.logger.debug('Enabling cross-frame click broadcasting');
@@ -101,6 +102,11 @@ export class ClickManager extends ResourceTracker {
    * Remove outside click listener
    */
   removeOutsideClickListener() {
+    if (this._outsideClickListenerRegistered) {
+      this.removeEventListener(document, 'click', this._handleOutsideClick, { capture: true });
+      this._outsideClickListenerRegistered = false;
+    }
+
     if (this.removeMouseDownListener) {
       this.removeMouseDownListener();
       this.removeMouseDownListener = null;
@@ -136,6 +142,9 @@ export class ClickManager extends ResourceTracker {
    * inside this window's root. Re-arming replaces any existing armed state.
    */
   _onWindowPointerDown(event) {
+    if (this._continuationRelayTokenTimer) clearTimeout(this._continuationRelayTokenTimer);
+    this._continuationRelayTokenTimer = null;
+    window.__translateItClickContinuationRelayToken = null;
     this._armedGesture = null;
     const windowEl = this._findGestureWindowEl(event);
     if (!windowEl) return;
@@ -163,6 +172,35 @@ export class ClickManager extends ResourceTracker {
    * state pass through untouched.
    */
   _onWindowCaptureClick(event) {
+    const continuationToken = window.simpleTextSelectionHandlerInstance
+      ?.getSelectionContinuationTokenForClick?.(event) ?? null;
+    if (continuationToken) {
+      let tokenDecorated = false;
+      try {
+        Object.defineProperty(event, '__translateItSelectionContinuationToken', {
+          value: continuationToken,
+          enumerable: false,
+        });
+        tokenDecorated = true;
+      } catch {
+        // Fail closed: neither the local handler nor a relay may consume a token
+        // when the native event cannot carry its one-use identity.
+        window.__translateItClickContinuationRelayToken = null;
+        window.__translateItPendingSelectionContinuationToken = null;
+      }
+      if (tokenDecorated) {
+        window.__translateItClickContinuationRelayToken = continuationToken;
+        if (this._continuationRelayTokenTimer) clearTimeout(this._continuationRelayTokenTimer);
+        this._continuationRelayTokenTimer = setTimeout(() => {
+          if (window.__translateItClickContinuationRelayToken === continuationToken) {
+            window.__translateItClickContinuationRelayToken = null;
+          }
+          this._continuationRelayTokenTimer = null;
+        }, 0);
+        window.__translateItPendingSelectionContinuationToken = null;
+      }
+    }
+
     const armed = this._armedGesture;
     if (!armed) return;
 
@@ -255,6 +293,13 @@ export class ClickManager extends ResourceTracker {
    * Handle outside click events
    */
   _handleOutsideClick(e) {
+    const continuationToken = e?.__translateItSelectionContinuationToken;
+    const activeToken = this.state.selectionContinuationToken;
+    if (this.state.isIconMode && continuationToken && activeToken &&
+        continuationToken.originFrameId === activeToken.originFrameId &&
+        continuationToken.sequence === activeToken.sequence) {
+      return;
+    }
     // Skip dismissal for the click that completes a pointer gesture which
     // started inside this window (press inside, release outside).
     if (this._armedGesture &&
@@ -520,11 +565,13 @@ export class ClickManager extends ResourceTracker {
    * Cleanup click manager
    */
   cleanup() {
+    if (this._continuationRelayTokenTimer) clearTimeout(this._continuationRelayTokenTimer);
+    this._continuationRelayTokenTimer = null;
+    window.__translateItClickContinuationRelayToken = null;
     this.removeOutsideClickListener();
     window.removeEventListener('pointerdown', this._onWindowPointerDown, { capture: true });
     window.removeEventListener('pointercancel', this._onWindowPointerCancel, { capture: true });
     window.removeEventListener('click', this._onWindowCaptureClick, { capture: true });
-    document.removeEventListener('click', this._handleOutsideClick, { capture: true });
     this.onOutsideClick = null;
     this.onIconClick = null;
     this._armedGesture = null;

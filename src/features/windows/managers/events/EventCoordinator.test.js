@@ -311,6 +311,7 @@ describe("EventCoordinator cross-frame outside-click resize handling", () => {
       dismiss: vi.fn().mockResolvedValue(undefined),
       displayManager: {
         shouldUseMobileUI: vi.fn(() => false),
+        invalidatePendingShows: vi.fn(),
         _showWindow: vi.fn().mockResolvedValue(undefined),
       },
       dismissalManager: { _removeDismissListener: vi.fn() },
@@ -408,6 +409,68 @@ describe("EventCoordinator cross-frame outside-click resize handling", () => {
     state.shouldPreventDismissal = false;
     await coordinator._handleOutsideClick();
     expect(facade.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels queued displays on external selection clear while retaining internal and visible protections", async () => {
+    vi.useFakeTimers();
+    let queuedIconShown = false;
+    let timer = setTimeout(() => { queuedIconShown = true; }, 100);
+    facade.displayManager.invalidatePendingShows.mockImplementation(() => clearTimeout(timer));
+
+    try {
+      await pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CLEAR);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(facade.displayManager.invalidatePendingShows).toHaveBeenCalledTimes(1);
+      expect(queuedIconShown).toBe(false);
+      expect(facade.dismiss).not.toHaveBeenCalled();
+
+      facade._internalDisplayDismissRequestVersion = 3;
+      timer = setTimeout(() => { queuedIconShown = true; }, 100);
+      await pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CLEAR);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(facade.displayManager.invalidatePendingShows).toHaveBeenCalledTimes(1);
+      expect(queuedIconShown).toBe(true);
+
+      facade._internalDisplayDismissRequestVersion = null;
+      state.isVisible = true;
+      state.shouldPreventDismissal = true;
+      await pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CLEAR);
+      expect(facade.displayManager.invalidatePendingShows).toHaveBeenCalledTimes(2);
+      expect(facade.dismiss).not.toHaveBeenCalled();
+    } finally {
+      coordinator.cleanup();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("invalidates queued displays on external clear before UI exists but ignores internal replacement clear", async () => {
+    vi.useFakeTimers();
+    let externalIconShown = false;
+    let internalIconShown = false;
+    let timer = setTimeout(() => { externalIconShown = true; }, 100);
+    facade.displayManager.invalidatePendingShows.mockImplementation(() => clearTimeout(timer));
+
+    try {
+      await pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CLEAR);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(facade.displayManager.invalidatePendingShows).toHaveBeenCalledTimes(1);
+      expect(externalIconShown).toBe(false);
+      expect(facade.dismiss).not.toHaveBeenCalled();
+
+      facade._internalDisplayDismissRequestVersion = 7;
+      timer = setTimeout(() => { internalIconShown = true; }, 100);
+      await pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CLEAR);
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(facade.displayManager.invalidatePendingShows).toHaveBeenCalledTimes(1);
+      expect(internalIconShown).toBe(true);
+      expect(facade.dismiss).not.toHaveBeenCalled();
+    } finally {
+      coordinator.cleanup();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("allows selection clear after bounded Vue transition while translation remains pending", async () => {
@@ -782,6 +845,7 @@ describe("EventCoordinator PageEventBus listener ownership", () => {
       dismiss: vi.fn(),
       show: vi.fn(),
       displayManager: {
+        invalidatePendingShows: vi.fn(),
         _showWindow: vi.fn().mockResolvedValue(undefined),
       },
       dismissalManager: {
