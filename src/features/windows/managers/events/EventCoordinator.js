@@ -135,11 +135,15 @@ export class EventCoordinator {
         const displayInteraction = window.__translateItSelectionDisplayInteraction || null;
         window.__translateItSelectionDisplayToken = null;
         window.__translateItSelectionDisplayInteraction = null;
+        if (detail.suppressWindowsManagerDisplay) return;
         this.facade.show(
           detail.text,
           detail.position,
           {
             ...detail.options,
+            ...(detail.selectionInteractionId != null
+              ? { selectionInteractionId: detail.selectionInteractionId }
+              : {}),
             ...(selectionContinuationToken ? { selectionContinuationToken } : {}),
             ...(displayInteraction ? { displayInteraction } : {}),
           },

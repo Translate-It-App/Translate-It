@@ -39,6 +39,7 @@ export class SelectionManager extends ResourceTracker {
     // Simple state tracking - no complex drag detection
     this.lastProcessedText = null;
     this.lastProcessedTime = 0;
+    this.lastProcessedSelectionInteractionId = null;
     this.processingCooldown = 1000; // 1 second to prevent duplicates
 
     // Generate frameId for cross-frame communication
@@ -111,7 +112,18 @@ export class SelectionManager extends ResourceTracker {
     // 1. Emit global selection event (Coordinator Pattern)
     // This allows any module (like FAB or TTS) to react independently
     const selectionTranslationMode = settingsManager.get('selectionTranslationMode', SelectionTranslationMode.ON_CLICK);
-    const { toolbarPosition, selectionContinuationToken, displayInteraction, ...selectionOptions } = options;
+    const {
+      toolbarPosition,
+      selectionContinuationToken,
+      displayInteraction,
+      selectionInteractionId,
+      ...selectionOptions
+    } = options;
+    const suppressWindowsManagerDisplay = this.isDuplicateSelection(
+      selectedText,
+      Date.now(),
+      selectionInteractionId,
+    );
     if (selectionContinuationToken && window === window.top) {
       window.__translateItSelectionDisplayToken = selectionContinuationToken;
     }
@@ -124,6 +136,8 @@ export class SelectionManager extends ResourceTracker {
       ...(toolbarPosition ? { toolbarPosition } : {}),
       mode: selectionTranslationMode,
       options: selectionOptions, // Pass keyboard state (ctrlPressed, shiftPressed)
+      ...(selectionInteractionId != null ? { selectionInteractionId } : {}),
+      ...(suppressWindowsManagerDisplay ? { suppressWindowsManagerDisplay: true } : {}),
       context: {
         frameId: this.frameId,
         isIframe: window !== window.top
@@ -163,7 +177,7 @@ export class SelectionManager extends ResourceTracker {
     const currentTime = Date.now();
 
     // Prevent duplicate processing of same text for the UI display part
-    if (this.isDuplicateSelection(selectedText, currentTime)) {
+    if (this.isDuplicateSelection(selectedText, currentTime, selectionInteractionId)) {
       this.logger.debug('Skipping duplicate selection UI display', {
         text: selectedText.substring(0, 30) + '...'
       });
@@ -178,6 +192,7 @@ export class SelectionManager extends ResourceTracker {
     // Show translation UI (This part is still dependent on WindowsManager being allowed)
     await this.showTranslationUI(selectedText, position, {
       ...selectionOptions,
+      ...(selectionInteractionId != null ? { selectionInteractionId } : {}),
       ...(selectionContinuationToken ? { selectionContinuationToken } : {}),
       ...(displayInteraction ? { displayInteraction } : {})
     }, toolbarPosition);
@@ -185,14 +200,18 @@ export class SelectionManager extends ResourceTracker {
     // Track this selection
     this.lastProcessedText = selectedText;
     this.lastProcessedTime = currentTime;
+    this.lastProcessedSelectionInteractionId = selectionInteractionId ?? null;
     return true;
   }
 
   /**
    * Check if this is a duplicate selection
    */
-  isDuplicateSelection(selectedText, currentTime) {
+  isDuplicateSelection(selectedText, currentTime, selectionInteractionId = null) {
     if (!selectedText || !this.lastProcessedText) return false;
+
+    if (selectionInteractionId != null &&
+        selectionInteractionId !== this.lastProcessedSelectionInteractionId) return false;
 
     const isSameText = selectedText === this.lastProcessedText;
     const withinCooldown = (currentTime - this.lastProcessedTime) < this.processingCooldown;
@@ -507,6 +526,7 @@ export class SelectionManager extends ResourceTracker {
     // Clear tracking
     this.lastProcessedText = null;
     this.lastProcessedTime = 0;
+    this.lastProcessedSelectionInteractionId = null;
   }
 
   /**
@@ -533,6 +553,7 @@ export class SelectionManager extends ResourceTracker {
   cleanup() {
     this.lastProcessedText = null;
     this.lastProcessedTime = 0;
+    this.lastProcessedSelectionInteractionId = null;
 
     // Call parent cleanup
     super.cleanup();

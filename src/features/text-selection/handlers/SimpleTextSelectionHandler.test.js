@@ -338,6 +338,62 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     expect(handler._consumeToolbarReleasePosition('new selection')).toBeNull();
   });
 
+  it('accepts a fresh same-text range only for a new primary interaction', async () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    const text = document.createTextNode('same text same text');
+    const oldRange = document.createRange();
+    oldRange.setStart(text, 0);
+    oldRange.setEnd(text, 9);
+    let currentRange = oldRange;
+    const selection = {
+      anchorNode: text,
+      rangeCount: 1,
+      toString: () => 'same text',
+      getRangeAt: () => currentRange,
+    };
+    const processSelection = vi.fn().mockResolvedValue(true);
+    handler.isActive = true;
+    handler.isDragging = false;
+    handler.shiftKeyPressed = false;
+    handler.selectionManager = { processSelection };
+    handler._lastSelectionRange = oldRange.cloneRange();
+    handler._lastSelectionText = 'same text';
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
+
+    try {
+      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+      const newRange = document.createRange();
+      newRange.setStart(text, 10);
+      newRange.setEnd(text, 19);
+      currentRange = newRange;
+      handler._selectionChangeVersion += 1;
+      handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 20, clientY: 30 }));
+      const firstInteractionId = handler._lastSelectionInteractionId;
+      await handler.processSelection();
+
+      expect(processSelection.mock.calls[0][2]).toMatchObject({
+        selectionInteractionId: firstInteractionId,
+        toolbarPosition: { x: 20, y: 40, _isViewportRelative: false },
+      });
+
+      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+      handler._selectionChangeVersion += 1;
+      handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 50, clientY: 60 }));
+      await handler.processSelection();
+      expect(processSelection.mock.calls[1][2]).not.toHaveProperty('toolbarPosition');
+    } finally {
+      handler._clearAllTimers();
+      vi.clearAllTimers();
+      text.remove();
+    }
+  });
+
   it('hands cursor coordinates to the manager while preserving the selected text', async () => {
     vi.useFakeTimers();
     const handler = new SimpleTextSelectionHandler();
@@ -354,6 +410,7 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
       selectedTextAtRelease: 'selected text', selectedTextAtPress: ''
     };
     handler._lastMouseUpInteractionId = 1;
+    handler._lastSelectionInteractionId = null;
     handler._selectionChangeVersion = 1;
     vi.spyOn(window, 'getSelection').mockReturnValue(selection);
     vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
@@ -374,6 +431,171 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
       vi.clearAllTimers();
       vi.useRealTimers();
     }
+  });
+});
+
+describe('SimpleTextSelectionHandler pending display invalidation', () => {
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('cancels a pending display on a new outside primary selection press while dragging', () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    const showToolbar = vi.fn();
+    const pendingShow = setTimeout(showToolbar, 100);
+    const invalidatePendingShows = vi.fn(() => clearTimeout(pendingShow));
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue({ invalidatePendingShows });
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    vi.advanceTimersByTime(101);
+
+    expect(handler.isDragging).toBe(true);
+    expect(invalidatePendingShows).toHaveBeenCalledOnce();
+    expect(showToolbar).not.toHaveBeenCalled();
+  });
+
+  it('does not invalidate pending displays for Shift-primary or extension-UI presses', () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    const invalidatePendingShows = vi.fn();
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue({ invalidatePendingShows });
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, shiftKey: true }));
+    const uiPress = new MouseEvent('mousedown', { button: 0 });
+    uiPress.composedPath = () => [Object.assign(document.createElement('div'), { className: 'translation-window' })];
+    handler.handleMouseDown(uiPress);
+
+    expect(invalidatePendingShows).not.toHaveBeenCalled();
+  });
+
+  it('passes stable interaction identity to delayed selection processing and refreshes it on a new press', async () => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    const selection = { toString: () => 'same text', rangeCount: 0 };
+    const processSelection = vi.fn().mockResolvedValue(true);
+    handler.isActive = true;
+    handler.isDragging = false;
+    handler.selectionManager = { processSelection };
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    vi.spyOn(handler, 'isSelectElementModeActive').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
+    vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
+    vi.spyOn(handler, '_detectSelectionType').mockReturnValue('default');
+    vi.spyOn(handler, '_startSelectionPreservation').mockImplementation(() => {});
+
+    try {
+      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+      handler.handleMouseUp(new MouseEvent('mouseup', { button: 0 }));
+      const firstInteractionId = handler._lastSelectionInteractionId;
+      await handler.processSelection();
+      await handler.processSelection();
+
+      expect(Number.isInteger(firstInteractionId)).toBe(true);
+      expect(processSelection.mock.calls[0][2].selectionInteractionId).toBe(firstInteractionId);
+      expect(processSelection.mock.calls[1][2].selectionInteractionId).toBe(firstInteractionId);
+
+      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+      handler.handleMouseUp(new MouseEvent('mouseup', { button: 0 }));
+      await handler.processSelection();
+      const nextInteractionId = processSelection.mock.calls[2][2].selectionInteractionId;
+      expect(nextInteractionId).toBeGreaterThan(firstInteractionId);
+    } finally {
+      handler._clearAllTimers();
+      vi.clearAllTimers();
+    }
+  });
+
+  it('does not assign fresh selection identity to Shift, UI, or secondary presses', () => {
+    const handler = new SimpleTextSelectionHandler();
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, shiftKey: true }));
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, shiftKey: true }));
+    expect(handler._lastSelectionInteractionId).toBeNull();
+
+    const uiPress = new MouseEvent('mousedown', { button: 0 });
+    uiPress.composedPath = () => [Object.assign(document.createElement('div'), { className: 'translation-window' })];
+    handler.handleMouseDown(uiPress);
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0 }));
+    expect(handler._lastSelectionInteractionId).toBeNull();
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 2 }));
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 2 }));
+    expect(handler._lastSelectionInteractionId).toBeNull();
+  });
+
+  it('clears mouse interaction identity before keyboard selection changes', () => {
+    const handler = new SimpleTextSelectionHandler();
+    handler._lastSelectionInteractionId = 12;
+
+    handler.handleKeyDown(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+
+    expect(handler._lastSelectionInteractionId).toBeNull();
+  });
+
+  it('uses the top-frame manager from a same-origin child when no local manager exists', () => {
+    const handler = new SimpleTextSelectionHandler();
+    const invalidatePendingShows = vi.fn();
+    const topManager = { invalidatePendingShows, dismiss: vi.fn() };
+    vi.spyOn(window, 'top', 'get').mockReturnValue({ windowsManagerInstance: topManager });
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue(null);
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+    const postMessage = vi.spyOn(window, 'postMessage');
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+
+    expect(invalidatePendingShows).toHaveBeenCalledOnce();
+    expect(topManager.dismiss).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('ignores inaccessible top-frame access when no local manager exists', () => {
+    const handler = new SimpleTextSelectionHandler();
+    const localInvalidate = vi.fn();
+    vi.spyOn(window, 'top', 'get').mockImplementation(() => { throw new Error('cross-origin'); });
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue(null);
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+    const postMessage = vi.spyOn(window, 'postMessage');
+
+    expect(() => handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }))).not.toThrow();
+    expect(localInvalidate).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('prefers the local manager when available and does not broadcast', () => {
+    const handler = new SimpleTextSelectionHandler();
+    const localInvalidate = vi.fn();
+    const topInvalidate = vi.fn();
+    vi.spyOn(window, 'top', 'get').mockReturnValue({ windowsManagerInstance: { invalidatePendingShows: topInvalidate } });
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue({ invalidatePendingShows: localInvalidate });
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+    const postMessage = vi.spyOn(window, 'postMessage');
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+
+    expect(localInvalidate).toHaveBeenCalledOnce();
+    expect(topInvalidate).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps Shift and UI guards when running inside a child frame', () => {
+    const handler = new SimpleTextSelectionHandler();
+    const invalidatePendingShows = vi.fn();
+    vi.spyOn(window, 'top', 'get').mockReturnValue({ windowsManagerInstance: { invalidatePendingShows } });
+    vi.spyOn(handler, 'getWindowsManager').mockReturnValue(null);
+    vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' });
+
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, shiftKey: true }));
+    const uiPress = new MouseEvent('mousedown', { button: 0 });
+    uiPress.composedPath = () => [Object.assign(document.createElement('div'), { className: 'translation-window' })];
+    handler.handleMouseDown(uiPress);
+
+    expect(invalidatePendingShows).not.toHaveBeenCalled();
   });
 });
 

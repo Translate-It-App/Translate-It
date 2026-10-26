@@ -122,6 +122,10 @@ export class WindowsManager extends ResourceTracker {
     return this.displayManager.show(selectedText, position, options, toolbarPosition);
   }
 
+  invalidatePendingShows() {
+    return this.displayManager.invalidatePendingShows();
+  }
+
   async dismiss(withFadeOut = true, preserveSelection = false, displayRequestVersion = null) {
     if (displayRequestVersion !== null) {
       if (!this.displayManager.isCurrentShowRequest(displayRequestVersion)) return false;

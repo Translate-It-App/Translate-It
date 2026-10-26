@@ -216,6 +216,13 @@ describe('WindowsManager', () => {
     expect(windowsManager).toBe(WindowsManager.getInstance());
   });
 
+  it('forwards pending-show invalidation to DisplayManager', () => {
+    windowsManager.displayManager.invalidatePendingShows = vi.fn().mockReturnValue(7);
+
+    expect(windowsManager.invalidatePendingShows()).toBe(7);
+    expect(windowsManager.displayManager.invalidatePendingShows).toHaveBeenCalledOnce();
+  });
+
   it('constructs the default TranslationHandler with this manager state', () => {
     expect(TranslationHandler).toHaveBeenCalledWith(windowsManager.state);
     expect(windowsManager.translationHandler).toBeDefined();

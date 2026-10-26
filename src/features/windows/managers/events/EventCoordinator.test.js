@@ -968,6 +968,94 @@ describe("EventCoordinator PageEventBus listener ownership", () => {
   });
 });
 
+describe("EventCoordinator duplicate selection display suppression", () => {
+  let coordinator;
+  let facade;
+  let state;
+  let observedSelection;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockPageEventBus.reset();
+    state = {};
+    let pendingTimer;
+    let committed;
+    facade = {
+      show: vi.fn((text, position, options, toolbarPosition) => {
+        clearTimeout(pendingTimer);
+        pendingTimer = setTimeout(() => {
+          committed = { text, position, options, toolbarPosition };
+        }, 100);
+      }),
+    };
+    facade.getCommitted = () => committed;
+    coordinator = new EventCoordinator(facade, {
+      state,
+      crossFrameManager: { isTopFrame: true, setEventHandlers: vi.fn() },
+      translationHandler: {},
+      errorHandler: {},
+      clickManager: { setHandlers: vi.fn() },
+      themeManager: {},
+      positionCalculator: {},
+    });
+    coordinator.setup();
+    observedSelection = vi.fn();
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, observedSelection);
+  });
+
+  afterEach(() => {
+    pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, observedSelection);
+    coordinator.cleanup();
+    mockPageEventBus.reset();
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("clears continuation globals but leaves a pending display untouched for duplicates", async () => {
+    const originalPosition = { x: 12, y: 34, _isViewportRelative: false };
+    const originalToolbarPosition = { x: 50, y: 60 };
+    const originalGeometry = { anchor: "original-selection" };
+    const originalDetail = {
+      text: "same text", position: originalPosition,
+      options: { geometry: originalGeometry }, toolbarPosition: originalToolbarPosition,
+    };
+    await pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, originalDetail);
+    await vi.advanceTimersByTimeAsync(50);
+
+    window.__translateItSelectionDisplayToken = { originFrameId: "frame", sequence: 2 };
+    window.__translateItSelectionDisplayInteraction = "selection-continuation";
+    const duplicateDetail = {
+      text: "same text", position: { x: 99, y: 100 },
+      options: { geometry: { anchor: "duplicate-selection" } },
+      suppressWindowsManagerDisplay: true,
+    };
+    await pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, duplicateDetail);
+
+    expect(facade.show).toHaveBeenCalledOnce();
+    expect(window.__translateItSelectionDisplayToken).toBeNull();
+    expect(window.__translateItSelectionDisplayInteraction).toBeNull();
+    expect(observedSelection).toHaveBeenNthCalledWith(2, duplicateDetail);
+    expect(facade.getCommitted()).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(facade.getCommitted()).toEqual({
+      text: "same text", position: originalPosition, options: { geometry: originalGeometry },
+      toolbarPosition: originalToolbarPosition,
+    });
+
+    await pageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, {
+      text: "different text", position: { x: 70, y: 80 }, options: {},
+    });
+    expect(facade.show).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(facade.getCommitted()).toEqual({
+      text: "different text", position: { x: 70, y: 80 }, options: {}, toolbarPosition: undefined,
+    });
+  });
+});
+
 describe("EventCoordinator iframe window creation error boundary", () => {
   let facade;
   let coordinator;

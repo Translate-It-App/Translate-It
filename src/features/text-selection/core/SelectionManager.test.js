@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SelectionManager } from './SelectionManager.js';
 import { UI_HOST_IDS } from '@/shared/constants/ui.js';
+import { ExtensionContextManager } from '@/core/extensionContext.js';
+import { pageEventBus } from '@/core/PageEventBus.js';
+import { SELECTION_EVENTS } from '@/features/text-selection/events/SelectionEvents.js';
+import settingsManager from '@/shared/managers/SettingsManager.js';
 
 const rect = (left, bottom, width, height) => ({ left, bottom, width, height });
 
@@ -586,5 +590,117 @@ describe('SelectionManager selection geometry', () => {
       toolbarPosition,
       options: { ctrlPressed: false, displayInteraction: 'multi-click' }
     }), '*');
+  });
+});
+
+describe('SelectionManager duplicate selection events', () => {
+  afterEach(() => {
+    pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, onSelectionChange);
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const onSelectionChange = vi.fn();
+
+  it('emits both global events and marks only the duplicate as display-suppressed', async () => {
+    vi.useFakeTimers();
+    const manager = new SelectionManager();
+    const position = { x: 20, y: 40, _isViewportRelative: false };
+    vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+    vi.spyOn(settingsManager, 'get').mockImplementation((_key, fallback) => fallback);
+    vi.spyOn(manager, 'calculateSelectionPosition').mockReturnValue(position);
+    vi.spyOn(manager, 'checkExclusion').mockResolvedValue(false);
+    vi.spyOn(manager, 'isWindowVisible').mockReturnValue(false);
+    vi.spyOn(manager, 'showTranslationUI').mockResolvedValue(undefined);
+    onSelectionChange.mockClear();
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, onSelectionChange);
+
+    try {
+      const selection = {};
+      await manager.processSelection('same text', selection, { ctrlPressed: true });
+      await vi.advanceTimersByTimeAsync(50);
+      await manager.processSelection('same text', selection, { ctrlPressed: true });
+
+      expect(onSelectionChange).toHaveBeenCalledTimes(2);
+      const [first, duplicate] = onSelectionChange.mock.calls.map(([detail]) => detail);
+      expect(first).toEqual(expect.objectContaining({
+        text: 'same text', position, options: { ctrlPressed: true },
+        context: { frameId: manager.frameId, isIframe: false },
+      }));
+      expect(first).not.toHaveProperty('suppressWindowsManagerDisplay');
+      expect(duplicate).toEqual(expect.objectContaining({
+        text: 'same text', position, options: { ctrlPressed: true },
+        context: { frameId: manager.frameId, isIframe: false },
+        suppressWindowsManagerDisplay: true,
+      }));
+      expect(manager.showTranslationUI).toHaveBeenCalledOnce();
+    } finally {
+      manager.cleanup();
+    }
+  });
+
+  it('dedupes the same interaction but accepts the same text from a new primary interaction', async () => {
+    vi.useFakeTimers();
+    const manager = new SelectionManager();
+    const position = { x: 20, y: 40, _isViewportRelative: false };
+    const toolbarPosition = { x: 31, y: 42 };
+    const selectionGeometry = { range: 'primary-selection' };
+    let pendingShow;
+    let committedShow;
+    vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+    vi.spyOn(settingsManager, 'get').mockImplementation((_key, fallback) => fallback);
+    vi.spyOn(manager, 'calculateSelectionPosition').mockReturnValue(position);
+    vi.spyOn(manager, 'checkExclusion').mockResolvedValue(false);
+    vi.spyOn(manager, 'isWindowVisible').mockReturnValue(false);
+    vi.spyOn(manager, 'showTranslationUI').mockImplementation((...args) => {
+      clearTimeout(pendingShow);
+      pendingShow = setTimeout(() => { committedShow = args; }, 200);
+    });
+    onSelectionChange.mockClear();
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, onSelectionChange);
+
+    try {
+      const selection = { rangeCount: 1 };
+      const options = { selectionInteractionId: 11, toolbarPosition, geometry: selectionGeometry };
+      await manager.processSelection('same text', selection, options);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await manager.processSelection('same text', selection, options)).toBe(false);
+      expect(onSelectionChange.mock.calls[1][0]).toHaveProperty('suppressWindowsManagerDisplay', true);
+      expect(onSelectionChange.mock.calls[0][0].selectionInteractionId).toBe(11);
+      expect(onSelectionChange.mock.calls[1][0].selectionInteractionId).toBe(11);
+      expect(onSelectionChange.mock.calls[0][0].options).not.toHaveProperty('selectionInteractionId');
+
+      clearTimeout(pendingShow);
+      expect(committedShow).toBeUndefined();
+      await manager.processSelection('same text', selection, {
+        ...options,
+        selectionInteractionId: 12,
+      });
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(onSelectionChange).toHaveBeenCalledTimes(3);
+      expect(onSelectionChange.mock.calls[2][0]).not.toHaveProperty('suppressWindowsManagerDisplay');
+      expect(onSelectionChange.mock.calls[2][0].selectionInteractionId).toBe(12);
+      expect(manager.showTranslationUI).toHaveBeenCalledTimes(2);
+      expect(manager.showTranslationUI.mock.calls[1]).toEqual([
+        'same text', position,
+        expect.objectContaining({
+          geometry: selectionGeometry,
+          selectionInteractionId: 12,
+        }),
+        toolbarPosition,
+      ]);
+      expect(committedShow).toEqual([
+        'same text', position,
+        expect.objectContaining({
+          geometry: selectionGeometry,
+          selectionInteractionId: 12,
+        }),
+        toolbarPosition,
+      ]);
+    } finally {
+      clearTimeout(pendingShow);
+      manager.cleanup();
+    }
   });
 });

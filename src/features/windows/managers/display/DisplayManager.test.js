@@ -344,6 +344,36 @@ describe("DisplayManager Selection Window error boundary", () => {
     expect(independentIcon).toMatchObject({ position: toolbarPosition, selectionPosition });
   });
 
+  it("allows a new same-text interaction to replace an active Toolbar without changing selection geometry", async () => {
+    const oldToken = { originFrameId: "frame-1", sequence: 18 };
+    const oldPosition = { x: 5, y: 6 };
+    const oldSelectionPosition = { x: 15, y: 16 };
+    const selectionPosition = { x: 30, y: 40 };
+    const toolbarPosition = { x: 90, y: 100 };
+    state.isIconMode = true;
+    await manager._showIcon("same text", oldPosition, oldSelectionPosition, oldToken);
+    const oldIconId = state.activeIconId;
+
+    await manager.show("same text", selectionPosition, { displayInteraction: "regular-drag" }, toolbarPosition);
+    expect(mocks.events.showIcon).toHaveBeenCalledOnce();
+    expect(facade.dismiss).not.toHaveBeenCalled();
+
+    await manager.show("same text", selectionPosition, {
+      selectionInteractionId: 22,
+      displayInteraction: "regular-drag",
+    }, toolbarPosition);
+
+    expect(facade.dismiss).toHaveBeenCalledWith(false, true, expect.any(Number));
+    expect(mocks.events.showIcon).toHaveBeenCalledTimes(2);
+    const replacement = mocks.events.showIcon.mock.calls[1][0];
+    expect(replacement.id).not.toBe(oldIconId);
+    expect(replacement).toMatchObject({
+      text: "same text",
+      position: toolbarPosition,
+      selectionPosition,
+    });
+  });
+
   it("omits missing cursor coordinates for a verified continuation and keeps selection geometry separate", async () => {
     const token = { originFrameId: "frame-1", sequence: 15 };
     const firstToolbarPosition = { x: 12, y: 18 };

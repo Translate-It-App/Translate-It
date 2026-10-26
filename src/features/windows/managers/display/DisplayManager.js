@@ -161,7 +161,7 @@ export class DisplayManager {
       }
     }
 
-    if (this._shouldSkipShow(selectedText)) {
+    if (this._shouldSkipShow(selectedText, options)) {
       this.logger.debug("Skipping show() - same text already visible");
       return;
     }
@@ -461,12 +461,13 @@ export class DisplayManager {
   /**
    * Check if we should skip showing (duplicate text)
    */
-  _shouldSkipShow(selectedText) {
+  _shouldSkipShow(selectedText, options = {}) {
     if (!selectedText) return true;
 
     const isAlreadyVisible = this.state.isVisible || this.state.isIconMode;
 
-    if (isAlreadyVisible && this.state.originalText === selectedText) {
+    if (isAlreadyVisible && this.state.originalText === selectedText &&
+        !Number.isInteger(options.selectionInteractionId)) {
       return true;
     }
 
