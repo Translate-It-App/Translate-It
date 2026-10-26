@@ -187,17 +187,6 @@
             </span>
           </div>
 
-          <div class="setting-group sub-setting-group">
-            <BaseCheckbox
-              v-model="enhancedTripleClickDrag"
-              :disabled="!extensionEnabled"
-              :label="t('enhanced_triple_click_drag_label') || 'Enhanced Triple-Click + Drag Support'"
-            />
-            <span class="setting-description">
-              {{ t('enhanced_triple_click_drag_description') || 'When enabled, triple-clicking to select a paragraph and then dragging to extend the selection will wait until you release the mouse before showing the translation. This prevents premature translation when you want to select multiple paragraphs.' }}
-            </span>
-          </div>
-
           <div
             v-if="selectionTranslationMode === SelectionTranslationMode.ON_CLICK"
             id="SHOW_TRANSLATE_ICON_IN_TOOLBAR"
@@ -1220,7 +1209,6 @@ const requireCtrlForTextSelection = createSetting('REQUIRE_CTRL_FOR_TEXT_SELECTI
 const showTtsIconInToolbar = createSetting('SHOW_TTS_ICON_IN_TOOLBAR', true)
 const showTranslateIconInToolbar = createSetting('SHOW_TRANSLATE_ICON_IN_TOOLBAR', true)
 const activeSelectionIconOnTextfields = createSetting('ACTIVE_SELECTION_ICON_ON_TEXTFIELDS', true)
-const enhancedTripleClickDrag = createSetting('ENHANCED_TRIPLE_CLICK_DRAG', false)
 
 // Whole Page
 const wholePageEnabled = createSetting('WHOLE_PAGE_TRANSLATION_ENABLED', true)

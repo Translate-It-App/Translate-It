@@ -79,6 +79,9 @@ describe('SettingsManager defaults', () => {
     const canonicalDefaults = getPersistedDefaultSettings();
     const managerDefaults = settingsManager._defaults;
 
+    expect(canonicalDefaults).not.toHaveProperty('ENHANCED_TRIPLE_CLICK_DRAG');
+    expect(managerDefaults).not.toHaveProperty('ENHANCED_TRIPLE_CLICK_DRAG');
+
     expect(Object.keys(managerDefaults).every(key => (
       Object.prototype.hasOwnProperty.call(canonicalDefaults, key)
     ))).toBe(true);

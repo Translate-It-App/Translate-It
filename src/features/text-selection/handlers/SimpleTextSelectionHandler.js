@@ -54,12 +54,6 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     this.selectionTimeout = null;
     this.debounceDelay = 100; // 100ms debounce
 
-    // Timing for triple-click detection
-    this.tripleClickDelay = 300; // Wait time to detect triple-click
-
-    // Settings
-    this.enhancedTripleClickDrag = false; // Will be loaded from settings
-
     // Track Ctrl key state
     this.ctrlKeyPressed = false;
     this.lastKeyEventTime = 0;
@@ -100,7 +94,6 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     // Simplified triple-click + drag support
     this.lastTripleClickTime = 0;
     this.isWaitingForDragEnd = false;
-    this.dragStartTime = 0;
 
     // Smart selection preservation system
     this._preservationState = {
@@ -192,9 +185,6 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
 
       // Setup event listeners
       this.setupEventListeners();
-
-      // Load enhanced triple-click drag setting
-      this.enhancedTripleClickDrag = settingsManager.get('ENHANCED_TRIPLE_CLICK_DRAG', false);
 
       // Setup settings listeners
       this.setupSettingsListeners();
@@ -406,14 +396,6 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
         }, 'simple-text-selection')
       );
 
-      // ENHANCED_TRIPLE_CLICK_DRAG changes
-      this._settingsListeners.push(
-        settingsManager.onChange('ENHANCED_TRIPLE_CLICK_DRAG', (newValue) => {
-          logger.debug('ENHANCED_TRIPLE_CLICK_DRAG changed:', newValue);
-          this.enhancedTripleClickDrag = newValue;
-        }, 'simple-text-selection')
-      );
-
       logger.debug('Settings listeners setup complete');
 
     } catch (error) {
@@ -496,8 +478,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     const currentTime = Date.now();
 
     // Enhanced triple-click + drag detection
-    if (this.enhancedTripleClickDrag &&
-        currentTime - this.lastTripleClickTime < 500 &&
+    if (currentTime - this.lastTripleClickTime < 500 &&
         this.isDragging) {
       return 'triple-click-drag';
     }
@@ -1151,22 +1132,17 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       this.lastKeyEventTime = Date.now();
     }
 
-    // Simple triple-click detection (only if enhanced mode is enabled)
+    // Track consecutive clicks to preserve the final expanded selection.
     let detectedTripleClick = false;
-    if (this.enhancedTripleClickDrag) {
-      const currentTime = Date.now();
-      const timeSinceLastClick = currentTime - this.lastTripleClickTime;
+    const currentTime = Date.now();
+    const timeSinceLastClick = currentTime - this.lastTripleClickTime;
 
-      // Check if this is a triple-click (within 300ms)
-      if (timeSinceLastClick < 300 && timeSinceLastClick > 0) {
-        detectedTripleClick = true;
-        this.isWaitingForDragEnd = true;
-        this.dragStartTime = currentTime;
-        logger.debug('Triple-click detected - waiting for drag end');
-      }
-
-      this.lastTripleClickTime = currentTime;
+    if (timeSinceLastClick < 300 && timeSinceLastClick > 0) {
+      detectedTripleClick = true;
+      this.isWaitingForDragEnd = true;
+      logger.debug('Multi-click selection detected - waiting for drag end');
     }
+    this.lastTripleClickTime = currentTime;
     if (!detectedTripleClick) this.isWaitingForDragEnd = false;
   }
 

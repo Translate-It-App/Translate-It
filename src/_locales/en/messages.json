@@ -1322,12 +1322,6 @@
   "active_selection_icon_on_textfields_description": {
     "message": "Show translation icon when double clicking on text inside text fields (textarea)."
   },
-  "enhanced_triple_click_drag_label": {
-    "message": "Enhanced Triple-Click + Drag Support"
-  },
-  "enhanced_triple_click_drag_description": {
-    "message": "When enabled, triple-clicking to select a paragraph and then dragging to extend the selection will wait until you release the mouse before showing the translation. This prevents premature translation when you want to select multiple paragraphs."
-  },
   "show_translate_icon_in_toolbar_label": {
     "message": "Show Translate Button in Selection Toolbar"
   },

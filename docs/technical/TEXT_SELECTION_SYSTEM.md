@@ -12,12 +12,13 @@ The Text Selection system is a key component of the Translate-It extension, resp
 - **Smart Dismissal**: TTS playback automatically stops when the toolbar is dismissed (e.g., clicking outside), ensuring audio doesn't leak after the UI is gone.
 
 ### Updates - Simplified System:
-- **Complexity Removal**: Complete removal of complex drag detection and the `pendingSelection` system.
-- **selectionchange-only**: Utilizes only `selectionchange` events for all scenarios.
+- **Selection and drag handling**: `selectionchange` tracks updated text and selection geometry; mouse and keyboard events provide interaction context and positioning.
+- **Multi-click and drag completion**: Double-click word selection, triple-click paragraph selection, and native drag extensions across paragraphs wait until release before presenting the toolbar.
+- **No behavior toggle**: Release-based handling is always enabled. Older persisted `ENHANCED_TRIPLE_CLICK_DRAG` values (`true` or `false`) are ignored; no storage migration is required.
+- **Release positioning**: The toolbar is positioned about 10px below the release cursor, clamped to the viewport. While the selection continues visibly, its position is retained as text and selection geometry update; keyboard selection uses selection geometry as the positioning fallback.
 - **Text Field Decoupling**: Text field logic has been moved to the `text-field-interaction` module.
-- **Simple Drag Prevention**: Uses basic `mousedown`/`mouseup` detection to prevent UI triggers during active dragging.
 - **Performance Boost**: 60-70% reduction in code complexity and improved performance.
-- **Maintainability**: Significantly simpler and more maintainable codebase.
+- **Lifecycle and cancellation**: Existing handler ownership, cleanup, and cancellation behavior remain in place.
 
 ## Architecture
 
@@ -26,8 +27,8 @@ The Text Selection system is a key component of the Translate-It extension, resp
 #### 1. **SimpleTextSelectionHandler**
 `src/features/text-selection/handlers/SimpleTextSelectionHandler.js`
 
-- Manages the standalone `selectionchange` event.
-- Simple drag detection (`mousedown`/`mouseup`).
+- Tracks `selectionchange` updates alongside pointer and keyboard interaction events.
+- Tracks multi-click and drag completion through release.
 - Prevents toolbar display within text fields.
 - Communicates directly with the `SelectionManager`.
 
@@ -56,25 +57,22 @@ The Text Selection system is a key component of the Translate-It extension, resp
 
 ## Selection Strategy (Simplified)
 
-### New Approach: selectionchange-only
+### Selection and Release Strategy
 
-The new system utilizes a single strategy:
+Page selections combine selection updates with interaction events:
 
-#### **Single Strategy** (All Content)
+#### **Page Content**
 ```javascript
-// Only one event listener is required:
-document.addEventListener('selectionchange', () => {
-  if (!isDragging && hasText && !isInTextField) {
-    showTranslationIcon();
-  }
-});
-
+selectionchange → track selected text and geometry
+mousedown / click / mouseup → track multi-click and drag lifecycle
+release → process completed selection and position from release cursor
+keyboard selection → process using selection geometry
 ```
 
 ### Toolbar Display Conditions:
 
 1. **Text is selected** (`selectedText.trim()`)
-2. **Not currently dragging** (`!isDragging`)
+2. **Pointer selection is complete** (wait for release after multi-click or drag extension)
 3. **Not inside a text field** (`!isInTextField`)
 4. **Ctrl key requirement** (if enabled)
 5. **Select element mode is disabled** (`!selectModeActive`)
@@ -85,83 +83,49 @@ document.addEventListener('selectionchange', () => {
 * **Page Text Selection** → `SimpleTextSelectionHandler`
 * **Text Field Selection** → `TextFieldDoubleClickHandler` (Separate module)
 
-## Simple Drag Prevention (Simplified Approach)
+## Drag Completion and Positioning
 
 ### Advantages of the New Approach
 
-#### ❌ Legacy Method (Complex Drag Detection)
+#### Selection lifecycle
 
 ```javascript
-// Complex and bug-prone
-selectionchange → store as pendingSelection
-mouseup → process pendingSelection
-timeout management + complex state
+// Track selection changes and interaction state separately.
+selectionchange → update selected text and geometry
+mousedown / click → track pointer gesture and multi-click
+mouseup → process completed gesture using release cursor
 
 ```
 
-#### New Method (Simple Prevention)
+#### Release behavior
 
 ```javascript
-// Highly simple and effective
-mousedown → isDragging = true
-selectionchange → if (isDragging) skip
-mouseup → isDragging = false + process after delay
+// Keep the toolbar aligned with the user's completed interaction.
+release → position about 10px below cursor, clamped to viewport
+visible continuation → retain position while selection geometry updates
+keyboard selection → fall back to selection geometry
 
 ```
 
-### Simple Implementation
+### Lifecycle
 
-```javascript
-class SimpleTextSelectionHandler {
-  constructor() {
-    this.isDragging = false;
-  }
-
-  handleMouseDown() {
-    this.isDragging = true;
-  }
-
-  handleMouseUp() {
-    this.isDragging = false;
-
-    // Process selection after short delay
-    setTimeout(() => {
-      this.processSelection();
-    }, 50);
-  }
-
-  async processSelection() {
-    if (this.isDragging) {
-      return; // Skip during drag
-    }
-
-    if (this.isSelectionInTextField()) {
-      return; // Skip text fields
-    }
-
-    // Process page selection
-    await this.showSelectionToolbar();
-  }
-}
-
-```
+The existing handler remains the lifecycle owner: it registers and removes its listeners through its established resource tracking and cancels pending work during cleanup. Selection processing still respects the existing cancellation and dismissal paths.
 
 ## Event Flow
 
-### Event Flow (Simplified)
+### Event Flow
 
 ```mermaid
 graph TD
-    A[User MouseDown] --> B[isDragging = true]
-    B --> C[User Drags Text]
-    C --> D[selectionchange events]
-    D --> E[Skip (isDragging = true)]
-    E --> F[User MouseUp]
-    F --> G[isDragging = false]
-    G --> H[Process selection after 50ms]
-    H --> I[Show Selection Toolbar]
-    I --> J1[Click Translate]
-    I --> J2[Click TTS]
+    A[User double/triple click or drag] --> B[Track pointer interaction]
+    B --> C[selectionchange updates text and geometry]
+    C --> D[Wait for release]
+    D --> E[Process completed selection at release cursor]
+    E --> F[Show Selection Toolbar]
+    G[Keyboard selection] --> H[Use selection geometry fallback]
+    H --> F
+    F --> J1[Click Translate]
+    F --> J2[Click TTS]
     J1 --> K1[Show Translation Window]
     J2 --> K2[Play Audio / Toggle State]
 
@@ -169,21 +133,21 @@ graph TD
 
 ### Various Scenarios
 
-#### 1. **Mouse Selection** (Drag-to-select)
+#### 1. **Mouse Selection** (Double/triple click and drag extension)
 
 ```
-mousedown → isDragging = true
+double-click → select word; triple-click → select paragraph
   ↓
-selectionchange → skip (isDragging = true)
+drag → extend native selection, including across paragraphs
   ↓
-mouseup → isDragging = false → process after 50ms → show toolbar
+release → process completed selection and position toolbar below release cursor
 
 ```
 
 #### 2. **Keyboard Selection** (Ctrl+A, Shift+Arrow)
 
 ```
-selectionchange (isDragging = false) → immediate processing → show toolbar
+selectionchange → update selection; use selection geometry to position toolbar
 
 ```
 
@@ -405,9 +369,9 @@ this.logger.debug('Selection detected', {
 ### 1. **Regular Website Selection**
 
 ```javascript
-// User drags text on a regular website
-// → selectionchange events ignored while dragging
-// → On mouseup: process and show selection toolbar
+// User double-clicks a word or triple-clicks a paragraph, then extends selection
+// → selectionchange updates the selection while the gesture is active
+// → On release: process the completed selection and position from the cursor
 
 ```
 
@@ -421,9 +385,9 @@ this.logger.debug('Selection detected', {
 
 ### 3. **Keyboard Selection**
 ```javascript
-// User presses Ctrl+A
-// → selectionchange with isDragging = false
-// → Immediate processing and toolbar display
+// User presses Ctrl+A or extends selection with the keyboard
+// → selectionchange updates the selection
+// → Use selection geometry as the toolbar positioning fallback
 
 ```
 
@@ -449,9 +413,9 @@ this.logger.debug('Selection detected', {
 
 ### Key Improvements - Simplification
 
-* **60-70% Code Reduction**: Eliminated unnecessary complexities.
-* **selectionchange-only**: Switched exclusively to `selectionchange` events.
-* **Simple Drag Prevention**: Replaced `pendingSelection` with simple `mousedown`/`mouseup`.
+* **Unified Selection Handling**: Selection updates, pointer gestures, release, and keyboard geometry are used together.
+* **Multi-click Drag Completion**: Double-click, triple-click, and native drag extension wait for release before toolbar display.
+* **Stable Positioning**: Release cursor position is retained for visible continuation; keyboard selections use selection geometry.
 * **Text Field Separation**: Fully decoupled text fields into an independent module.
 * **Performance Boost**: Higher efficiency with fewer race conditions.
 * **Maintainability**: Cleaner, more readable code.

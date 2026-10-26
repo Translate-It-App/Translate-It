@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import ElementDetectionService from '@/shared/services/ElementDetectionService.js';
+import { settingsManager } from '@/shared/managers/SettingsManager.js';
 import { SimpleTextSelectionHandler } from './SimpleTextSelectionHandler.js';
 
 vi.mock('@/shared/services/ElementDetectionService.js', () => ({
@@ -385,8 +386,8 @@ describe('SimpleTextSelectionHandler enhanced triple-click waiting state', () =>
   it('processes the final paragraph selection after a three-click drag and clears waiting state', async () => {
     vi.useFakeTimers();
     const handler = new SimpleTextSelectionHandler();
-    handler.enhancedTripleClickDrag = true;
-    const selection = { toString: () => 'final paragraph', rangeCount: 1 };
+    let selectedText = 'word';
+    const selection = { toString: () => selectedText, rangeCount: 1 };
     const processSelection = vi.fn().mockResolvedValue();
     handler.isActive = true;
     handler.isDragging = false;
@@ -397,26 +398,35 @@ describe('SimpleTextSelectionHandler enhanced triple-click waiting state', () =>
     vi.spyOn(handler, 'isSelectionInTextField').mockReturnValue(false);
     vi.spyOn(handler, 'isSelectionInsideUI').mockReturnValue(false);
 
-    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
-    vi.advanceTimersByTime(10);
-    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
-    vi.advanceTimersByTime(10);
-    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, detail: 1 }));
+    selectedText = 'paragraph one';
+    handler.handleSelectionChange();
+    vi.advanceTimersByTime(20);
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, detail: 2 }));
     expect(handler.isWaitingForDragEnd).toBe(true);
+    selectedText = 'paragraph one\nparagraph two';
     handler.handleSelectionChange();
     expect(handler.selectionTimeout).toBeNull();
+    vi.advanceTimersByTime(10);
+    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, detail: 3 }));
+    selectedText = 'paragraph one\nparagraph two\nparagraph three';
+    handler.handleSelectionChange();
+    expect(processSelection).not.toHaveBeenCalled();
 
-    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0 }));
+    handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, detail: 3, clientX: 25, clientY: 35 }));
     await vi.runAllTimersAsync();
     expect(handler.isWaitingForDragEnd).toBe(false);
-    expect(processSelection).toHaveBeenCalledWith('final paragraph', selection, expect.any(Object));
+    expect(processSelection).toHaveBeenCalledTimes(1);
+    expect(processSelection).toHaveBeenCalledWith(
+      'paragraph one\nparagraph two\nparagraph three', selection,
+      expect.objectContaining({ toolbarPosition: { x: 25, y: 45, _isViewportRelative: false } }),
+    );
     handler._clearPreservationTimer();
   });
 
   it('clears stale waiting state before independent mouse or keyboard selection', () => {
     vi.useFakeTimers();
     const handler = new SimpleTextSelectionHandler();
-    handler.enhancedTripleClickDrag = true;
     handler.lastTripleClickTime = Date.now() - 500;
     handler.isWaitingForDragEnd = true;
     handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
@@ -428,19 +438,35 @@ describe('SimpleTextSelectionHandler enhanced triple-click waiting state', () =>
     expect(handler.isWaitingForDragEnd).toBe(false);
   });
 
-  it('does not enter the triple-click waiting state when the enhancement is disabled', () => {
+  it.each([true, false])('ignores legacy persisted enhanced-triple-click setting=%s on activation', async (legacyValue) => {
     vi.useFakeTimers();
-    const handler = new SimpleTextSelectionHandler();
-    handler.enhancedTripleClickDrag = false;
-    handler.lastTripleClickTime = Date.now() - 10;
-    handler.handleMouseDown(new MouseEvent('mousedown', { button: 0 }));
-    expect(handler.isWaitingForDragEnd).toBe(false);
+    SimpleTextSelectionHandler.resetInstance();
+    const getSetting = vi.spyOn(settingsManager, 'get').mockImplementation((key, fallback) =>
+      key === 'ENHANCED_TRIPLE_CLICK_DRAG' ? legacyValue : fallback,
+    );
+    const handler = SimpleTextSelectionHandler.getInstance();
+    try {
+      expect(await handler.activate()).toBe(true);
+      expect(getSetting.mock.calls.some(([key]) => key === 'ENHANCED_TRIPLE_CLICK_DRAG')).toBe(false);
+
+      vi.advanceTimersByTime(1);
+      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, detail: 1 }));
+      vi.advanceTimersByTime(10);
+      handler.handleMouseDown(new MouseEvent('mousedown', { button: 0, detail: 2 }));
+      expect(handler.isWaitingForDragEnd).toBe(true);
+
+      await handler.deactivate();
+      expect(handler.isWaitingForDragEnd).toBe(false);
+    } finally {
+      SimpleTextSelectionHandler.resetInstance();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
-  it.each([true, false])('creates a continuation only from a primary native third-click expansion with enhancement=%s', (enhanced) => {
+  it('creates a continuation only from a primary native third-click expansion', () => {
     vi.useFakeTimers();
     const handler = new SimpleTextSelectionHandler();
-    handler.enhancedTripleClickDrag = enhanced;
     const paragraph = document.createElement('p');
     const span = document.createElement('span');
     const textNode = document.createTextNode('word then rest');

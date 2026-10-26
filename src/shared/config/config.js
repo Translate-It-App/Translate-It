@@ -281,7 +281,6 @@ export const CONFIG = {
   REQUIRE_CTRL_FOR_TEXT_SELECTION: false, // نیاز به نگه داشتن Ctrl هنگام انتخاب متن
   SHOW_TTS_ICON_IN_TOOLBAR: true, // نمایش آیکون تلفظ صوتی در تولبار انتخاب متن
   SHOW_TRANSLATE_ICON_IN_TOOLBAR: true, // نمایش آیکون ترجمه در تولبار انتخاب متن
-  ENHANCED_TRIPLE_CLICK_DRAG: false, // فعال کردن پشتیبانی پیشرفته از triple-click + drag
   ENABLE_DICTIONARY: true, // با مکانیزم تشخیص کلمه، بعنوان دیکشنری پاسخ را نمایش میدهد
   ENABLE_SCREEN_CAPTURE: true, // فعال کردن قابلیت Screen Capture Translator
   OCR_DEFAULT_LANG: 'eng', // زبان پیش‌فرض OCR
@@ -1215,13 +1214,6 @@ export const getRequireCtrlForTextSelectionAsync = async () => {
   return getSettingValueAsync(
     "REQUIRE_CTRL_FOR_TEXT_SELECTION",
     CONFIG.REQUIRE_CTRL_FOR_TEXT_SELECTION
-  );
-};
-
-export const getEnhancedTripleClickDragAsync = async () => {
-  return getSettingValueAsync(
-    "ENHANCED_TRIPLE_CLICK_DRAG",
-    CONFIG.ENHANCED_TRIPLE_CLICK_DRAG
   );
 };
 

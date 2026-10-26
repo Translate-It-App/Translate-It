@@ -1322,12 +1322,6 @@
   "active_selection_icon_on_textfields_description": {
     "message": "نمایش آیکون ترجمه هنگام دوبار کلیک روی متن‌های داخل فیلدهای متنی (textarea)."
   },
-  "enhanced_triple_click_drag_label": {
-    "message": "پشتیبانی پیشرفته از سه‌بار کلیک + کشیدن"
-  },
-  "enhanced_triple_click_drag_description": {
-    "message": "هنگام فعال‌سازی، با سه‌بار کلیک برای انتخاب یک پاراگراف و سپس کشیدن ماوس برای گسترش انتخاب، سیستم تا زمان رها کردن ماوس صبر می‌کند و سپس ترجمه را نمایش می‌دهد. این از ترجمه زودهنگام موقع انتخاب چندین پاراگراف جلوگیری می‌کند."
-  },
   "show_translate_icon_in_toolbar_label": {
     "message": "نمایش دکمه ترجمه در نوار ابزار انتخاب"
   },

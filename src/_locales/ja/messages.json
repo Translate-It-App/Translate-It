@@ -1322,12 +1322,6 @@
   "active_selection_icon_on_textfields_description": {
     "message": "テキストフィールド（textarea）内のテキストをダブルクリックすると翻訳アイコンを表示します。"
   },
-  "enhanced_triple_click_drag_label": {
-    "message": "トリプルクリック＋ドラッグのサポートを強化"
-  },
-  "enhanced_triple_click_drag_description": {
-    "message": "有効にすると、段落をトリプルクリックで選択してからドラッグで範囲を広げた場合、マウスを離すまで翻訳を待機します。複数段落を選択したいときに途中で翻訳されるのを防ぎます。"
-  },
   "show_translate_icon_in_toolbar_label": {
     "message": "選択ツールバーに翻訳ボタンを表示"
   },
