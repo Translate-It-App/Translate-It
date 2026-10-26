@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { nextTick, ref } from 'vue';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import TranslationDisplay from './TranslationDisplay.vue';
 import { SimpleMarkdown } from '@/shared/utils/text/markdown.js';
 import { TranslationMode } from '@/shared/config/config.js';
@@ -12,6 +14,7 @@ const pronunciationMarkdown = [
   '- **Noun**: Expression, phrase, wording',
   '- **Synonyms**: Phrase, wording, statement',
 ].join('\n');
+const settingsMock = vi.hoisted(() => ({ dark: false }));
 
 vi.mock('@/composables/shared/useTextDirection.js', () => ({
   useTextDirection: (contentRef) => {
@@ -42,7 +45,9 @@ vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
 
 vi.mock('@/features/settings/stores/settings.js', () => ({
   useSettingsStore: () => ({
-    isDarkTheme: false,
+    get isDarkTheme() {
+      return settingsMock.dark;
+    },
   }),
 }));
 
@@ -53,16 +58,10 @@ vi.mock('@/features/text-actions/components/ActionToolbar.vue', () => ({
   },
 }));
 
-vi.mock('@/components/base/LoadingSpinner.vue', () => ({
-  default: {
-    name: 'LoadingSpinner',
-    template: '<div class="loading-spinner-stub" />',
-  },
-}));
-
 describe('TranslationDisplay.vue', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    settingsMock.dark = false;
   });
 
   const mountDisplay = async (props) => {
@@ -77,6 +76,102 @@ describe('TranslationDisplay.vue', () => {
     await nextTick();
     return wrapper;
   };
+
+  it('shows loading only before streaming and shares it across display modes', async () => {
+    for (const mode of ['standard', 'compact', 'popup', 'sidepanel', 'selection', 'mobile']) {
+      const wrapper = await mountDisplay({ mode, isLoading: true, isStreaming: false });
+
+      expect(wrapper.find('.ti-translation-loading-indicator').exists(), mode).toBe(true);
+      expect(wrapper.find('.ti-translation-content').exists(), mode).toBe(false);
+      wrapper.unmount();
+    }
+  });
+
+  it('follows the dark-theme setting while showing the loading indicator', async () => {
+    const wrapper = await mountDisplay({ isLoading: true });
+    expect(wrapper.classes()).not.toContain('theme-dark');
+
+    settingsMock.dark = true;
+    wrapper.vm.$forceUpdate();
+    await nextTick();
+
+    expect(wrapper.classes()).toContain('theme-dark');
+    expect(wrapper.find('.ti-translation-loading-indicator').exists()).toBe(true);
+  });
+
+  it('does not show the loader during streaming, with or without a partial result', async () => {
+    for (const content of ['', 'partial translation']) {
+      const wrapper = await mountDisplay({ isLoading: true, isStreaming: true, content });
+
+      expect(wrapper.find('.ti-translation-loading-indicator').exists()).toBe(false);
+      expect(wrapper.find('.ti-translation-content').exists()).toBe(true);
+      if (content) expect(wrapper.find('.ti-translation-content').text()).toContain(content);
+      wrapper.unmount();
+    }
+  });
+
+  it('moves from loading through streaming to successful content without retaining the loader', async () => {
+    const wrapper = await mountDisplay({ isLoading: true });
+    expect(wrapper.find('.ti-translation-loading-indicator').exists()).toBe(true);
+
+    await wrapper.setProps({ isStreaming: true, content: 'partial' });
+    expect(wrapper.find('.ti-translation-loading-indicator').exists()).toBe(false);
+    expect(wrapper.find('.ti-translation-content').text()).toContain('partial');
+
+    await wrapper.setProps({ isLoading: false, isStreaming: false, content: 'complete' });
+    expect(wrapper.find('.ti-translation-loading-indicator').exists()).toBe(false);
+    expect(wrapper.find('.ti-translation-content').text()).toContain('complete');
+  });
+
+  it('suppresses previous content and errors while pending, then shows errors or cancellation reset', async () => {
+    const wrapper = await mountDisplay({ content: 'previous result' });
+    expect(wrapper.find('.ti-translation-content').text()).toContain('previous result');
+
+    await wrapper.setProps({ isLoading: true, isStreaming: false, error: 'previous error' });
+    expect(wrapper.find('.ti-translation-loading-indicator').exists()).toBe(true);
+    expect(wrapper.find('.ti-translation-content').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('previous error');
+
+    await wrapper.setProps({ isLoading: false, error: 'translation failed', content: '' });
+    expect(wrapper.find('.ti-translation-loading-indicator').exists()).toBe(false);
+    expect(wrapper.find('.error-message').text()).toContain('translation failed');
+
+    await wrapper.setProps({ isLoading: true, error: '', content: '' });
+    expect(wrapper.find('.ti-translation-loading-indicator').exists()).toBe(true);
+    await wrapper.setProps({ isLoading: false, isStreaming: false, content: '', error: '' });
+    expect(wrapper.find('.ti-translation-loading-indicator').exists()).toBe(false);
+    expect(wrapper.find('.placeholder-message').exists()).toBe(true);
+  });
+
+  it('keeps toolbar predicates and emits no loading-state events', async () => {
+    const wrapper = await mountDisplay({ content: 'result', isLoading: false, showToolbar: true });
+    expect(wrapper.find('.action-toolbar-stub').exists()).toBe(true);
+
+    await wrapper.setProps({ isLoading: true });
+    expect(wrapper.find('.action-toolbar-stub').exists()).toBe(false);
+    expect(Object.keys(wrapper.emitted())).toEqual([]);
+
+    await wrapper.setProps({ isLoading: false, content: '', showToolbar: true });
+    expect(wrapper.find('.action-toolbar-stub').exists()).toBe(false);
+  });
+
+  it('structurally routes current display consumers through the shared component', () => {
+    const consumers = [
+      'src/components/popup/TranslationForm.vue',
+      'src/apps/sidepanel/components/SidepanelMainContent.vue',
+      'src/apps/pdf/components/PdfWindowsHost.vue',
+      'src/features/windows/components/TranslationWindow.vue',
+      'src/apps/content/components/mobile/views/InputView.vue',
+      'src/apps/content/components/mobile/views/SelectionView.vue',
+      'src/apps/content/components/MouseHoverTooltip.vue',
+    ];
+
+    for (const file of consumers) {
+      const source = readFileSync(resolve(process.cwd(), file), 'utf8');
+      expect(source, file).toMatch(/import\s+TranslationDisplay\s+from\s+["'][^"']*components\/shared\/TranslationDisplay\.vue["']/);
+      expect(source, file).toMatch(/<TranslationDisplay\b/);
+    }
+  });
 
   it('renders normalized Google bold-label markdown through the modern marked path', async () => {
     const renderSpy = vi.spyOn(SimpleMarkdown, 'render');

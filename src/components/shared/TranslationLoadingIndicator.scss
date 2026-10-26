@@ -1,0 +1,87 @@
+/* Independently authored look-around and blink animation, visually inspired by
+   https://www.loading-ui.com/docs/components/wandering-eyes. */
+.ti-translation-loading-indicator {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  max-width: 100%;
+  color: var(--text-color, #343a40);
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.35;
+}
+
+.ti-translation-loading-indicator-eyes {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(0.35rem * var(--ti-loading-size, 1));
+  width: min(calc(4.5rem * var(--ti-loading-size, 1)), 100%);
+  height: calc(2rem * var(--ti-loading-size, 1));
+}
+
+.ti-translation-loading-indicator-eye {
+  display: grid;
+  flex-shrink: 1;
+  place-items: center;
+  width: min(calc(1.75rem * var(--ti-loading-size, 1)), 50%);
+  height: calc(1.45rem * var(--ti-loading-size, 1));
+  overflow: hidden;
+  border: calc(2px * var(--ti-loading-size, 1)) solid var(--ti-loading-eye-color, currentcolor);
+  border-radius: 50%;
+  animation: ti-translation-eye-blink var(--ti-loading-duration, 2.8s) infinite;
+}
+
+.ti-translation-loading-indicator-pupil {
+  width: calc(0.48rem * var(--ti-loading-size, 1));
+  height: calc(0.48rem * var(--ti-loading-size, 1));
+  border-radius: 50%;
+  background: var(--ti-loading-eye-color, currentcolor);
+  box-shadow: 0 0 0 calc(2px * var(--ti-loading-size, 1)) var(--ti-loading-pupil-color, var(--bg-result-color, #fff));
+  animation: ti-translation-eye-look var(--ti-loading-duration, 2.8s) infinite ease-in-out;
+}
+
+.ti-translation-loading-indicator-eye:nth-child(2) {
+  animation-delay: 0.08s;
+}
+
+.ti-translation-loading-indicator-eye:nth-child(2) .ti-translation-loading-indicator-pupil {
+  animation-delay: 0.08s;
+}
+
+.ti-translation-loading-indicator-label {
+  overflow-wrap: anywhere;
+}
+
+.ti-translation-display[class~="theme-dark"] .ti-translation-loading-indicator {
+  color: var(--text-color, #e8eaed);
+}
+
+.ti-translation-display[class~="theme-dark"] .ti-translation-loading-indicator-pupil {
+  box-shadow: 0 0 0 calc(2px * var(--ti-loading-size, 1)) var(--ti-loading-pupil-color, #1a1a1a);
+}
+
+@keyframes ti-translation-eye-look {
+  0%, 18%, 100% { transform: translateX(0); }
+
+  28%, 42% { transform: translateX(calc(-0.3rem * var(--ti-loading-size, 1))); }
+
+  55%, 69% { transform: translateX(calc(0.3rem * var(--ti-loading-size, 1))); }
+
+  80%, 90% { transform: translateX(0); }
+}
+
+@keyframes ti-translation-eye-blink {
+  0%, 44%, 48%, 88%, 92%, 100% { transform: scaleY(1); }
+
+  46%, 90% { transform: scaleY(0.08); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ti-translation-loading-indicator-eye,
+  .ti-translation-loading-indicator-pupil {
+    animation: none;
+  }
+}

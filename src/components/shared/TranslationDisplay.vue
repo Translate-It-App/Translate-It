@@ -25,7 +25,7 @@
       v-if="isLoading && !isStreaming"
       class="ti-loading-overlay"
     >
-      <LoadingSpinner size="lg" />
+      <TranslationLoadingIndicator :label="t('mobile_selection_translating_label')" />
     </div>
 
     <!-- Main Content State -->
@@ -196,7 +196,7 @@ import {
 import { TranslationMode } from "@/shared/config/config.js";
 import { renderMarkdownPreview } from "@/shared/utils/text/markdownPreview.js";
 import ActionToolbar from "@/features/text-actions/components/ActionToolbar.vue";
-import LoadingSpinner from "@/components/base/LoadingSpinner.vue";
+import TranslationLoadingIndicator from "@/components/shared/TranslationLoadingIndicator.vue";
 import { useFont } from "@/composables/shared/useFont.js";
 import { useUnifiedI18n } from "@/composables/shared/useUnifiedI18n.js";
 import { getScopedLogger } from "@/shared/logging/logger.js";
