@@ -4,6 +4,7 @@ import { ref } from 'vue';
 import TranslationForm from './TranslationForm.vue';
 
 const mockSettingsCallback = vi.fn();
+const mockFocusTextarea = vi.fn();
 const resourceTrackerMocks = vi.hoisted(() => ({
   addEventListener: vi.fn((target, event, handler) => target.addEventListener(event, handler)),
 }));
@@ -67,6 +68,9 @@ vi.mock('@/shared/logging/logConstants.js', () => ({
 vi.mock('@/components/shared/TranslationInputField.vue', () => ({
   default: {
     name: 'TranslationInputField',
+    setup(_props, { expose }) {
+      expose({ focusTextarea: mockFocusTextarea });
+    },
     template: '<div class="translation-input-stub" />',
   },
 }));
@@ -96,6 +100,7 @@ describe('TranslationForm.vue', () => {
     mockTranslation.getRetryCallback.mockImplementation((retryFunction) => retryFunction);
     mockTranslation.getSettingsCallback.mockReturnValue(mockSettingsCallback);
     mockTranslation.revertTranslation.mockReturnValue({ sourceLanguage: 'fr', targetLanguage: 'en' });
+    mockTranslation.clearTranslation.mockResolvedValue(undefined);
   });
 
   const mountForm = () => mount(TranslationForm, {
@@ -133,6 +138,45 @@ describe('TranslationForm.vue', () => {
     expect(mockTranslation.getRetryCallback).toHaveBeenCalledWith(expect.any(Function));
     expect(mockTranslation.getSettingsCallback).toHaveBeenCalledTimes(1);
     expect(mockSettingsCallback).toHaveBeenCalledTimes(1);
+  });
+
+  it('exposes source focus but does not focus from clear-storage listeners', async () => {
+    const wrapper = mountForm();
+    const clearListener = resourceTrackerMocks.addEventListener.mock.calls
+      .find(([, event]) => event === 'clear-storage')[2];
+
+    await wrapper.vm.focusSourceInput();
+    expect(mockFocusTextarea).toHaveBeenCalledTimes(1);
+    mockFocusTextarea.mockClear();
+    clearListener();
+    await Promise.resolve();
+    expect(mockTranslation.clearTranslation).toHaveBeenCalledTimes(1);
+    expect(mockFocusTextarea).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('skips only the Popup button event and preserves regular clear semantics', () => {
+    const wrapper = mountForm();
+    const clearListener = resourceTrackerMocks.addEventListener.mock.calls
+      .find(([, event]) => event === 'clear-storage')[2];
+    mockTranslation.lastTranslation.value = { source: 'hello' };
+
+    wrapper.vm.clearFields();
+    expect(mockTranslation.clearTranslation).toHaveBeenCalledTimes(1);
+    expect(mockTranslation.lastTranslation.value).toBeNull();
+
+    mockTranslation.clearTranslation.mockClear();
+    mockTranslation.lastTranslation.value = { source: 'still here' };
+    clearListener(new CustomEvent('clear-storage', {
+      detail: { source: 'popup-clear-button' }
+    }));
+    expect(mockTranslation.clearTranslation).not.toHaveBeenCalled();
+    expect(mockTranslation.lastTranslation.value).toEqual({ source: 'still here' });
+
+    clearListener(new CustomEvent('clear-storage'));
+    expect(mockTranslation.clearTranslation).toHaveBeenCalledTimes(1);
+    expect(mockTranslation.lastTranslation.value).toBeNull();
+    wrapper.unmount();
   });
 
   it('reverts UI state without persisting language defaults', () => {

@@ -388,7 +388,13 @@ const handleTranslate = async (data) => {
 
 const clearFields = async () => {
   logger.debug("Clearing fields and resetting languages");
+  const activeElement = document.activeElement;
   await clearTranslation();
+  const focusStayedOnClear = document.activeElement === activeElement
+    || (activeElement?.matches('.ti-sidepanel-clear-action') && document.activeElement === document.body);
+  if (!isUnmounted && focusStayedOnClear) {
+    sourceInputRef.value?.focusTextarea?.();
+  }
 };
 
 const handleSetDefaultSource = async () => {

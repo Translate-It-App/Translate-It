@@ -169,6 +169,7 @@ const translationFormRef = ref(null)
  */
 defineExpose({
   triggerTranslation: (...args) => translationFormRef.value?.triggerTranslation(...args),
-  cancelTranslation: (...args) => translationFormRef.value?.cancelTranslation(...args)
+  cancelTranslation: (...args) => translationFormRef.value?.cancelTranslation(...args),
+  focusSourceInput: () => translationFormRef.value?.focusSourceInput()
 })
 </script>

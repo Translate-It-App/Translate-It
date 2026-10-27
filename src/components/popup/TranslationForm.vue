@@ -67,6 +67,7 @@ import { useResourceTracker } from '@/composables/core/useResourceTracker.js';
 import './TranslationForm.scss';
 
 const logger = getScopedLogger(LOG_COMPONENTS.UI, 'PopupTranslationForm');
+const POPUP_CLEAR_EVENT_SOURCE = 'popup-clear-button'
 
 // Resource tracker for memory management
 const tracker = useResourceTracker('popup-translation-form');
@@ -193,7 +194,8 @@ const handleTranslate = async (manualProvider) => {
   }
 }
 
-const clearStorage = () => {
+const clearStorage = (event) => {
+  if (event?.detail?.source === POPUP_CLEAR_EVENT_SOURCE) return;
   clearTranslation()
   lastTranslation.value = null
 }
@@ -222,6 +224,7 @@ defineExpose({
   triggerTranslation: handleTranslate,
   cancelTranslation,
   clearFields: clearStorage,
+  focusSourceInput: () => sourceInputRef.value?.focusTextarea(),
   isTranslating
 })
 </script>

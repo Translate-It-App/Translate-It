@@ -133,6 +133,7 @@ import { CONFIG } from '@/shared/config/config.js';
 
 // --- Initialization & Setup ---
 const logger = getScopedLogger(LOG_COMPONENTS.UI, 'PopupApp')
+const POPUP_CLEAR_EVENT_SOURCE = 'popup-clear-button'
 
 // Resource tracker for automatic cleanup of timeouts and listeners
 const tracker = useResourceTracker('popup-app')
@@ -265,6 +266,7 @@ const displayErrorMessage = computed(() => {
 
 // Refs for child component communication
 const translationFormRef = ref(null)
+let isUnmounted = false
 
 // --- Event Handlers ---
 
@@ -296,11 +298,25 @@ const handleCancel = () => {
  */
 const handleClearFields = async () => {
   logger.debug('Clearing fields via minimized button');
+  const activeElement = document.activeElement;
   await clearTranslation();
   
   // Also dispatch global event if other components rely on it
-  const event = new CustomEvent('clear-storage');
+  const event = new CustomEvent('clear-storage', {
+    detail: { source: POPUP_CLEAR_EVENT_SOURCE }
+  });
   document.dispatchEvent(event);
+
+  if (
+    !isUnmounted
+    && activeView.value === 'translate'
+    && (
+      document.activeElement === activeElement
+      || (activeElement?.matches('.ti-btn-min-clear') && document.activeElement === document.body)
+    )
+  ) {
+    translationFormRef.value?.focusSourceInput?.();
+  }
 }
 
 const handleSetDefaultSource = async () => {
@@ -364,7 +380,8 @@ const initialize = async () => {
     await translation.initializeSessionState()
 
     // Step 5: Global Event Listeners (e.g., clearing fields from other components)
-    tracker.addEventListener(document, 'clear-storage', async () => {
+    tracker.addEventListener(document, 'clear-storage', async (event) => {
+      if (event.detail?.source === POPUP_CLEAR_EVENT_SOURCE) return;
       await clearTranslation();
     })
 
@@ -424,6 +441,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  isUnmounted = true
   logger.debug('[PopupApp] Popup unmounting - cleaning up resources')
   
   // Explicitly disconnect lifecycle port

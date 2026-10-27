@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import TranslationView from './TranslationView.vue'
 
+const mockFocusSourceInput = vi.fn()
+
 vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
   useUnifiedI18n: () => ({ t: (key) => key })
 }))
@@ -17,7 +19,12 @@ describe('TranslationView clear action', () => {
         stubs: {
           ProviderSelector: true,
           LanguageSelector: true,
-          TranslationForm: true,
+          TranslationForm: {
+            setup(_props, { expose }) {
+              expose({ focusSourceInput: mockFocusSourceInput })
+            },
+            template: '<div />'
+          },
           MaskIcon: true
         }
       }
@@ -41,6 +48,8 @@ describe('TranslationView clear action', () => {
     expect(button.attributes('title')).toBe(button.attributes('aria-label'))
     await button.trigger('click')
     expect(wrapper.emitted('clear')).toHaveLength(1)
+    wrapper.vm.focusSourceInput()
+    expect(mockFocusSourceInput).toHaveBeenCalledTimes(1)
     await wrapper.setProps({ showClearButton: false })
     expect(wrapper.get('.ti-btn-min-clear').element).toBe(button.element)
   })

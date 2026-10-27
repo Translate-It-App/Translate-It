@@ -7,6 +7,8 @@ let mockSettingsStore
 let mockUnifiedTranslation
 let mockLanguageDefaults
 const useUnifiedTranslationMock = vi.hoisted(() => vi.fn())
+const translationViewFocus = vi.hoisted(() => vi.fn())
+const popupTrackedEventListeners = vi.hoisted(() => [])
 const liveDubbingViewLifecycle = vi.hoisted(() => ({ mounts: 0, unmounts: 0, stopCalls: 0 }))
 const popupLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -58,7 +60,10 @@ vi.mock('@/features/tts/core/TTSGlobalManager.js', () => ({
 vi.mock('@/composables/core/useResourceTracker.js', () => ({
   useResourceTracker: () => ({
     trackTimeout: vi.fn(),
-    addEventListener: vi.fn()
+    addEventListener: vi.fn((target, type, listener) => {
+      target.addEventListener(type, listener)
+      popupTrackedEventListeners.push([target, type, listener])
+    })
   })
 }))
 
@@ -137,7 +142,10 @@ vi.mock('@/components/popup/TranslationView.vue', () => ({
       'update:targetLanguage',
       'update:currentProvider'
     ],
-    template: '<div class="translation-view-stub" />'
+    methods: {
+      focusSourceInput: translationViewFocus
+    },
+    template: '<button class="translation-view-stub" :disabled="!showClearButton" @click="$emit(\'clear\')" />'
   }
 }))
 
@@ -193,6 +201,9 @@ const deferred = () => {
 
 describe('PopupApp', () => {
   beforeEach(() => {
+    popupTrackedEventListeners.splice(0).forEach(([target, type, listener]) => {
+      target.removeEventListener(type, listener)
+    })
     vi.stubGlobal('__BROWSER__', 'chrome')
     liveDubbingViewLifecycle.mounts = 0
     liveDubbingViewLifecycle.unmounts = 0
@@ -207,6 +218,7 @@ describe('PopupApp', () => {
       lastTranslation: ref({ source: 'hello' })
     }
     useUnifiedTranslationMock.mockClear()
+    translationViewFocus.mockClear()
     popupLogger.debug.mockClear()
     popupLogger.info.mockClear()
     popupLogger.warn.mockClear()
@@ -294,6 +306,186 @@ describe('PopupApp', () => {
 
     expect(useUnifiedTranslationMock).toHaveBeenCalledTimes(1)
     expect(wrapper.findComponent({ name: 'TranslationView' }).props('translation')).toBe(mockUnifiedTranslation)
+  })
+
+  it('waits for a successful clear before focusing source and dispatches clear-storage once', async () => {
+    const pendingClear = deferred()
+    const delayedDuplicate = deferred()
+    mockUnifiedTranslation.clearTranslation = vi.fn(() => (
+      mockUnifiedTranslation.clearTranslation.mock.calls.length === 1
+        ? pendingClear.promise
+        : delayedDuplicate.promise.then(() => {
+          mockUnifiedTranslation.sourceText.value = ''
+        })
+    ))
+    const wrapper = mount(PopupApp)
+    await flushPromises()
+    await flushPromises()
+
+    const clearButton = wrapper.get('.translation-view-stub')
+    clearButton.element.focus()
+    const clearStorage = vi.fn()
+    const formClearListener = (event) => {
+      if (event.detail?.source === 'popup-clear-button') return
+      mockUnifiedTranslation.clearTranslation()
+    }
+    document.addEventListener('clear-storage', clearStorage)
+    document.addEventListener('clear-storage', formClearListener)
+    try {
+      await clearButton.trigger('keydown', { key: 'Enter' })
+      await clearButton.trigger('click') // browsers synthesize this click for Enter activation
+      expect(mockUnifiedTranslation.clearTranslation).toHaveBeenCalledTimes(1)
+      expect(translationViewFocus).not.toHaveBeenCalled()
+      expect(clearStorage).not.toHaveBeenCalled()
+
+      pendingClear.resolve()
+      await flushPromises()
+      expect(translationViewFocus).toHaveBeenCalledTimes(1)
+      expect(clearStorage).toHaveBeenCalledTimes(1)
+      expect(clearStorage.mock.calls[0][0].detail).toEqual({ source: 'popup-clear-button' })
+      expect(mockUnifiedTranslation.clearTranslation).toHaveBeenCalledTimes(1)
+
+      mockUnifiedTranslation.sourceText.value = 'typed after clear focus'
+      delayedDuplicate.resolve()
+      await flushPromises()
+      expect(mockUnifiedTranslation.sourceText.value).toBe('typed after clear focus')
+    } finally {
+      document.removeEventListener('clear-storage', clearStorage)
+      document.removeEventListener('clear-storage', formClearListener)
+      wrapper.unmount()
+    }
+  })
+
+  it('continues handling separately dispatched unmarked clear-storage events', async () => {
+    const wrapper = mount(PopupApp)
+    await flushPromises()
+    await flushPromises()
+    const clearStorage = vi.fn()
+    const formClearListener = (event) => {
+      if (event.detail?.source === 'popup-clear-button') return
+      mockUnifiedTranslation.clearTranslation()
+    }
+    document.addEventListener('clear-storage', clearStorage)
+    document.addEventListener('clear-storage', formClearListener)
+
+    try {
+      mockUnifiedTranslation.clearTranslation.mockClear()
+      document.dispatchEvent(new CustomEvent('clear-storage'))
+      await flushPromises()
+      expect(clearStorage).toHaveBeenCalledTimes(1)
+      expect(clearStorage.mock.calls[0][0].detail).toBeNull()
+      expect(mockUnifiedTranslation.clearTranslation).toHaveBeenCalledTimes(2)
+    } finally {
+      document.removeEventListener('clear-storage', clearStorage)
+      document.removeEventListener('clear-storage', formClearListener)
+      wrapper.unmount()
+    }
+  })
+
+  it('propagates clear rejection without focusing or dispatching clear-storage', async () => {
+    const pendingClear = deferred()
+    const errorHandler = vi.fn()
+    mockUnifiedTranslation.clearTranslation.mockReturnValue(pendingClear.promise)
+    const wrapper = mount(PopupApp, { global: { config: { errorHandler } } })
+    await flushPromises()
+    await flushPromises()
+    const clearButton = wrapper.get('.translation-view-stub')
+    clearButton.element.focus()
+    const clearStorage = vi.fn()
+    document.addEventListener('clear-storage', clearStorage)
+
+    try {
+      await clearButton.trigger('click')
+      const error = new Error('clear failed')
+      pendingClear.reject(error)
+      await flushPromises()
+
+      expect(errorHandler).toHaveBeenCalledWith(error, expect.anything(), expect.anything())
+      expect(translationViewFocus).not.toHaveBeenCalled()
+      expect(clearStorage).not.toHaveBeenCalled()
+    } finally {
+      document.removeEventListener('clear-storage', clearStorage)
+      wrapper.unmount()
+    }
+  })
+
+  it('focuses after a successful clear blurs its now-disabled action to body', async () => {
+    const pendingClear = deferred()
+    mockUnifiedTranslation.clearTranslation.mockImplementation(() => {
+      mockUnifiedTranslation.sourceText.value = ''
+      mockUnifiedTranslation.translatedText.value = ''
+      mockUnifiedTranslation.sourceLanguage.value = mockLanguageDefaults.savedSourceLanguage.value
+      mockUnifiedTranslation.targetLanguage.value = mockLanguageDefaults.savedTargetLanguage.value
+      return pendingClear.promise
+    })
+    const wrapper = mount(PopupApp)
+    await flushPromises()
+    await flushPromises()
+    const clearButton = wrapper.get('.translation-view-stub')
+    clearButton.element.focus()
+    await clearButton.trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(clearButton.attributes('disabled')).toBeDefined()
+    document.body.setAttribute('tabindex', '-1')
+    document.body.focus()
+    expect(document.activeElement).toBe(document.body)
+    pendingClear.resolve()
+    await flushPromises()
+
+    expect(translationViewFocus).toHaveBeenCalledTimes(1)
+    document.body.removeAttribute('tabindex')
+    wrapper.unmount()
+  })
+
+  it('does not focus if focus changes while clear is pending', async () => {
+    const pendingClear = deferred()
+    mockUnifiedTranslation.clearTranslation.mockReturnValue(pendingClear.promise)
+    const wrapper = mount(PopupApp)
+    await flushPromises()
+    await flushPromises()
+    const clearButton = wrapper.get('.translation-view-stub')
+    clearButton.element.focus()
+    await clearButton.trigger('click')
+
+    const otherInput = document.createElement('input')
+    document.body.append(otherInput)
+    otherInput.focus()
+    pendingClear.resolve()
+    await flushPromises()
+
+    expect(document.activeElement).toBe(otherInput)
+    expect(translationViewFocus).not.toHaveBeenCalled()
+    otherInput.remove()
+    wrapper.unmount()
+  })
+
+  it('does not focus after unmount or while the Translation view is inactive', async () => {
+    const pendingClear = deferred()
+    mockUnifiedTranslation.clearTranslation.mockReturnValue(pendingClear.promise)
+    const wrapper = mount(PopupApp)
+    await flushPromises()
+    await flushPromises()
+    const clearButton = wrapper.get('.translation-view-stub')
+    clearButton.element.focus()
+    await clearButton.trigger('click')
+    wrapper.unmount()
+    pendingClear.resolve()
+    await flushPromises()
+    expect(translationViewFocus).not.toHaveBeenCalled()
+
+    mockUnifiedTranslation.clearTranslation.mockResolvedValue(undefined)
+    const inactiveWrapper = mount(PopupApp)
+    await flushPromises()
+    await flushPromises()
+    inactiveWrapper.get('.switch-to-live-dubbing').element.click()
+    await inactiveWrapper.vm.$nextTick()
+    const inactiveClear = inactiveWrapper.get('.translation-view-stub')
+    inactiveClear.element.focus()
+    await inactiveClear.trigger('click')
+    await flushPromises()
+    expect(translationViewFocus).not.toHaveBeenCalled()
+    inactiveWrapper.unmount()
   })
 
   it('persists current source and target when stars are clicked', async () => {

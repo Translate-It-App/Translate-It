@@ -130,6 +130,14 @@ const emit = defineEmits([
 
 // Refs
 const textareaRef = ref(null);
+const focusTextarea = () => {
+  const textarea = textareaRef.value;
+  if (!textarea?.isConnected) return false;
+
+  textarea.focus({ preventScroll: true });
+  return true;
+};
+defineExpose({ focusTextarea });
 
 // Composables
 const { handleError } = useErrorHandler();
