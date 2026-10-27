@@ -35,6 +35,19 @@ describe('textAnalysis - Direction Detection', () => {
     it('should return false for Arabic characters', () => {
       expect(isLTRStrongCharacter('س'.charCodeAt(0))).toBe(false);
     });
+
+    it('opts in to non-RTL Unicode letters without changing defaults or counting neutral characters', () => {
+      for (const letter of ['日', '中', 'न']) {
+        expect(isLTRStrongCharacter(letter.codePointAt(0))).toBe(false);
+        expect(isLTRStrongCharacter(letter.codePointAt(0), true)).toBe(true);
+      }
+      for (const neutral of ['5', '!', '\u093c']) {
+        expect(isLTRStrongCharacter(neutral.codePointAt(0), true)).toBe(false);
+      }
+      expect(isLTRStrongCharacter('س'.codePointAt(0), true)).toBe(false);
+      expect(isLTRStrongCharacter(0x1E900, true)).toBe(false); // Adlam
+      expect(isLTRStrongCharacter(0x0840, true)).toBe(false); // Mandaic
+    });
   });
 
   describe('shouldApplyRtl', () => {
@@ -59,6 +72,16 @@ describe('textAnalysis - Direction Detection', () => {
     it('uses custom thresholds with a strict greater-than comparison', () => {
       expect(shouldApplyRtl('سلامabcd', 0.5)).toBe(false);
       expect(shouldApplyRtl('ابتab', 0.5)).toBe(true);
+    });
+
+    it('counts opted-in Unicode letters as LTR while preserving RTL classification and defaults', () => {
+      const mixed = '日本語日本語سلام';
+      expect(shouldApplyRtl(mixed)).toBe(true);
+      expect(shouldApplyRtl(mixed, 0.5, true)).toBe(false);
+      expect(shouldApplyRtl('日本語१२3!', 0.5, true)).toBe(false);
+      expect(shouldApplyRtl('日本語س', 0.5, true)).toBe(false);
+      expect(shouldApplyRtl(`سلام ${String.fromCodePoint(0x1E900, 0x1E901, 0x1E902, 0x1E903, 0x1E904)}`, 0.5, true)).toBe(true);
+      expect(shouldApplyRtl(`سلام ${String.fromCodePoint(0x0840, 0x0841, 0x0842, 0x0843, 0x0844)}`, 0.5, true)).toBe(true);
     });
 
     it('should apply LTR for mixed text with mostly English', () => {

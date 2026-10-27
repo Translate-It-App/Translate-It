@@ -387,7 +387,7 @@ const sourceDirection = computed(() => {
   let hasStrongDirectionalCharacter = false;
   for (const character of sourceDraft.value) {
     const code = character.codePointAt(0);
-    if (isRTLStrongCharacter(code) || isLTRStrongCharacter(code)) {
+    if (isRTLStrongCharacter(code) || isLTRStrongCharacter(code, true)) {
       hasStrongDirectionalCharacter = true;
       break;
     }
@@ -397,7 +397,7 @@ const sourceDirection = computed(() => {
     return LanguageDetectionService.isRTL(props.sourceLanguage) ? 'rtl' : 'ltr';
   }
 
-  return shouldApplyRtl(sourceDraft.value, 0.5) ? 'rtl' : 'ltr';
+  return shouldApplyRtl(sourceDraft.value, 0.5, true) ? 'rtl' : 'ltr';
 });
 const sourceTextarea = ref(null);
 const sourceHasOverflow = ref(false);

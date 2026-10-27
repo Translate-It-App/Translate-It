@@ -653,6 +653,17 @@ describe('TranslationWindow.vue', () => {
 
     await editor.setValue('Hello سلام سلام');
     expect(editor.attributes('dir')).toBe('rtl');
+    for (const mixedScript of ['日本語日本語سلام', '中文中文中文سلام', 'नमस्तेभारतسلام']) {
+      await editor.setValue(mixedScript);
+      expect(editor.attributes('dir')).toBe('ltr');
+    }
+    for (const rtlAndUnsupportedScript of [
+      `سلام ${String.fromCodePoint(0x1E900, 0x1E901, 0x1E902, 0x1E903, 0x1E904)}`,
+      `سلام ${String.fromCodePoint(0x0840, 0x0841, 0x0842, 0x0843, 0x0844)}`,
+    ]) {
+      await editor.setValue(rtlAndUnsupportedScript);
+      expect(editor.attributes('dir')).toBe('rtl');
+    }
     await editor.setValue('سلامabcd');
     expect(editor.attributes('dir')).toBe('ltr');
     await editor.setValue('This is English with سلام');
