@@ -166,6 +166,7 @@ import { useUnifiedTranslation } from '@/features/translation/composables/useUni
 import { useLanguageDefaults } from '@/features/settings/composables/useLanguageDefaults.js'
 import { useErrorHandler } from '@/composables/shared/useErrorHandler.js'
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js'
+import { getCanonicalCode } from '@/shared/config/languageConstants.js'
 
 // Components
 import LanguageSelector from '@/components/shared/LanguageSelector.vue'
@@ -230,8 +231,8 @@ const {
   setSourceLanguageAsDefault,
   setTargetLanguageAsDefault
 } = useLanguageDefaults()
-const sourceIsSavedDefault = computed(() => sourceLanguage.value === savedSourceLanguage.value)
-const targetIsSavedDefault = computed(() => targetLanguage.value === savedTargetLanguage.value)
+const sourceIsSavedDefault = computed(() => getCanonicalCode(sourceLanguage.value) === getCanonicalCode(savedSourceLanguage.value))
+const targetIsSavedDefault = computed(() => getCanonicalCode(targetLanguage.value) === getCanonicalCode(savedTargetLanguage.value))
 const showClearButton = computed(() => (
   isSessionStateReady.value
   && (

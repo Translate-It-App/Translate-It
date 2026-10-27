@@ -403,6 +403,33 @@ describe('SidepanelMainContent.vue', () => {
     }
   });
 
+  it('treats canonical Chinese language codes as saved defaults after clearing', async () => {
+    mockLanguageDefaults.savedSourceLanguage.value = 'zh';
+    mockLanguageDefaults.savedTargetLanguage.value = 'zh';
+    mockUnifiedTranslation.sourceText.value = '';
+    mockUnifiedTranslation.translatedText.value = '';
+    mockUnifiedTranslation.sourceLanguage.value = 'en';
+    mockUnifiedTranslation.targetLanguage.value = 'en';
+    mockUnifiedTranslation.clearTranslation.mockImplementation(async () => {
+      mockUnifiedTranslation.sourceText.value = '';
+      mockUnifiedTranslation.translatedText.value = '';
+      mockUnifiedTranslation.sourceLanguage.value = 'zh-cn';
+      mockUnifiedTranslation.targetLanguage.value = 'zh-cn';
+    });
+
+    const wrapper = mount(SidepanelMainContent, { props: { provider: '' } });
+    try {
+      await wrapper.vm.initializeSessionState();
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeUndefined();
+
+      await wrapper.vm.clearFields();
+
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeDefined();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   it('cancels delayed resize observer initialization on unmount', () => {
     const previousResizeObserver = globalThis.ResizeObserver;
     const ResizeObserverMock = vi.fn();

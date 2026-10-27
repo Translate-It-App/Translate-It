@@ -130,6 +130,7 @@ import { MessageContexts } from '@/shared/messaging/core/MessagingConstants.js';
 import { matchErrorToType } from '@/shared/error-management/ErrorMatcher.js';
 import { useGlobalFont } from '@/composables/shared/useFont.js';
 import { CONFIG } from '@/shared/config/config.js';
+import { getCanonicalCode } from '@/shared/config/languageConstants.js'
 
 // --- Initialization & Setup ---
 const logger = getScopedLogger(LOG_COMPONENTS.UI, 'PopupApp')
@@ -171,8 +172,8 @@ const {
   setSourceLanguageAsDefault,
   setTargetLanguageAsDefault
 } = useLanguageDefaults()
-const sourceIsSavedDefault = computed(() => sourceLanguage.value === savedSourceLanguage.value)
-const targetIsSavedDefault = computed(() => targetLanguage.value === savedTargetLanguage.value)
+const sourceIsSavedDefault = computed(() => getCanonicalCode(sourceLanguage.value) === getCanonicalCode(savedSourceLanguage.value))
+const targetIsSavedDefault = computed(() => getCanonicalCode(targetLanguage.value) === getCanonicalCode(savedTargetLanguage.value))
 const showClearButton = computed(() => (
   translation.sourceText.value !== ''
   || translation.translatedText.value !== ''
