@@ -487,6 +487,7 @@ describe('TranslationWindow.vue', () => {
 
     expect(originalTextStyles).not.toMatch(/(?:max-height|overflow-y)\s*:/);
     expect(sourceInputStyles).toMatch(/max-height\s*:\s*150px/);
+    expect(sourceInputStyles).toMatch(/padding-inline\s*:\s*2px/);
     expect(sourceInputStyles).toMatch(/overflow-y\s*:\s*hidden/);
     expect(sourceInputStyles).toMatch(/&\.ti-window-source-overflow\s*\{\s*overflow-y\s*:\s*auto/);
   });
