@@ -1,3 +1,15 @@
+#### v1.25.1 – Released on October 27, 2026
+
+##### Changed
+
+- Improved the translation interface, including loading animations and overall usability.
+
+##### Fixed
+
+- Fixed various issues with text selection and Floating Window, improving stability and website compatibility.
+
+---
+
 #### v1.25.0 – Released on October 22, 2026
 
 ##### Added
