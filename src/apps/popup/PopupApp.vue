@@ -69,6 +69,7 @@
               :is-ready="isReady"
               :source-is-saved-default="sourceIsSavedDefault"
               :target-is-saved-default="targetIsSavedDefault"
+              :show-clear-button="showClearButton"
               :source-default-title="sourceDefaultTitle"
               :target-default-title="targetDefaultTitle"
               :last-keyword="lastKeyword"
@@ -171,6 +172,12 @@ const {
 } = useLanguageDefaults()
 const sourceIsSavedDefault = computed(() => sourceLanguage.value === savedSourceLanguage.value)
 const targetIsSavedDefault = computed(() => targetLanguage.value === savedTargetLanguage.value)
+const showClearButton = computed(() => (
+  translation.sourceText.value !== ''
+  || translation.translatedText.value !== ''
+  || !sourceIsSavedDefault.value
+  || !targetIsSavedDefault.value
+))
 const sourceDefaultTitle = computed(() => t('popup_set_source_language_default_title', 'Set current source language as default'))
 const targetDefaultTitle = computed(() => t('popup_set_target_language_default_title', 'Set current target language as default'))
 

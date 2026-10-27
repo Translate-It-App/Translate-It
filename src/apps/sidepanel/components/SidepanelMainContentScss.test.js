@@ -188,6 +188,19 @@ describe('SidepanelMainContent.scss selector ownership', () => {
 })
 
 describe('compiled Phase 1 language-control styles', () => {
+  it('keeps the inline provider at inline-end with or without the inline clear button', () => {
+    const { css } = compile()
+
+    expectDeclaration(css, '.language-controls--wide .translate-button-inline', 'justify-content: flex-start')
+    const providerRule = findRule(css, '.language-controls--wide .translate-button-inline .ti-sidepanel-split-selector')
+    expect(providerRule).toBeDefined()
+    expect(providerRule[1]).toContain('.sidepanel-wrapper .language-controls--wide .translate-button-inline .ti-sidepanel-split-selector')
+    expect(providerRule[1]).not.toContain(':deep(')
+    expect(providerRule[2]).toContain('margin-inline-start: auto')
+    expect(css).not.toContain('.translate-button-inline :deep(.ti-sidepanel-split-selector)')
+    expect(css).not.toMatch(/\.language-controls--wide\s+\.inline-clear-btn\s*\{[^}]*margin-(?:left|right):/)
+  })
+
   it('keeps language-control rules scoped and free of :deep while preserving unrelated deep selectors', () => {
     const { css } = compile()
 

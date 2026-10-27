@@ -121,6 +121,7 @@ vi.mock('@/components/popup/TranslationView.vue', () => ({
       'isReady',
       'sourceIsSavedDefault',
       'targetIsSavedDefault',
+      'showClearButton',
       'sourceDefaultTitle',
       'targetDefaultTitle',
       'lastKeyword'
@@ -247,6 +248,43 @@ describe('PopupApp', () => {
     expect(view.props('isReady')).toBe(true)
     expect(view.props('sourceIsSavedDefault')).toBe(true)
     expect(view.props('targetIsSavedDefault')).toBe(false)
+    expect(view.props('showClearButton')).toBe(true)
+  })
+
+  it('updates clear-button visibility from text and saved language defaults', async () => {
+    mockUnifiedTranslation.sourceText.value = ''
+    mockUnifiedTranslation.translatedText.value = ''
+    mockUnifiedTranslation.sourceLanguage.value = mockLanguageDefaults.savedSourceLanguage.value
+    mockUnifiedTranslation.targetLanguage.value = mockLanguageDefaults.savedTargetLanguage.value
+
+    const wrapper = mount(PopupApp)
+    await flushPromises()
+    await flushPromises()
+    const view = wrapper.findComponent({ name: 'TranslationView' })
+
+    expect(view.props('showClearButton')).toBe(false)
+    mockUnifiedTranslation.sourceText.value = ' '
+    await wrapper.vm.$nextTick()
+    expect(view.props('showClearButton')).toBe(true)
+
+    mockUnifiedTranslation.sourceText.value = ''
+    mockUnifiedTranslation.translatedText.value = 'translated'
+    await wrapper.vm.$nextTick()
+    expect(view.props('showClearButton')).toBe(true)
+
+    mockUnifiedTranslation.translatedText.value = ''
+    mockUnifiedTranslation.sourceLanguage.value = 'de'
+    await wrapper.vm.$nextTick()
+    expect(view.props('showClearButton')).toBe(true)
+
+    mockUnifiedTranslation.sourceLanguage.value = mockLanguageDefaults.savedSourceLanguage.value
+    mockUnifiedTranslation.targetLanguage.value = 'fr'
+    await wrapper.vm.$nextTick()
+    expect(view.props('showClearButton')).toBe(true)
+
+    mockUnifiedTranslation.targetLanguage.value = mockLanguageDefaults.savedTargetLanguage.value
+    await wrapper.vm.$nextTick()
+    expect(view.props('showClearButton')).toBe(false)
   })
 
   it('creates one popup translation owner and passes it to TranslationView', async () => {

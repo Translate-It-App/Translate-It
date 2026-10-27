@@ -38,6 +38,7 @@
 
       <!-- Clear Button: Minimized clear fields button -->
       <button
+        v-if="showClearButton"
         class="ti-btn-min-clear"
         :title="t('popup_clear_storage_title_icon') || 'پاک کردن فیلدها'"
         :aria-label="t('popup_clear_storage_title_icon') || 'پاک کردن فیلدها'"
@@ -120,6 +121,10 @@ const props = defineProps({
   lastKeyword: {
     type: String,
     default: ''
+  },
+  showClearButton: {
+    type: Boolean,
+    default: true
   }
 })
 

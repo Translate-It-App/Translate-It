@@ -34,6 +34,7 @@
           class="translate-button-inline"
         >
           <button
+            v-if="showClearButton"
             class="ti-icon-button inline-clear-btn"
             :title="t('SIDEPANEL_CLEAR_STORAGE_TITLE_ICON', 'Clear fields')"
             :aria-label="t('SIDEPANEL_CLEAR_STORAGE_TITLE_ICON', 'Clear fields')"
@@ -66,6 +67,7 @@
         class="translate-button-row"
       >
         <button
+          v-if="showClearButton"
           class="ti-icon-button row-clear-btn"
           :title="t('SIDEPANEL_CLEAR_STORAGE_TITLE_ICON', 'Clear fields')"
           :aria-label="t('SIDEPANEL_CLEAR_STORAGE_TITLE_ICON', 'Clear fields')"
@@ -77,6 +79,10 @@
             :size="16"
           />
         </button>
+        <div
+          v-if="!showClearButton"
+          class="end-spacer"
+        />
         <div class="center-spacer">
           <ProviderSelector
             v-model="currentProviderLocal"
@@ -224,6 +230,15 @@ const {
 } = useLanguageDefaults()
 const sourceIsSavedDefault = computed(() => sourceLanguage.value === savedSourceLanguage.value)
 const targetIsSavedDefault = computed(() => targetLanguage.value === savedTargetLanguage.value)
+const showClearButton = computed(() => (
+  isSessionStateReady.value
+  && (
+    sourceText.value !== ''
+    || translatedText.value !== ''
+    || !sourceIsSavedDefault.value
+    || !targetIsSavedDefault.value
+  )
+))
 const sourceDefaultTitle = computed(() => t('sidepanel_set_source_language_default_title', 'Set current source language as default'))
 const targetDefaultTitle = computed(() => t('sidepanel_set_target_language_default_title', 'Set current target language as default'))
 const { handleError } = useErrorHandler()
@@ -231,6 +246,14 @@ const { handleError } = useErrorHandler()
 // Refs
 const sourceInputRef = ref(null)
 const translationResultRef = ref(null)
+const isSessionStateReady = ref(false)
+const initializeSessionStateForView = async (...args) => {
+  try {
+    return await initializeSessionState(...args)
+  } finally {
+    isSessionStateReady.value = true
+  }
+}
 
 const retryTranslation = getRetryCallback(() => triggerTranslation(
   sourceLanguage.value,
@@ -386,7 +409,7 @@ const handleSetDefaultTarget = async () => {
 defineExpose({
   clearFields,
   sourceInputRef,
-  initializeSessionState
+  initializeSessionState: initializeSessionStateForView
 });
 
 

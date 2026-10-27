@@ -32,7 +32,12 @@ const mockUnifiedTranslation = {
   getRetryCallback: vi.fn((retryFunction) => retryFunction),
   getSettingsCallback: vi.fn(() => vi.fn()),
   cancelTranslation: vi.fn(),
-  clearTranslation: vi.fn(),
+  clearTranslation: vi.fn(async () => {
+    mockUnifiedTranslation.sourceText.value = '';
+    mockUnifiedTranslation.translatedText.value = '';
+    mockUnifiedTranslation.sourceLanguage.value = mockLanguageDefaults.savedSourceLanguage.value;
+    mockUnifiedTranslation.targetLanguage.value = mockLanguageDefaults.savedTargetLanguage.value;
+  }),
   initializeSessionState: vi.fn().mockResolvedValue(undefined),
 };
 
@@ -136,6 +141,13 @@ vi.mock('webextension-polyfill', () => ({
 describe('SidepanelMainContent.vue', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockUnifiedTranslation.sourceText.value = 'expressions';
+    mockUnifiedTranslation.translatedText.value = '表达方式';
+    mockUnifiedTranslation.sourceLanguage.value = 'en';
+    mockUnifiedTranslation.targetLanguage.value = 'fa';
+    mockLanguageDefaults.savedSourceLanguage.value = 'en';
+    mockLanguageDefaults.savedTargetLanguage.value = 'fa';
+    mockUnifiedTranslation.initializeSessionState.mockResolvedValue(undefined);
   });
 
   it('continues to pass dictionary metadata to TranslationDisplay', async () => {
@@ -202,6 +214,8 @@ describe('SidepanelMainContent.vue', () => {
 
     try {
       wrapper = mount(SidepanelMainContent, { props: { provider: '' } });
+      expect(wrapper.find('.inline-clear-btn').exists()).toBe(false);
+      await wrapper.vm.initializeSessionState();
       await vi.advanceTimersByTimeAsync(100);
       const wideButton = wrapper.get('.inline-clear-btn');
       const wideIcon = wideButton.findComponent(MaskIcon);
@@ -212,10 +226,14 @@ describe('SidepanelMainContent.vue', () => {
       expect(wideIcon.attributes('aria-hidden')).toBe('true');
       await wideButton.trigger('click');
       expect(mockUnifiedTranslation.clearTranslation).toHaveBeenCalledTimes(1);
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('.inline-clear-btn').exists()).toBe(false);
       wrapper.unmount();
 
       width = 509;
+      mockUnifiedTranslation.sourceText.value = 'expressions';
       wrapper = mount(SidepanelMainContent, { props: { provider: '' } });
+      await wrapper.vm.initializeSessionState();
       await vi.advanceTimersByTimeAsync(100);
       const narrowButton = wrapper.get('.row-clear-btn');
       const narrowIcon = narrowButton.findComponent(MaskIcon);
@@ -236,6 +254,52 @@ describe('SidepanelMainContent.vue', () => {
       } else {
         delete HTMLElement.prototype.offsetWidth;
       }
+    }
+  });
+
+  it('shows clear only for content or a non-default language, after session restore', async () => {
+    mockUnifiedTranslation.sourceText.value = '';
+    mockUnifiedTranslation.translatedText.value = '';
+    const wrapper = mount(SidepanelMainContent, { props: { provider: '' } });
+
+    try {
+      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(false);
+      expect(wrapper.find('.row-clear-btn').exists()).toBe(false);
+
+      await wrapper.vm.initializeSessionState();
+      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(false);
+
+      mockUnifiedTranslation.sourceText.value = ' ';
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+
+      mockUnifiedTranslation.sourceText.value = '';
+      mockUnifiedTranslation.translatedText.value = 'translated';
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+
+      mockUnifiedTranslation.translatedText.value = '';
+      mockUnifiedTranslation.sourceLanguage.value = 'de';
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+
+      mockUnifiedTranslation.sourceLanguage.value = 'en';
+      mockUnifiedTranslation.targetLanguage.value = 'fr';
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+
+      mockUnifiedTranslation.targetLanguage.value = 'fa';
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(false);
+
+      mockLanguageDefaults.savedSourceLanguage.value = 'de';
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+      mockLanguageDefaults.savedSourceLanguage.value = 'en';
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(false);
+    } finally {
+      wrapper.unmount();
     }
   });
 

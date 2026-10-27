@@ -46,16 +46,13 @@
       margin-left: 8px;
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-start;
     }
 
-    .inline-clear-btn {
-      margin-right: auto;
-    }
-
-    .translate-button-inline :deep(.provider-selector) {
+    .translate-button-inline .ti-sidepanel-split-selector {
       min-width: auto;
       max-width: none;
+      margin-inline-start: auto;
     }
   }
 
