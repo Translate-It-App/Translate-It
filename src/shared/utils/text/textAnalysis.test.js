@@ -52,6 +52,15 @@ describe('textAnalysis - Direction Detection', () => {
       expect(shouldApplyRtl('سلام World')).toBe(true);
     });
 
+    it('keeps the default threshold strict at exactly 40%', () => {
+      expect(shouldApplyRtl('ابabc')).toBe(false);
+    });
+
+    it('uses custom thresholds with a strict greater-than comparison', () => {
+      expect(shouldApplyRtl('سلامabcd', 0.5)).toBe(false);
+      expect(shouldApplyRtl('ابتab', 0.5)).toBe(true);
+    });
+
     it('should apply LTR for mixed text with mostly English', () => {
       // "Hi سلام" -> 2 LTR + 1 space + 4 RTL = 4/6 = 66% RTL -> actually this would be true
       // Let's try "English is much longer than سلام"

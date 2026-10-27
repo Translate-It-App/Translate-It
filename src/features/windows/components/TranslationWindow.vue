@@ -139,7 +139,7 @@
                 :class="{ 'ti-window-source-overflow': sourceHasOverflow }"
                 :aria-label="t('window_edit_source')"
                 :lang="props.sourceLanguage !== 'auto' ? props.sourceLanguage : undefined"
-                dir="auto"
+                :dir="sourceDirection"
                 rows="1"
                 @mousedown.stop
                 @touchstart.stop
@@ -207,6 +207,8 @@ import { useSettingsStore } from '@/features/settings/stores/settings.js';
 import { TranslationMode } from '@/shared/config/config.js';
 import { SimpleMarkdown, ExtractionStrategy } from '@/shared/utils/text/markdown.js';
 import { getLanguageNameFromCode } from '@/shared/config/languageConstants.js';
+import { LanguageDetectionService } from '@/shared/services/LanguageDetectionService.js';
+import { isLTRStrongCharacter, isRTLStrongCharacter, shouldApplyRtl } from '@/shared/utils/text/textAnalysis.js';
 import { getProviderById } from '@/core/provider-registry.js';
 import IconButton from '@/components/shared/IconButton.vue';
 import TTSButton from '@/components/shared/TTSButton.vue';
@@ -381,6 +383,22 @@ const currentSize = ref(props.initialSize);
 const translatedText = computed(() => props.isError ? '' : props.initialTranslatedText);
 const originalText = ref(props.selectedText);
 const sourceDraft = ref(props.selectedText);
+const sourceDirection = computed(() => {
+  let hasStrongDirectionalCharacter = false;
+  for (const character of sourceDraft.value) {
+    const code = character.codePointAt(0);
+    if (isRTLStrongCharacter(code) || isLTRStrongCharacter(code)) {
+      hasStrongDirectionalCharacter = true;
+      break;
+    }
+  }
+
+  if (!hasStrongDirectionalCharacter) {
+    return LanguageDetectionService.isRTL(props.sourceLanguage) ? 'rtl' : 'ltr';
+  }
+
+  return shouldApplyRtl(sourceDraft.value, 0.5) ? 'rtl' : 'ltr';
+});
 const sourceTextarea = ref(null);
 const sourceHasOverflow = ref(false);
 let sourceResizeObserver = null;

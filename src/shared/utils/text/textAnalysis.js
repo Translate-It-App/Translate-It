@@ -218,9 +218,10 @@ export function isLTRStrongCharacter(code) {
  * Check if RTL (Right-to-Left) should be applied to text based on content.
  * Uses a majority-voting algorithm with strong directional character detection.
  * @param {string} text - Text to check
+ * @param {number} rtlThreshold - RTL ratio must be strictly greater than this value
  * @returns {boolean} True if RTL should be applied
  */
-export const shouldApplyRtl = (text) => {
+export const shouldApplyRtl = (text, rtlThreshold = 0.4) => {
   if (!text || typeof text !== 'string') return false;
   const trimmedText = text.trim();
   if (trimmedText.length === 0) return false;
@@ -239,9 +240,8 @@ export const shouldApplyRtl = (text) => {
   // If no strong characters found, default to LTR
   if (rtlStrongCount === 0 && ltrStrongCount === 0) return false;
 
-  // RTL Bias: If any significant RTL content exists, or more than 40% is RTL, consider it RTL
-  // This helps with mixed strings where the target context is usually RTL.
-  return (rtlStrongCount / (rtlStrongCount + ltrStrongCount)) > 0.4;
+  // The default threshold preserves the existing RTL bias for mixed strings.
+  return (rtlStrongCount / (rtlStrongCount + ltrStrongCount)) > rtlThreshold;
 };
 
 /**
