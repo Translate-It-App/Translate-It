@@ -34,10 +34,13 @@
           class="translate-button-inline"
         >
           <button
-            v-if="showClearButton"
-            class="ti-icon-button inline-clear-btn"
+            class="ti-icon-button inline-clear-btn ti-sidepanel-clear-action"
+            :class="{ 'ti-clear-hidden': !showClearButton }"
             :title="t('SIDEPANEL_CLEAR_STORAGE_TITLE_ICON', 'Clear fields')"
             :aria-label="t('SIDEPANEL_CLEAR_STORAGE_TITLE_ICON', 'Clear fields')"
+            :disabled="!showClearButton"
+            :aria-hidden="!showClearButton"
+            :tabindex="showClearButton ? 0 : -1"
             @click="clearFields"
           >
             <MaskIcon
@@ -67,10 +70,13 @@
         class="translate-button-row"
       >
         <button
-          v-if="showClearButton"
-          class="ti-icon-button row-clear-btn"
+          class="ti-icon-button row-clear-btn ti-sidepanel-clear-action"
+          :class="{ 'ti-clear-hidden': !showClearButton }"
           :title="t('SIDEPANEL_CLEAR_STORAGE_TITLE_ICON', 'Clear fields')"
           :aria-label="t('SIDEPANEL_CLEAR_STORAGE_TITLE_ICON', 'Clear fields')"
+          :disabled="!showClearButton"
+          :aria-hidden="!showClearButton"
+          :tabindex="showClearButton ? 0 : -1"
           @click="clearFields"
         >
           <MaskIcon
@@ -79,10 +85,6 @@
             :size="16"
           />
         </button>
-        <div
-          v-if="!showClearButton"
-          class="end-spacer"
-        />
         <div class="center-spacer">
           <ProviderSelector
             v-model="currentProviderLocal"

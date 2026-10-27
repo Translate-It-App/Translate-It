@@ -214,10 +214,10 @@ describe('SidepanelMainContent.vue', () => {
 
     try {
       wrapper = mount(SidepanelMainContent, { props: { provider: '' } });
-      expect(wrapper.find('.inline-clear-btn').exists()).toBe(false);
       await wrapper.vm.initializeSessionState();
       await vi.advanceTimersByTimeAsync(100);
       const wideButton = wrapper.get('.inline-clear-btn');
+      expect(wideButton.attributes('disabled')).toBeUndefined();
       const wideIcon = wideButton.findComponent(MaskIcon);
       expect(wideButton.attributes('aria-label')).toBeTruthy();
       expect(wideButton.attributes('aria-label')).toBe(wideButton.attributes('title'));
@@ -227,7 +227,8 @@ describe('SidepanelMainContent.vue', () => {
       await wideButton.trigger('click');
       expect(mockUnifiedTranslation.clearTranslation).toHaveBeenCalledTimes(1);
       await wrapper.vm.$nextTick();
-      expect(wrapper.find('.inline-clear-btn').exists()).toBe(false);
+      expect(wrapper.get('.inline-clear-btn').element).toBe(wideButton.element);
+      expect(wrapper.get('.inline-clear-btn').attributes('disabled')).toBeDefined();
       wrapper.unmount();
 
       width = 509;
@@ -236,6 +237,9 @@ describe('SidepanelMainContent.vue', () => {
       await wrapper.vm.initializeSessionState();
       await vi.advanceTimersByTimeAsync(100);
       const narrowButton = wrapper.get('.row-clear-btn');
+      expect(narrowButton.attributes('disabled')).toBeUndefined();
+      expect(wrapper.findAll('.end-spacer')).toHaveLength(1);
+      expect(wrapper.get('.center-spacer').element.nextElementSibling.classList.contains('end-spacer')).toBe(true);
       const narrowIcon = narrowButton.findComponent(MaskIcon);
       expect(narrowButton.attributes('aria-label')).toBeTruthy();
       expect(narrowButton.attributes('aria-label')).toBe(narrowButton.attributes('title'));
@@ -263,41 +267,46 @@ describe('SidepanelMainContent.vue', () => {
     const wrapper = mount(SidepanelMainContent, { props: { provider: '' } });
 
     try {
-      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(false);
-      expect(wrapper.find('.row-clear-btn').exists()).toBe(false);
+      const clearButton = wrapper.get('.row-clear-btn');
+      expect(clearButton.attributes('disabled')).toBeDefined();
+      expect(clearButton.attributes('aria-hidden')).toBe('true');
+      expect(wrapper.findAll('.end-spacer')).toHaveLength(1);
+      const provider = wrapper.get('.center-spacer').element.firstElementChild;
 
       await wrapper.vm.initializeSessionState();
-      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(false);
+      expect(wrapper.get('.row-clear-btn').element).toBe(clearButton.element);
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeDefined();
+      expect(wrapper.get('.center-spacer').element.firstElementChild).toBe(provider);
 
       mockUnifiedTranslation.sourceText.value = ' ';
       await wrapper.vm.$nextTick();
-      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeUndefined();
 
       mockUnifiedTranslation.sourceText.value = '';
       mockUnifiedTranslation.translatedText.value = 'translated';
       await wrapper.vm.$nextTick();
-      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeUndefined();
 
       mockUnifiedTranslation.translatedText.value = '';
       mockUnifiedTranslation.sourceLanguage.value = 'de';
       await wrapper.vm.$nextTick();
-      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeUndefined();
 
       mockUnifiedTranslation.sourceLanguage.value = 'en';
       mockUnifiedTranslation.targetLanguage.value = 'fr';
       await wrapper.vm.$nextTick();
-      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeUndefined();
 
       mockUnifiedTranslation.targetLanguage.value = 'fa';
       await wrapper.vm.$nextTick();
-      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(false);
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeDefined();
 
       mockLanguageDefaults.savedSourceLanguage.value = 'de';
       await wrapper.vm.$nextTick();
-      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(true);
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeUndefined();
       mockLanguageDefaults.savedSourceLanguage.value = 'en';
       await wrapper.vm.$nextTick();
-      expect(wrapper.find('.inline-clear-btn, .row-clear-btn').exists()).toBe(false);
+      expect(wrapper.get('.row-clear-btn').attributes('disabled')).toBeDefined();
     } finally {
       wrapper.unmount();
     }

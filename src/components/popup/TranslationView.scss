@@ -212,10 +212,16 @@
   border-radius: 6px !important;
   background: transparent !important;
   color: var(--ti-action-icon) !important;
-  opacity: 1 !important;
+  opacity: 1;
+  visibility: visible;
   cursor: pointer !important;
   flex-shrink: 0 !important;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  transition:
+    background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 180ms ease-in-out,
+    visibility 0s linear 0s;
 
   img,
   .mask-icon {
@@ -241,6 +247,25 @@
   &:focus-visible {
     outline: 2px solid var(--color-primary, #1976d2) !important;
     outline-offset: 1px !important;
+  }
+}
+
+.ti-btn-min-clear.ti-clear-hidden:disabled {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 180ms ease-in-out,
+    visibility 0s linear 180ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .translation-view .language-controls .ti-btn-min-clear,
+  .translation-view .language-controls .ti-btn-min-clear:where(.ti-clear-hidden):disabled {
+    transition: none;
   }
 }
 

@@ -47,7 +47,10 @@ const mobileRules = (css) => {
 }
 
 const classSpecificity = (selector) => (selector.match(/\.[\w-]+/g) || []).length
-const selectorSpecificity = (selector) => classSpecificity(selector) + (selector.match(/:(?!:)[\w-]+/g) || []).length
+const selectorSpecificity = (selector) => {
+  const effectiveSelector = selector.replace(/:where\([^)]*\)/g, '')
+  return classSpecificity(effectiveSelector) + (effectiveSelector.match(/:(?!:)[\w-]+/g) || []).length
+}
 
 /**
  * Sidepanel CSS is bundled into shared CSS loaded by other surfaces
@@ -199,6 +202,46 @@ describe('compiled Phase 1 language-control styles', () => {
     expect(providerRule[2]).toContain('margin-inline-start: auto')
     expect(css).not.toContain('.translate-button-inline :deep(.ti-sidepanel-split-selector)')
     expect(css).not.toMatch(/\.language-controls--wide\s+\.inline-clear-btn\s*\{[^}]*margin-(?:left|right):/)
+  })
+
+  it('reserves 24px clear actions and fades before hiding with reduced-motion support', () => {
+    const { css } = compile()
+    const visible = findRule(css, '.ti-sidepanel-clear-action')
+    const hidden = findRule(css, '.ti-icon-button.ti-sidepanel-clear-action:where(.ti-clear-hidden)')
+    expect(visible?.[2]).toContain('width: 24px')
+    expect(visible?.[2]).toContain('height: 24px')
+    expect(visible?.[2]).toContain('flex: 0 0 24px')
+    expect(visible?.[2]).toMatch(/transition:\s*background-color 0\.15s ease,\s*color 0\.15s ease,\s*transform 0\.15s ease,\s*opacity 180ms ease-in-out,\s*visibility 0s linear 0s/)
+    expect(hidden?.[2]).toContain('opacity: 0;')
+    expect(hidden?.[1]).toContain('.sidepanel-wrapper .ti-icon-button.ti-sidepanel-clear-action')
+    expect(hidden?.[1]).not.toContain('.inline-clear-btn')
+    expect(hidden?.[1]).not.toContain('.row-clear-btn')
+    expect(hidden?.[2]).toContain('visibility: hidden')
+    expect(hidden?.[2]).toContain('pointer-events: none')
+    expect(hidden?.[2]).toMatch(/transition:\s*background-color 0\.15s ease,\s*color 0\.15s ease,\s*transform 0\.15s ease,\s*opacity 180ms ease-in-out,\s*visibility 0s linear 180ms/)
+
+    const mixinDisabled = findRule(css, '.sidepanel-wrapper .ti-icon-button:disabled')
+    const mixinButton = findRule(css, '.sidepanel-wrapper .ti-icon-button')
+    expect(mixinDisabled?.[2]).toContain('opacity: 0.5')
+    expect(mixinButton?.[2]).toContain('transition: all 0.15s ease')
+    expect(selectorSpecificity(hidden[1])).toBe(selectorSpecificity(mixinDisabled[1]))
+    expect(css.indexOf(hidden[0])).toBeGreaterThan(css.indexOf(mixinDisabled[0]))
+    expect(selectorSpecificity(visible[1])).toBeGreaterThan(selectorSpecificity(mixinButton[1]))
+    expect(css.indexOf(visible[0])).toBeGreaterThan(css.indexOf(mixinButton[0]))
+
+    const reducedMotion = css.match(
+      /@media \(prefers-reduced-motion: reduce\)\s*\{\s*([^{}]+)\{([^{}]*)\}/
+    )
+    expect(reducedMotion).not.toBeNull()
+    const reducedSelectors = reducedMotion[1].split(',').map((selector) => selector.trim())
+    expect(reducedMotion[2]).toContain('transition: none')
+    const reducedVisible = reducedSelectors.find((selector) => !selector.includes(':where('))
+    const reducedHidden = reducedSelectors.find((selector) => selector.includes(':where('))
+    expect(selectorSpecificity(reducedVisible)).toBe(selectorSpecificity(visible[1]))
+    expect(selectorSpecificity(reducedHidden)).toBe(selectorSpecificity(hidden[1]))
+    expect(css.indexOf(reducedMotion[0])).toBeGreaterThan(css.indexOf(hidden[0]))
+    expectDeclaration(css, '.sidepanel-wrapper .center-spacer', 'justify-content: center')
+    expectDeclaration(css, '.sidepanel-wrapper .end-spacer', 'width: 20px')
   })
 
   it('keeps language-control rules scoped and free of :deep while preserving unrelated deep selectors', () => {

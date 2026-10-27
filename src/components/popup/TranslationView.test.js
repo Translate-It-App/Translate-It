@@ -25,6 +25,12 @@ const rule = (css, re) => {
   return match[1]
 }
 
+const selectorSpecificity = (selector) => {
+  const effectiveSelector = selector.replace(/:where\([^)]*\)/g, '')
+  return (effectiveSelector.match(/\.[\w-]+/g) || []).length +
+    (effectiveSelector.match(/:(?!:)[\w-]+/g) || []).length
+}
+
 /**
  * Text Popup language toolbar consumes the Popup Header visual contract:
  * 44px band · 32px primary controls · 6px radius · 13px labels ·
@@ -76,7 +82,7 @@ describe('TranslationView.scss language toolbar contract', () => {
     expect(base).toMatch(/inset-inline-end:\s*24px/)
     expect(base).toMatch(/width:\s*18px/)
     expect(base).toMatch(/color:\s*var\(--tab-button-color/)
-    expect(base).toMatch(/opacity:\s*1/)
+    expect(base).toMatch(/opacity:\s*1\s*!important/)
     // All three properties must transition so hover background/color changes do
     // not become abrupt when the idle-hide opacity transition was added.
     expect(base).toMatch(/transition:[^;]*background-color\s+0\.2s\s+ease/)
@@ -97,13 +103,13 @@ describe('TranslationView.scss language toolbar contract', () => {
       /\.translation-view \.language-controls \.ti-language-controls \.ti-default-action-button\.is-active\s*\{[^}]*opacity:\s*0/
     )
     expect(css).toMatch(
-      /\.translation-view \.language-controls \.ti-language-controls\s+\.ti-language-control-group:hover \.ti-default-action-button\.is-active[^{]*\{[^}]*opacity:\s*1/
+      /\.translation-view \.language-controls \.ti-language-controls\s+\.ti-language-control-group:hover \.ti-default-action-button\.is-active[^{]*\{[^}]*opacity:\s*1\s*!important/
     )
     expect(css).toMatch(
-      /\.translation-view \.language-controls \.ti-language-controls\s+\.ti-language-control-group:focus-within \.ti-default-action-button\.is-active[^{]*\{[^}]*opacity:\s*1/
+      /\.translation-view \.language-controls \.ti-language-controls\s+\.ti-language-control-group:focus-within \.ti-default-action-button\.is-active[^{]*\{[^}]*opacity:\s*1\s*!important/
     )
     expect(css).toMatch(
-      /\.translation-view \.language-controls \.ti-language-controls\s+\.ti-language-control-group \.ti-default-action-button\.is-active:focus(?:-visible)?[^{]*\{[^}]*opacity:\s*1/
+      /\.translation-view \.language-controls \.ti-language-controls\s+\.ti-language-control-group \.ti-default-action-button\.is-active:focus(?:-visible)?[^{]*\{[^}]*opacity:\s*1\s*!important/
     )
   })
 
@@ -137,6 +143,7 @@ describe('TranslationView.scss language toolbar contract', () => {
     expect(body).toMatch(/border-radius:\s*6px/)
     expect(body).toMatch(/color:\s*var\(--ti-action-icon\)/)
     expect(body).toMatch(/opacity:\s*1/)
+    expect(body).not.toMatch(/opacity:\s*1\s*!important/)
     // Layout reset properties must remain on the button itself, independent of
     // global button defaults, so styles do not depend on browser resets.
     expect(body).toMatch(/display:\s*flex/)
@@ -154,6 +161,46 @@ describe('TranslationView.scss language toolbar contract', () => {
     expect(hover).toMatch(/background-color:\s*var\(--ti-action-hover-bg\)/)
     expect(hover).toMatch(/color:\s*var\(--ti-action-icon-hover\)/)
     expect(hover).toMatch(/translateY\(-1px\)/)
+    const active = rule(css, /(\.translation-view \.language-controls \.ti-btn-min-clear:active\s*\{[^}]*\})/)
+    expect(active).toMatch(/transform:\s*translateY\(0\) scale\(0\.95\) !important/)
+  })
+
+  it('fades Clear out before hiding it and respects reduced motion', () => {
+    const visible = rule(css, /(\.translation-view \.language-controls \.ti-btn-min-clear\s*\{[^}]*\})/)
+    const hidden = rule(css, /(\.ti-btn-min-clear\.ti-clear-hidden:disabled\s*\{[^}]*\})/)
+    const baseMatch = css.match(/(\.translation-view \.language-controls \.ti-btn-min-clear)\s*\{([^}]*)\}/)
+    const hiddenMatch = css.match(/(\.ti-btn-min-clear\.ti-clear-hidden:disabled)\s*\{([^}]*)\}/)
+    expect(visible).toMatch(/opacity 180ms ease-in-out,\s*visibility 0s linear 0s/)
+    expect(visible).toMatch(/background-color 0\.2s cubic-bezier\(0\.4, 0, 0\.2, 1\)/)
+    expect(visible).toMatch(/color 0\.2s cubic-bezier\(0\.4, 0, 0\.2, 1\)/)
+    expect(visible).toMatch(/transform 0\.2s cubic-bezier\(0\.4, 0, 0\.2, 1\)/)
+    expect(visible).not.toMatch(/transition:\s*all/)
+    expect(visible).toMatch(/opacity: 1;/)
+    expect(visible).not.toMatch(/opacity: 1 !important/)
+    expect(hidden).toMatch(/opacity: 0;/)
+    expect(hidden).not.toMatch(/opacity: 0 !important/)
+    expect(hidden).toMatch(/visibility: hidden/)
+    expect(hidden).toMatch(/pointer-events: none/)
+    expect(hidden).toMatch(/opacity 180ms ease-in-out,\s*visibility 0s linear 180ms/)
+    expect(hidden).toMatch(/background-color 0\.2s cubic-bezier\(0\.4, 0, 0\.2, 1\)/)
+    expect(hidden).toMatch(/color 0\.2s cubic-bezier\(0\.4, 0, 0\.2, 1\)/)
+    expect(hidden).toMatch(/transform 0\.2s cubic-bezier\(0\.4, 0, 0\.2, 1\)/)
+    expect(selectorSpecificity(hiddenMatch[1])).toBe(selectorSpecificity(baseMatch[1]))
+    expect(css.indexOf(hiddenMatch[0])).toBeGreaterThan(css.indexOf(baseMatch[0]))
+
+    const reducedMotion = css.match(
+      /@media \(prefers-reduced-motion: reduce\)\s*\{\s*([^{}]+)\{([^{}]*)\}/
+    )
+    expect(reducedMotion).not.toBeNull()
+    const reducedSelectors = reducedMotion[1].split(',').map((selector) => selector.trim())
+    expect(reducedMotion[2]).toContain('transition: none')
+    expect(reducedSelectors).toEqual([
+      '.translation-view .language-controls .ti-btn-min-clear',
+      '.translation-view .language-controls .ti-btn-min-clear:where(.ti-clear-hidden):disabled'
+    ])
+    expect(selectorSpecificity(reducedSelectors[0])).toBeGreaterThanOrEqual(selectorSpecificity(baseMatch[1]))
+    expect(selectorSpecificity(reducedSelectors[1])).toBeGreaterThanOrEqual(selectorSpecificity(hiddenMatch[1]))
+    expect(css.indexOf(reducedMotion[0])).toBeGreaterThan(css.indexOf(hiddenMatch[0]))
   })
 
   it('keeps the row unwrapped at narrow popup widths', () => {
@@ -174,7 +221,13 @@ describe('TranslationView.scss language toolbar contract', () => {
         .filter((selector) => selector.includes(hook))
 
       for (const selector of selectors) {
-        expect(selector, `selector must stay scoped: ${selector}`).toContain('.translation-view')
+        if (selector.includes('.translation-view')) {
+          expect(selector).toContain('.translation-view')
+        } else if (selector.includes('.ti-clear-hidden')) {
+          expect(selector).toMatch(/^(?:\.ti-[\w-]+(?::[\w-]+)?)+$/)
+        } else {
+          expect(selector, `selector must stay scoped: ${selector}`).toContain('.translation-view')
+        }
       }
     }
   })

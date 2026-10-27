@@ -38,10 +38,13 @@
 
       <!-- Clear Button: Minimized clear fields button -->
       <button
-        v-if="showClearButton"
         class="ti-btn-min-clear"
+        :class="{ 'ti-clear-hidden': !showClearButton }"
         :title="t('popup_clear_storage_title_icon') || 'پاک کردن فیلدها'"
         :aria-label="t('popup_clear_storage_title_icon') || 'پاک کردن فیلدها'"
+        :disabled="!showClearButton"
+        :aria-hidden="!showClearButton"
+        :tabindex="showClearButton ? 0 : -1"
         @click="emit('clear')"
       >
         <MaskIcon
