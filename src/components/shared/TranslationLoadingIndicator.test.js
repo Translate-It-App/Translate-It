@@ -31,8 +31,11 @@ describe('TranslationLoadingIndicator.vue', () => {
     };
 
     expect(rule('.ti-translation-loading-indicator').nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['color', 'var(--text-color, #343a40)']);
-    expect(rule('.ti-translation-loading-indicator-pupil').nodes.map(({ prop, value }) => [prop, value]))
+      .toContainEqual(['color', 'var(--ti-loading-eye-color, var(--tab-button-color, #5f6368))']);
+    const pupil = rule('.ti-translation-loading-indicator-pupil');
+    expect(pupil.nodes.map(({ prop, value }) => [prop, value]))
+      .toContainEqual(['background', 'var(--ti-loading-eye-color, currentcolor)']);
+    expect(pupil.nodes.map(({ prop, value }) => [prop, value]))
       .toContainEqual(['box-shadow', '0 0 0 calc(2px * var(--ti-loading-size, 1)) var(--ti-loading-pupil-color, transparent)']);
 
     const label = rule('.ti-translation-loading-indicator-label');
@@ -66,10 +69,21 @@ describe('TranslationLoadingIndicator.vue', () => {
 
     const darkIndicator = rule('.ti-translation-display[class~=theme-dark] .ti-translation-loading-indicator');
     expect(darkIndicator.nodes.map(({ prop, value }) => [prop, value]))
-      .toContainEqual(['color', 'var(--text-color, #e8eaed)']);
+      .toContainEqual(['color', 'var(--ti-loading-eye-color, var(--placeholder-color, #888))']);
     const darkPupil = rule('.ti-translation-display[class~=theme-dark] .ti-translation-loading-indicator-pupil');
     expect(darkPupil.nodes.map(({ prop, value }) => [prop, value]))
       .toContainEqual(['box-shadow', '0 0 0 calc(2px * var(--ti-loading-size, 1)) var(--ti-loading-pupil-color, transparent)']);
+    expect(darkPupil.nodes.map(({ prop }) => prop)).not.toEqual(expect.arrayContaining(['color', 'background', 'border', 'border-color']));
+
+    const darkChildRules = [];
+    root.walkRules((candidate) => {
+      if (candidate.selector.startsWith('.ti-translation-display[class~=theme-dark]')
+        && /\.ti-translation-loading-indicator-(?:eye|pupil)/.test(candidate.selector)) {
+        darkChildRules.push(candidate);
+      }
+    });
+    expect(darkChildRules.flatMap((candidate) => candidate.nodes.map(({ prop }) => prop)))
+      .not.toEqual(expect.arrayContaining(['color', 'background', 'border', 'border-color']));
 
     const reducedMotion = root.nodes.find((node) => node.type === 'atrule' && node.params === '(prefers-reduced-motion: reduce)');
     expect(reducedMotion).toBeDefined();
