@@ -86,6 +86,9 @@
   "api_provider_requesty": {
     "message": "Requesty"
   },
+  "api_provider_cheaperinference": {
+    "message": "Cheaper Inference"
+  },
   "api_provider_deepseek": {
     "message": "DeepSeek"
   },
@@ -233,11 +236,17 @@
   "provider_requesty_title": {
     "message": "Requesty"
   },
+  "provider_cheaperinference_title": {
+    "message": "Cheaper Inference"
+  },
   "provider_openrouter_description": {
     "message": "OpenRouter経由で複数のAIモデルにアクセスできます。APIキーが必要です。"
   },
   "provider_requesty_description": {
     "message": "Requesty経由で複数のAIモデルにアクセスできます。APIキーが必要です。"
+  },
+  "provider_cheaperinference_description": {
+    "message": "Cheaper Inference経由で複数のAIモデルにアクセスできます。APIキーが必要です。"
   },
   "provider_deepseek_title": {
     "message": "DeepSeek"
@@ -959,6 +968,9 @@
   "help_api_providers_requesty": {
     "message": "Requesty - [Requesty]({url}) を通じて複数のモデルにアクセスできます"
   },
+  "help_api_providers_cheaperinference": {
+    "message": "Cheaper Inference - [Cheaper Inference]({url}) を通じて複数のモデルにアクセスできます"
+  },
   "help_api_providers_deepseek": {
     "message": "DeepSeek - [DeepSeek Platform]({url}) から API アクセスを取得できます"
   },
@@ -1397,6 +1409,9 @@
   "requesty_api_key_info": {
     "message": "RequestyのAPIキーはRequestyダッシュボードで取得できます。"
   },
+  "cheaperinference_api_key_info": {
+    "message": "Cheaper InferenceのAPIキーはCheaper Inferenceダッシュボードで取得できます。"
+  },
   "webai_api_key_info": {
     "message": "ローカルにホストしたWebAI APIサーバーを取得・実行できます。"
   },
@@ -1413,6 +1428,9 @@
     "message": "APIキーを取得"
   },
   "requesty_api_key_link": {
+    "message": "APIキーを取得"
+  },
+  "cheaperinference_api_key_link": {
     "message": "APIキーを取得"
   },
   "webai_api_key_link": {
@@ -1583,6 +1601,9 @@
   "requesty_api_settings_title": {
     "message": "Requesty 設定"
   },
+  "cheaperinference_api_settings_title": {
+    "message": "Cheaper Inference 設定"
+  },
   "openrouter_api_settings_api_key_label": {
     "message": "APIキー"
   },
@@ -1592,34 +1613,67 @@
   "requesty_api_key_placeholder": {
     "message": "Requesty APIキーを貼り付けてください"
   },
+  "cheaperinference_api_key_placeholder": {
+    "message": "Cheaper Inference APIキーを貼り付けてください"
+  },
   "requesty_catalog_search_label": {
     "message": "Requestyモデルを検索"
   },
+  "cheaperinference_catalog_search_label": {
+    "message": "Cheaper Inferenceモデルを検索"
+  },
   "requesty_catalog_search_placeholder": {
+    "message": "モデルIDまたは名前で検索"
+  },
+  "cheaperinference_catalog_search_placeholder": {
     "message": "モデルIDまたは名前で検索"
   },
   "requesty_catalog_results_label": {
     "message": "利用可能なRequestyモデル"
   },
+  "cheaperinference_catalog_results_label": {
+    "message": "利用可能なCheaper Inferenceモデル"
+  },
   "requesty_catalog_showing_count": {
+    "message": "一致するモデル {total} 件中 {shown} 件を表示"
+  },
+  "cheaperinference_catalog_showing_count": {
     "message": "一致するモデル {total} 件中 {shown} 件を表示"
   },
   "requesty_catalog_no_matches": {
     "message": "検索に一致するモデルはありません。"
   },
+  "cheaperinference_catalog_no_matches": {
+    "message": "検索に一致するモデルはありません。"
+  },
   "requesty_models_loading": {
+    "message": "モデルカタログを読み込み中…"
+  },
+  "cheaperinference_models_loading": {
     "message": "モデルカタログを読み込み中…"
   },
   "requesty_models_discovery_failed": {
     "message": "Requestyモデルを読み込めませんでした。"
   },
+  "cheaperinference_models_discovery_failed": {
+    "message": "Cheaper Inferenceモデルを読み込めませんでした。"
+  },
   "requesty_models_empty": {
     "message": "Requestyからモデルが返されませんでした。"
+  },
+  "cheaperinference_models_empty": {
+    "message": "Cheaper Inferenceからモデルが返されませんでした。"
   },
   "requesty_model_not_listed": {
     "message": "保存済みモデルはRequestyの一覧にありません。"
   },
+  "cheaperinference_model_not_listed": {
+    "message": "保存済みモデルはCheaper Inferenceの一覧にありません。"
+  },
   "requesty_saved_model_label": {
+    "message": "保存済みモデル"
+  },
+  "cheaperinference_saved_model_label": {
     "message": "保存済みモデル"
   },
   "openrouter_api_settings_model_label": {
@@ -2520,10 +2574,16 @@
   "requesty_custom_model_placeholder": {
     "message": "モデル名を入力（例：provider/model-name）"
   },
+  "cheaperinference_custom_model_placeholder": {
+    "message": "モデル名を入力（例：model-name）"
+  },
   "openrouter_custom_model_label": {
     "message": "モデル名"
   },
   "requesty_custom_model_label": {
+    "message": "モデル名"
+  },
+  "cheaperinference_custom_model_label": {
     "message": "モデル名"
   },
   "deepseek_custom_model_placeholder": {

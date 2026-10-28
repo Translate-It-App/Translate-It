@@ -437,12 +437,13 @@ export const PROVIDER_SUPPORTED_LANGUAGES = {
     // Vajehyab - Persian dictionary service
     vajehyab: ['fa', 'en', 'ar', 'tr'],
 
-    // AI Providers (Gemini, OpenAI, OpenRouter, Requesty, DeepSeek, WebAI, Custom)
+    // AI Providers (Gemini, OpenAI, OpenRouter, Requesty, Cheaper Inference, DeepSeek, WebAI, Custom)
     // These support virtually all languages through LLM capabilities
     gemini: null, // null = supports all languages
   openai: null,
   openrouter: null,
   requesty: null,
+  cheaperinference: null,
   deepseek: null,
   webai: null,
   custom: null

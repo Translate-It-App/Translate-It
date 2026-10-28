@@ -78,7 +78,7 @@
 از میان سرویس‌های ترجمهٔ سنتی، مبتنی بر هوش مصنوعی، محلی و تخصصی انتخاب کنید:
 
 - **سنتی:** [Google Translate](https://translate.google.com/)، [Microsoft Edge Translator](https://www.microsoft.com/translator/)، [DeepL](https://www.deepl.com/translator)، [Yandex](https://translate.yandex.com/)، [Lingva](https://github.com/TheDavidDelta/lingva-translate)، [Bing](https://www.bing.com/translator)
-- **هوش مصنوعی:** [Gemini](https://ai.google.dev/)، [OpenAI](https://openai.com/api/)، [OpenRouter](https://openrouter.ai/)، [Requesty](https://www.requesty.ai/)، [DeepSeek](https://platform.deepseek.com/)
+- **هوش مصنوعی:** [Gemini](https://ai.google.dev/)، [OpenAI](https://openai.com/api/)، [OpenRouter](https://openrouter.ai/)، [Requesty](https://www.requesty.ai/)، [Cheaper Inference](https://cheaperinference.com/)، [DeepSeek](https://platform.deepseek.com/)
 - **سفارشی و محلی:** OpenAI-Compatible APIs، [WebAI-to-API](https://github.com/Amm1rr/WebAI-to-API/)، Browser Translation
 - **واژه‌نامه:** [Vajehyab](https://vajehyab.com/)
 

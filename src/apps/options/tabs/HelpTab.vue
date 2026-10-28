@@ -78,6 +78,7 @@ const PROVIDER_URLS = {
   openai: 'https://platform.openai.com/api-keys',
   openrouter: 'https://openrouter.ai/keys',
   requesty: 'https://app.requesty.ai/api-keys',
+  cheaperinference: 'https://cheaperinference.com',
   deepseek: 'https://platform.deepseek.com/api_keys'
 }
 
@@ -118,6 +119,7 @@ const apiKeysHelpContent = computed(() => {
 - ${t('help_api_providers_openai', { url: PROVIDER_URLS.openai }) || `**OpenAI** - Register at [OpenAI Platform](${PROVIDER_URLS.openai})`}
 - ${t('help_api_providers_openrouter', { url: PROVIDER_URLS.openrouter }) || `**OpenRouter** - Access multiple models via [OpenRouter](${PROVIDER_URLS.openrouter})`}
 - ${t('help_api_providers_requesty', { url: PROVIDER_URLS.requesty }) || `**Requesty** - Access multiple models via [Requesty](${PROVIDER_URLS.requesty})`}
+- ${t('help_api_providers_cheaperinference', { url: PROVIDER_URLS.cheaperinference }) || `**Cheaper Inference** - Access multiple models via [Cheaper Inference](${PROVIDER_URLS.cheaperinference})`}
 - ${t('help_api_providers_deepseek', { url: PROVIDER_URLS.deepseek }) || `**DeepSeek** - Get API access from [DeepSeek Platform](${PROVIDER_URLS.deepseek})`}
 
 ---

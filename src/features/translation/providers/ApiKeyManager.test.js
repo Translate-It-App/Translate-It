@@ -183,6 +183,7 @@ describe('ApiKeyManager', () => {
       [ProviderRegistryIds.DEEPSEEK, '_testDeepSeekKey', ['secret-key', {}]],
       [ProviderRegistryIds.OPENROUTER, '_testOpenRouterKey', ['secret-key', {}]],
       [ProviderRegistryIds.REQUESTY, '_testRequestyKey', ['secret-key', {}]],
+      [ProviderRegistryIds.CHEAPERINFERENCE, '_testCheaperInferenceKey', ['secret-key', {}]],
        [ProviderRegistryIds.DEEPL, '_testDeepLKey', ['secret-key', {}]]
     ])('dispatches %s to its validator', async (providerId, validator, expectedArgs) => {
       const testValidator = vi.spyOn(ApiKeyManager, validator).mockResolvedValue(true);
@@ -218,7 +219,7 @@ describe('ApiKeyManager', () => {
       testValidator.mockRestore();
     });
 
-    it.each(['unknown-provider', 'OpenAI', 'Gemini', 'DeepSeek', 'OpenRouter', 'Requesty', 'DeepL', 'Custom'])('returns unknown-provider result for unsupported provider ID %s', async (providerId) => {
+    it.each(['unknown-provider', 'OpenAI', 'Gemini', 'DeepSeek', 'OpenRouter', 'Requesty', 'CheaperInference', 'DeepL', 'Custom'])('returns unknown-provider result for unsupported provider ID %s', async (providerId) => {
         const result = await ApiKeyManager.testKeysDirect('secret-key', providerId);
 
         expect(result).toMatchObject({

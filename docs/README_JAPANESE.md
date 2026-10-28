@@ -78,7 +78,7 @@
 従来型、AI、ローカル、専門的な翻訳プロバイダーから選べます。
 
 - **従来型:** [Google Translate](https://translate.google.com/)、[Microsoft Edge Translator](https://www.microsoft.com/translator/)、[DeepL](https://www.deepl.com/translator)、[Yandex](https://translate.yandex.com/)、[Lingva](https://github.com/TheDavidDelta/lingva-translate)、[Bing](https://www.bing.com/translator)
-- **AI:** [Gemini](https://ai.google.dev/)、[OpenAI](https://openai.com/api/)、[OpenRouter](https://openrouter.ai/)、[Requesty](https://www.requesty.ai/)、[DeepSeek](https://platform.deepseek.com/)
+- **AI:** [Gemini](https://ai.google.dev/)、[OpenAI](https://openai.com/api/)、[OpenRouter](https://openrouter.ai/)、[Requesty](https://www.requesty.ai/)、[Cheaper Inference](https://cheaperinference.com/)、[DeepSeek](https://platform.deepseek.com/)
 - **カスタム・ローカル:** OpenAI-Compatible APIs、[WebAI-to-API](https://github.com/Amm1rr/WebAI-to-API/)、Browser Translation
 - **辞書:** [Vajehyab](https://vajehyab.com/)
 
