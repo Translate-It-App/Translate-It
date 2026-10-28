@@ -34,7 +34,7 @@ Powered by **10+ translation providers**, Translate It focuses on privacy, flexi
 
 <p align="center">
   <br>
-  <img src="./docs/Images/Windows.webp" alt="Watch the video" width="560" />
+  <img src="./docs/Images/Windows.webp" alt="Floating Window" width="560" />
   
   https://github.com/user-attachments/assets/16e12bef-7771-4285-9117-f167b0f62359
 
