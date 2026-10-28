@@ -33,13 +33,12 @@
 <br>
 
 <p align="center">
-  <a href="https://youtu.be/VxgRWlx20wU">
-    <b>مشاهده دمو در یوتیوب</b>
-  </a>
   <br>
-  <a href="https://youtu.be/VxgRWlx20wU">
-    <img src="./Images/Windows.webp" alt="مشاهده ویدیو" width="560" />
-  </a>
+  <img src="./Images/Windows.webp" alt="پنجره شناور" width="560" />
+  
+  https://github.com/user-attachments/assets/16e12bef-7771-4285-9117-f167b0f62359
+
+
 </p>
 
 ---
