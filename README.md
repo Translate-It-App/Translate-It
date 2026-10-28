@@ -33,13 +33,12 @@ Powered by **10+ translation providers**, Translate It focuses on privacy, flexi
 <br>
 
 <p align="center">
-  <a href="https://youtu.be/bKQF_SkhYjs">
-    <b>Watch Demo on YouTube</b>
-  </a>
   <br>
-  <a href="https://youtu.be/bKQF_SkhYjs">
-    <img src="./docs/Images/Windows.webp" alt="Watch the video" width="560" />
-  </a>
+  <img src="./docs/Images/Windows.webp" alt="Watch the video" width="560" />
+  
+  https://github.com/user-attachments/assets/16e12bef-7771-4285-9117-f167b0f62359
+
+
 </p>
 
 ---
