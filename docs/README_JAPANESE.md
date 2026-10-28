@@ -33,13 +33,12 @@
 <br>
 
 <p align="center">
-  <a href="https://youtu.be/VxgRWlx20wU">
-    <b>YouTubeでデモを見る</b>
-  </a>
   <br>
-  <a href="https://youtu.be/VxgRWlx20wU">
-    <img src="./Images/Windows.webp" alt="動画を見る" width="560" />
-  </a>
+  <img src="./Images/Windows.webp" alt="フローティングウィンドウ" width="560" />
+  
+  https://github.com/user-attachments/assets/16e12bef-7771-4285-9117-f167b0f62359
+
+
 </p>
 
 ---
