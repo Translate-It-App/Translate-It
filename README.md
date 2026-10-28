@@ -33,11 +33,11 @@ Powered by **10+ translation providers**, Translate It focuses on privacy, flexi
 <br>
 
 <p align="center">
-  <a href="https://youtu.be/VxgRWlx20wU">
+  <a href="https://youtu.be/bKQF_SkhYjs">
     <b>Watch Demo on YouTube</b>
   </a>
   <br>
-  <a href="https://youtu.be/VxgRWlx20wU">
+  <a href="https://youtu.be/bKQF_SkhYjs">
     <img src="./docs/Images/Windows.webp" alt="Watch the video" width="560" />
   </a>
 </p>
