@@ -86,6 +86,9 @@
   "api_provider_requesty": {
     "message": "Requesty"
   },
+  "api_provider_cheaperinference": {
+    "message": "Cheaper Inference"
+  },
   "api_provider_deepseek": {
     "message": "DeepSeek"
   },
@@ -233,11 +236,17 @@
   "provider_requesty_title": {
     "message": "Requesty"
   },
+  "provider_cheaperinference_title": {
+    "message": "Cheaper Inference"
+  },
   "provider_openrouter_description": {
     "message": "Access to multiple AI models via OpenRouter. Requires an API key."
   },
   "provider_requesty_description": {
     "message": "Access to multiple AI models via Requesty. Requires an API key."
+  },
+  "provider_cheaperinference_description": {
+    "message": "Access to multiple AI models via Cheaper Inference. Requires an API key."
   },
   "provider_deepseek_title": {
     "message": "DeepSeek"
@@ -959,6 +968,9 @@
   "help_api_providers_requesty": {
     "message": "Requesty - Access multiple models via [Requesty]({url})"
   },
+  "help_api_providers_cheaperinference": {
+    "message": "Cheaper Inference - Access multiple models via [Cheaper Inference]({url})"
+  },
   "help_api_providers_deepseek": {
     "message": "DeepSeek - Get API access from [DeepSeek Platform]({url})"
   },
@@ -1397,6 +1409,9 @@
   "requesty_api_key_info": {
     "message": "You can get your Requesty API key from the Requesty dashboard."
   },
+  "cheaperinference_api_key_info": {
+    "message": "You can get your Cheaper Inference API key from the Cheaper Inference dashboard."
+  },
   "webai_api_key_info": {
     "message": "You can get and run your locally hosted WebAI API server."
   },
@@ -1413,6 +1428,9 @@
     "message": "Get Your API Key"
   },
   "requesty_api_key_link": {
+    "message": "Get Your API Key"
+  },
+  "cheaperinference_api_key_link": {
     "message": "Get Your API Key"
   },
   "webai_api_key_link": {
@@ -1583,6 +1601,9 @@
   "requesty_api_settings_title": {
     "message": "Requesty Settings"
   },
+  "cheaperinference_api_settings_title": {
+    "message": "Cheaper Inference Settings"
+  },
   "openrouter_api_settings_api_key_label": {
     "message": "API Key"
   },
@@ -1592,34 +1613,67 @@
   "requesty_api_key_placeholder": {
     "message": "Paste your Requesty API key here"
   },
+  "cheaperinference_api_key_placeholder": {
+    "message": "Paste your Cheaper Inference API key here"
+  },
   "requesty_catalog_search_label": {
     "message": "Search Requesty models"
   },
+  "cheaperinference_catalog_search_label": {
+    "message": "Search Cheaper Inference models"
+  },
   "requesty_catalog_search_placeholder": {
+    "message": "Search by model ID or name"
+  },
+  "cheaperinference_catalog_search_placeholder": {
     "message": "Search by model ID or name"
   },
   "requesty_catalog_results_label": {
     "message": "Available Requesty models"
   },
+  "cheaperinference_catalog_results_label": {
+    "message": "Available Cheaper Inference models"
+  },
   "requesty_catalog_showing_count": {
+    "message": "Showing {shown} of {total} matching models"
+  },
+  "cheaperinference_catalog_showing_count": {
     "message": "Showing {shown} of {total} matching models"
   },
   "requesty_catalog_no_matches": {
     "message": "No models match your search."
   },
+  "cheaperinference_catalog_no_matches": {
+    "message": "No models match your search."
+  },
   "requesty_models_loading": {
+    "message": "Loading model catalog…"
+  },
+  "cheaperinference_models_loading": {
     "message": "Loading model catalog…"
   },
   "requesty_models_discovery_failed": {
     "message": "Could not load Requesty models."
   },
+  "cheaperinference_models_discovery_failed": {
+    "message": "Could not load Cheaper Inference models."
+  },
   "requesty_models_empty": {
     "message": "No models were returned by Requesty."
+  },
+  "cheaperinference_models_empty": {
+    "message": "No models were returned by Cheaper Inference."
   },
   "requesty_model_not_listed": {
     "message": "Saved model was not listed by Requesty."
   },
+  "cheaperinference_model_not_listed": {
+    "message": "Saved model was not listed by Cheaper Inference."
+  },
   "requesty_saved_model_label": {
+    "message": "Saved model"
+  },
+  "cheaperinference_saved_model_label": {
     "message": "Saved model"
   },
   "openrouter_api_settings_model_label": {
@@ -2520,10 +2574,16 @@
   "requesty_custom_model_placeholder": {
     "message": "Enter model name (e.g., provider/model-name)"
   },
+  "cheaperinference_custom_model_placeholder": {
+    "message": "Enter model name (e.g., model-name)"
+  },
   "openrouter_custom_model_label": {
     "message": "Model Name"
   },
   "requesty_custom_model_label": {
+    "message": "Model Name"
+  },
+  "cheaperinference_custom_model_label": {
     "message": "Model Name"
   },
   "deepseek_custom_model_placeholder": {
