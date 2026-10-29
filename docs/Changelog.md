@@ -1,3 +1,11 @@
+#### v1.25.2 – Released on October 29, 2026
+
+##### Changed
+
+- Improved compatibility with various websites for smoother, more reliable floating translation controls and a more consistent browsing experience.
+
+---
+
 #### v1.25.1 – Released on October 27, 2026
 
 ##### Changed
