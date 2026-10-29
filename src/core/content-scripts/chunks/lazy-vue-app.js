@@ -160,6 +160,10 @@ async function createMountPoint() {
         translate: none !important;
         scale: none !important;
         rotate: none !important;
+        perspective: none !important;
+        will-change: auto !important;
+        content-visibility: visible !important;
+        zoom: 1 !important;
         opacity: 1 !important;
         visibility: visible !important;
         contain: none !important;

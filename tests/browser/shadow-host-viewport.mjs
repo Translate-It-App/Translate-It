@@ -173,15 +173,17 @@ try {
     scrollTo(0,0);
     const host=document.getElementById('translate-it-host-main'), root=host.shadowRoot;
     const probe=document.createElement('button'); probe.id='window';
-    probe.style.cssText='position:fixed;left:360px;top:180px;width:180px;height:120px;pointer-events:auto';
-    root.getElementById('translate-it-app-container').append(probe);
-    const properties=['position','display','inset','transform','translate','scale','rotate','opacity','visibility','contain','filter','clipPath','backgroundColor','pointerEvents'];
+    probe.style.cssText='position:fixed;left:360px;top:180px;width:180px;height:120px;pointer-events:auto'; probe.onclick=()=>probe.dataset.clicked='yes';
+    const fab=document.createElement('button'); fab.id='fab';
+    fab.style.cssText='position:fixed;right:20px;bottom:20px;width:64px;height:44px;pointer-events:auto'; fab.onclick=()=>fab.dataset.clicked='yes';
+    root.getElementById('translate-it-app-container').append(probe,fab);
+    const properties=['position','display','inset','transform','translate','scale','rotate','perspective','willChange','contentVisibility','zoom','opacity','visibility','contain','filter','clipPath','backgroundColor','pointerEvents'];
     const capture=()=>{
-      const s=getComputedStyle(host), b=getComputedStyle(host,'::backdrop'), r=probe.getBoundingClientRect();
-      return {style:Object.fromEntries(properties.map(k=>[k,s[k]])), rect:[r.left,r.top,r.right,r.bottom], backdrop:{backgroundColor:b.backgroundColor,pointerEvents:b.pointerEvents}};
+      const s=getComputedStyle(host), b=getComputedStyle(host,'::backdrop');
+      return {style:Object.fromEntries(properties.map(k=>[k,s[k]])), children:[probe,fab].map(el=>{const r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;return{id:el.id,rect:[r.left,r.top,r.right,r.bottom],visible:el.checkVisibility(),documentHit:document.elementFromPoint(x,y)?.id||document.elementFromPoint(x,y)?.tagName,shadowHit:host.shadowRoot.elementFromPoint(x,y)?.id||host.shadowRoot.elementFromPoint(x,y)?.tagName}}), backdrop:{backgroundColor:b.backgroundColor,pointerEvents:b.pointerEvents}};
     };
     const baseline=capture(), selectors=['[popover]',':popover-open'], priorities=['',' !important'], observations=[];
-    const declarations='transform:translate(70px,50px);translate:11px 12px;scale:1.2;rotate:15deg;opacity:.25;visibility:hidden;display:none;contain:paint;filter:blur(3px);clip-path:inset(20%);background-color:rgb(255,0,0);pointer-events:auto';
+    const declarations='transform:translate(70px,50px);translate:11px 12px;scale:1.2;rotate:15deg;perspective:1000px;will-change:transform;content-visibility:hidden;zoom:1.2;opacity:.25;visibility:hidden;display:none;contain:paint;filter:blur(3px);clip-path:inset(20%);background-color:rgb(255,0,0);pointer-events:auto';
     for(const selector of selectors) for(const priority of priorities){
       const style=document.createElement('style');
       style.textContent=selector+'{'+declarations.replaceAll(';',''+priority+';')+priority+'}';
@@ -198,20 +200,20 @@ try {
     probe.style.cssText+=';pointer-events:auto'; probe.onclick=()=>probe.dataset.clicked='yes';
     const backdrop={...capture(), hit:document.elementFromPoint(25,25)?.id||document.elementFromPoint(25,25)?.tagName};
     const point=e=>{const r=e.getBoundingClientRect();return[r.left+r.width/2,r.top+r.height/2]};
-    const probePoint=point(probe);
-    return {baseline,observations,backdrop,hostile:capture(),pagePoint:point(page),probePoint,probeHit:root.elementFromPoint(...probePoint)?.id||null,pageHit:document.elementFromPoint(...probePoint)?.id||document.elementFromPoint(...probePoint)?.tagName};
+    const probePoints=[point(page),point(probe),point(fab)];
+    return {baseline,observations,backdrop,hostile:capture(),probePoints};
   `);
   console.log('Popover CSS interference evidence:', JSON.stringify(interference));
-  await click([interference.pagePoint,interference.probePoint]);
-  const clicks = await execute(`return {page:document.getElementById('popover-page-target').dataset.clicked,probe:document.getElementById('translate-it-host-main').shadowRoot.getElementById('translate-it-app-container').querySelector('#window').dataset.clicked}`);
-  console.log('Popover CSS pointer-click evidence:', JSON.stringify({ ...clicks, points:[interference.pagePoint,interference.probePoint] }));
+  await click(interference.probePoints);
+  const clicks = await execute(`const root=document.getElementById('translate-it-host-main').shadowRoot;return {page:document.getElementById('popover-page-target').dataset.clicked,probes:['window','fab'].map(id=>root.getElementById(id).dataset.clicked)}`);
+  console.log('Popover CSS pointer-click evidence:', JSON.stringify({ clicks, points:interference.probePoints }));
   for (const item of interference.observations) {
     assert.deepEqual(item.style, interference.baseline.style, `Page ${item.selector} ${item.priority} CSS changed promoted host computed styles`);
+    assert.deepEqual(item.children, interference.baseline.children, `Page ${item.selector} ${item.priority} CSS changed fixed child visibility, geometry, or hit testing`);
   }
-  assert.ok(interference.observations.every((item) => JSON.stringify(item.rect) === JSON.stringify(interference.baseline.rect)), 'Page popover CSS changed fixed probe geometry');
   assert.deepEqual(interference.backdrop.backdrop, interference.baseline.backdrop, 'Page CSS changed promoted host backdrop');
-  assert.equal(clicks.page, 'yes', 'Page CSS prevented an outside-page click');
-  assert.equal(clicks.probe, 'yes', 'Page CSS prevented interaction with shadow probe');
+  assert.equal(clicks.page, 'yes', 'Host intercepted the page click');
+  assert.ok(clicks.probes.every((value) => value === 'yes'), 'Page CSS prevented pointer interaction with a fixed shadow probe');
   console.log('PASS: Chrome production-host containment, normal page, RTL, iframe, hit-testing, pointer clicks/drag probe, remount, and old-code negative control.');
 } finally {
   if (session && base) { try { await request(`/session/${session}`, 'DELETE'); } catch { /* ChromeDriver may have already closed the session. */ } }
