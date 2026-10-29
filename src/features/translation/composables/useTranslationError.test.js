@@ -5,6 +5,7 @@ import * as ErrorDisplayStrategies from '@/shared/error-management/ErrorDisplayS
 import { isCancellationError, matchErrorToType } from '@/shared/error-management/ErrorMatcher.js';
 import { mockErrorHandlerInstance } from '@/shared/error-management/ErrorHandler.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
+import { openOptionsPage } from '@/core/helpers.js';
 
 // --- Shared Mock Objects ---
 const mockUseErrorHandler = {
@@ -36,6 +37,10 @@ vi.mock('@/composables/shared/useErrorHandler.js', () => ({
 
 vi.mock('@/shared/error-management/ErrorDisplayStrategies.js');
 vi.mock('@/shared/error-management/ErrorMatcher.js');
+
+vi.mock('@/core/helpers.js', () => ({
+  openOptionsPage: vi.fn()
+}));
 
 // Helper to test composables
 function withSetup(composable) {
@@ -417,7 +422,7 @@ describe('useTranslationError', () => {
     const settingsCallback = composable.getSettingsCallback();
     settingsCallback();
 
-    expect(mockErrorHandlerInstance.openOptionsPageCallback).toHaveBeenCalled();
+    expect(openOptionsPage).toHaveBeenCalled();
   });
 
   it.each([

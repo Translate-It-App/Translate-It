@@ -80,6 +80,7 @@
           >
             <button
               v-if="canRetry"
+              type="button"
               class="error-action retry-btn"
               @click="handleRetry"
             >
@@ -87,6 +88,7 @@
             </button>
             <button
               v-if="canOpenSettings"
+              type="button"
               class="error-action settings-btn"
               @click="handleSettings"
             >

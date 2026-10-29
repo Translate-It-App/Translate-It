@@ -13,6 +13,7 @@ import { PublicTranslationErrorActions } from '@/shared/error-management/PublicT
 import { createLegacyDisplayError } from '@/shared/error-management/PublicTranslationErrorAdapter.js'
 import { getScopedLogger } from '@/shared/logging/logger.js'
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js'
+import { openOptionsPage } from '@/core/helpers.js'
 
 // Lazy logger to avoid TDZ ReferenceErrors when bundled
 const logger = new Proxy({}, {
@@ -203,8 +204,8 @@ export function useTranslationError(context = 'unknown') {
       
       try {
         logger.info(`[${context}] Opening settings for error: ${errorType.value}`)
-        // Use ErrorHandler's settings callback
-        errorHandler.openOptionsPageCallback?.()
+        // Open the extension options page via the established helper
+        openOptionsPage()
       } catch (settingsError) {
         logger.error(`[${context}] Failed to open settings:`, settingsError)
       }
