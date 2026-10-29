@@ -5,18 +5,12 @@ html[data-translate-it-select-mode="true"] * {
   cursor: crosshair !important;
 }
 
-:root {
-  --translate-highlight-color: #ff8800;
-  --translate-highlight-width: 3px;
-  --translate-highlight-offset: 2px;
-}
-
 // Highlight must NOT set position/z-index: those would change the host
 // element's positioning, stacking context, containing block and hit testing.
 // Outline + glow box-shadow keep the visual hierarchy paint-only.
-html body [data-translate-highlighted="true"],
-html body .translate-it-element-highlighted {
-  outline: var(--translate-highlight-width) solid var(--translate-highlight-color) !important;
-  outline-offset: var(--translate-highlight-offset) !important;
+html[data-translate-it-select-mode="true"] body [data-translate-highlighted="true"],
+html[data-translate-it-select-mode="true"] body .translate-it-element-highlighted {
+  outline: 3px solid #ff8800 !important;
+  outline-offset: 2px !important;
   box-shadow: 0 0 10px rgba(255, 136, 0, 0.5) !important;
 }

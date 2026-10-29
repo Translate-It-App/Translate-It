@@ -473,6 +473,41 @@ describe('SelectElementManager', () => {
     expect(pageEventBus.emit).toHaveBeenCalledWith('show-select-element-notification', expect.any(Object));
   });
 
+  it.each([['top frame', true], ['iframe', false]])('injects mode-scoped host CSS from the local core in a %s', async (_frame, isTopFrame) => {
+    const previousCore = window.translateItContentCore;
+    const localCore = { injectMainDOMStyles: vi.fn() };
+    window.translateItContentCore = localCore;
+    manager.isTopFrame = isTopFrame;
+
+    try {
+      await manager.initialize();
+      await manager.activateSelectElementMode();
+
+      expect(localCore.injectMainDOMStyles).toHaveBeenCalledOnce();
+      const [css, id] = localCore.injectMainDOMStyles.mock.calls[0];
+      expect(css).toEqual(expect.any(String));
+      expect(css.length).toBeGreaterThan(0);
+      expect(id).toBe('translate-it-select-mode-styles');
+      expect(document.documentElement.getAttribute('data-translate-it-select-mode')).toBe('true');
+
+      await manager.activateSelectElementMode();
+      expect(localCore.injectMainDOMStyles).toHaveBeenCalledOnce();
+      await manager.deactivate();
+      expect(document.documentElement.hasAttribute('data-translate-it-select-mode')).toBe(false);
+
+      await manager.activateSelectElementMode();
+      expect(localCore.injectMainDOMStyles).toHaveBeenCalledTimes(2);
+      expect(localCore.injectMainDOMStyles.mock.calls[1]).toEqual(localCore.injectMainDOMStyles.mock.calls[0]);
+      expect(document.documentElement.getAttribute('data-translate-it-select-mode')).toBe('true');
+      await manager.deactivate();
+      expect(document.documentElement.hasAttribute('data-translate-it-select-mode')).toBe(false);
+    } finally {
+      if (manager.isActive) await manager.deactivate({ reason: 'manual' });
+      if (previousCore === undefined) delete window.translateItContentCore;
+      else window.translateItContentCore = previousCore;
+    }
+  });
+
   it('publishes canonical active state on direct activation', async () => {
     await manager.initialize();
     await manager.activateSelectElementMode();

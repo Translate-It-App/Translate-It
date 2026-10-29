@@ -966,12 +966,10 @@ class SelectElementManager extends ResourceTracker {
 
   /**
    * Ensure necessary CSS styles are injected for element selection
-   * Only runs in main frame and uses the content core singleton
+   * Uses the current frame's content core singleton
    * @private
    */
   async _ensureStylesInjected() {
-    if (!this.isTopFrame) return;
-
     const contentCore = window.translateItContentCore;
     if (contentCore && typeof contentCore.injectMainDOMStyles === 'function') {
       await contentCore.injectMainDOMStyles(selectionStyles, 'translate-it-select-mode-styles');

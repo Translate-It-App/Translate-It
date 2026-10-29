@@ -102,6 +102,9 @@ describe('IFrameContentScriptCore lifecycle', () => {
     window.translateItContentScriptInitializing = false;
     window.translateItContentCore = undefined;
     window.translateItContentScriptCore = undefined;
+    document.getElementById('translate-it-main-dom-styles')?.remove();
+    document.getElementById('translate-it-select-mode-styles')?.remove();
+    document.getElementById('website-highlight-token')?.remove();
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: { href: 'https://example.com/frame.html', protocol: 'https:', host: 'example.com' },
@@ -181,6 +184,11 @@ describe('IFrameContentScriptCore lifecycle', () => {
     const { IFrameContentScriptCore } = await import('./IFrameContentScriptCore.js');
     const core = new IFrameContentScriptCore();
     await core.initializeBase();
+    const injectStyles = vi.spyOn(core, 'injectStyles');
+    const pageStyles = document.createElement('style');
+    pageStyles.id = 'website-highlight-token';
+    pageStyles.textContent = ':root { --translate-highlight-color: rgb(1, 2, 3); }';
+    document.head.appendChild(pageStyles);
 
     const p1 = core.ensureAllowedRuntime();
     const p2 = core.ensureAllowedRuntime();
@@ -191,6 +199,9 @@ describe('IFrameContentScriptCore lifecycle', () => {
     expect(results).toEqual([true, true]);
     expect(core._allowedRuntimeStarted).toBe(true);
     expect(core._allowedRuntimePromise).toBeNull();
+    expect(injectStyles).not.toHaveBeenCalled();
+    expect(document.getElementById('translate-it-main-dom-styles')).toBeNull();
+    expect(getComputedStyle(document.documentElement).getPropertyValue('--translate-highlight-color').trim()).toBe('rgb(1,2,3)');
     // loadFeature called once per lite feature, not duplicated
     const lite = ['messaging', 'extensionContext', 'contentMessageHandler', 'mouseHover'];
     for (const f of lite) {
@@ -204,11 +215,29 @@ describe('IFrameContentScriptCore lifecycle', () => {
     expect(mocks.frameReady).toHaveBeenCalledTimes(1);
   });
 
+  it('injects only supplied feature styles and deduplicates their stylesheet ID', async () => {
+    const { IFrameContentScriptCore } = await import('./IFrameContentScriptCore.js');
+    const core = new IFrameContentScriptCore();
+    await core.initializeBase();
+    const injectStyles = vi.spyOn(core, 'injectStyles');
+    const css = 'html[data-translate-it-select-mode="true"] body .translate-it-element-highlighted { outline: 3px solid #ff8800 !important; }';
+
+    core.injectMainDOMStyles();
+    expect(injectStyles).not.toHaveBeenCalled();
+    core.injectMainDOMStyles(css, 'translate-it-select-mode-styles');
+    core.injectMainDOMStyles(css, 'translate-it-select-mode-styles');
+
+    expect(injectStyles).toHaveBeenCalledTimes(2);
+    expect(document.querySelectorAll('#translate-it-select-mode-styles')).toHaveLength(1);
+    expect(document.getElementById('translate-it-select-mode-styles').textContent).toBe(css);
+  });
+
   it('I4 retry after failure does not duplicate iframe message listener', async () => {
     mocks.check.mockResolvedValue(false);
     const { IFrameContentScriptCore } = await import('./IFrameContentScriptCore.js');
     const core = new IFrameContentScriptCore();
     await core.initializeBase();
+    const injectStyles = vi.spyOn(core, 'injectStyles');
 
     // First attempt fails at loadFeature (before listener)
     mocks.loadFeature.mockRejectedValueOnce(new Error('iframe bootstrap fail'));
@@ -216,6 +245,7 @@ describe('IFrameContentScriptCore lifecycle', () => {
     await expect(core.ensureAllowedRuntime()).rejects.toThrow('iframe bootstrap fail');
     expect(core._allowedRuntimeStarted).toBe(false);
     expect(core._allowedRuntimePromise).toBeNull();
+    expect(injectStyles).not.toHaveBeenCalled();
     // No FRAME_READY on failure
     expect(mocks.frameReady).not.toHaveBeenCalled();
     // Listener not yet set (failed before)
@@ -227,6 +257,7 @@ describe('IFrameContentScriptCore lifecycle', () => {
 
     expect(core._allowedRuntimeStarted).toBe(true);
     expect(core._allowedRuntimePromise).toBeNull();
+    expect(injectStyles).not.toHaveBeenCalled();
     expect(mocks.frameReady).toHaveBeenCalledTimes(1);
     messageCalls = addEventListenerSpy.mock.calls.filter(([ev]) => ev === 'message');
     expect(messageCalls.length).toBe(1);

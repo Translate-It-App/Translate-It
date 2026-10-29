@@ -51,8 +51,6 @@ export function IFrameContentScriptCore() {
       const fm = FeatureManager.getInstance();
       if (!fm.initialized) await fm.initialize();
 
-      await this.injectMainDOMStyles();
-
       try {
         const { interactionCoordinator } = await import('./InteractionCoordinator.js');
         await interactionCoordinator.initialize();
@@ -151,15 +149,7 @@ export function IFrameContentScriptCore() {
   core.injectMainDOMStyles = function(css, id = 'translate-it-main-dom-styles') {
     if (css && id) {
       this.injectStyles(css, id);
-      return;
     }
-    
-    // Fallback for default lite styles
-    const liteCss = `
-      :root { --translate-highlight-color: #ff8800; }
-      .translate-it-element-highlighted { outline: 3px solid var(--translate-highlight-color) !important; }
-    `;
-    this.injectStyles(liteCss, 'translate-it-main-dom-styles');
   };
 
   // Compatibility
