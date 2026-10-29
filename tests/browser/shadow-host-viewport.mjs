@@ -85,7 +85,7 @@ try {
     args: ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', `--user-data-dir=${profile}`, '--window-size=1000,800'],
   } } } });
   session = created.sessionId;
-  await request(`/session/${session}/url`, 'POST', { url: 'data:text/html,<html><head></head><body></body></html>' });
+  await request(`/session/${session}/url`, 'POST', { url: 'data:text/html,<!DOCTYPE html><html><head></head><body></body></html>' });
   await request(`/session/${session}/timeouts`, 'POST', { script: 10000 });
 
   // Ordinary page: host remains viewport-fixed without containment/top-layer promotion.
@@ -119,7 +119,7 @@ try {
       const rects=()=>probes.map(el=>{const r=el.getBoundingClientRect();return[r.left,r.top,r.right,r.bottom]});
       const before=rects();scrollTo(317,643);await new Promise(requestAnimationFrame);const after=rects();
       const hits=probes.map(el=>{const r=el.getBoundingClientRect();return host.shadowRoot.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===el});
-      results.push({property,value,expectedPopover,expectedVisible,expectedStable,hasPopover:host.hasAttribute('popover'),open:host.matches(':popover-open'),computed:getComputedStyle(document.documentElement).getPropertyValue(property),before,after,hits,visible:probes.map(el=>el.checkVisibility())});
+      results.push({property,value,expectedPopover,expectedVisible,expectedStable,hasPopover:host.hasAttribute('popover'),open:host.matches(':popover-open'),computed:getComputedStyle(document.documentElement).getPropertyValue(property),viewport:{width:document.documentElement.clientWidth,height:document.documentElement.clientHeight},before,after,hits,visible:probes.map(el=>el.checkVisibility())});
       host.remove();
     }
     return results;
@@ -128,7 +128,18 @@ try {
     assert.equal(item.open, item.expectedPopover, `Unexpected promotion for root ${item.property}: ${item.value}`);
     if(item.expectedStable) assert.deepEqual(item.after, item.before, `Root ${item.property}: ${item.value} moved fixed probes`);
     assert.ok(item.visible.every(value => value === item.expectedVisible), `Unexpected probe visibility for root ${item.property}: ${item.value}`);
-    if(item.expectedVisible && item.expectedStable) assert.ok(item.hits.every(Boolean), `Root ${item.property}: ${item.value} failed shadow hit-testing`);
+    if(item.expectedVisible && item.expectedStable) {
+      const [topLeft, bottomRight] = item.before;
+      const [scrolledTopLeft, scrolledBottomRight] = item.after;
+      const { width, height } = item.viewport;
+      const tolerance = 0.5;
+      const near = (actual, expected) => Math.abs(actual - expected) <= tolerance;
+      assert.ok(near(topLeft[0], 24) && near(topLeft[1], 32), `Root ${item.property}: ${item.value} top-left probe is not viewport-anchored before scroll: ${JSON.stringify(topLeft)}`);
+      assert.ok(near(bottomRight[2], width - 24) && near(bottomRight[3], height - 32), `Root ${item.property}: ${item.value} bottom-right probe is not viewport-anchored before scroll: ${JSON.stringify({rect:bottomRight,viewport:item.viewport})}`);
+      assert.ok(near(scrolledTopLeft[0], 24) && near(scrolledTopLeft[1], 32), `Root ${item.property}: ${item.value} top-left probe is not viewport-anchored after scroll: ${JSON.stringify(scrolledTopLeft)}`);
+      assert.ok(near(scrolledBottomRight[2], width - 24) && near(scrolledBottomRight[3], height - 32), `Root ${item.property}: ${item.value} bottom-right probe is not viewport-anchored after scroll: ${JSON.stringify({rect:scrolledBottomRight,viewport:item.viewport})}`);
+      assert.ok(item.hits.every(Boolean), `Root ${item.property}: ${item.value} failed shadow hit-testing`);
+    }
   }
   const transformClick = await execute(`
     document.documentElement.style.cssText='';document.documentElement.style.transform='translateX(1px)';scrollTo(0,0);
