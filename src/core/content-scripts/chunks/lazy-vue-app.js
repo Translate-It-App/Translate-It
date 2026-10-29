@@ -36,8 +36,10 @@ function stopFocusInPropagation(event) {
 }
 
 function needsTopLayerViewportHost() {
-  const containment = getComputedStyle(document.documentElement).contain;
-  return /(?:^|\s)(?:layout|paint|strict|content)(?:\s|$)/.test(containment);
+  const rootStyle = getComputedStyle(document.documentElement);
+  if (/(?:^|\s)(?:layout|paint|strict|content)(?:\s|$)/.test(rootStyle.contain)) return true;
+  if ([rootStyle.transform, rootStyle.perspective, rootStyle.rotate, rootStyle.scale, rootStyle.translate].some(value => value && value !== 'none')) return true;
+  return (rootStyle.willChange || 'auto').split(',').some(value => ['transform', 'perspective', 'rotate', 'scale', 'translate'].includes(value.trim()));
 }
 
 function isSuitableEnvironmentForVue() {

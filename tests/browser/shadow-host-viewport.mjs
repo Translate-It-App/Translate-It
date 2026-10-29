@@ -25,6 +25,16 @@ const UI_HOST_IDS = { MAIN:'translate-it-host-main', IFRAME:'translate-it-host-i
 const contentAppStyles = '', allComponentStyles = '';
 ${focus}\n${helper}\n${topLayer ? mount : mount.replace("needsTopLayerViewportHost() && typeof hostElement.showPopover === 'function'", 'false')}
 return createMountPoint;`;
+const rootStyleCases = [
+  ['transform', 'translateX(1px)', true], ['perspective', '1000px', true],
+  ['rotate', '1deg', true], ['scale', '1.1', true], ['translate', '1px 0', true],
+  ['will-change', 'transform', true], ['will-change', 'perspective', true],
+  ['will-change', 'rotate', true], ['will-change', 'scale', true], ['will-change', 'translate', true],
+  ['will-change', 'opacity, transform', true],
+  ['filter', 'blur(1px)', false], ['content-visibility', 'hidden', false, false, false],
+  ['content-visibility', 'auto', false, true, false], ['will-change', 'filter', false],
+  ['will-change', 'opacity', false], ['will-change', 'opacity, filter', false],
+];
 
 const profile = await mkdtemp(join(tmpdir(), 'shadow-host-chrome-'));
 const driver = spawn(process.env.CHROMEDRIVER || '/usr/bin/chromedriver', ['--port=0'], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -90,12 +100,52 @@ try {
   assert.deepEqual([normal.b.left, normal.b.top], [normal.a.left, normal.a.top], 'Normal-page fixed probe moved on scroll');
   assert.equal(normal.host, 'translate-it-host-main');
 
+  // Real source extraction matrix: fixed-containing-block triggers promote;
+  // filter/opacity and content-visibility remain ordinary by design.
+  const rootMatrix = await execute(`
+    const cases=${JSON.stringify(rootStyleCases)}, results=[];
+    document.getElementById('translate-it-host-main')?.remove();
+    document.body.style.cssText='height:3000px;margin:0';
+    for(const [property,value,expectedPopover,expectedVisible=true,expectedStable=true] of cases){
+      document.documentElement.style.cssText='';
+      document.documentElement.style.setProperty(property,value);
+      scrollTo(0,0);
+      const create=new Function(${JSON.stringify(implementation(true))})();
+      const container=await create(),host=container.getRootNode().host;
+      const probes=[];
+      for(const [id,css] of [['top-left','left:24px;top:32px'],['bottom-right','right:24px;bottom:32px']]){
+        const el=document.createElement('button');el.id=id;el.style.cssText='position:fixed;width:64px;height:44px;pointer-events:auto;'+css;container.append(el);probes.push(el);
+      }
+      const rects=()=>probes.map(el=>{const r=el.getBoundingClientRect();return[r.left,r.top,r.right,r.bottom]});
+      const before=rects();scrollTo(317,643);await new Promise(requestAnimationFrame);const after=rects();
+      const hits=probes.map(el=>{const r=el.getBoundingClientRect();return host.shadowRoot.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===el});
+      results.push({property,value,expectedPopover,expectedVisible,expectedStable,hasPopover:host.hasAttribute('popover'),open:host.matches(':popover-open'),computed:getComputedStyle(document.documentElement).getPropertyValue(property),before,after,hits,visible:probes.map(el=>el.checkVisibility())});
+      host.remove();
+    }
+    return results;
+  `);
+  for (const item of rootMatrix) {
+    assert.equal(item.open, item.expectedPopover, `Unexpected promotion for root ${item.property}: ${item.value}`);
+    if(item.expectedStable) assert.deepEqual(item.after, item.before, `Root ${item.property}: ${item.value} moved fixed probes`);
+    assert.ok(item.visible.every(value => value === item.expectedVisible), `Unexpected probe visibility for root ${item.property}: ${item.value}`);
+    if(item.expectedVisible && item.expectedStable) assert.ok(item.hits.every(Boolean), `Root ${item.property}: ${item.value} failed shadow hit-testing`);
+  }
+  const transformClick = await execute(`
+    document.documentElement.style.cssText='';document.documentElement.style.transform='translateX(1px)';scrollTo(0,0);
+    const create=new Function(${JSON.stringify(implementation(true))})();const c=await create(),host=c.getRootNode().host;
+    const button=document.createElement('button');button.id='transform-trigger-click';button.style.cssText='position:fixed;left:40px;top:50px;width:80px;height:50px;pointer-events:auto';button.onclick=()=>button.dataset.clicked='yes';c.append(button);
+    const r=button.getBoundingClientRect();return {point:[r.left+r.width/2,r.top+r.height/2],promoted:host.matches(':popover-open')};
+  `);
+  assert.equal(transformClick.promoted, true, 'Transform-trigger host did not enter the top layer');
+  await click([transformClick.point]);
+  assert.equal(await execute(`return document.querySelector('#translate-it-host-main').shadowRoot.getElementById('transform-trigger-click').dataset.clicked`), 'yes', 'Promoted transform-trigger probe missed a real pointer click');
+
   // Root containment: real toolbar/tooltip/FAB/window-shaped fixed buttons in the production shadow host.
   const setup = await execute(`
     document.getElementById('translate-it-host-main')?.remove();
     scrollTo(0,0);
     document.body.style.cssText='height:3000px;margin:0';
-    document.documentElement.style.contain='layout style'; document.documentElement.dir='ltr';
+    document.documentElement.style.cssText='contain:layout style'; document.documentElement.dir='ltr';
     const create=new Function(${JSON.stringify(implementation(true))})();
     const c=await create(), host=c.getRootNode().host, els={};
     for(const [id,css] of Object.entries({toolbar:'left:100px;top:40px;width:90px;height:32px',tooltip:'left:220px;top:90px;width:80px;height:24px',fab:'right:40px;bottom:40px;width:48px;height:48px',window:'left:360px;top:180px;width:180px;height:120px'})){
@@ -155,10 +205,19 @@ try {
     w.document.documentElement.style.contain='layout style'; const create=w.Function(${JSON.stringify(implementation(true))})();
     const c=await create(), p=w.document.createElement('button'); p.style.cssText='position:fixed;left:35px;top:45px;width:50px;height:30px;pointer-events:auto'; c.append(p);
     const before=p.getBoundingClientRect().toJSON(); w.scrollTo(120,210); await new Promise(resolve=>w.requestAnimationFrame(resolve));
-    const after=p.getBoundingClientRect().toJSON(); return {before:[before.left,before.top],after:[after.left,after.top],host:c.getRootNode().host.id};
+    const after=p.getBoundingClientRect().toJSON(); const contained={before:[before.left,before.top],after:[after.left,after.top],host:c.getRootNode().host.id,promoted:c.getRootNode().host.matches(':popover-open')};
+    c.getRootNode().host.remove();w.document.documentElement.style.contain='';w.document.documentElement.style.transform='translateX(1px)';w.scrollTo(0,0);
+    const transformCreate=w.Function(${JSON.stringify(implementation(true))})();const transformContainer=await transformCreate(),transformHost=transformContainer.getRootNode().host;
+    const transformProbe=w.document.createElement('button');transformProbe.style.cssText='position:fixed;left:35px;top:45px;width:50px;height:30px;pointer-events:auto';transformContainer.append(transformProbe);
+    const transformBefore=transformProbe.getBoundingClientRect().toJSON();w.scrollTo(120,210);await new Promise(resolve=>w.requestAnimationFrame(resolve));
+    const transformAfter=transformProbe.getBoundingClientRect().toJSON();return {contained,transformed:{before:[transformBefore.left,transformBefore.top],after:[transformAfter.left,transformAfter.top],host:transformHost.id,promoted:transformHost.matches(':popover-open')}};
   `);
-  assert.deepEqual(frame.after, frame.before, 'Iframe viewport probe moved on iframe scroll');
-  assert.equal(frame.host, 'translate-it-host-iframe');
+  assert.deepEqual(frame.contained.after, frame.contained.before, 'Iframe containment probe moved on iframe scroll');
+  assert.equal(frame.contained.host, 'translate-it-host-iframe');
+  assert.equal(frame.contained.promoted, true);
+  assert.deepEqual(frame.transformed.after, frame.transformed.before, 'Iframe transform probe moved on iframe scroll');
+  assert.equal(frame.transformed.host, 'translate-it-host-iframe');
+  assert.equal(frame.transformed.promoted, true);
 
   const remount = await execute(`
     const old=document.getElementById('translate-it-host-main'); old.remove();

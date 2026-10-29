@@ -37,7 +37,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   document.getElementById(HOST_ID)?.remove();
-  document.documentElement.style.contain = '';
+  document.documentElement.style.cssText = '';
 });
 
 afterEach(() => {
@@ -88,6 +88,29 @@ describe('loadVueApp idempotence', () => {
     expect(resetCss).toContain(':host([popover])::backdrop {\n        display: none !important;');
   });
 
+  it.each([
+    ['transform', 'translateX(1px)'],
+    ['perspective', '1000px'],
+    ['rotate', '1deg'],
+    ['scale', '1.1'],
+    ['translate', '1px 0'],
+    ['will-change', 'transform'],
+    ['will-change', 'perspective'],
+    ['will-change', 'rotate'],
+    ['will-change', 'scale'],
+    ['will-change', 'translate'],
+    ['will-change', 'opacity, transform'],
+  ])('uses a manual top-layer host for root %s: %s', async (property, value) => {
+    const showPopover = vi.fn();
+    HTMLElement.prototype.showPopover = showPopover;
+    document.documentElement.style.setProperty(property, value);
+    const { loadVueApp } = await import('./lazy-vue-app.js');
+
+    await loadVueApp(makeCore());
+    expect(document.getElementById(HOST_ID).getAttribute('popover')).toBe('manual');
+    expect(showPopover).toHaveBeenCalledOnce();
+  });
+
   it.each(['none', 'style', 'size'])(
     'keeps the ordinary host out of the top layer for root contain: %s', async (contain) => {
       const showPopover = vi.fn();
@@ -100,6 +123,29 @@ describe('loadVueApp idempotence', () => {
       expect(showPopover).not.toHaveBeenCalled();
     }
   );
+
+  it.each([
+    ['transform', 'none'],
+    ['perspective', 'none'],
+    ['rotate', 'none'],
+    ['scale', 'none'],
+    ['translate', 'none'],
+    ['filter', 'blur(1px)'],
+    ['content-visibility', 'hidden'],
+    ['content-visibility', 'auto'],
+    ['will-change', 'filter'],
+    ['will-change', 'opacity'],
+    ['will-change', 'opacity, filter'],
+  ])('keeps a normal host for root %s: %s', async (property, value) => {
+    const showPopover = vi.fn();
+    HTMLElement.prototype.showPopover = showPopover;
+    document.documentElement.style.setProperty(property, value);
+    const { loadVueApp } = await import('./lazy-vue-app.js');
+
+    await loadVueApp(makeCore());
+    expect(document.getElementById(HOST_ID).hasAttribute('popover')).toBe(false);
+    expect(showPopover).not.toHaveBeenCalled();
+  });
 
   it('falls back when showPopover is absent', async () => {
     delete HTMLElement.prototype.showPopover;
