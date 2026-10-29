@@ -71,6 +71,35 @@ function promoteRootHost(host) {
   }
 }
 
+function isStylesheetLink(element, rel = element?.rel) {
+  return element?.localName === 'link'
+    && String(rel || '').toLowerCase().split(/\s+/).includes('stylesheet');
+}
+
+function containsStylesheet(node) {
+  if (!node || (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE)) return false;
+  if (node.localName === 'style' || isStylesheetLink(node)) return true;
+  return Array.from(node.querySelectorAll?.('style, link[rel]') || [])
+    .some(element => element.localName === 'style' || isStylesheetLink(element));
+}
+
+function isRelevantHeadMutation(record) {
+  if (record.type === 'childList') {
+    if (record.target?.localName === 'style') return true;
+    return [...record.addedNodes, ...record.removedNodes].some(containsStylesheet);
+  }
+  if (record.type === 'characterData') {
+    return record.target.parentNode?.localName === 'style';
+  }
+  if (record.type !== 'attributes') return false;
+
+  const { target, attributeName, oldValue } = record;
+  if (target.localName === 'style') return attributeName === 'media' || attributeName === 'disabled';
+  if (target.localName !== 'link') return false;
+  if (attributeName === 'rel') return isStylesheetLink(target) || isStylesheetLink(target, oldValue);
+  return ['href', 'media', 'disabled'].includes(attributeName) && isStylesheetLink(target);
+}
+
 function watchRootHostPromotion(host) {
   if (promotedRootHost === host || typeof host.showPopover !== 'function' || typeof MutationObserver !== 'function') return;
   if (rootHostPromotionWatch?.host === host) return;
@@ -79,7 +108,9 @@ function watchRootHostPromotion(host) {
   const watch = {
     host,
     rootObserver: new MutationObserver(scheduleCheck),
-    headObserver: new MutationObserver(scheduleCheck),
+    headObserver: new MutationObserver(records => {
+      if (records.some(isRelevantHeadMutation)) scheduleCheck();
+    }),
     frameId: null,
     onStylesheetLoad: event => {
       if (event.target?.localName === 'link' && event.target.relList?.contains('stylesheet')) scheduleCheck();
@@ -108,6 +139,7 @@ function watchRootHostPromotion(host) {
     childList: true,
     characterData: true,
     attributes: true,
+    attributeOldValue: true,
     attributeFilter: ['href', 'rel', 'media', 'disabled'],
   });
   document.addEventListener('load', watch.onStylesheetLoad, true);
