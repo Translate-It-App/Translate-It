@@ -35,6 +35,11 @@ function stopFocusInPropagation(event) {
   event.stopPropagation();
 }
 
+function needsTopLayerViewportHost() {
+  const containment = getComputedStyle(document.documentElement).contain;
+  return /(?:^|\s)(?:layout|paint|strict|content)(?:\s|$)/.test(containment);
+}
+
 function isSuitableEnvironmentForVue() {
   if (!document.body) return false;
   const isBrowserXMLViewer =
@@ -96,6 +101,18 @@ async function createMountPoint() {
     hostElement = document.createElement('div');
     hostElement.id = hostId;
     hostElement.classList.add('notranslate');
+
+    // Root containment can establish a fixed-position containing block. Use the
+    // popover top layer only for those pages; ordinary pages keep the existing host.
+    let useTopLayer = needsTopLayerViewportHost() && typeof hostElement.showPopover === 'function';
+    if (useTopLayer) {
+      try {
+        hostElement.setAttribute('popover', 'manual');
+      } catch {
+        hostElement.removeAttribute('popover');
+        useTopLayer = false;
+      }
+    }
     
     // Apply layout-neutral inline styles before appending
     Object.assign(hostElement.style, {
@@ -121,6 +138,7 @@ async function createMountPoint() {
     resetStyles.textContent = `
       :host {
         display: block !important;
+        inset: 0 auto auto 0 !important;
         position: fixed !important;
         top: 0 !important;
         left: 0 !important;
@@ -132,8 +150,25 @@ async function createMountPoint() {
         pointer-events: none !important;
         z-index: 2147483647 !important;
         overflow: visible !important;
+        background: transparent !important;
+        color: inherit !important;
         visibility: visible !important;
         direction: ltr !important;
+      }
+      :host([popover]) {
+        transform: none !important;
+        translate: none !important;
+        scale: none !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        contain: none !important;
+        filter: none !important;
+        clip-path: none !important;
+      }
+      :host([popover])::backdrop {
+        display: none !important;
+        background: transparent !important;
+        pointer-events: none !important;
       }
       #${UI_HOST_IDS.APP_CONTAINER} { 
         position: relative !important; 
@@ -163,9 +198,16 @@ async function createMountPoint() {
     }
 
     shadowRoot.appendChild(appContainer);
-    // CRITICAL: Append to documentElement (html) to escape any transforms or filters applied to body
-    // This ensures position: fixed children anchor to the viewport correctly
+    // Append at the document root to avoid body-level containing blocks. Root
+    // containment requires the top-layer promotion above for viewport anchoring.
     document.documentElement.appendChild(hostElement);
+    if (useTopLayer) {
+      try {
+        hostElement.showPopover();
+      } catch {
+        hostElement.removeAttribute('popover');
+      }
+    }
   }
 
   const shadowRoot = hostElement.shadowRoot;

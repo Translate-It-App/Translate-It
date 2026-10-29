@@ -2,7 +2,11 @@
 
 ## Overview
 
-The UI Host system is a centralized Vue.js application that manages all in-page user interface elements for the Translate It extension. It runs within a Shadow DOM to ensure complete CSS and JavaScript isolation from the host webpage.
+The UI Host system is a centralized Vue.js application that manages all in-page user interface elements for the Translate It extension. It runs within an open Shadow DOM to limit style leakage; this does not provide complete JavaScript isolation or protection from page-level layout and stacking contexts.
+
+The shared host is appended to the current document's `documentElement` (with distinct top-frame and iframe IDs). On pages whose root establishes layout containment, supported browsers promote the host as a manual popover so its fixed-position descendants remain viewport-positioned. The promoted host resets page-authored popover-state effects on its transform, opacity, containment, filters, and clipping; its backdrop is hidden, transparent, and pointer-inert. Unsupported or failing popover APIs fall back to the regular host; this cannot defeat root containment there. Normal pages do not enter the top layer. The host remains pointer-transparent, and its shadow root stops extension-originated `focusin` propagation.
+
+Containment is checked when the host is created; changing root containment afterward does not promote or demote an already-mounted host.
 
 ## Architecture
 
@@ -15,7 +19,7 @@ The UI Host system is a centralized Vue.js application that manages all in-page 
 
 ### Key Features
 
-- **Shadow DOM Isolation**: All UI elements are rendered within a Shadow DOM to prevent CSS conflicts.
+- **Shadow DOM styling boundary**: UI component styles are scoped within an open Shadow DOM, limiting CSS leakage without claiming complete CSS or JavaScript isolation.
 - **Selection Coordinator Integration**: Decoupled selection awareness for FAB, Windows, and TTS.
 - **Event-Based Communication**: Uses a custom event bus for seamless communication between vanilla JS and Vue.
 - **Centralized Management**: All in-page UI (notifications, toolbars, icons) is managed by a single Vue app.
@@ -125,7 +129,7 @@ The central UI container for mobile browsers. It provides a touch-friendly "Bott
 
 ## Benefits
 
-1. **Isolation**: Complete CSS/JS isolation prevents conflicts with webpage styles
+1. **Style boundary**: Shadow DOM limits CSS conflicts; page-level rules can still affect the host element.
 2. **Maintainability**: Centralized UI management simplifies debugging and updates
 3. **Consistency**: Uniform notification and UI patterns across the extension
 4. **Performance**: Reduced DOM manipulation and optimized rendering

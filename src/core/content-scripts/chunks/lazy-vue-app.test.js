@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('vue', () => ({
   createApp: vi.fn(() => ({ use: vi.fn(), mount: vi.fn(), unmount: vi.fn() }))
@@ -29,6 +29,7 @@ vi.mock('@/core/extensionContext.js', () => ({
 }));
 
 const HOST_ID = 'translate-it-host-main';
+const showPopoverDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'showPopover');
 
 const makeCore = () => ({ vueLoaded: false, dispatchEvent: vi.fn() });
 
@@ -36,6 +37,15 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   document.getElementById(HOST_ID)?.remove();
+  document.documentElement.style.contain = '';
+});
+
+afterEach(() => {
+  if (showPopoverDescriptor) {
+    Object.defineProperty(HTMLElement.prototype, 'showPopover', showPopoverDescriptor);
+  } else {
+    delete HTMLElement.prototype.showPopover;
+  }
 });
 
 describe('loadVueApp idempotence', () => {
@@ -52,6 +62,59 @@ describe('loadVueApp idempotence', () => {
     await loadVueApp(core);
     expect(createApp).toHaveBeenCalledTimes(1);
     expect(core.dispatchEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['layout', 'layout style', 'paint', 'content', 'strict'])(
+    'uses a manual top-layer host for root contain: %s', async (contain) => {
+    const showPopover = vi.fn();
+    HTMLElement.prototype.showPopover = showPopover;
+    document.documentElement.style.contain = contain;
+    const { loadVueApp } = await import('./lazy-vue-app.js');
+
+    await loadVueApp(makeCore());
+    const host = document.getElementById(HOST_ID);
+    expect(host.getAttribute('popover')).toBe('manual');
+    expect(showPopover).toHaveBeenCalledOnce();
+    expect(host.style.pointerEvents).toBe('none');
+    const resetCss = host.shadowRoot.querySelector('style').textContent;
+    expect(resetCss).toContain(':host([popover]) {');
+    for (const reset of [
+      'transform: none !important', 'translate: none !important', 'scale: none !important',
+      'opacity: 1 !important', 'visibility: visible !important', 'contain: none !important',
+      'filter: none !important', 'clip-path: none !important',
+    ]) expect(resetCss).toContain(reset);
+    expect(resetCss).toContain(':host([popover])::backdrop {\n        display: none !important;');
+  });
+
+  it.each(['none', 'style', 'size'])(
+    'keeps the ordinary host out of the top layer for root contain: %s', async (contain) => {
+      const showPopover = vi.fn();
+      HTMLElement.prototype.showPopover = showPopover;
+      document.documentElement.style.contain = contain;
+      const { loadVueApp } = await import('./lazy-vue-app.js');
+
+      await loadVueApp(makeCore());
+      expect(document.getElementById(HOST_ID).hasAttribute('popover')).toBe(false);
+      expect(showPopover).not.toHaveBeenCalled();
+    }
+  );
+
+  it('falls back when showPopover is absent', async () => {
+    delete HTMLElement.prototype.showPopover;
+    document.documentElement.style.contain = 'layout';
+    const { loadVueApp } = await import('./lazy-vue-app.js');
+
+    await loadVueApp(makeCore());
+    expect(document.getElementById(HOST_ID).hasAttribute('popover')).toBe(false);
+  });
+
+  it('falls back to the ordinary host when entering the top layer throws', async () => {
+    HTMLElement.prototype.showPopover = vi.fn(() => { throw new Error('unsupported'); });
+    document.documentElement.style.contain = 'strict';
+    const { loadVueApp } = await import('./lazy-vue-app.js');
+
+    await loadVueApp(makeCore());
+    expect(document.getElementById(HOST_ID).hasAttribute('popover')).toBe(false);
   });
 });
 
@@ -105,6 +168,29 @@ describe('loadVueApp failure / retry contract', () => {
     root.getElementById('translate-it-app-container').dispatchEvent(event);
     expect(stopPropagation).toHaveBeenCalledOnce();
     addEventListener.mockRestore();
+  });
+
+  it('reuses a contained top-layer host across mount retry and cleanup/remount', async () => {
+    const { createApp } = await import('vue');
+    const showPopover = vi.fn();
+    HTMLElement.prototype.showPopover = showPopover;
+    document.documentElement.style.contain = 'layout';
+    const failedApp = { use: vi.fn(), mount: vi.fn(() => { throw new Error('mount failed'); }), unmount: vi.fn() };
+    createApp.mockImplementationOnce(() => failedApp);
+    const { loadVueApp, cleanupVueApp } = await import('./lazy-vue-app.js');
+
+    await expect(loadVueApp(makeCore())).rejects.toThrow('mount failed');
+    const firstHost = document.getElementById(HOST_ID);
+    expect(firstHost.getAttribute('popover')).toBe('manual');
+    await loadVueApp(makeCore());
+    expect(document.getElementById(HOST_ID)).toBe(firstHost);
+    expect(showPopover).toHaveBeenCalledOnce();
+
+    cleanupVueApp();
+    expect(document.getElementById(HOST_ID)).toBeNull();
+    await loadVueApp(makeCore());
+    expect(document.getElementById(HOST_ID)).not.toBe(firstHost);
+    expect(showPopover).toHaveBeenCalledTimes(2);
   });
 });
 
