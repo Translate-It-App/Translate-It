@@ -79,7 +79,7 @@ describe('loadVueApp idempotence', () => {
     const resetCss = host.shadowRoot.querySelector('style').textContent;
     expect(resetCss).toContain(':host([popover]) {');
     for (const reset of [
-      'transform: none !important', 'translate: none !important', 'scale: none !important',
+      'transform: none !important', 'translate: none !important', 'scale: none !important', 'rotate: none !important',
       'opacity: 1 !important', 'visibility: visible !important', 'contain: none !important',
       'filter: none !important', 'clip-path: none !important',
     ]) expect(resetCss).toContain(reset);

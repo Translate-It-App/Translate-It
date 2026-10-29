@@ -175,13 +175,13 @@ try {
     const probe=document.createElement('button'); probe.id='window';
     probe.style.cssText='position:fixed;left:360px;top:180px;width:180px;height:120px;pointer-events:auto';
     root.getElementById('translate-it-app-container').append(probe);
-    const properties=['position','display','inset','transform','translate','scale','opacity','visibility','contain','filter','clipPath','backgroundColor','pointerEvents'];
+    const properties=['position','display','inset','transform','translate','scale','rotate','opacity','visibility','contain','filter','clipPath','backgroundColor','pointerEvents'];
     const capture=()=>{
       const s=getComputedStyle(host), b=getComputedStyle(host,'::backdrop'), r=probe.getBoundingClientRect();
       return {style:Object.fromEntries(properties.map(k=>[k,s[k]])), rect:[r.left,r.top,r.right,r.bottom], backdrop:{backgroundColor:b.backgroundColor,pointerEvents:b.pointerEvents}};
     };
     const baseline=capture(), selectors=['[popover]',':popover-open'], priorities=['',' !important'], observations=[];
-    const declarations='transform:translate(70px,50px);translate:11px 12px;scale:1.2;opacity:.25;visibility:hidden;display:none;contain:paint;filter:blur(3px);clip-path:inset(20%);background-color:rgb(255,0,0);pointer-events:auto';
+    const declarations='transform:translate(70px,50px);translate:11px 12px;scale:1.2;rotate:15deg;opacity:.25;visibility:hidden;display:none;contain:paint;filter:blur(3px);clip-path:inset(20%);background-color:rgb(255,0,0);pointer-events:auto';
     for(const selector of selectors) for(const priority of priorities){
       const style=document.createElement('style');
       style.textContent=selector+'{'+declarations.replaceAll(';',''+priority+';')+priority+'}';
