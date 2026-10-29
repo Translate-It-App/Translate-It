@@ -30,6 +30,8 @@ const logger = getScopedLogger(LOG_COMPONENTS.CONTENT, 'LazyVueApp');
 
 let vueApp = null;
 let pinia = null;
+let rootHostPromotionWatch = null;
+let promotedRootHost = null;
 
 function stopFocusInPropagation(event) {
   event.stopPropagation();
@@ -40,6 +42,81 @@ function needsTopLayerViewportHost() {
   if (/(?:^|\s)(?:layout|paint|strict|content)(?:\s|$)/.test(rootStyle.contain)) return true;
   if ([rootStyle.transform, rootStyle.perspective, rootStyle.rotate, rootStyle.scale, rootStyle.translate].some(value => value && value !== 'none')) return true;
   return (rootStyle.willChange || 'auto').split(',').some(value => ['transform', 'perspective', 'rotate', 'scale', 'translate'].includes(value.trim()));
+}
+
+function stopRootHostPromotionWatch(host = null) {
+  const watch = rootHostPromotionWatch;
+  if (!watch || (host && watch.host !== host)) return;
+  watch.rootObserver.disconnect();
+  watch.headObserver.disconnect();
+  document.removeEventListener('load', watch.onStylesheetLoad, true);
+  window.removeEventListener('resize', watch.onViewportResize);
+  if (watch.frameId !== null) cancelAnimationFrame(watch.frameId);
+  rootHostPromotionWatch = null;
+}
+
+function promoteRootHost(host) {
+  if (promotedRootHost === host || !needsTopLayerViewportHost()) return promotedRootHost === host;
+  if (typeof host.showPopover !== 'function') return false;
+
+  try {
+    host.setAttribute('popover', 'manual');
+    host.showPopover();
+    promotedRootHost = host;
+    stopRootHostPromotionWatch(host);
+    return true;
+  } catch {
+    host.removeAttribute('popover');
+    return false;
+  }
+}
+
+function watchRootHostPromotion(host) {
+  if (promotedRootHost === host || typeof host.showPopover !== 'function' || typeof MutationObserver !== 'function') return;
+  if (rootHostPromotionWatch?.host === host) return;
+  stopRootHostPromotionWatch();
+
+  const watch = {
+    host,
+    rootObserver: new MutationObserver(scheduleCheck),
+    headObserver: new MutationObserver(scheduleCheck),
+    frameId: null,
+    onStylesheetLoad: event => {
+      if (event.target?.localName === 'link' && event.target.relList?.contains('stylesheet')) scheduleCheck();
+    },
+    onViewportResize: scheduleCheck,
+  };
+  function scheduleCheck() {
+    if (rootHostPromotionWatch !== watch || watch.frameId !== null) return;
+    watch.frameId = requestAnimationFrame(() => {
+      watch.frameId = null;
+      if (!host.isConnected) {
+        stopRootHostPromotionWatch(host);
+        return;
+      }
+      if (promoteRootHost(host)) stopRootHostPromotionWatch(host);
+    });
+  }
+
+  rootHostPromotionWatch = watch;
+  watch.rootObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['style', 'class'],
+  });
+  watch.headObserver.observe(document.head, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['href', 'rel', 'media', 'disabled'],
+  });
+  document.addEventListener('load', watch.onStylesheetLoad, true);
+  window.addEventListener('resize', watch.onViewportResize);
+}
+
+function ensureRootHostPromotion(host) {
+  if (promotedRootHost === host) return;
+  if (!promoteRootHost(host)) watchRootHostPromotion(host);
 }
 
 function isSuitableEnvironmentForVue() {
@@ -66,12 +143,14 @@ function isSuitableEnvironmentForVue() {
 export async function loadVueApp(contentCore) {
   if (vueApp) return;
 
+  let app;
+  let mountHost;
   try {
     if (!ExtensionContextManager.isValidSync()) return;
     if (!isSuitableEnvironmentForVue()) return;
 
     setupTrustedTypesCompatibility();
-    const app = createApp(ContentApp);
+    app = createApp(ContentApp);
     pinia = createPinia();
     app.use(pinia);
 
@@ -83,6 +162,7 @@ export async function loadVueApp(contentCore) {
     }
 
     const mountPoint = await createMountPoint();
+    mountHost = mountPoint.getRootNode().host;
     app.mount(mountPoint);
     vueApp = app;
 
@@ -91,6 +171,10 @@ export async function loadVueApp(contentCore) {
       contentCore.dispatchEvent(new CustomEvent('vue-loaded'));
     }
   } catch (error) {
+    stopRootHostPromotionWatch(mountHost);
+    try { app?.unmount(); } catch { /* ignore partial mount cleanup errors */ }
+    if (vueApp === app) vueApp = null;
+    pinia = null;
     logger.error('Failed to load Vue app:', error);
     throw error;
   }
@@ -104,18 +188,6 @@ async function createMountPoint() {
     hostElement.id = hostId;
     hostElement.classList.add('notranslate');
 
-    // Root containment can establish a fixed-position containing block. Use the
-    // popover top layer only for those pages; ordinary pages keep the existing host.
-    let useTopLayer = needsTopLayerViewportHost() && typeof hostElement.showPopover === 'function';
-    if (useTopLayer) {
-      try {
-        hostElement.setAttribute('popover', 'manual');
-      } catch {
-        hostElement.removeAttribute('popover');
-        useTopLayer = false;
-      }
-    }
-    
     // Apply layout-neutral inline styles before appending
     Object.assign(hostElement.style, {
       position: 'fixed',
@@ -205,34 +277,29 @@ async function createMountPoint() {
     }
 
     shadowRoot.appendChild(appContainer);
-    // Append at the document root to avoid body-level containing blocks. Root
-    // containment requires the top-layer promotion above for viewport anchoring.
+    // Root-level append avoids body-level containing blocks; the promotion check
+    // below handles fixed-position containing blocks established by root CSS.
     document.documentElement.appendChild(hostElement);
-    if (useTopLayer) {
-      try {
-        hostElement.showPopover();
-      } catch {
-        hostElement.removeAttribute('popover');
-      }
-    }
   }
 
+  ensureRootHostPromotion(hostElement);
   const shadowRoot = hostElement.shadowRoot;
   shadowRoot.addEventListener('focusin', stopFocusInPropagation);
   return shadowRoot.getElementById(UI_HOST_IDS.APP_CONTAINER);
 }
 
 export function cleanupVueApp() {
-  if (vueApp) {
-    try {
-      vueApp.unmount();
-      vueApp = null;
-      pinia = null;
-      const hostElement = document.getElementById(UI_HOST_IDS.MAIN) || document.getElementById(UI_HOST_IDS.IFRAME);
-      if (hostElement) hostElement.remove();
-    } catch (error) {
-      logger.error('Error cleaning up Vue app:', error);
-    }
+  const hostElement = document.getElementById(UI_HOST_IDS.MAIN) || document.getElementById(UI_HOST_IDS.IFRAME);
+  stopRootHostPromotionWatch();
+  try {
+    vueApp?.unmount();
+  } catch (error) {
+    logger.error('Error cleaning up Vue app:', error);
+  } finally {
+    vueApp = null;
+    pinia = null;
+    promotedRootHost = null;
+    hostElement?.remove();
   }
 }
 
