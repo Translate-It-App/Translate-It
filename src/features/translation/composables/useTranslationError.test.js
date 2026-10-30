@@ -30,6 +30,10 @@ vi.mock('@/shared/logging/logConstants.js', () => ({
 
 vi.mock('@/shared/error-management/ErrorHandler.js');
 
+vi.mock('@/core/helpers.js', () => ({
+  openOptionsPage: vi.fn(() => Promise.resolve())
+}));
+
 vi.mock('@/composables/shared/useErrorHandler.js', () => ({
   useErrorHandler: vi.fn(() => mockUseErrorHandler)
 }));
@@ -414,10 +418,16 @@ describe('useTranslationError', () => {
       type: ErrorTypes.TEXT_TOO_LONG,
     }));
     
+    const { openOptionsPage } = await import('@/core/helpers.js');
+
     const settingsCallback = composable.getSettingsCallback();
     settingsCallback();
 
-    expect(mockErrorHandlerInstance.openOptionsPageCallback).toHaveBeenCalled();
+    expect(openOptionsPage).toHaveBeenCalled();
+
+    // rejected promise is handled without throwing
+    openOptionsPage.mockReturnValueOnce(Promise.reject(new Error('boom')));
+    expect(() => settingsCallback()).not.toThrow();
   });
 
   it.each([
