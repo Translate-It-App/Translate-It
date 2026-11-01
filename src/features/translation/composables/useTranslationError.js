@@ -6,6 +6,7 @@ import { useErrorHandler } from '@/composables/shared/useErrorHandler.js'
 import { ErrorHandler } from '@/shared/error-management/ErrorHandler.js'
 import ExtensionContextManager from '@/core/extensionContext.js'
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js'
+import { openOptionsPage } from '@/core/helpers.js'
 import { getErrorDisplayStrategy, processErrorMessage, shouldShowRetry, shouldShowSettings } from '@/shared/error-management/ErrorDisplayStrategies.js'
 import { isCancellationError, matchErrorToType } from '@/shared/error-management/ErrorMatcher.js'
 import { mapCanonicalTranslationError } from '@/shared/error-management/PublicTranslationErrorPolicy.js'
@@ -203,8 +204,11 @@ export function useTranslationError(context = 'unknown') {
       
       try {
         logger.info(`[${context}] Opening settings for error: ${errorType.value}`)
-        // Use ErrorHandler's settings callback
-        errorHandler.openOptionsPageCallback?.()
+        // Open the extension options page via the supported runtime message path.
+        // Guard against unhandled promise rejections without leaking error details.
+        openOptionsPage().catch((settingsError) => {
+          logger.error(`[${context}] Failed to open settings:`, settingsError)
+        })
       } catch (settingsError) {
         logger.error(`[${context}] Failed to open settings:`, settingsError)
       }

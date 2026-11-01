@@ -30,6 +30,10 @@ vi.mock('@/shared/logging/logConstants.js', () => ({
 
 vi.mock('@/shared/error-management/ErrorHandler.js');
 
+vi.mock('@/core/helpers.js', () => ({
+  openOptionsPage: vi.fn(() => Promise.resolve())
+}));
+
 vi.mock('@/composables/shared/useErrorHandler.js', () => ({
   useErrorHandler: vi.fn(() => mockUseErrorHandler)
 }));
@@ -406,6 +410,9 @@ describe('useTranslationError', () => {
 
   it('should execute settings callback', async () => {
     const [composable] = withSetup(() => useTranslationError('popup'));
+    const { getScopedLogger } = await import('@/shared/logging/logger.js');
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    getScopedLogger.mockReturnValue(logger);
     
     // Mock strategy to allow settings
     matchErrorToType.mockReturnValue(ErrorTypes.TEXT_TOO_LONG);
@@ -414,10 +421,21 @@ describe('useTranslationError', () => {
       type: ErrorTypes.TEXT_TOO_LONG,
     }));
     
+    const { openOptionsPage } = await import('@/core/helpers.js');
+
     const settingsCallback = composable.getSettingsCallback();
     settingsCallback();
 
-    expect(mockErrorHandlerInstance.openOptionsPageCallback).toHaveBeenCalled();
+    expect(openOptionsPage).toHaveBeenCalled();
+
+    // Rejected promises are handled and logged without leaking details.
+    const rejection = new Error('boom');
+    openOptionsPage.mockReturnValueOnce(Promise.reject(rejection));
+    expect(() => settingsCallback()).not.toThrow();
+    await vi.waitFor(() => expect(logger.error).toHaveBeenCalledWith(
+      '[popup] Failed to open settings:',
+      rejection
+    ));
   });
 
   it.each([

@@ -43,7 +43,7 @@ vi.mock('@/composables/shared/useErrorHandler.js', () => ({
 }));
 
 vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
-  useUnifiedI18n: () => ({ t: (key) => key }),
+  useUnifiedI18n: () => ({ t: (key) => key, locale: ref('en') }),
 }));
 
 vi.mock('@/composables/core/useResourceTracker.js', () => ({
@@ -75,17 +75,8 @@ vi.mock('@/components/shared/TranslationInputField.vue', () => ({
   },
 }));
 
-vi.mock('@/components/shared/TranslationDisplay.vue', () => ({
-  default: {
-    name: 'TranslationDisplay',
-    props: {
-      canRetry: { type: Boolean, default: false },
-      canOpenSettings: { type: Boolean, default: false },
-      onRetry: { type: Function, default: null },
-      onOpenSettings: { type: Function, default: null },
-    },
-    template: '<div class="translation-display-stub" />',
-  },
+vi.mock('@/features/text-actions/components/ActionToolbar.vue', () => ({
+  default: { name: 'ActionToolbar', template: '<div />' },
 }));
 
 describe('TranslationForm.vue', () => {
@@ -97,6 +88,7 @@ describe('TranslationForm.vue', () => {
     };
     mockTranslation.canRetry.value = false;
     mockTranslation.canOpenSettings.value = false;
+    mockTranslation.translationError.value = '';
     mockTranslation.getRetryCallback.mockImplementation((retryFunction) => retryFunction);
     mockTranslation.getSettingsCallback.mockReturnValue(mockSettingsCallback);
     mockTranslation.revertTranslation.mockReturnValue({ sourceLanguage: 'fr', targetLanguage: 'en' });
@@ -138,6 +130,32 @@ describe('TranslationForm.vue', () => {
     expect(mockTranslation.getRetryCallback).toHaveBeenCalledWith(expect.any(Function));
     expect(mockTranslation.getSettingsCallback).toHaveBeenCalledTimes(1);
     expect(mockSettingsCallback).toHaveBeenCalledTimes(1);
+  });
+
+  it('handles real error-action clicks without submitting the parent form', async () => {
+    mockTranslation.canRetry.value = true;
+    mockTranslation.canOpenSettings.value = true;
+    mockTranslation.translationError.value = 'translation failed';
+    const wrapper = mountForm();
+
+    await wrapper.get('.settings-btn').trigger('click');
+    expect(mockSettingsCallback).toHaveBeenCalledTimes(1);
+    expect(mockTranslation.triggerTranslation).not.toHaveBeenCalled();
+
+    await wrapper.get('.retry-btn').trigger('click');
+    expect(mockTranslation.triggerTranslation).toHaveBeenCalledTimes(1);
+    expect(mockTranslation.triggerTranslation).toHaveBeenCalledWith('en', 'fr', 'openai');
+    wrapper.unmount();
+  });
+
+  it('still translates on normal form submission', async () => {
+    const wrapper = mountForm();
+
+    await wrapper.get('form').trigger('submit');
+
+    expect(mockTranslation.triggerTranslation).toHaveBeenCalledTimes(1);
+    expect(mockTranslation.triggerTranslation).toHaveBeenCalledWith('en', 'fr', 'openai');
+    wrapper.unmount();
   });
 
   it('exposes source focus but does not focus from clear-storage listeners', async () => {
