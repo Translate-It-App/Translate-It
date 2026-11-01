@@ -64,6 +64,7 @@ vi.mock('@/composables/shared/useErrorHandler.js', () => ({
 vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
   useUnifiedI18n: () => ({
     t: (key) => key,
+    locale: ref('en'),
   }),
 }));
 
