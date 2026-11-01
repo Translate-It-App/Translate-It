@@ -410,6 +410,9 @@ describe('useTranslationError', () => {
 
   it('should execute settings callback', async () => {
     const [composable] = withSetup(() => useTranslationError('popup'));
+    const { getScopedLogger } = await import('@/shared/logging/logger.js');
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    getScopedLogger.mockReturnValue(logger);
     
     // Mock strategy to allow settings
     matchErrorToType.mockReturnValue(ErrorTypes.TEXT_TOO_LONG);
@@ -425,9 +428,14 @@ describe('useTranslationError', () => {
 
     expect(openOptionsPage).toHaveBeenCalled();
 
-    // rejected promise is handled without throwing
-    openOptionsPage.mockReturnValueOnce(Promise.reject(new Error('boom')));
+    // Rejected promises are handled and logged without leaking details.
+    const rejection = new Error('boom');
+    openOptionsPage.mockReturnValueOnce(Promise.reject(rejection));
     expect(() => settingsCallback()).not.toThrow();
+    await vi.waitFor(() => expect(logger.error).toHaveBeenCalledWith(
+      '[popup] Failed to open settings:',
+      rejection
+    ));
   });
 
   it.each([

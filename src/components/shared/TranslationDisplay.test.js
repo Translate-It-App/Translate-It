@@ -89,6 +89,31 @@ describe('TranslationDisplay.vue', () => {
     }
   });
 
+  it('renders error actions as non-submit buttons and invokes their callbacks', async () => {
+    const onRetry = vi.fn();
+    const onOpenSettings = vi.fn();
+    const wrapper = await mountDisplay({
+      error: 'translation failed',
+      canRetry: true,
+      canOpenSettings: true,
+      onRetry,
+      onOpenSettings,
+    });
+    const retryButton = wrapper.get('.retry-btn');
+    const settingsButton = wrapper.get('.settings-btn');
+
+    expect(retryButton.attributes('type')).toBe('button');
+    expect(settingsButton.attributes('type')).toBe('button');
+
+    await retryButton.trigger('click');
+    await settingsButton.trigger('click');
+
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(wrapper.emitted('retry-requested')).toHaveLength(1);
+    expect(wrapper.emitted('settings-requested')).toHaveLength(1);
+  });
+
   it('follows the dark-theme setting while showing the loading indicator', async () => {
     const wrapper = await mountDisplay({ isLoading: true });
     expect(wrapper.classes()).not.toContain('theme-dark');

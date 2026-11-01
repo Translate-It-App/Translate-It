@@ -6,6 +6,7 @@ import SidepanelMainContent from './SidepanelMainContent.vue';
 import { TranslationMode } from '@/shared/config/config.js';
 
 const mockFocusTextarea = vi.fn();
+const mockSettingsCallback = vi.fn();
 const mockUnifiedTranslation = {
   sourceText: ref('expressions'),
   translatedText: ref('表达方式'),
@@ -31,7 +32,7 @@ const mockUnifiedTranslation = {
   }),
   triggerTranslation: vi.fn().mockResolvedValue(true),
   getRetryCallback: vi.fn((retryFunction) => retryFunction),
-  getSettingsCallback: vi.fn(() => vi.fn()),
+  getSettingsCallback: vi.fn(() => mockSettingsCallback),
   cancelTranslation: vi.fn(),
   clearTranslation: vi.fn(async () => {
     mockUnifiedTranslation.sourceText.value = '';
@@ -119,19 +120,8 @@ vi.mock('@/components/shared/TranslationInputField.vue', () => ({
   },
 }));
 
-vi.mock('@/components/shared/TranslationDisplay.vue', () => ({
-  default: {
-    name: 'TranslationDisplay',
-    props: {
-      lastTranslation: { type: Object, default: null },
-      mode: { type: String, default: '' },
-      canRetry: { type: Boolean, default: false },
-      canOpenSettings: { type: Boolean, default: false },
-      onRetry: { type: Function, default: null },
-      onOpenSettings: { type: Function, default: null },
-    },
-    template: '<div class="translation-display-stub" />',
-  },
+vi.mock('@/features/text-actions/components/ActionToolbar.vue', () => ({
+  default: { name: 'ActionToolbar', template: '<div />' },
 }));
 
 vi.mock('webextension-polyfill', () => ({
@@ -150,6 +140,9 @@ describe('SidepanelMainContent.vue', () => {
     mockUnifiedTranslation.translatedText.value = '表达方式';
     mockUnifiedTranslation.sourceLanguage.value = 'en';
     mockUnifiedTranslation.targetLanguage.value = 'fa';
+    mockUnifiedTranslation.translationError.value = '';
+    mockUnifiedTranslation.canRetry.value = false;
+    mockUnifiedTranslation.canOpenSettings.value = false;
     mockLanguageDefaults.savedSourceLanguage.value = 'en';
     mockLanguageDefaults.savedTargetLanguage.value = 'fa';
     mockUnifiedTranslation.initializeSessionState.mockResolvedValue(undefined);
@@ -525,6 +518,38 @@ describe('SidepanelMainContent.vue', () => {
       expect(mockUnifiedTranslation.triggerTranslation).toHaveBeenCalledWith('en', 'fa', 'gemini');
       expect(mockUnifiedTranslation.getRetryCallback).toHaveBeenCalledWith(expect.any(Function));
       expect(mockUnifiedTranslation.getSettingsCallback).toHaveBeenCalledTimes(1);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it('handles real error-action clicks without submitting the parent form', async () => {
+    mockUnifiedTranslation.canRetry.value = true;
+    mockUnifiedTranslation.canOpenSettings.value = true;
+    mockUnifiedTranslation.translationError.value = 'translation failed';
+    const wrapper = mount(SidepanelMainContent, { props: { provider: 'gemini' } });
+
+    try {
+      await wrapper.get('.settings-btn').trigger('click');
+      expect(mockSettingsCallback).toHaveBeenCalledTimes(1);
+      expect(mockUnifiedTranslation.triggerTranslation).not.toHaveBeenCalled();
+
+      await wrapper.get('.retry-btn').trigger('click');
+      expect(mockUnifiedTranslation.triggerTranslation).toHaveBeenCalledTimes(1);
+      expect(mockUnifiedTranslation.triggerTranslation).toHaveBeenCalledWith('en', 'fa', 'gemini');
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it('still translates on normal form submission', async () => {
+    const wrapper = mount(SidepanelMainContent, { props: { provider: 'gemini' } });
+
+    try {
+      await wrapper.get('form').trigger('submit');
+
+      expect(mockUnifiedTranslation.triggerTranslation).toHaveBeenCalledTimes(1);
+      expect(mockUnifiedTranslation.triggerTranslation).toHaveBeenCalledWith('en', 'fa', 'gemini');
     } finally {
       wrapper.unmount();
     }
