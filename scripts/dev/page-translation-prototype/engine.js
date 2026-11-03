@@ -230,6 +230,7 @@
             if (attr && owned.has(attr)) restoreOne(attr, owned.get(attr));
           }
         }
+        for (const [node, rec] of owned) if (!rec.owner?.isConnected || (node.nodeType === 3 && !node.parentNode)) restoreOne(node, rec);
         owned.clear(); candidates.clear();
         report.restoreMs += performance.now() - then; restorePromise = Promise.resolve(getStats()); return restorePromise;
       }
@@ -250,7 +251,10 @@
       return restorePromise;
     };
     const restoreOne = (node, rec) => {
-      if (!connected(node) || !connected(rec.owner)) return;
+      const detachedText = node.nodeType === 3 && !node.parentNode;
+      if (composedOwner(node) !== rec.owner && !detachedText) return;
+      if (node.nodeType === 2 && node.ownerElement.getAttributeNode(node.name) !== node) return;
+      if (rec.owner.isConnected && !connected(rec.owner)) return;
       if (own(node) !== rec.applied) { report.preservedExternalNodes++; return; }
       rec.setter(rec.original); report.restoredNodes++;
     };

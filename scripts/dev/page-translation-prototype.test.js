@@ -138,6 +138,101 @@ describe('viewport DOM prototype', () => {
     expect(p.title).toBe('Replacement'); expect(p.textContent).toBe('Text');
   });
 
+  it('restores owned detached subtrees and preserves detached external edits in both modes', async () => {
+    for (const mode of ['baseline', 'viewport']) {
+      document.body.innerHTML = '<main><p data-y="0" title="Original title">Original text</p></main>';
+      const root = document.querySelector('main'), detached = root.firstElementChild;
+      const first = TranslateItViewportPrototype.createEngine({ root, mode, maxStepsPerSlice: 1 });
+      await first.start(); await first.whenIdle();
+      expect(detached.textContent).toBe('⟦TI⟧Original text');
+      expect(detached.title).toBe('⟦TI⟧Original title');
+      detached.remove();
+      const restore = first.restore();
+      expect(first.restore()).toBe(restore);
+      expect(first.cleanup()).toBe(restore);
+      await restore;
+      expect(detached.textContent).toBe('Original text');
+      expect(detached.title).toBe('Original title');
+      root.append(detached);
+      expect(detached.textContent).toBe('Original text');
+      expect(detached.title).toBe('Original title');
+
+      const reinserted = document.createElement('p'); reinserted.dataset.y = '0'; reinserted.title = 'Before'; reinserted.textContent = 'Before text'; root.append(reinserted);
+      const second = TranslateItViewportPrototype.createEngine({ root, mode, maxStepsPerSlice: 1 });
+      await second.start(); await second.whenIdle();
+      reinserted.remove(); root.append(reinserted);
+      await second.restore();
+      expect(reinserted.textContent).toBe('Before text');
+      expect(reinserted.title).toBe('Before');
+
+      const edited = document.createElement('p'); edited.dataset.y = '0'; edited.title = 'Owned title'; edited.textContent = 'Owned text'; root.append(edited);
+      const third = TranslateItViewportPrototype.createEngine({ root, mode, maxStepsPerSlice: 1 });
+      await third.start(); await third.whenIdle();
+      edited.remove(); edited.firstChild.nodeValue = 'External text'; edited.removeAttribute('title'); edited.setAttribute('title', 'Replacement title');
+      await third.restore();
+      expect(edited.textContent).toBe('External text');
+      expect(edited.title).toBe('Replacement title');
+      expect(third.getStats().preservedExternalNodes).toBe(1);
+      root.append(edited);
+      expect(edited.textContent).toBe('External text');
+      expect(edited.title).toBe('Replacement title');
+    }
+  });
+
+  it('does not restore nodes still connected outside the original root', async () => {
+    for (const mode of ['baseline', 'viewport']) {
+      document.body.innerHTML = '<main><p data-y="0" title="Original title">Original text</p></main><aside></aside>';
+      const root = document.querySelector('main'), moved = root.firstElementChild;
+      const engine = TranslateItViewportPrototype.createEngine({ root, mode });
+      await engine.start(); await engine.whenIdle();
+      document.querySelector('aside').append(moved);
+      await engine.restore();
+      expect(moved.textContent).toBe('⟦TI⟧Original text');
+      expect(moved.title).toBe('⟦TI⟧Original title');
+    }
+  });
+
+  it('restores individually detached Text nodes on reinsert in both modes', async () => {
+    for (const mode of ['baseline', 'viewport']) {
+      document.body.innerHTML = '<main><p data-y="0" title="Original title">Original text</p></main>';
+      const root = document.querySelector('main'), paragraph = root.firstElementChild, text = paragraph.firstChild;
+      const engine = TranslateItViewportPrototype.createEngine({ root, mode });
+      await engine.start(); await engine.whenIdle();
+      paragraph.removeChild(text);
+      await engine.restore();
+      expect(text.data).toBe('Original text');
+      expect(paragraph.title).toBe('Original title');
+      paragraph.append(text);
+      expect(paragraph.textContent).toBe('Original text');
+    }
+  });
+
+  it('preserves edits to detached Text nodes and does not restore them after moving outside the root', async () => {
+    for (const mode of ['baseline', 'viewport']) {
+      document.body.innerHTML = '<main><p data-y="0" title="Original title">Original text</p></main><aside></aside>';
+      const root = document.querySelector('main'), paragraph = root.firstElementChild, text = paragraph.firstChild;
+      const engine = TranslateItViewportPrototype.createEngine({ root, mode });
+      await engine.start(); await engine.whenIdle();
+      paragraph.removeChild(text);
+      text.data = 'External edit';
+      await engine.restore();
+      expect(text.data).toBe('External edit');
+      expect(paragraph.title).toBe('Original title');
+      expect(engine.getStats().preservedExternalNodes).toBe(1);
+      paragraph.append(text);
+      expect(paragraph.textContent).toBe('External edit');
+
+      const moved = paragraph.firstChild;
+      const second = TranslateItViewportPrototype.createEngine({ root, mode });
+      await second.start(); await second.whenIdle();
+      paragraph.removeChild(moved);
+      document.querySelector('aside').append(moved);
+      await second.restore();
+      expect(moved.data).toBe('⟦TI⟧External edit');
+      expect(paragraph.title).toBe('Original title');
+    }
+  });
+
   it('counts prototype restore targets separately from baseline DOM traversal nodes', async () => {
     document.body.innerHTML = '<main><p data-y="0" title="Tip">Visible</p><p data-y="5000">Offscreen</p></main>';
     const root = document.querySelector('main');
