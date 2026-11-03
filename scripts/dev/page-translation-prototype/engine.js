@@ -14,7 +14,7 @@
     const customSelectors = excludedSelectors.filter((s) => { try { doc.createElement('div').matches(s); return true; } catch { return false; } });
     const owned = new Map(), candidates = new Set(), queuedCandidates = new Set(), queuedRoots = new Set(), observers = new Map();
     const changedNodes = new Set(), addedRoots = new Set();
-    const report = { mode, visitedNodes: 0, restoreVisitedNodes: 0, translatedNodes: 0, firstVisibleMs: null, processingMs: 0, restoreMs: 0, restoredNodes: 0, preservedExternalNodes: 0, ownedNodes: 0, maxSliceMs: 0, maxRestoreSliceMs: 0, geometryChecks: 0, prunedBranches: 0, discoveryPasses: 0, mutationAuditMs: 0, mutationAuditCount: 0, mutationAuditFallbacks: 0 };
+    const report = { mode, visitedNodes: 0, seedAncestorVisits: 0, seedSubtreeVisits: 0, rootTraversalVisits: 0, seedTargetRepeatVisits: 0, restoreVisitedNodes: 0, translatedNodes: 0, firstVisibleMs: null, processingMs: 0, restoreMs: 0, restoredNodes: 0, preservedExternalNodes: 0, ownedNodes: 0, maxSliceMs: 0, maxRestoreSliceMs: 0, geometryChecks: 0, prunedBranches: 0, discoveryPasses: 0, discoveryRequests: 0, discoveryRequestsStart: 0, discoveryRequestsScroll: 0, discoveryRequestsResize: 0, discoveryRequestsDomMutation: 0, discoveryRequestsHeadMutation: 0, discoveryRequestsBodyMutation: 0, discoveryRequestsStylesheetLoad: 0, discoveryRequestsStylesheetError: 0, discoveryRequestsImmediate: 0, discoveryRequestsCoalesced: 0, discoveryFollowupPasses: 0, domMutationObserverBatches: 0, rootMutationObserverBatches: 0, headMutationObserverBatches: 0, bodyMutationObserverBatches: 0, mutationChildListRecords: 0, mutationUnownedCharacterDataRecords: 0, mutationRelevantAttributeRecords: 0, mutationDataAttributeRecords: 0, mutationCssReferencedBatches: 0, mutationCssClearBatches: 0, mutationCssFallbackBatches: 0, mutationAuditMs: 0, mutationAuditCount: 0, mutationAuditFallbacks: 0 };
     let active = false, stopped = false, initialDone = false, timer = null, queue = [], queueHead = 0, waiters = [], startResolve, startPromise, startedAt = 0, restorePromise = null, mutationsQueued = false, rescan = null, rescanDirty = false, maintenance = null, maintenanceDirty = false, viewportJob = null, viewportDirty = false, observerSweepDirty = false, bodyLinkInventoryOverflow = false, bodyPendingLinkOverflow = false, uncertainRootsOverflow = false, headObserver = null, bodyObserver = null;
     const pendingStylesheetLinks = new Map(), stylesheetResources = new Set(), uncertainStylesheetRoots = new Set(), stylesheetEventTargets = new Set(), handledStylesheetEvents = new WeakSet();
     const connected = (node) => {
@@ -185,19 +185,25 @@
         else stack.pop();
       }
     }
-    function* viewportTraversal(seeds) {
+    function* viewportTraversal(seeds, setPhase) {
       for (const target of seeds) {
+        setPhase('seedAncestor');
         for (let node = target; node; node = node.parentElement || node.parentNode?.host) {
           if (!connected(node)) break;
           yield node;
           if (node === root) break;
         }
-        if (connected(target)) yield* walkViewport(target);
+        setPhase('seedSubtree');
+        if (connected(target)) { report.seedTargetRepeatVisits++; yield* walkViewport(target); }
       }
+      setPhase('rootTraversal');
       yield* walkViewport(root);
     }
-    const discoverViewport = (node) => {
+    const discoverViewport = (node, phase) => {
       report.visitedNodes++;
+      if (phase === 'seedAncestor') report.seedAncestorVisits++;
+      else if (phase === 'seedSubtree') report.seedSubtreeVisits++;
+      else report.rootTraversalVisits++;
       if (!connected(node)) return;
       if (node.nodeType === 1) {
         observeShadow(node);
@@ -233,17 +239,34 @@
       }
       return seeds;
     };
-    function beginViewportPass() {
+    function beginViewportPass(followup = false) {
       const cleanup = observerSweepDirty ? observers.entries() : null;
       const cleanupRemaining = observerSweepDirty ? observers.size : 0;
       observerSweepDirty = false;
-      viewportJob = { iterator: null, cleanup, cleanupRemaining };
+      viewportJob = { iterator: null, cleanup, cleanupRemaining, visitPhase: 'seedAncestor' };
       report.discoveryPasses++;
+      if (followup && mode === 'viewport') report.discoveryFollowupPasses++;
     }
-    function requestViewportPass() {
+    function requestViewportPass(trigger) {
       if (!active || stopped) return;
-      if (viewportJob) viewportDirty = true;
-      else beginViewportPass();
+      if (mode === 'viewport') {
+        report.discoveryRequests++;
+        if (trigger === 'start') report.discoveryRequestsStart++;
+        else if (trigger === 'scroll') report.discoveryRequestsScroll++;
+        else if (trigger === 'resize') report.discoveryRequestsResize++;
+        else if (trigger === 'headMutation') report.discoveryRequestsHeadMutation++;
+        else if (trigger === 'bodyMutation') report.discoveryRequestsBodyMutation++;
+        else if (trigger === 'stylesheetLoad') report.discoveryRequestsStylesheetLoad++;
+        else if (trigger === 'stylesheetError') report.discoveryRequestsStylesheetError++;
+        else report.discoveryRequestsDomMutation++;
+      }
+      if (viewportJob) {
+        if (mode === 'viewport') report.discoveryRequestsCoalesced++;
+        viewportDirty = true;
+      } else {
+        if (mode === 'viewport') report.discoveryRequestsImmediate++;
+        beginViewportPass();
+      }
       schedule();
     }
     function flushViewport() {
@@ -264,12 +287,12 @@
           continue;
         }
         viewportJob.cleanup = null;
-        if (!viewportJob.iterator) { viewportJob.iterator = viewportTraversal(hitTestSeeds()); continue; }
+        if (!viewportJob.iterator) { viewportJob.iterator = viewportTraversal(hitTestSeeds(), (phase) => { viewportJob.visitPhase = phase; }); continue; }
         const next = viewportJob.iterator.next();
-        if (!next.done) discoverViewport(next.value);
+        if (!next.done) discoverViewport(next.value, viewportJob.visitPhase);
         else {
           viewportJob = null;
-          if (viewportDirty) { viewportDirty = false; beginViewportPass(); }
+          if (viewportDirty) { viewportDirty = false; beginViewportPass(true); }
         }
       }
       const elapsed = performance.now() - began; report.processingMs += elapsed; report.maxSliceMs = Math.max(report.maxSliceMs, elapsed);
@@ -465,9 +488,11 @@
     };
     function onHeadMutations(records) {
       if (!active || stopped) return;
+      report.domMutationObserverBatches++; report.headMutationObserverBatches++;
       let invalidate = false;
       for (const record of records) {
         if (record.type === 'childList') {
+          report.mutationChildListRecords++;
           for (const node of record.addedNodes) {
             const scan = scanHeadResources(node, true);
             if (scan.overflow) markUncertainStylesheetRoot(node);
@@ -476,24 +501,27 @@
           for (const node of record.removedNodes) if (pruneStylesheetStateInSubtree(node)) invalidate = true;
           if (record.target?.nodeType === 1 && record.target.localName === 'style') invalidate = true;
         } else if (record.type === 'characterData') {
+          if (!owned.has(record.target)) report.mutationUnownedCharacterDataRecords++;
           if (record.target.parentElement?.localName === 'style') invalidate = true;
         } else {
           const target = record.target, name = record.attributeName.toLowerCase();
           if (isStylesheetLink(target) || pendingStylesheetLinks.has(target)) {
             const wasPending = pendingStylesheetLinks.has(target);
             if (['href', 'rel', 'type', 'disabled', 'media'].includes(name) && updatePendingLink(target, ['href', 'rel', 'type'].includes(name))) markUncertainStylesheetRoot(target);
-            if (wasPending || isStylesheetLink(target)) invalidate = true;
-          } else if (target?.nodeType === 1 && target.localName === 'style' && ['type', 'media', 'title', 'disabled'].includes(name)) invalidate = true;
+            if (wasPending || isStylesheetLink(target)) { invalidate = true; report.mutationRelevantAttributeRecords++; }
+          } else if (target?.nodeType === 1 && target.localName === 'style' && ['type', 'media', 'title', 'disabled'].includes(name)) { invalidate = true; report.mutationRelevantAttributeRecords++; }
         }
       }
       if (bodyLinkInventoryOverflow) invalidate = true;
-      if (invalidate) requestViewportPass();
+      if (invalidate) requestViewportPass('headMutation');
     }
     function onBodyMutations(records) {
       if (!active || stopped) return;
+      report.domMutationObserverBatches++; report.bodyMutationObserverBatches++;
       let invalidate = false, budget = MAX_HEAD_NODES;
       for (const record of records) {
         if (record.type === 'childList') {
+          report.mutationChildListRecords++;
           for (const node of record.removedNodes) {
             if (pruneStylesheetStateInSubtree(node)) invalidate = true;
           }
@@ -509,13 +537,13 @@
           if (!target.isConnected || connected(target)) continue;
           if (isStylesheetLink(target) || pendingStylesheetLinks.has(target)) {
             if (updatePendingLink(target, ['href', 'rel', 'type'].includes(name))) markUncertainStylesheetRoot(target);
-            invalidate = true;
-          } else if (target.localName === 'style' && ['type', 'media', 'title', 'disabled'].includes(name)) invalidate = true;
+            invalidate = true; report.mutationRelevantAttributeRecords++;
+          } else if (target.localName === 'style' && ['type', 'media', 'title', 'disabled'].includes(name)) { invalidate = true; report.mutationRelevantAttributeRecords++; }
         }
       }
       if (records.some((record) => record.type === 'childList') && (bodyLinkInventoryOverflow || bodyPendingLinkOverflow)) { captureBodyStylesheetLinks(); invalidate = true; }
       if (bodyLinkInventoryOverflow || bodyPendingLinkOverflow) invalidate = true;
-      if (invalidate) requestViewportPass();
+      if (invalidate) requestViewportPass('bodyMutation');
     }
     const onStylesheetSettled = (event) => {
       if (!active || stopped || !isStylesheetLink(event.target)) return;
@@ -523,15 +551,17 @@
       handledStylesheetEvents.add(event);
       if (event.type === 'error') pendingStylesheetLinks.delete(event.target);
       else if (updatePendingLink(event.target)) markUncertainStylesheetRoot(event.target);
-      requestViewportPass();
+      requestViewportPass(event.type === 'error' ? 'stylesheetError' : 'stylesheetLoad');
     };
     function onMutations(records) {
       if (!active || stopped) return;
       if (mode === 'viewport') {
+        report.domMutationObserverBatches++; report.rootMutationObserverBatches++;
         let invalidate = false, overflow = false, linkScanBudget = MAX_HEAD_NODES;
-        const dataNames = new Set();
+        const dataNames = new Set(); let dataAttributeRecords = 0;
         for (const record of records) {
           if (record.type === 'childList') {
+            report.mutationChildListRecords++;
             invalidate = true; observerSweepDirty ||= record.removedNodes.length > 0;
             for (const node of record.removedNodes) pruneStylesheetStateInSubtree(node);
             for (const node of record.addedNodes) {
@@ -541,25 +571,33 @@
               if (scan.overflow) markUncertainStylesheetRoot(node);
             }
           }
-          else if (record.type === 'characterData') { if (!owned.has(record.target)) invalidate = true; }
+          else if (record.type === 'characterData') { if (!owned.has(record.target)) { invalidate = true; report.mutationUnownedCharacterDataRecords++; } }
           else {
-            if (record.attributeNamespace) { invalidate = true; continue; }
+            if (record.attributeNamespace) { invalidate = true; report.mutationRelevantAttributeRecords++; continue; }
             if (record.target?.localName === 'link' && ['href', 'rel', 'type', 'disabled', 'media'].includes(record.attributeName.toLowerCase()) && updatePendingLink(record.target, ['href', 'rel', 'type'].includes(record.attributeName.toLowerCase()))) markUncertainStylesheetRoot(record.target);
             const attr = record.target.getAttributeNode(record.attributeName);
             if (attr && owned.has(attr)) continue;
             const name = record.attributeName.toLowerCase();
-            if (name === 'data-translate-it-ui') invalidate = true;
+            if (name === 'data-translate-it-ui') { invalidate = true; report.mutationRelevantAttributeRecords++; }
             else if (name.startsWith('data-') && /^data-[a-z0-9_-]+$/i.test(name)) {
+              report.mutationDataAttributeRecords++; dataAttributeRecords++;
               if (dataNames.has(name)) continue;
               if (dataNames.size === MAX_BATCH_DATA_NAMES) overflow = true;
               else dataNames.add(name);
-            } else invalidate = true;
+            } else { invalidate = true; report.mutationRelevantAttributeRecords++; }
           }
         }
         if ((bodyLinkInventoryOverflow || bodyPendingLinkOverflow) && records.some((record) => record.type === 'childList')) captureBodyStylesheetLinks();
-        if (!invalidate && overflow) { report.mutationAuditCount++; report.mutationAuditFallbacks++; invalidate = true; }
-        else if (!invalidate && dataNames.size) invalidate = auditDataAttributes(dataNames) !== 'clear';
-        if (invalidate) requestViewportPass();
+        if (!invalidate && overflow) {
+          report.mutationAuditCount++; report.mutationAuditFallbacks++; report.mutationCssFallbackBatches++;
+          report.mutationRelevantAttributeRecords += dataAttributeRecords; invalidate = true;
+        } else if (!invalidate && dataNames.size) {
+          const result = auditDataAttributes(dataNames);
+          if (result === 'referenced') { report.mutationCssReferencedBatches++; report.mutationRelevantAttributeRecords += dataAttributeRecords; invalidate = true; }
+          else if (result === 'fallback') { report.mutationCssFallbackBatches++; report.mutationRelevantAttributeRecords += dataAttributeRecords; invalidate = true; }
+          else report.mutationCssClearBatches++;
+        }
+        if (invalidate) requestViewportPass('domMutation');
         return;
       }
       for (const record of records) {
@@ -583,10 +621,10 @@
     const whenIdle = () => !hasWork() && timer === null && initialDone ? Promise.resolve(getStats()) : new Promise((resolve) => waiters.push(resolve));
     const onScroll = () => {
       if (!active || stopped) return;
-      if (mode === 'viewport') { requestViewportPass(); return; }
+      if (mode === 'viewport') { requestViewportPass('scroll'); return; }
       if (rescan) rescanDirty = true; else startRescan(); schedule();
     };
-    const onResize = () => { if (mode === 'viewport') requestViewportPass(); };
+    const onResize = () => { if (mode === 'viewport') requestViewportPass('resize'); };
     function startRescan() { const count = candidates.size; rescan = { kind: 'rescan', iterator: candidates.values(), remaining: count }; if (count) queue.push(rescan); else rescan = null; }
     const start = () => {
       if (startPromise) return whenIdle();
@@ -624,7 +662,7 @@
           target.addEventListener('load', onStylesheetSettled, true);
           target.addEventListener('error', onStylesheetSettled, true);
         }
-        requestViewportPass();
+        requestViewportPass('start');
       }
       return startPromise;
     };

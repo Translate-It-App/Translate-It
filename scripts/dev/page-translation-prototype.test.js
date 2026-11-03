@@ -2,6 +2,13 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const DIAGNOSTIC_COUNTERS = [
+  'visitedNodes', 'seedAncestorVisits', 'seedSubtreeVisits', 'rootTraversalVisits', 'seedTargetRepeatVisits', 'discoveryPasses',
+  'discoveryRequests', 'discoveryRequestsStart', 'discoveryRequestsScroll', 'discoveryRequestsResize', 'discoveryRequestsDomMutation', 'discoveryRequestsHeadMutation', 'discoveryRequestsBodyMutation', 'discoveryRequestsStylesheetLoad', 'discoveryRequestsStylesheetError', 'discoveryRequestsImmediate', 'discoveryRequestsCoalesced', 'discoveryFollowupPasses',
+  'domMutationObserverBatches', 'rootMutationObserverBatches', 'headMutationObserverBatches', 'bodyMutationObserverBatches', 'mutationChildListRecords', 'mutationUnownedCharacterDataRecords', 'mutationRelevantAttributeRecords', 'mutationDataAttributeRecords', 'mutationCssReferencedBatches', 'mutationCssClearBatches', 'mutationCssFallbackBatches', 'mutationAuditMs', 'mutationAuditCount', 'mutationAuditFallbacks',
+];
+const VIEWPORT_ONLY_COUNTERS = DIAGNOSTIC_COUNTERS.filter(key => !['visitedNodes', 'discoveryPasses'].includes(key));
+
 beforeEach(() => {
   delete globalThis.TranslateItViewportPrototype;
   window.eval(readFileSync(resolve('scripts/dev/page-translation-prototype/engine.js'), 'utf8'));
@@ -18,6 +25,8 @@ describe('viewport DOM prototype', () => {
     const root = document.querySelector('main');
     const e = TranslateItViewportPrototype.createEngine({ root, mode: 'baseline' });
     await e.start();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    for (const key of VIEWPORT_ONLY_COUNTERS) expect(e.getStats()[key]).toBe(0);
     expect(root.innerHTML).toContain('⟦TI⟧Visible');
     expect(root.querySelector('p').title).toBe('⟦TI⟧Tip');
     expect(root.querySelector('code').textContent).toBe('Code');
@@ -42,6 +51,44 @@ describe('viewport DOM prototype', () => {
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(inserted.textContent).toBe('Late');
     await engine.cleanup();
+  });
+
+  it('freezes numeric viewport diagnostics after stop and restore', async () => {
+    document.body.innerHTML = '<main><p data-y="0">Owned source</p></main>';
+    const root = document.querySelector('main'), p = root.firstElementChild;
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const diagnostics = () => Object.fromEntries(DIAGNOSTIC_COUNTERS.map(key => [key, engine.getStats()[key]]));
+    const beforeStop = diagnostics();
+    engine.stop();
+    p.firstChild.nodeValue = 'External after stop';
+    window.dispatchEvent(new Event('scroll')); window.dispatchEvent(new Event('resize'));
+    const lateLink = document.createElement('link'); lateLink.rel = 'stylesheet'; lateLink.href = '/late-diagnostic.css'; document.head.append(lateLink);
+    lateLink.dispatchEvent(new Event('load'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(diagnostics()).toEqual(beforeStop);
+    await engine.restore();
+    expect(diagnostics()).toEqual(beforeStop);
+    lateLink.remove();
+  });
+
+  it('does not start a dirty follow-up when an active sliced pass is stopped', async () => {
+    document.body.innerHTML = '<main><p>First</p>' + '<p>Next</p>'.repeat(20) + '</main>';
+    const root = document.querySelector('main'); document.elementFromPoint = () => null;
+    vi.useFakeTimers();
+    try {
+      const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
+      const started = engine.start();
+      await vi.advanceTimersToNextTimerAsync(); // initialize the pass
+      await vi.advanceTimersToNextTimerAsync(); // advance one root-traversal node
+      window.dispatchEvent(new Event('scroll')); // leave a dirty follow-up pending
+      expect(engine.getStats()).toMatchObject({ discoveryRequests: 2, discoveryRequestsStart: 1, discoveryRequestsScroll: 1, discoveryRequestsCoalesced: 1, discoveryPasses: 1, discoveryFollowupPasses: 0 });
+      engine.stop(); await started;
+      const stopped = Object.fromEntries(DIAGNOSTIC_COUNTERS.map(key => [key, engine.getStats()[key]]));
+      await engine.restore(); await vi.runAllTimersAsync();
+      expect(Object.fromEntries(DIAGNOSTIC_COUNTERS.map(key => [key, engine.getStats()[key]]))).toEqual(stopped);
+      expect(engine.getStats().discoveryFollowupPasses).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it('observes scrolling and open shadow roots; leaves detached and external edits alone', async () => {
@@ -82,6 +129,9 @@ describe('viewport DOM prototype', () => {
       const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
       const started = engine.start();
       expect(engine.getStats().visitedNodes).toBe(0);
+      for (let i = 0; i < 3; i++) window.dispatchEvent(new Event('scroll'));
+      window.dispatchEvent(new Event('resize'));
+      expect(engine.getStats()).toMatchObject({ discoveryRequests: 5, discoveryRequestsStart: 1, discoveryRequestsScroll: 3, discoveryRequestsResize: 1, discoveryRequestsImmediate: 1, discoveryRequestsCoalesced: 4, discoveryPasses: 1 });
       for (let i = 0; i < 8; i++) {
         const before = engine.getStats().visitedNodes;
         await vi.advanceTimersToNextTimerAsync();
@@ -90,6 +140,14 @@ describe('viewport DOM prototype', () => {
       await vi.runAllTimersAsync(); await started;
       const domNodeCount = root.querySelectorAll('*').length + root.querySelectorAll('*').length + 1;
       expect(engine.getStats().visitedNodes).toBeGreaterThan(domNodeCount);
+      expect(engine.getStats().discoveryPasses).toBe(2);
+      expect(engine.getStats().discoveryFollowupPasses).toBe(1);
+      expect(engine.getStats().visitedNodes).toBe(engine.getStats().seedAncestorVisits + engine.getStats().seedSubtreeVisits + engine.getStats().rootTraversalVisits);
+      expect(engine.getStats().seedTargetRepeatVisits).toBe(engine.getStats().discoveryPasses);
+      const completed = engine.getStats();
+      window.dispatchEvent(new Event('scroll'));
+      expect(engine.getStats()).toMatchObject({ discoveryRequests: completed.discoveryRequests + 1, discoveryRequestsScroll: completed.discoveryRequestsScroll + 1, discoveryRequestsImmediate: completed.discoveryRequestsImmediate + 1, discoveryRequestsCoalesced: completed.discoveryRequestsCoalesced, discoveryPasses: completed.discoveryPasses + 1 });
+      await vi.runAllTimersAsync(); await engine.whenIdle();
       const cleanup = engine.cleanup(); await vi.runAllTimersAsync(); await cleanup;
     } finally { vi.useRealTimers(); }
   }, 15000);
@@ -109,6 +167,10 @@ describe('viewport DOM prototype', () => {
       host.remove();
       await vi.runAllTimersAsync(); await started; await engine.whenIdle();
       expect(engine.getStats().observerCount).toBe(1);
+      expect(engine.getStats().seedAncestorVisits).toBe(0);
+      expect(engine.getStats().seedSubtreeVisits).toBe(0);
+      expect(engine.getStats().rootTraversalVisits).toBe(engine.getStats().visitedNodes);
+      expect(engine.getStats().seedTargetRepeatVisits).toBe(0);
       expect(shadow.textContent).toBe('Detached shadow source');
       await engine.cleanup();
     } finally { vi.useRealTimers(); }
@@ -139,6 +201,9 @@ describe('viewport DOM prototype', () => {
     expect(engine.getStats().visitedNodes).toBe(visits);
     expect(engine.getStats().mutationAuditCount).toBeGreaterThan(0);
     expect(engine.getStats().mutationAuditFallbacks).toBe(0);
+    expect(engine.getStats().mutationDataAttributeRecords).toBeGreaterThanOrEqual(16);
+    expect(engine.getStats().mutationCssClearBatches).toBeGreaterThan(0);
+    expect(engine.getStats().discoveryRequests).toBe(engine.getStats().discoveryRequestsStart);
 
     const style = document.createElement('style'); style.textContent = '[data-noise] { color: blue }'; root.append(style);
     await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
@@ -163,6 +228,7 @@ describe('viewport DOM prototype', () => {
     const beforeNative = engine.getStats().discoveryPasses;
     await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(beforeNative));
     await engine.whenIdle();
+    expect(engine.getStats().mutationRelevantAttributeRecords).toBeGreaterThanOrEqual(3);
     target.removeAttribute('data-muted');
     await vi.waitFor(() => expect(target.textContent).toBe('⟦TI⟧Unblocked text'));
     await engine.whenIdle();
@@ -186,6 +252,7 @@ describe('viewport DOM prototype', () => {
       await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
       await engine.whenIdle();
       expect(engine.getStats().mutationAuditFallbacks).toBe(0);
+      expect(engine.getStats().mutationCssReferencedBatches).toBe(1);
       await engine.cleanup();
     } finally {
       if (descriptor) Object.defineProperty(document, 'styleSheets', descriptor);
@@ -205,6 +272,7 @@ describe('viewport DOM prototype', () => {
     await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
     await engine.whenIdle();
     expect(engine.getStats().mutationAuditFallbacks).toBe(0);
+    expect(engine.getStats().mutationCssReferencedBatches).toBe(1);
     await engine.cleanup();
   });
 
@@ -264,6 +332,7 @@ describe('viewport DOM prototype', () => {
     await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
     await engine.whenIdle();
     expect(engine.getStats().mutationAuditCount).toBe(0);
+    expect(engine.getStats().mutationRelevantAttributeRecords).toBe(1);
     await engine.cleanup();
   });
 
@@ -287,6 +356,7 @@ describe('viewport DOM prototype', () => {
         await engine.whenIdle();
         expect(engine.getStats().mutationAuditCount).toBe(1);
         expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+        expect(engine.getStats().mutationCssFallbackBatches).toBe(1);
         await engine.cleanup();
       }
     } finally {
@@ -337,9 +407,11 @@ describe('viewport DOM prototype', () => {
       await engine.start(); await engine.whenIdle();
       const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = '/dynamic.css';
       let passes = engine.getStats().discoveryPasses;
+      const headRequests = engine.getStats().discoveryRequestsHeadMutation;
       document.head.append(link);
       await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
       await engine.whenIdle();
+      expect(engine.getStats().discoveryRequestsHeadMutation).toBeGreaterThan(headRequests);
       p.dataset.dynamic = 'one';
       await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1));
       await engine.whenIdle();
@@ -348,14 +420,24 @@ describe('viewport DOM prototype', () => {
       Object.defineProperty(link, 'sheet', { configurable: true, value: sheet });
       Object.defineProperty(document, 'styleSheets', { configurable: true, value: [sheet] });
       passes = engine.getStats().discoveryPasses;
+      const loadRequests = engine.getStats().discoveryRequestsStylesheetLoad;
       link.dispatchEvent(new Event('load'));
       await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
       await engine.whenIdle();
+      expect(engine.getStats().discoveryRequestsStylesheetLoad).toBe(loadRequests + 1);
       passes = engine.getStats().discoveryPasses;
       p.dataset.dynamic = 'two';
       await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
       await engine.whenIdle();
       expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+
+      const failed = document.createElement('link'); failed.rel = 'stylesheet'; failed.href = '/failed.css';
+      const requestsBeforeFailure = engine.getStats().discoveryRequestsHeadMutation;
+      document.head.append(failed); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+      expect(engine.getStats().discoveryRequestsHeadMutation).toBeGreaterThan(requestsBeforeFailure);
+      const errorRequests = engine.getStats().discoveryRequestsStylesheetError;
+      failed.dispatchEvent(new Event('error')); await engine.whenIdle();
+      expect(engine.getStats().discoveryRequestsStylesheetError).toBe(errorRequests + 1);
 
       await engine.cleanup();
       passes = engine.getStats().discoveryPasses;
@@ -363,7 +445,7 @@ describe('viewport DOM prototype', () => {
       late.dispatchEvent(new Event('load'));
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(engine.getStats()).toMatchObject({ discoveryPasses: passes, pendingJobCount: 0 });
-      late.remove(); link.remove();
+      late.remove(); failed.remove(); link.remove();
     } finally {
       await engine.cleanup();
       if (descriptor) Object.defineProperty(document, 'styleSheets', descriptor);
@@ -450,9 +532,12 @@ describe('viewport DOM prototype', () => {
       expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes);
 
       dynamic = document.createElement('link'); dynamic.rel = 'stylesheet'; dynamic.href = '/dynamic-external.css';
-      passes = engine.getStats().discoveryPasses; document.body.append(dynamic);
+      passes = engine.getStats().discoveryPasses;
+      const bodyRequests = engine.getStats().discoveryRequestsBodyMutation;
+      document.body.append(dynamic);
       await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
       await engine.whenIdle();
+      expect(engine.getStats().discoveryRequestsBodyMutation).toBeGreaterThan(bodyRequests);
       p.dataset.outside = 'one';
       await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(2));
       await engine.whenIdle();
@@ -610,7 +695,7 @@ describe('viewport DOM prototype', () => {
   it('descends through zero-box containers and reacts to nested and shadow-local scrolls', async () => {
     document.body.innerHTML = '<main><section data-zero><p data-y="0">Zero box child</p><div id="nested"><p id="nested-target">Nested target</p></div><p id="resize-target">Resize target</p><x-card></x-card></section></main>';
     const shadow = document.querySelector('x-card').attachShadow({ mode: 'open' });
-    shadow.innerHTML = '<p id="shadow-target">Shadow target</p>';
+    shadow.innerHTML = '<link rel="stylesheet" href="/shadow-local.css"><p id="shadow-target">Shadow target</p>';
     let nestedVisible = false, shadowVisible = false, resizeVisible = false;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
       if (this.hasAttribute('data-zero')) return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
@@ -625,12 +710,21 @@ describe('viewport DOM prototype', () => {
     expect(document.querySelector('[data-zero] p').textContent).toBe('⟦TI⟧Zero box child');
     expect(nestedTarget.textContent).toBe('Nested target');
     expect(shadowTarget.textContent).toBe('Shadow target');
+    const scrollRequests = engine.getStats().discoveryRequestsScroll;
     nestedVisible = true; nested.dispatchEvent(new Event('scroll'));
     await vi.waitFor(() => expect(nestedTarget.textContent).toBe('⟦TI⟧Nested target'));
     shadowVisible = true; shadow.dispatchEvent(new Event('scroll'));
     await vi.waitFor(() => expect(shadowTarget.textContent).toBe('⟦TI⟧Shadow target'));
+    expect(engine.getStats().discoveryRequestsScroll).toBe(scrollRequests + 2);
+    const resizeRequests = engine.getStats().discoveryRequestsResize;
     resizeVisible = true; window.dispatchEvent(new Event('resize'));
     await vi.waitFor(() => expect(resizeTarget.textContent).toBe('⟦TI⟧Resize target'));
+    expect(engine.getStats().discoveryRequestsResize).toBe(resizeRequests + 1);
+    const loadRequests = engine.getStats().discoveryRequestsStylesheetLoad;
+    const shadowLink = shadow.querySelector('link');
+    Object.defineProperty(shadowLink, 'sheet', { configurable: true, value: { cssRules: [] } });
+    shadowLink.dispatchEvent(new Event('load', { composed: true })); await engine.whenIdle();
+    expect(engine.getStats().discoveryRequestsStylesheetLoad).toBe(loadRequests + 1);
     await engine.cleanup();
   });
 
@@ -643,7 +737,10 @@ describe('viewport DOM prototype', () => {
     for (let i = 0; i < 3; i++) window.dispatchEvent(new Event('scroll'));
     await engine.whenIdle();
     const added = document.createElement('p'); added.dataset.y = '0'; added.textContent = 'Added'; p.after(added);
+    const domRequestsBefore = engine.getStats().discoveryRequestsDomMutation, childrenBefore = engine.getStats().mutationChildListRecords;
     await vi.waitFor(() => expect(added.textContent).toBe('⟦TI⟧Added'));
+    expect(engine.getStats().discoveryRequestsDomMutation).toBeGreaterThan(domRequestsBefore);
+    expect(engine.getStats().mutationChildListRecords).toBeGreaterThan(childrenBefore);
     await engine.cleanup();
   });
 
@@ -877,6 +974,9 @@ describe('viewport DOM prototype', () => {
     expect(engine.getStats().pendingJobCount).toBeLessThanOrEqual(1);
     await engine.whenIdle();
     expect(engine.getStats().candidateCount).toBe(0);
+    expect(engine.getStats().mutationUnownedCharacterDataRecords).toBeGreaterThan(0);
+    expect(engine.getStats().mutationChildListRecords).toBeGreaterThan(0);
+    expect(engine.getStats().mutationRelevantAttributeRecords).toBeGreaterThan(0);
     const final = document.createElement('p'); final.dataset.y = '5000'; final.title = 'Final'; final.textContent = 'Final text'; root.append(final);
     const passesBeforeAppend = engine.getStats().discoveryPasses;
     await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passesBeforeAppend));
@@ -921,9 +1021,15 @@ describe('viewport DOM prototype', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     await engine.whenIdle();
     expect(engine.getStats()).toMatchObject({ candidateCount: 0, pendingJobCount: 0, observerCount: 1 });
+    const requestsBeforeExternalEdit = engine.getStats().discoveryRequests;
+    const unownedTextBeforeExternalEdit = engine.getStats().mutationUnownedCharacterDataRecords;
+    const relevantAttrsBeforeExternalEdit = engine.getStats().mutationRelevantAttributeRecords;
     live.firstChild.nodeValue = 'External text'; live.title = 'External title';
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(engine.getStats()).toMatchObject({ candidateCount: 0, pendingJobCount: 0 });
+    expect(engine.getStats().discoveryRequests).toBe(requestsBeforeExternalEdit);
+    expect(engine.getStats().mutationUnownedCharacterDataRecords).toBe(unownedTextBeforeExternalEdit);
+    expect(engine.getStats().mutationRelevantAttributeRecords).toBe(relevantAttrsBeforeExternalEdit);
     await engine.cleanup();
     expect(live.textContent).toBe('External text');
     expect(live.title).toBe('External title');

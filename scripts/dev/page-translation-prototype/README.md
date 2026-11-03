@@ -40,16 +40,25 @@ This is a convenience run, not Firefox validation. If browser startup or DevTool
 ## Firefox DevTools on a real page (manual, explicit opt-in)
 
 1. Use a dedicated Firefox profile. Disable the extension's automatic Page Translation rule for the target page (or disable that feature in this profile) so it cannot mutate the DOM alongside the prototype. Keep the extension's production behavior otherwise untouched.
-2. On a live page, paste **only** the standalone `engine.js` source from the local file into the Firefox DevTools Console. Do not load/paste `fixture.js`, `benchmark.js`, or run the fixture harness on a live page. Use the engine API directly and inspect only numeric stats:
-   ```js
-   const engine = TranslateItViewportPrototype.createEngine({ root: document.body, mode: 'viewport' });
-   await engine.start();
-   await engine.whenIdle();
-   engine.getStats(); // numeric fields only; do not stringify/log DOM content
-   engine.stop();
-   await engine.restore();
-   await engine.cleanup();
-   ```
+2. On a live page, paste **only** the standalone `engine.js` source from the local file into the Firefox DevTools Console. Do not load/paste `fixture.js`, `benchmark.js`, or run the fixture harness on a live page. Use the engine API directly and inspect only numeric stats. First start the engine and capture a numeric-only snapshot:
+    ```js
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.body, mode: 'viewport' });
+    await engine.start();
+    await engine.whenIdle();
+    window.__translateItNumericSnapshot = (stats) => Object.fromEntries(Object.entries(stats).filter(([, value]) => typeof value === 'number'));
+    window.__translateItBeforeScroll = window.__translateItNumericSnapshot(engine.getStats());
+    ```
+   Scroll the page normally, stop scrolling, then run the second block to await idle, capture numeric counters, and clean up:
+    ```js
+    await engine.whenIdle();
+    window.__translateItAfterScroll = window.__translateItNumericSnapshot(engine.getStats());
+    console.table({ before: window.__translateItBeforeScroll, after: window.__translateItAfterScroll });
+    engine.stop();
+    await engine.restore();
+    await engine.cleanup();
+    delete window.__translateItBeforeScroll; delete window.__translateItAfterScroll; delete window.__translateItNumericSnapshot;
+    ```
+   The projection includes `processingMs`, `maxSliceMs`, `geometryChecks`, `prunedBranches`, and mutation-audit timings/counters as well as the new diagnostics. Nullable `firstVisibleMs` is omitted until a visible write occurs.
    Never inject with page fetch/import or paste a dynamic localhost import into Reddit. The prototype itself makes no network requests, but site code may react to observed DOM changes and initiate its own requests.
 3. Reload the target before each mode/trial and capture matching initial conditions. Site mutation means repeated Reddit runs are not equivalent DOMs; record a fresh reload and comparable admitted-node counts for every trial. Never claim paired equivalence if counts differ.
 4. Start only the viewport prototype first. Use the Firefox Performance Profiler to record tasks, responsiveness and memory; note profiler/browser version, viewport, initial counts, extension auto-rule state and trial order. Firefox Long Tasks observer support is not assumed: unsupported is reported as `null`. The harness first-write value is mutation latency, not a rendered-pixel measurement.
@@ -57,6 +66,10 @@ This is a convenience run, not Firefox validation. If browser startup or DevTool
 6. Stop and restore before navigating away. Verify restoration without exporting page text. The direct live-page commands above own this lifecycle; fixture harness instructions apply only to the marked local fixture.
 
 Firefox measurement is outstanding until performed manually. The synthetic baseline is not the current production implementation and cannot support replacing it.
+
+`getStats()` keeps numeric viewport diagnostics after stop/restore; new diagnostics add no observers, scans, timers or node histories. `discoveryRequests` is the sum of trigger requests: start, scroll, resize, root/shadow DOM mutation, head mutation, body mutation, stylesheet load, and stylesheet error. `discoveryRequestsImmediate` counts requests that start a pass while idle; `discoveryRequestsCoalesced` counts requests folded into an active pass's dirty bit. Their sum equals `discoveryRequests`. `discoveryPasses` counts pass starts, including a pass later stopped partway; `discoveryFollowupPasses` counts dirty-bit follow-up starts, even if subsequently cancelled. For viewport mode, `seedAncestorVisits + seedSubtreeVisits + rootTraversalVisits` equals `visitedNodes`. `seedTargetRepeatVisits` counts only a hit-test target revisited at the start of its seed subtree after the ancestor-chain visit; it is a lower bound on overlap and does not measure seed/root cross-overlap or unique nodes. Baseline mode leaves new viewport counters at zero (the legacy `visitedNodes` remains its baseline traversal count). Mutation batch counters count observer callback invocations per source, even if no discovery is requested; record counters count delivered records. Observer scopes can overlap, so one DOM change may be counted by multiple callbacks. `mutationDataAttributeRecords` counts eligible data-attribute records seen; `mutationCssReferencedBatches`, `mutationCssClearBatches`, and `mutationCssFallbackBatches` describe one CSS audit outcome per batch when an audit runs. `mutationRelevantAttributeRecords` includes direct invalidators and data-attribute records classified as referenced/fallback; it excludes candidate data records when a different trigger makes the batch skip CSS auditing.
+
+`discoveryRequestsDomMutation` specifically counts root and discovered-shadow mutation callbacks that request a pass; head/body request counters are separate. `domMutationObserverBatches` sums root, head, and body callback invocations, including callbacks that do not request discovery. Mutation record counters are not exclusive cause attribution: a batch can contain multiple categories, and overlapping observers can report the same DOM change more than once. `mutationRelevantAttributeRecords` includes direct attribute invalidators and data records classified as referenced/fallback; it excludes data candidates in a mixed batch when another trigger skips CSS auditing. For viewport mode, `discoveryPasses` equals immediate starts plus dirty follow-up starts; stopping with a dirty bit cancels that follow-up rather than counting it as a started pass.
 
 The prototype is a traversal/mutation spike, not a production feature-equivalent implementation: it does not apply production font or direction behavior or own a SPA/session lifecycle. An externally edited owned node is preserved on restore, not translated again; owned restoration records are intentionally retained until restore/cleanup. Viewport mode uses one sliced discovery pass, prunes positive-area offscreen element branches, and coalesces scroll, resize, and relevant mutations to one active pass plus a dirty follow-up. It does not retain offscreen text/attribute candidates; each pass checks visible branches and a fixed set of hit-test seeds. Seed traversal can overlap the root pass, but every visited node is yielded to the slicer; `visitedNodes` counts these repeated visits. `geometryChecks` counts bounding-box reads (including write eligibility checks), `prunedBranches` counts skipped positive-area element subtrees, `discoveryPasses` counts viewport scans, and `pendingJobCount` is 0/1 for the active scan. A wide flat sibling list still costs O(N); overlapping seed subtrees incur bounded duplicate work (at most 16 hit-test targets). Bounding-box pruning is a heuristic, not a completeness guarantee: positioned/fixed or overflowing descendants can escape an offscreen ancestor and be missed until another eligible path/trigger reaches them. Zero-area containers are descended conservatively. Open shadow roots are observed once encountered, including for local scroll events; late-attached roots have no automatic trigger until another scan/mutation happens, and closed roots remain inaccessible. Page scripts may react to prototype DOM changes even though the prototype has no outbound request code.
 
