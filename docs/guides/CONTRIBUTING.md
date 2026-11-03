@@ -7,8 +7,8 @@ Thank you for your interest in Translate It! The workflow below helps you find u
 1. **Find existing work.** Browse the public [Translate It Roadmap](https://github.com/orgs/Translate-It-App/projects/2), then search [GitHub Issues](https://github.com/Translate-It-App/Translate-It/issues) and [Discussions](https://github.com/Translate-It-App/Translate-It/discussions) for related work. Add context to an existing item rather than creating a duplicate. Look for `good first issue` and `help wanted` labels when available. The roadmap needs no permission or edit access to browse.
 2. **Choose a channel.** Use Issues for actionable bugs, feature requests, enhancements, documentation, and technical debt; feature requests need no prior approval. See the [Project Backlog](../Backlog.md) for detailed tracking rules. Use Discussions for early ideas, research, architecture or product discussion, and Q&A. When a Discussion becomes actionable, create an Issue or link it to an existing one. Small independent fixes (such as typos, minor documentation corrections, and straightforward bug fixes) may go directly to a PR without an Issue.
 3. **Coordinate before substantial work.** Comment on the relevant Issue to express interest and discuss scope before beginning substantial changes, including new features, major UI/UX or architectural changes, and substantial refactors. Do not duplicate assigned or in-progress work without coordinating with the maintainer. Design suggestions and feedback are welcome on existing Issues, including those assigned to someone else.
-4. **Make and validate your change.** Fork the repository, create a branch, and implement the change. Run relevant checks (see [Code Quality and Validation](#code-quality-and-validation)) and review your diff.
-5. **Submit a pull request.** Open a PR from your fork's branch to upstream `main`, ready for review. Include a clear title and summary, link relevant Issues when applicable, and report the validation you ran.
+4. **Make and validate your change.** Fork the repository, create a branch, and implement the change. Run relevant checks locally (see [Code Quality and Validation](#code-quality-and-validation)); running the full test suite locally is optional. Browser-specific changes may still need manual testing.
+5. **Submit a pull request.** Open a PR from your fork's branch to upstream `main`. You can open it as a **Draft PR** to use GitHub Actions CI for full validation. Address CI failures and finish the implementation before selecting **Ready for review**. Include a clear title and summary, link relevant Issues when applicable, and report the validation you ran.
 
 The roadmap's `Ready` status means work has been prepared for implementation; it does not mean it is available. An unassigned Issue is not necessarily approved for implementation, and expressing interest is neither ownership nor a guarantee of acceptance. Maintainers control assignments, priorities, scope, review, and merge decisions; prior discussion or approval of an idea and passing CI do not guarantee that an implementation will be accepted or merged. Review may request revisions, and a particular assignment, timeline, or review turnaround is not guaranteed.
 
@@ -117,6 +117,8 @@ Select a device with `--device=<id>` (for example `pnpm run dev:android -- --dev
 
 ### Code Quality and Validation
 
+Running the full test suite locally can be time-consuming and resource-intensive, depending on your system. Run relevant tests and checks locally, and use a Draft PR to let GitHub Actions CI perform full validation.
+
 #### Linting
 
 To ensure code quality and catch potential issues early, you can run ESLint and Stylelint:
@@ -140,7 +142,7 @@ pnpm run format src/path/to/file.js
 
 Formatting is optional. Running `pnpm run format` without file paths prints usage and exits without reading stdin or modifying files.
 
-Recommended flow: make changes, format only the touched files, run lint and tests, then review `git diff` before committing.
+Recommended flow: make changes, format only the touched files if useful, run relevant lint and tests, then review `git diff` before committing. The full test suite and `pnpm run pre-submit` are optional local checks; use CI for full validation when helpful.
 
 #### Coding Style
 
@@ -163,17 +165,19 @@ pnpm run validate:chrome
 
 #### Pre-submission Workflow
 
-Before submitting your changes, run the comprehensive pre-submission check:
+As an optional local check, you can run the comprehensive pre-submission check:
 
 ```bash
 pnpm run pre-submit
 ```
 
-This command runs ESLint, Stylelint, and the production build. It does not run tests or validation: it is a manual pre-submission check, not a replacement for full CI, where tests and validation still run.
+This command runs ESLint, Stylelint, and the production build. It does not run tests or validation, so it is not a replacement for full CI, where tests and validation still run.
 
 #### PR CI Behavior
 
-CI runs on every pull request when it is opened, reopened, or updated with new commits. A lightweight Preflight check runs first:
+CI runs on every pull request when it is opened, reopened, or updated with new commits, including Draft PRs. Selecting **Ready for review** does not itself rerun CI. A lightweight Preflight check runs first:
+
+For first-time external contributors, CI may require maintainer approval before it runs.
 
 - Docs/metadata-only changes skip full validation and finish quickly.
 - Code, config, runtime, or unrecognized changes run the full CI (lint, tests, build, validate).
