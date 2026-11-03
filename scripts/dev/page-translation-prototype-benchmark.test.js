@@ -23,7 +23,13 @@ function fakeEngine(variant = 'correct') {
     mockTranslate: oracle,
     createEngine({ root, mode }) {
       const originals = new Map();
-      let stats = { mode, visitedNodes: 0, restoreVisitedNodes: 0, translatedNodes: 0, firstVisibleMs: 1, processingMs: 2, maxSliceMs: 1, maxRestoreSliceMs: 0 };
+      let stats = { mode, visitedNodes: 0, restoreVisitedNodes: 0, translatedNodes: 0, firstVisibleMs: 1, processingMs: 2, maxSliceMs: 1, maxRestoreSliceMs: 0, mutationAuditMs: 0, mutationAuditCount: 0, mutationAuditFallbacks: 0 };
+      let lastNoiseValue = root.getAttribute('data-benchmark-noise');
+      const readStats = () => {
+        const noiseValue = root.getAttribute('data-benchmark-noise');
+        if (noiseValue !== lastNoiseValue) { stats.mutationAuditMs += 1; stats.mutationAuditCount += 1; lastNoiseValue = noiseValue; }
+        return { ...stats };
+      };
       const visit = (node) => {
         if (node.nodeType === 3 && node.parentElement && !node.parentElement.closest('textarea,input,.benchmark-excluded') && node.data.trim()) {
           originals.set(node, { source: node.data, translated: transform(node.data) }); node.data = transform(node.data); stats.translatedNodes += 1;
@@ -50,7 +56,7 @@ function fakeEngine(variant = 'correct') {
         originals.clear();
         return { ...stats, restoreVisitedNodes, restoredNodes, preservedExternalNodes };
       };
-      return { start: () => new Promise((resolve) => setTimeout(() => { translate(); resolve({ ...stats }); }, 25)), whenIdle: async () => ({ ...stats }), stop() {}, restore, cleanup: restore, getStats: () => ({ ...stats }) };
+      return { start: () => new Promise((resolve) => setTimeout(() => { translate(); resolve({ ...stats }); }, 25)), whenIdle: async () => readStats(), stop() {}, restore, cleanup: restore, getStats: readStats };
     },
   };
 }
@@ -93,6 +99,29 @@ describe('prototype benchmark safety and reporting', () => {
     expect(report.results.viewport.correctness.excludedNodesUntouched).toBe(true);
     expect(report.results.viewport.translatedNodes).toEqual(report.results.baseline.translatedNodes);
     expect(report.results.baseline.visitedNodes).toEqual([report.results.baseline.translatedNodes[0]]);
+    expect(report.results.baseline.initialVisitedNodes).toEqual([report.results.baseline.visitedNodes[0]]);
+    expect(report.results.baseline.afterScrollVisitedNodes).toEqual(report.results.baseline.initialVisitedNodes);
+    expect(report.results.baseline.scrollVisitedNodes).toEqual([0]);
+    expect(report.results.baseline.peakQueueCandidateObserver).toHaveLength(1);
+    expect(report.results.baseline.peakQueueCandidateObserver[0]).toEqual(expect.objectContaining({ pendingJobCount: expect.any(Number), candidateCount: expect.any(Number), observerCount: expect.any(Number) }));
+    expect(report.results.baseline.metrics.initialWallElapsedMs.median).toBeGreaterThanOrEqual(0);
+    expect(report.results.baseline.metrics.scrollWallElapsedMs.median).toBeGreaterThanOrEqual(0);
+    expect(report.results.baseline.metrics.initialProcessingMs.median).toBeGreaterThanOrEqual(0);
+    expect(report.results.baseline.metrics.scrollProcessingMs.median).toBeGreaterThanOrEqual(0);
+    expect(report.results.baseline.metrics.attributeNoiseWallElapsedMs.median).toBeGreaterThanOrEqual(0);
+    expect(report.results.baseline.metrics.attributeNoiseProcessingMs.median).toBe(0);
+    expect(report.results.baseline.metrics.attributeNoiseMutationAuditMs.median).toBe(12);
+    expect(report.results.baseline.metrics.attributeNoiseTotalProcessingMs.median).toBe(12);
+    expect(report.results.baseline.metrics.attributeNoiseMutationAuditCount.median).toBe(12);
+    expect(report.results.baseline.metrics.attributeNoiseMutationAuditFallbacks.median).toBe(0);
+    expect(report.environment.attributeNoiseBursts).toBe(12);
+    expect(report.results.baseline.attributeNoiseVisitedNodes).toEqual([0]);
+    expect(report.results.baseline.attributeNoiseMutationAuditMs).toEqual([12]);
+    expect(report.results.baseline.attributeNoiseMutationAuditCount).toEqual([12]);
+    expect(report.results.baseline.attributeNoiseMutationAuditFallbacks).toEqual([0]);
+    expect(document.querySelector('#benchmark-root').getAttribute('data-benchmark-noise')).toBeNull();
+    expect(report.results.baseline.initialGeometryChecks).toEqual([null]);
+    expect(report.results.baseline.scrollGeometryChecks).toEqual([null]);
     expect(report.results.baseline.restoreVisitedNodes[0]).toBeGreaterThan(report.results.baseline.restoredNodes[0]);
     expect(report.results.baseline.metrics.maxRestoreSliceMs.median).toBeNull();
     expect(report.results.viewport.preservedExternalNodes.every((count) => count > 0)).toBe(true);
@@ -123,7 +152,9 @@ describe('prototype benchmark safety and reporting', () => {
     expect(observedText.filter((text) => text === 'external page edit must be preserved')).toHaveLength(4);
     expect(report.results.baseline.metrics.translationLongestTaskMs.median).toBe(13);
     expect(report.results.baseline.metrics.restoreLongestTaskMs.median).toBe(13);
-    expect(report.results.baseline.taskObserver.translationCount).toEqual([1]);
+    expect(report.results.baseline.taskObserver.initialCount).toEqual([1]);
+    expect(report.results.baseline.taskObserver.scrollCount).toEqual([1]);
+    expect(report.results.baseline.taskObserver.attributeNoiseCount).toEqual([1]);
     expect(report.results.baseline.taskObserver.restoreCount).toEqual([1]);
     vi.unstubAllGlobals();
   });

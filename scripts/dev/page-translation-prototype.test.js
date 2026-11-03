@@ -29,7 +29,7 @@ describe('viewport DOM prototype', () => {
     expect(e.getStats().preservedExternalNodes).toBe(1);
   });
 
-  it('scans cooperatively, handles mutations and stops without late writes', async () => {
+  it('scans viewport-first cooperatively, handles mutations and stops without late writes', async () => {
     document.body.innerHTML = '<main><div data-y="0">Visible</div>' + '<p data-y="5000">Far</p>'.repeat(80) + '</main>';
     const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main'), mode: 'viewport', maxStepsPerSlice: 2, budgetMs: 20 });
     const started = engine.start();
@@ -52,8 +52,7 @@ describe('viewport DOM prototype', () => {
     await engine.start();
     const p = document.querySelector('p'); p.dataset.y = '0';
     window.dispatchEvent(new Event('scroll'));
-    await new Promise(resolve => setTimeout(resolve, 10));
-    expect(p.textContent).toBe('⟦TI⟧Later');
+    await vi.waitFor(() => expect(p.textContent).toBe('⟦TI⟧Later'));
     expect(shadow.textContent).toBe('⟦TI⟧Shadow text');
     p.firstChild.nodeValue = 'host edit';
     p.remove();
@@ -62,7 +61,7 @@ describe('viewport DOM prototype', () => {
     expect(engine.getStats().restoredNodes).toBe(1);
   });
 
-  it('seeds the visible deep target before cooperative background traversal finishes', async () => {
+  it('seeds the visible deep target before the sliced background pass completes', async () => {
     document.body.innerHTML = '<main>' + '<p data-y="5000">Far</p>'.repeat(50) + '<p data-y="0">Deep visible</p></main>';
     const visible = document.querySelector('main').lastElementChild;
     document.elementFromPoint = () => visible;
@@ -71,6 +70,568 @@ describe('viewport DOM prototype', () => {
     await vi.waitFor(() => expect(visible.textContent).toBe('⟦TI⟧Deep visible'));
     expect(engine.getStats().visitedNodes).toBeLessThan(100);
     await engine.cleanup(); await started;
+  });
+
+  it('keeps overlapping seed and root traversal within one-node timer slices', async () => {
+    const children = '<p data-y="0">Visible seed child</p>'.repeat(12);
+    document.body.innerHTML = `<main><section data-y="0">${children}</section></main>`;
+    const root = document.querySelector('main');
+    document.elementFromPoint = () => root.firstElementChild;
+    vi.useFakeTimers();
+    try {
+      const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
+      const started = engine.start();
+      expect(engine.getStats().visitedNodes).toBe(0);
+      for (let i = 0; i < 8; i++) {
+        const before = engine.getStats().visitedNodes;
+        await vi.advanceTimersToNextTimerAsync();
+        expect(engine.getStats().visitedNodes - before).toBeLessThanOrEqual(1);
+      }
+      await vi.runAllTimersAsync(); await started;
+      const domNodeCount = root.querySelectorAll('*').length + root.querySelectorAll('*').length + 1;
+      expect(engine.getStats().visitedNodes).toBeGreaterThan(domNodeCount);
+      const cleanup = engine.cleanup(); await vi.runAllTimersAsync(); await cleanup;
+    } finally { vi.useRealTimers(); }
+  }, 15000);
+
+  it('does not observe a shadow host removed between viewport slices', async () => {
+    document.body.innerHTML = '<main><x-card data-y="0"></x-card></main>';
+    const root = document.querySelector('main'), host = root.firstElementChild, shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<p>Detached shadow source</p>';
+    document.elementFromPoint = () => null;
+    vi.useFakeTimers();
+    try {
+      const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
+      const started = engine.start();
+      await vi.advanceTimersToNextTimerAsync(); // initialize the sliced pass
+      await vi.advanceTimersToNextTimerAsync(); // visit the root, but not its child
+      expect(engine.getStats().visitedNodes).toBe(1);
+      host.remove();
+      await vi.runAllTimersAsync(); await started; await engine.whenIdle();
+      expect(engine.getStats().observerCount).toBe(1);
+      expect(shadow.textContent).toBe('Detached shadow source');
+      await engine.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps eligible contenteditable=false descendants inside an editable ancestor', async () => {
+    document.body.innerHTML = '<main><section contenteditable="true"><p contenteditable="false" data-y="0">Eligible child</p></section></main>';
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main'), maxStepsPerSlice: 1 });
+    await engine.start(); await engine.whenIdle();
+    expect(document.querySelector('p').textContent).toBe('⟦TI⟧Eligible child');
+    await engine.cleanup();
+  });
+
+  it('skips unrelated data attributes but reaudits CSS when stylesheets change', async () => {
+    document.body.innerHTML = '<main><p id="plain">Plain text</p><x-card></x-card></main>';
+    const shadow = document.querySelector('x-card').attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<style>.decorated { color: red }</style><p class="decorated">Shadow text</p>';
+    const root = document.querySelector('main'), plain = document.querySelector('#plain'), shadowText = shadow.querySelector('p');
+    const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 2 });
+    await engine.start(); await engine.whenIdle();
+    const passes = engine.getStats().discoveryPasses, visits = engine.getStats().visitedNodes;
+    for (let i = 0; i < 8; i++) {
+      plain.dataset.noise = `root-${i}`; shadowText.dataset.noise = `shadow-${i}`;
+      await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+      expect(engine.getStats().pendingJobCount).toBe(0);
+    }
+    expect(engine.getStats().discoveryPasses).toBe(passes);
+    expect(engine.getStats().visitedNodes).toBe(visits);
+    expect(engine.getStats().mutationAuditCount).toBeGreaterThan(0);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(0);
+
+    const style = document.createElement('style'); style.textContent = '[data-noise] { color: blue }'; root.append(style);
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    const afterStylesheet = engine.getStats().discoveryPasses;
+    plain.dataset.noise = 'two';
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(afterStylesheet));
+    await engine.whenIdle();
+    expect(engine.getStats().mutationAuditFallbacks).toBe(0);
+    expect(engine.getStats().mutationAuditMs).toBeGreaterThanOrEqual(0);
+    await engine.cleanup();
+  });
+
+  it('invalidates for native attributes, custom exclusions, and shadow host-context selectors', async () => {
+    document.body.innerHTML = '<main><p id="target" data-muted="yes">Unblocked text</p><x-card></x-card></main>';
+    const host = document.querySelector('x-card'), shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<style>:host-context([data-theme]) .item { color: red }</style><p class="item">Themed text</p>';
+    const target = document.querySelector('#target'), root = document.querySelector('main');
+    const engine = TranslateItViewportPrototype.createEngine({ root, excludedSelectors: ['[data-muted]'], maxStepsPerSlice: 2 });
+    await engine.start(); await engine.whenIdle();
+    expect(target.textContent).toBe('Unblocked text');
+    target.classList.add('changed'); target.style.color = 'red'; target.hidden = true;
+    const beforeNative = engine.getStats().discoveryPasses;
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(beforeNative));
+    await engine.whenIdle();
+    target.removeAttribute('data-muted');
+    await vi.waitFor(() => expect(target.textContent).toBe('⟦TI⟧Unblocked text'));
+    await engine.whenIdle();
+    const beforeTheme = engine.getStats().discoveryPasses;
+    host.setAttribute('data-theme', 'dark');
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(beforeTheme));
+    await engine.whenIdle();
+    expect(engine.getStats().mutationAuditCount).toBeGreaterThan(0);
+    await engine.cleanup();
+  });
+
+  it('finds data attribute dependencies in nested rules and declaration attr() values', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'styleSheets');
+    Object.defineProperty(document, 'styleSheets', { configurable: true, value: [{ cssRules: [{ type: 4, conditionText: 'screen', cssRules: [{ type: 1, selectorText: '.ancestor:has([data-state])', style: { cssText: 'content: attr(data-state)' } }] }] }] });
+    try {
+      document.body.innerHTML = '<main><p data-state="old">State text</p></main>';
+      const p = document.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+      await engine.start(); await engine.whenIdle();
+      const passes = engine.getStats().discoveryPasses;
+      p.setAttribute('data-state', 'new');
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      expect(engine.getStats().mutationAuditFallbacks).toBe(0);
+      await engine.cleanup();
+    } finally {
+      if (descriptor) Object.defineProperty(document, 'styleSheets', descriptor);
+      else delete document.styleSheets;
+    }
+  });
+
+  it('audits stylesheets in enclosing shadow scopes when the root is inside a shadow tree', async () => {
+    document.body.innerHTML = '<x-shell></x-shell>';
+    const host = document.querySelector('x-shell'), shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<style>[data-scope] { color: red }</style><main><p data-scope="old">Scoped text</p></main>';
+    const root = shadow.querySelector('main'), p = root.querySelector('p');
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const passes = engine.getStats().discoveryPasses;
+    p.setAttribute('data-scope', 'new');
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+    await engine.whenIdle();
+    expect(engine.getStats().mutationAuditFallbacks).toBe(0);
+    await engine.cleanup();
+  });
+
+  it('uses only live shadow stylesheet nodes after repeated replacement', async () => {
+    document.body.innerHTML = '<main><x-card></x-card></main>';
+    const shadow = document.querySelector('x-card').attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<style>[data-noise] { color: red }</style><p>Shadow text</p>';
+    const root = document.querySelector('main'), p = shadow.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    p.dataset.noise = 'initial';
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(1));
+    await engine.whenIdle();
+    for (let i = 0; i < 12; i++) {
+      const before = engine.getStats().discoveryPasses, style = document.createElement('style');
+      style.textContent = `.unrelated-${i} { color: blue }`;
+      shadow.querySelector('style').remove(); shadow.prepend(style);
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(before));
+      await engine.whenIdle();
+    }
+    const visits = engine.getStats().visitedNodes, passes = engine.getStats().discoveryPasses;
+    p.dataset.noise = 'after-replacement';
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().discoveryPasses).toBe(passes);
+    expect(engine.getStats().visitedNodes).toBe(visits);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(0);
+    await engine.cleanup();
+  });
+
+  it('falls back when discovered shadow stylesheet nodes exceed the audit cap', async () => {
+    document.body.innerHTML = '<main><x-card></x-card></main>';
+    const shadow = document.querySelector('x-card').attachShadow({ mode: 'open' });
+    for (let i = 0; i < 129; i++) { const style = document.createElement('style'); style.textContent = `.rule-${i} { color: red }`; shadow.append(style); }
+    const p = document.createElement('p'); p.textContent = 'Shadow text'; shadow.append(p);
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+    await engine.start(); await engine.whenIdle();
+    const passes = engine.getStats().discoveryPasses;
+    p.dataset.noise = 'change';
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+    await engine.whenIdle();
+    expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+    for (const style of [...shadow.querySelectorAll('style')]) style.remove();
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    const afterRemoval = engine.getStats().discoveryPasses;
+    p.dataset.noise = 'after-shadow-style-removal';
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().discoveryPasses).toBe(afterRemoval);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+    await engine.cleanup();
+  });
+
+  it('invalidates namespaced attribute mutations instead of treating them as plain data attributes', async () => {
+    document.body.innerHTML = '<main><p>Namespaced target</p></main>';
+    const root = document.querySelector('main'), p = root.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const passes = engine.getStats().discoveryPasses;
+    p.setAttributeNS('urn:example', 'x:data-noise', 'changed');
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+    await engine.whenIdle();
+    expect(engine.getStats().mutationAuditCount).toBe(0);
+    await engine.cleanup();
+  });
+
+  it('falls back conservatively for inaccessible, escaped, imported, and oversized CSSOM audits', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'styleSheets');
+    const cases = [
+      [{ get cssRules() { throw new Error('blocked stylesheet'); } }],
+      [{ cssRules: [{ type: 3, styleSheet: null }] }],
+      [{ cssRules: [{ type: 1, selectorText: '[data\\\\2d noise]', style: { cssText: '' } }] }],
+      [{ cssRules: Array.from({ length: 513 }, () => ({ type: 1, selectorText: '.unrelated', style: { cssText: '' } })) }],
+    ];
+    try {
+      for (const sheets of cases) {
+        Object.defineProperty(document, 'styleSheets', { configurable: true, value: sheets });
+        document.body.innerHTML = '<main><p>Audit fallback</p></main>';
+        const p = document.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+        await engine.start(); await engine.whenIdle();
+        const passes = engine.getStats().discoveryPasses;
+        p.dataset.noise = 'changed';
+        await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+        await engine.whenIdle();
+        expect(engine.getStats().mutationAuditCount).toBe(1);
+        expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+        await engine.cleanup();
+      }
+    } finally {
+      if (descriptor) Object.defineProperty(document, 'styleSheets', descriptor);
+      else delete document.styleSheets;
+    }
+  });
+
+  it('keeps data mutations conservative while an initial stylesheet link is pending', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'styleSheets');
+    document.body.innerHTML = '<main><p>Pending stylesheet</p></main>';
+    const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = '/pending.css'; document.head.append(link);
+    const root = document.querySelector('main'), p = root.querySelector('p');
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    try {
+      await engine.start(); await engine.whenIdle();
+      let passes = engine.getStats().discoveryPasses;
+      p.dataset.show = 'one';
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+
+      const sheet = { cssRules: [{ type: 1, selectorText: '[data-show]', style: { cssText: 'content: attr(data-show)' } }] };
+      Object.defineProperty(link, 'sheet', { configurable: true, value: sheet });
+      Object.defineProperty(document, 'styleSheets', { configurable: true, value: [sheet] });
+      passes = engine.getStats().discoveryPasses;
+      link.dispatchEvent(new Event('load'));
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      passes = engine.getStats().discoveryPasses;
+      p.dataset.show = 'two';
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+    } finally {
+      await engine.cleanup();
+      if (descriptor) Object.defineProperty(document, 'styleSheets', descriptor);
+      else delete document.styleSheets;
+      link.remove();
+    }
+  });
+
+  it('tracks dynamically added pending links and releases head listeners on cleanup', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'styleSheets');
+    document.body.innerHTML = '<main><p>Dynamic stylesheet</p></main>';
+    const root = document.querySelector('main'), p = root.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root });
+    try {
+      await engine.start(); await engine.whenIdle();
+      const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = '/dynamic.css';
+      let passes = engine.getStats().discoveryPasses;
+      document.head.append(link);
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      p.dataset.dynamic = 'one';
+      await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1));
+      await engine.whenIdle();
+
+      const sheet = { cssRules: [{ type: 1, selectorText: '[data-dynamic]', style: { cssText: '' } }] };
+      Object.defineProperty(link, 'sheet', { configurable: true, value: sheet });
+      Object.defineProperty(document, 'styleSheets', { configurable: true, value: [sheet] });
+      passes = engine.getStats().discoveryPasses;
+      link.dispatchEvent(new Event('load'));
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      passes = engine.getStats().discoveryPasses;
+      p.dataset.dynamic = 'two';
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+
+      await engine.cleanup();
+      passes = engine.getStats().discoveryPasses;
+      const late = document.createElement('link'); late.rel = 'stylesheet'; late.href = '/late.css'; document.head.append(late);
+      late.dispatchEvent(new Event('load'));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(engine.getStats()).toMatchObject({ discoveryPasses: passes, pendingJobCount: 0 });
+      late.remove(); link.remove();
+    } finally {
+      await engine.cleanup();
+      if (descriptor) Object.defineProperty(document, 'styleSheets', descriptor);
+      else delete document.styleSheets;
+    }
+  });
+
+  it('tracks body stylesheet links and rescans when a link load changes viewport geometry', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'styleSheets');
+    document.body.innerHTML = '<main><link id="initial-link" rel="stylesheet" href="/body.css"><p id="body-target" data-show="one">Body stylesheet text</p></main>';
+    let targetVisible = false;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
+      if (this.id === 'body-target' && !targetVisible) return { top: 5000, bottom: 5020, left: 0, right: 100, width: 100, height: 20 };
+      const y = Number(this.dataset.y || 0);
+      return { top: y, bottom: y + 20, left: 0, right: 100, width: 100, height: 20 };
+    });
+    const root = document.querySelector('main'), p = root.querySelector('p'), initialLink = root.querySelector('link');
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    try {
+      await engine.start(); await engine.whenIdle();
+      expect(p.textContent).toBe('Body stylesheet text');
+      let passes = engine.getStats().discoveryPasses;
+      p.dataset.show = 'two';
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+
+      const sheet = { cssRules: [{ type: 1, selectorText: '[data-show]', style: { cssText: 'content: attr(data-show)' } }] };
+      Object.defineProperty(initialLink, 'sheet', { configurable: true, value: sheet });
+      Object.defineProperty(document, 'styleSheets', { configurable: true, value: [sheet] });
+      targetVisible = true; passes = engine.getStats().discoveryPasses;
+      initialLink.dispatchEvent(new Event('load'));
+      await vi.waitFor(() => expect(p.textContent).toBe('⟦TI⟧Body stylesheet text'));
+      await engine.whenIdle();
+      expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes);
+
+      const dynamic = document.createElement('link'); dynamic.rel = 'stylesheet'; dynamic.href = '/dynamic-body.css';
+      passes = engine.getStats().discoveryPasses; root.append(dynamic);
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      p.dataset.unrelated = 'one';
+      await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(2));
+      await engine.whenIdle();
+
+      const beforeCleanup = engine.getStats().discoveryPasses;
+      await engine.cleanup();
+      dynamic.dispatchEvent(new Event('load'));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(engine.getStats()).toMatchObject({ discoveryPasses: beforeCleanup, pendingJobCount: 0 });
+      dynamic.remove();
+    } finally {
+      await engine.cleanup();
+      if (descriptor) Object.defineProperty(document, 'styleSheets', descriptor);
+      else delete document.styleSheets;
+    }
+  });
+
+  it('tracks pending stylesheet links outside a narrower translation root', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'styleSheets');
+    document.body.innerHTML = '<main><p id="target" data-show="first">Outside-root link</p></main><link id="external" rel="stylesheet" href="/external.css">';
+    let targetVisible = false;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
+      if (this.id === 'target' && !targetVisible) return { top: 5000, bottom: 5020, left: 0, right: 100, width: 100, height: 20 };
+      const y = Number(this.dataset.y || 0);
+      return { top: y, bottom: y + 20, left: 0, right: 100, width: 100, height: 20 };
+    });
+    const root = document.querySelector('main'), p = root.querySelector('p'), link = document.querySelector('#external');
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    let dynamic;
+    try {
+      await engine.start(); await engine.whenIdle();
+      let passes = engine.getStats().discoveryPasses;
+      p.dataset.show = 'second';
+      await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1));
+      await engine.whenIdle();
+
+      const sheet = { cssRules: [{ type: 1, selectorText: '[data-show]', style: { cssText: '' } }] };
+      Object.defineProperty(link, 'sheet', { configurable: true, value: sheet });
+      Object.defineProperty(document, 'styleSheets', { configurable: true, value: [sheet] });
+      targetVisible = true;
+      link.dispatchEvent(new Event('load'));
+      await vi.waitFor(() => expect(p.textContent).toBe('⟦TI⟧Outside-root link'));
+      await engine.whenIdle();
+      expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes);
+
+      dynamic = document.createElement('link'); dynamic.rel = 'stylesheet'; dynamic.href = '/dynamic-external.css';
+      passes = engine.getStats().discoveryPasses; document.body.append(dynamic);
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      p.dataset.outside = 'one';
+      await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(2));
+      await engine.whenIdle();
+
+      const dynamicSheet = { cssRules: [{ type: 1, selectorText: '[data-outside]', style: { cssText: '' } }] };
+      Object.defineProperty(dynamic, 'sheet', { configurable: true, value: dynamicSheet });
+      Object.defineProperty(document, 'styleSheets', { configurable: true, value: [sheet, dynamicSheet] });
+      dynamic.dispatchEvent(new Event('load')); await engine.whenIdle();
+      passes = engine.getStats().discoveryPasses; p.dataset.outside = 'two';
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+      await engine.whenIdle();
+      expect(engine.getStats().mutationAuditFallbacks).toBe(2);
+
+      await engine.cleanup();
+      passes = engine.getStats().discoveryPasses;
+      dynamic.dispatchEvent(new Event('load')); await new Promise(resolve => setTimeout(resolve, 0));
+      expect(engine.getStats()).toMatchObject({ discoveryPasses: passes, pendingJobCount: 0 });
+    } finally {
+      await engine.cleanup(); dynamic?.remove(); link.remove();
+      if (descriptor) Object.defineProperty(document, 'styleSheets', descriptor);
+      else delete document.styleSheets;
+    }
+  });
+
+  it('clears temporary CSS uncertainty after an oversized unrelated body subtree is removed', async () => {
+    document.body.innerHTML = '<main><p>Unrelated body churn</p></main>';
+    const root = document.querySelector('main'), p = root.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const group = document.createElement('section'); group.innerHTML = '<i></i>'.repeat(600);
+    let passes = engine.getStats().discoveryPasses; document.body.append(group);
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+    await engine.whenIdle();
+    passes = engine.getStats().discoveryPasses; group.remove();
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+    await engine.whenIdle();
+    passes = engine.getStats().discoveryPasses; p.dataset.noise = 'after-removal';
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().discoveryPasses).toBe(passes);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(0);
+    await engine.cleanup();
+  });
+
+  it('clears stylesheet-resource-cap fallback when the oversized stylesheet subtree is removed', async () => {
+    document.body.innerHTML = '<main><p>Stylesheet resource cap</p></main>';
+    const root = document.querySelector('main'), p = root.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const group = document.createElement('section');
+    for (let i = 0; i < 300; i++) { const style = document.createElement('style'); style.textContent = `.resource-${i} { color: red }`; group.append(style); }
+    let passes = engine.getStats().discoveryPasses; document.body.append(group);
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes)); await engine.whenIdle();
+    p.dataset.noise = 'while-styles-live';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1)); await engine.whenIdle();
+    group.remove(); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    passes = engine.getStats().discoveryPasses;
+    p.dataset.noise = 'after-styles-removed';
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().discoveryPasses).toBe(passes);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+    await engine.cleanup();
+  });
+
+  it('clears pending-link-cap fallback when the oversized link subtree is removed', async () => {
+    document.body.innerHTML = '<main><p>Pending link cap</p></main>';
+    const root = document.querySelector('main'), p = root.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const group = document.createElement('section');
+    for (let i = 0; i < 300; i++) { const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = `/pending-${i}.css`; group.append(link); }
+    let passes = engine.getStats().discoveryPasses; document.body.append(group);
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes)); await engine.whenIdle();
+    p.dataset.noise = 'while-links-pending';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1)); await engine.whenIdle();
+    group.remove(); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    passes = engine.getStats().discoveryPasses;
+    p.dataset.noise = 'after-links-removed';
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().discoveryPasses).toBe(passes);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+    await engine.cleanup();
+  });
+
+  it('rechecks and clears the bounded initial body-link inventory after links are removed', async () => {
+    document.body.innerHTML = '<main><p>Initial link inventory</p></main>';
+    for (let i = 0; i < 129; i++) { const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = `/initial-${i}.css`; document.body.append(link); }
+    const root = document.querySelector('main'), p = root.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    p.dataset.noise = 'while-inventory-overflowed';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1)); await engine.whenIdle();
+    for (const link of [...document.body.querySelectorAll(':scope > link')]) link.remove();
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    const passes = engine.getStats().discoveryPasses;
+    p.dataset.noise = 'after-inventory-recheck';
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().discoveryPasses).toBe(passes);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+    await engine.cleanup();
+  });
+
+  it('keeps session fallback when the bounded uncertainty-root registry itself overflows', async () => {
+    document.body.innerHTML = '<main><p>Uncertainty registry cap</p></main>';
+    const root = document.querySelector('main'), p = root.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < 600; i++) fragment.append(document.createElement('i'));
+    const beforeAppend = engine.getStats().discoveryPasses; document.body.append(fragment);
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(beforeAppend)); await engine.whenIdle();
+    for (const node of [...document.body.querySelectorAll('i')]) node.remove();
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    const passes = engine.getStats().discoveryPasses;
+    p.dataset.noise = 'after-untracked-overflow';
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+    await engine.whenIdle();
+    expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+    await engine.cleanup();
+  });
+
+  it('keeps an oversized live subtree fail-closed, then clears that uncertainty on removal', async () => {
+    document.body.innerHTML = '<main><p>Unscanned external stylesheet</p></main>';
+    const root = document.querySelector('main'), p = root.querySelector('p'), engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const group = document.createElement('section'); group.innerHTML = '<i></i>'.repeat(600);
+    const hiddenLink = document.createElement('link'); hiddenLink.rel = 'stylesheet'; hiddenLink.href = '/past-scan-budget.css'; group.append(hiddenLink);
+    let passes = engine.getStats().discoveryPasses; document.body.append(group);
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+    await engine.whenIdle();
+    p.dataset.noise = 'while-live';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1));
+    await engine.whenIdle();
+
+    passes = engine.getStats().discoveryPasses; group.remove();
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+    await engine.whenIdle();
+    passes = engine.getStats().discoveryPasses; p.dataset.noise = 'after-removal';
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().discoveryPasses).toBe(passes);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+    await engine.cleanup();
+  });
+
+  it('prunes large offscreen branches, then discovers their unseen descendants on scroll', async () => {
+    const descendants = '<div data-y="5000"><p>Hidden child</p></div>'.repeat(1000);
+    document.body.innerHTML = `<main><section id="far" data-y="5000">${descendants}<p data-y="5000">Reveal me</p></section></main>`;
+    const root = document.querySelector('main'), branch = document.querySelector('#far'), target = branch.lastElementChild;
+    const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 100 });
+    await engine.start(); await engine.whenIdle();
+    expect(engine.getStats().prunedBranches).toBeGreaterThan(0);
+    expect(engine.getStats().geometryChecks).toBeGreaterThan(0);
+    expect(engine.getStats().visitedNodes).toBeLessThan(20);
+    expect(target.textContent).toBe('Reveal me');
+    branch.dataset.y = '0'; target.dataset.y = '0';
+    window.dispatchEvent(new Event('scroll'));
+    await vi.waitFor(() => expect(target.textContent).toBe('⟦TI⟧Reveal me'), { timeout: 5000 });
+    await engine.cleanup();
+  });
+
+  it('descends through zero-box containers and reacts to nested and shadow-local scrolls', async () => {
+    document.body.innerHTML = '<main><section data-zero><p data-y="0">Zero box child</p><div id="nested"><p id="nested-target">Nested target</p></div><p id="resize-target">Resize target</p><x-card></x-card></section></main>';
+    const shadow = document.querySelector('x-card').attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<p id="shadow-target">Shadow target</p>';
+    let nestedVisible = false, shadowVisible = false, resizeVisible = false;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
+      if (this.hasAttribute('data-zero')) return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+      if (this.id === 'nested-target' && !nestedVisible || this.id === 'shadow-target' && !shadowVisible) return { top: 5000, bottom: 5020, left: 0, right: 100, width: 100, height: 20 };
+      if (this.id === 'resize-target' && !resizeVisible) return { top: 5000, bottom: 5020, left: 0, right: 100, width: 100, height: 20 };
+      const y = Number(this.dataset.y || 0);
+      return { top: y, bottom: y + 20, left: 0, right: 100, width: 100, height: 20 };
+    });
+    const root = document.querySelector('main'), nested = document.querySelector('#nested'), nestedTarget = document.querySelector('#nested-target'), resizeTarget = document.querySelector('#resize-target'), shadowTarget = shadow.querySelector('#shadow-target');
+    const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
+    await engine.start(); await engine.whenIdle();
+    expect(document.querySelector('[data-zero] p').textContent).toBe('⟦TI⟧Zero box child');
+    expect(nestedTarget.textContent).toBe('Nested target');
+    expect(shadowTarget.textContent).toBe('Shadow target');
+    nestedVisible = true; nested.dispatchEvent(new Event('scroll'));
+    await vi.waitFor(() => expect(nestedTarget.textContent).toBe('⟦TI⟧Nested target'));
+    shadowVisible = true; shadow.dispatchEvent(new Event('scroll'));
+    await vi.waitFor(() => expect(shadowTarget.textContent).toBe('⟦TI⟧Shadow target'));
+    resizeVisible = true; window.dispatchEvent(new Event('resize'));
+    await vi.waitFor(() => expect(resizeTarget.textContent).toBe('⟦TI⟧Resize target'));
+    await engine.cleanup();
   });
 
   it('processes mutations after idle and handles repeated scrolls and timer drainage', async () => {
@@ -251,7 +812,7 @@ describe('viewport DOM prototype', () => {
     expect(baseline.getStats().restoreVisitedNodes).toBeGreaterThan(baselineTargets);
   });
 
-  it('coalesces scroll bursts and rescans pending candidates at the latest position', async () => {
+  it('coalesces scroll bursts and discovers the latest viewport position', async () => {
     document.body.innerHTML = '<main><p data-y="5000">Initially far</p><p data-y="9000">Later far</p></main>';
     const root = document.querySelector('main');
     const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
@@ -265,17 +826,16 @@ describe('viewport DOM prototype', () => {
     await engine.cleanup();
   });
 
-  it('prunes removed and replaced pending targets without a scroll event', async () => {
+  it('does not retain offscreen candidates and drains a detached-branch mutation', async () => {
     document.body.innerHTML = '<main><p data-y="5000" title="Old">Pending</p></main>';
     const root = document.querySelector('main'), p = root.firstElementChild;
     const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
     await engine.start(); await engine.whenIdle();
-    expect(engine.getStats().candidateCount).toBeGreaterThan(0);
-    p.remove();
-    await vi.waitFor(() => expect(engine.getStats().candidateCount).toBe(0));
-    await engine.whenIdle();
     expect(engine.getStats().candidateCount).toBe(0);
-    expect(engine.getStats().pendingJobCount).toBe(0);
+    expect(engine.getStats().prunedBranches).toBeGreaterThan(0);
+    p.remove();
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats()).toMatchObject({ candidateCount: 0, pendingJobCount: 0 });
     await engine.cleanup();
   });
 
@@ -295,7 +855,7 @@ describe('viewport DOM prototype', () => {
     await vi.waitFor(() => expect(shadow.querySelector('p').textContent).toBe('⟦TI⟧Shadow text'));
     const added = document.createElement('p'); added.dataset.y = '0'; added.title = 'New shadow title'; added.textContent = 'New shadow text'; shadow.append(added);
     await vi.waitFor(() => expect(added.title).toBe('⟦TI⟧New shadow title'));
-    expect(added.textContent).toBe('⟦TI⟧New shadow text');
+    await vi.waitFor(() => expect(added.textContent).toBe('⟦TI⟧New shadow text'));
     await engine.cleanup();
   });
 
@@ -303,7 +863,7 @@ describe('viewport DOM prototype', () => {
     document.body.innerHTML = '<main><p data-y="5000" title="Live title">Live pending</p></main>';
     const root = document.querySelector('main'), engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
     await engine.start(); await engine.whenIdle();
-    expect(engine.getStats().candidateCount).toBe(2);
+    expect(engine.getStats().candidateCount).toBe(0);
     const live = root.firstElementChild;
     for (let i = 0; i < 100; i++) { live.firstChild.nodeValue = `Live pending ${i}`; live.title = `Live title ${i}`; }
     for (let i = 0; i < 100; i++) {
@@ -314,15 +874,17 @@ describe('viewport DOM prototype', () => {
       for (let j = 0; j < 5; j++) window.dispatchEvent(new Event('scroll'));
     }
     await Promise.resolve();
-    expect(engine.getStats().pendingJobCount).toBeLessThan(10);
+    expect(engine.getStats().pendingJobCount).toBeLessThanOrEqual(1);
     await engine.whenIdle();
-    expect(engine.getStats().candidateCount).toBe(2);
+    expect(engine.getStats().candidateCount).toBe(0);
     const final = document.createElement('p'); final.dataset.y = '5000'; final.title = 'Final'; final.textContent = 'Final text'; root.append(final);
-    await vi.waitFor(() => expect(engine.getStats().candidateCount).toBe(4));
+    const passesBeforeAppend = engine.getStats().discoveryPasses;
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passesBeforeAppend));
     await engine.whenIdle();
     final.remove();
     live.remove();
-    await vi.waitFor(() => expect(engine.getStats().candidateCount).toBe(0));
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().candidateCount).toBe(0);
     await engine.cleanup();
   });
 
@@ -331,22 +893,24 @@ describe('viewport DOM prototype', () => {
     const root = document.querySelector('main'), live = root.firstElementChild;
     const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1, budgetMs: 20 });
     await engine.start(); await engine.whenIdle();
-    const liveCount = engine.getStats().candidateCount;
 
     for (let i = 0; i < 12; i++) {
       const p = document.createElement('p'); p.dataset.y = '5000'; p.title = `Cycle title ${i}`; p.textContent = `Cycle text ${i}`;
       const host = document.createElement('x-card'), shadow = host.attachShadow({ mode: 'open' });
       shadow.innerHTML = `<span data-y="5000" title="Shadow title ${i}">Shadow text ${i}</span>`;
       root.append(p, host);
-      await vi.waitFor(() => expect(engine.getStats().candidateCount).toBeGreaterThan(liveCount));
+      const beforePasses = engine.getStats().discoveryPasses;
+      await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(beforePasses));
       await engine.whenIdle();
-      expect(engine.getStats().candidateCount).toBe(liveCount + 4);
+      expect(engine.getStats().candidateCount).toBe(0);
+      expect(engine.getStats().pendingJobCount).toBe(0);
       p.firstChild.nodeValue = `Changed text ${i}`; p.title = `Changed title ${i}`;
       await new Promise(resolve => setTimeout(resolve, 0));
       await engine.whenIdle();
       for (let j = 0; j < 8; j++) window.dispatchEvent(new Event('scroll'));
       root.removeChild(p); root.removeChild(host);
-      await vi.waitFor(() => expect(engine.getStats()).toMatchObject({ candidateCount: liveCount, pendingJobCount: 0, observerCount: 1 }));
+      await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+      expect(engine.getStats()).toMatchObject({ candidateCount: 0, pendingJobCount: 0, observerCount: 1 });
     }
 
     live.dataset.y = '0'; window.dispatchEvent(new Event('scroll'));
@@ -355,6 +919,7 @@ describe('viewport DOM prototype', () => {
       expect(live.title).toBe('⟦TI⟧Live title');
     });
     await new Promise(resolve => setTimeout(resolve, 0));
+    await engine.whenIdle();
     expect(engine.getStats()).toMatchObject({ candidateCount: 0, pendingJobCount: 0, observerCount: 1 });
     live.firstChild.nodeValue = 'External text'; live.title = 'External title';
     await new Promise(resolve => setTimeout(resolve, 0));

@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,6 +12,7 @@ let binary;
 for (const candidate of [...candidates, ...located]) { try { await access(candidate); binary = candidate; break; } catch {} }
 if (!binary) throw new Error('No supported Chrome/Chromium executable found; set CHROME_BIN to an installed browser binary.');
 const profileRoot = '/tmp/opencode';
+const runToken = randomUUID();
 await access(profileRoot);
 const profile = await mkdtemp(join(profileRoot, 'page-translation-benchmark-'));
 const serverPath = fileURLToPath(new URL('./serve.mjs', import.meta.url));
@@ -72,8 +74,15 @@ try {
 
   let id = 0;
   const pending = new Map();
+  let engineSourceServed = false;
   socket.addEventListener('message', ({ data }) => {
     const message = JSON.parse(data);
+    if (message.method === 'Fetch.requestPaused' && message.params.request.url.endsWith('/engine.js')) {
+      engineSourceServed = true;
+      const body = engineSource.toString('base64');
+      socket.send(JSON.stringify({ id: ++id, method: 'Fetch.fulfillRequest', params: { requestId: message.params.requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/javascript; charset=utf-8' }, { name: 'Cache-Control', value: 'no-store' }], body } }));
+      return;
+    }
     if (!message.id || !pending.has(message.id)) return;
     const { resolve, reject, timer } = pending.get(message.id);
     clearTimeout(timer);
@@ -86,19 +95,32 @@ try {
     pending.set(commandId, { resolve, reject, timer });
     socket.send(JSON.stringify({ id: commandId, method, params }));
   });
+  const sourcePath = process.env.PAGE_TRANSLATION_ENGINE_SOURCE;
+  const engineSource = sourcePath ? await readFile(sourcePath) : await readFile(fileURLToPath(new URL('./engine.js', import.meta.url)));
+  await command('Fetch.enable', { patterns: [{ urlPattern: '*engine.js' }] });
+  await command('Page.enable');
+  await command('Page.addScriptToEvaluateOnNewDocument', { source: `globalThis.__pageTranslationBenchmarkRunToken = ${JSON.stringify(runToken)};` });
+  await command('Page.reload', { ignoreCache: true });
   await command('Runtime.enable');
   let readyInPage = false;
   for (let attempt = 0; attempt < 50 && !readyInPage; attempt += 1) {
-    const response = await command('Runtime.evaluate', { expression: 'typeof TranslateItPageBenchmark === "object" && typeof TranslateItViewportPrototype === "object"', returnByValue: true });
-    readyInPage = response.result.value === true;
+    try {
+      const response = await command('Runtime.evaluate', { expression: `globalThis.__pageTranslationBenchmarkRunToken === ${JSON.stringify(runToken)} && typeof TranslateItPageBenchmark === "object" && typeof TranslateItViewportPrototype === "object"`, returnByValue: true });
+      readyInPage = response.result.value === true;
+    } catch (error) {
+      if (!/context|execution/i.test(error.message)) throw error;
+    }
     if (!readyInPage) await delay(100);
   }
   if (!readyInPage) throw new Error('Fixture page scripts did not become ready.');
+  if (sourcePath && !engineSourceServed) throw new Error(`Failed to serve requested engine override: ${sourcePath}`);
   const response = await command('Runtime.evaluate', {
-    expression: 'TranslateItPageBenchmark.run({samples:5})', awaitPromise: true, returnByValue: true,
+    expression: `TranslateItPageBenchmark.run({samples:5, fixtureOptions:${JSON.stringify(process.env.PAGE_TRANSLATION_FIXTURE === 'flat' ? { branches: 2500, depth: 1, visibleCount: 24 } : { branches: 2500, depth: 4, visibleCount: 24 })}})`, awaitPromise: true, returnByValue: true,
   }, 120000);
   if (response.exceptionDetails) throw new Error(`Fixture benchmark failed: ${response.exceptionDetails.text}`);
   if (!response.result.value) throw new Error('Fixture benchmark returned no aggregate result.');
+  response.result.value.environment.engineSource = sourcePath ?? 'working-tree engine.js';
+  response.result.value.environment.engineSha256 = createHash('sha256').update(engineSource).digest('hex');
   process.stdout.write(`${JSON.stringify(response.result.value, null, 2)}\n`);
 } finally {
   socket?.close();
