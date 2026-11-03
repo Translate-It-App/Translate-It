@@ -60,7 +60,15 @@ The primary way to manage log levels is through the Options UI:
   - **Granular control**: Set specific log levels (Error to Debug) for individual components organized by categories (UI, Background, Messaging, etc.).
 - **Apply changes**: The checkbox and component-level edits are drafts in the Options settings store. Click **Save Settings** to persist them; only then do storage listeners and the `DebugModeBridge` synchronize the changed values to other contexts.
 
-For troubleshooting, check the component's configured level as well as the global Debug Mode gate. Extension contexts have separate consoles (for example, the background worker and a page's content script), so inspect the console belonging to the context that emitted the log.
+For troubleshooting, check the component's configured level as well as the global Debug Mode gate. Extension contexts have separate consoles (for example, the background worker and a page's content script), so inspect the console belonging to the context that emitted the log:
+
+- **Content scripts:** inspect the webpage tab. In Chrome, select the extension/content-script context from the Console context dropdown; in Firefox, use that page's DevTools.
+- **Background:** in Chrome, open `chrome://extensions` and choose **Inspect views** for the service worker. In Firefox, open `about:debugging` → **This Firefox** → **Inspect** for the extension, then use its Console; Firefox uses an event page, not a service worker.
+- **Popup:** in Chrome, right-click the open popup and choose **Inspect**. In Firefox, open the extension Toolbox and select the popup in its page selector (disable popup auto-hide if needed).
+- **Options:** inspect the Options tab in Chrome; in Firefox, use the extension Toolbox to select the Options iframe.
+- **Side Panel:** in Chrome, right-click the open panel and choose **Inspect**. In Firefox, use the extension Toolbox document selector to choose the sidebar.
+
+Before sharing logs, redact API keys, credentials, private text, and other sensitive data. See the browser guides for [Chrome](https://developer.chrome.com/docs/extensions/get-started/tutorial/debug) and [Firefox](https://extensionworkshop.com/documentation/develop/debugging/) for more debugging details.
 
 The offscreen document retrieves its initial logging settings from the authorized background context over runtime messaging; it does not read extension storage directly. A valid response contains boolean `DEBUG_MODE` and object `COMPONENT_LOG_LEVELS` values. Failed or malformed requests remain uninitialized and are retried up to three total attempts; subsequent explicit initialization calls can retry after exhaustion. Targeted setting updates received during this process take precedence over the initial response.
 
