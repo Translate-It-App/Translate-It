@@ -3,9 +3,11 @@
   const ATTRIBUTES = ['title', 'alt', 'placeholder'];
   const DEFAULT_EXCLUDED = 'script,style,noscript,code,pre,textarea,input,select,button,[data-translate-it-ui]';
   const CLIPPING_OVERFLOW = new Set(['hidden', 'clip', 'auto', 'scroll']);
+  const MAX_POSITIVE_VISIBILITY_ANCESTORS = 64;
   const MAX_AUDIT_SCOPES = 64, MAX_AUDIT_SHEETS = 128, MAX_AUDIT_RULES = 512, MAX_AUDIT_BYTES = 262144, MAX_BATCH_DATA_NAMES = 32, MAX_HEAD_NODES = 512;
   const own = (node) => node.nodeType === 2 ? node.value : node.nodeValue;
   const composedOwner = (node) => node.nodeType === 2 ? node.ownerElement : node.nodeType === 3 ? (node.parentElement || node.parentNode?.host) : node;
+  const assignedTextSlot = (node) => node.nodeType === 3 ? node.assignedSlot : null;
   function mockTranslate(text) { return text.startsWith('⟦TI⟧') ? text : `⟦TI⟧${text}`; }
 
   function createEngine({ root = document.body, mode = 'viewport', budgetMs = 6, maxStepsPerSlice = 250, marginPx = 150, excludedSelectors = [] } = {}) {
@@ -39,16 +41,41 @@
       }
       return editable;
     };
+    const simpleClipBox = (style) => {
+      const margin = style.overflowClipMargin || '';
+      const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomLeftRadius, style.borderBottomRightRadius];
+      return !(margin && margin.split(/\s+/).some(value => value !== '0px' && value !== '0')) && !radii.some(value => value && value !== '0px' && value !== '0');
+    };
+    const intersectClientClip = (allowed, el, box, clipX, clipY) => {
+      const values = [box.left, box.top, el.clientLeft, el.clientTop, el.clientWidth, el.clientHeight];
+      if (!values.every(Number.isFinite)) return null;
+      const left = box.left + el.clientLeft, top = box.top + el.clientTop;
+      if (clipX) { allowed.left = Math.max(allowed.left, left); allowed.right = Math.min(allowed.right, left + el.clientWidth); }
+      if (clipY) { allowed.top = Math.max(allowed.top, top); allowed.bottom = Math.min(allowed.bottom, top + el.clientHeight); }
+      return allowed.right > allowed.left && allowed.bottom > allowed.top;
+    };
+    const textRangeIntersects = (node, allowed) => {
+      try {
+        const range = doc.createRange(); range.selectNodeContents(node);
+        const rects = range.getClientRects();
+        if (!rects || !Number.isFinite(rects.length)) return null;
+        for (let i = 0; i < rects.length; i++) {
+          const r = rects.item(i) ?? rects[i];
+          if (![r.left, r.top, r.right, r.bottom, r.width, r.height].every(Number.isFinite)) return null;
+          if (r.width > 0 && r.height > 0 && r.right > allowed.left && r.left < allowed.right && r.bottom > allowed.top && r.top < allowed.bottom) return true;
+        }
+      } catch { return null; }
+      return false;
+    };
     const visibleTextWithoutOwnerBox = (node, owner, ownerRect) => {
       const allowed = { left: -marginPx, top: -marginPx, right: view.innerWidth + marginPx, bottom: view.innerHeight + marginPx };
-      const start = node.assignedSlot || owner;
-      const hasNonDefault = (value, fallback) => !!value && value !== fallback;
+      const start = assignedTextSlot(node) || owner;
       try {
         for (let el = start; el; el = el.assignedSlot || el.parentElement || el.parentNode?.host) {
           const style = view.getComputedStyle(el);
           if (!style || typeof style.display !== 'string' || typeof style.visibility !== 'string' || typeof style.overflowX !== 'string' || typeof style.overflowY !== 'string') return false;
           if (style.display === 'none' || (style.contentVisibility && style.contentVisibility !== 'visible') || (el === start && ['hidden', 'collapse'].includes(style.visibility))) return false;
-          if (hasNonDefault(style.transform, 'none') || hasNonDefault(style.perspective, 'none') || hasNonDefault(style.zoom, 'normal') && style.zoom !== '1' && style.zoom !== '100%' || hasNonDefault(style.scale, 'none') || hasNonDefault(style.rotate, 'none') || hasNonDefault(style.translate, 'none') || hasNonDefault(style.clipPath, 'none') || hasNonDefault(style.clip, 'auto') || hasNonDefault(style.maskImage, 'none') || hasNonDefault(style.webkitMaskImage, 'none') || hasNonDefault(style.maskBorderSource, 'none') || hasNonDefault(style.webkitMaskBoxImageSource, 'none') || (style.contain || '').split(/\s+/).some(value => ['paint', 'content', 'strict'].includes(value))) return false;
+          if ((style.transform && style.transform !== 'none') || (style.perspective && style.perspective !== 'none') || (style.zoom && !['normal', '1', '100%'].includes(style.zoom)) || (style.scale && style.scale !== 'none') || (style.rotate && style.rotate !== 'none') || (style.translate && style.translate !== 'none') || (style.clipPath && style.clipPath !== 'none') || (style.clip && style.clip !== 'auto') || (style.maskImage && style.maskImage !== 'none') || (style.webkitMaskImage && style.webkitMaskImage !== 'none') || (style.maskBorderSource && style.maskBorderSource !== 'none') || (style.webkitMaskBoxImageSource && style.webkitMaskBoxImageSource !== 'none') || (style.contain || '').split(/\s+/).some(value => ['paint', 'content', 'strict'].includes(value))) return false;
           let clipX = CLIPPING_OVERFLOW.has(style.overflowX), clipY = CLIPPING_OVERFLOW.has(style.overflowY);
           if (el === doc.documentElement || style.display === 'contents') clipX = clipY = false;
           if (el === doc.body) {
@@ -58,35 +85,86 @@
             if (rootStyle.overflowY === 'visible') clipY = false;
           }
           if (clipX || clipY) {
-            const clipMargin = style.overflowClipMargin || '';
-            const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomLeftRadius, style.borderBottomRightRadius];
-            if (clipMargin && clipMargin.split(/\s+/).some(value => value !== '0px' && value !== '0') || radii.some(radius => radius && radius !== '0px' && radius !== '0')) return false;
+            if (!simpleClipBox(style)) return false;
             let box = ownerRect;
             if (el !== owner) { report.geometryChecks++; box = el.getBoundingClientRect(); }
-            const values = [box.left, box.top, el.clientLeft, el.clientTop, el.clientWidth, el.clientHeight];
-            if (!values.every(Number.isFinite)) return false;
-            const left = box.left + el.clientLeft, top = box.top + el.clientTop;
-            if (clipX) { allowed.left = Math.max(allowed.left, left); allowed.right = Math.min(allowed.right, left + el.clientWidth); }
-            if (clipY) { allowed.top = Math.max(allowed.top, top); allowed.bottom = Math.min(allowed.bottom, top + el.clientHeight); }
-            if (allowed.right <= allowed.left || allowed.bottom <= allowed.top) return false;
+            if (intersectClientClip(allowed, el, box, clipX, clipY) !== true) return false;
           }
           if (el === doc.documentElement) break;
         }
-        const range = doc.createRange(); range.selectNodeContents(node);
-        const rects = range.getClientRects();
-        if (!rects || !Number.isFinite(rects.length)) return false;
-        for (let i = 0; i < rects.length; i++) {
-          const r = rects.item(i) ?? rects[i];
-          if ([r.left, r.top, r.right, r.bottom, r.width, r.height].every(Number.isFinite) && r.width > 0 && r.height > 0 && r.right > allowed.left && r.left < allowed.right && r.bottom > allowed.top && r.top < allowed.bottom) return true;
-        }
       } catch { return false; }
-      return false;
+      return textRangeIntersects(node, allowed) === true;
+    };
+    const nativePositiveVisibility = (node, owner) => {
+      try {
+        const directSlotText = !!assignedTextSlot(node);
+        if (directSlotText) return true;
+        const visibilityOwner = owner;
+        const check = visibilityOwner.checkVisibility;
+        if (typeof check !== 'function') return true;
+        return check.call(visibilityOwner, { visibilityProperty: true, contentVisibilityAuto: true }) !== false;
+      } catch { return true; }
+    };
+    const positiveBoxClipVisibility = (node, owner, ownerRect) => {
+      const fallback = nativePositiveVisibility(node, owner);
+      if (!fallback) return false;
+      const start = assignedTextSlot(node) || owner;
+      const clips = [];
+      let startHidden = false, unsupported = false;
+      for (let el = start, depth = 0; el; el = el.assignedSlot || el.parentElement || el.parentNode?.host, depth++) {
+        if (depth >= MAX_POSITIVE_VISIBILITY_ANCESTORS) return startHidden ? false : fallback;
+        let style;
+        try { style = view.getComputedStyle(el); } catch { unsupported = true; continue; }
+        if (!style) { unsupported = true; continue; }
+        if (style.display === 'none' || style.contentVisibility === 'hidden') startHidden = true;
+        if (el === start && ['hidden', 'collapse'].includes(style.visibility)) startHidden = true;
+        if (typeof style.display !== 'string' || typeof style.visibility !== 'string' || typeof style.overflowX !== 'string' || typeof style.overflowY !== 'string' || typeof style.position !== 'string') { unsupported = true; continue; }
+        if (['absolute', 'fixed'].includes(style.position) || style.contentVisibility === 'auto') unsupported = true;
+        const active = (key, inactive) => { const value = style[key]; return typeof value === 'string' && value !== '' && value !== inactive; };
+        if (active('transform', 'none') || active('perspective', 'none') || active('scale', 'none') || active('rotate', 'none') || active('translate', 'none') || active('filter', 'none') || active('backdropFilter', 'none') || active('webkitBackdropFilter', 'none') || active('clipPath', 'none') || active('clip', 'auto') || active('maskImage', 'none') || active('webkitMaskImage', 'none') || active('maskBorderSource', 'none') || active('webkitMaskBoxImageSource', 'none') || (style.zoom && !['normal', '1', '100%'].includes(style.zoom)) || (style.contain || '').split(/\s+/).some(value => ['paint', 'content', 'strict'].includes(value))) unsupported = true;
+        let clipX = CLIPPING_OVERFLOW.has(style.overflowX), clipY = CLIPPING_OVERFLOW.has(style.overflowY);
+        if (el === doc.documentElement || style.display === 'contents') clipX = clipY = false;
+        if (el === doc.body) {
+          let rootStyle;
+          try { rootStyle = view.getComputedStyle(doc.documentElement); } catch { unsupported = true; }
+          if (!rootStyle || typeof rootStyle.overflowX !== 'string' || typeof rootStyle.overflowY !== 'string') { unsupported = true; clipX = clipY = false; }
+          else {
+            if (rootStyle.overflowX === 'visible') clipX = false;
+            if (rootStyle.overflowY === 'visible') clipY = false;
+          }
+        }
+        if ((clipX || clipY) && style.display === 'inline') unsupported = true;
+        if (clipX || clipY) clips.push({ el, clipX, clipY, style });
+        if (el === doc.documentElement) break;
+      }
+      if (startHidden) return false;
+      if (unsupported || !clips.length) return fallback;
+
+      const clipBoxes = [];
+      for (const { el, clipX, clipY, style } of clips) {
+        if (!simpleClipBox(style)) return fallback;
+        let box;
+        try { if (el !== owner) report.geometryChecks++; box = el === owner ? ownerRect : el.getBoundingClientRect(); }
+        catch { return fallback; }
+        const values = [box.left, box.top, el.clientLeft, el.clientTop, el.clientWidth, el.clientHeight];
+        if (!values.every(Number.isFinite)) return fallback;
+        clipBoxes.push({ el, box, clipX, clipY });
+      }
+      const allowed = { left: -marginPx, top: -marginPx, right: view.innerWidth + marginPx, bottom: view.innerHeight + marginPx };
+      for (const { el, box, clipX, clipY } of clipBoxes) {
+        const intersects = intersectClientClip(allowed, el, box, clipX, clipY);
+        if (intersects === null) return fallback;
+        if (!intersects) return false;
+      }
+      if (node.nodeType === 2) return ownerRect.right > allowed.left && ownerRect.left < allowed.right && ownerRect.bottom > allowed.top && ownerRect.top < allowed.bottom;
+      const intersects = textRangeIntersects(node, allowed);
+      return intersects === null ? fallback : intersects;
     };
     const visible = (node) => {
       const el = composedOwner(node);
       if (!el) return false;
       let r; try { report.geometryChecks++; r = el.getBoundingClientRect(); } catch { return false; }
-      if ((r.width > 0 || r.height > 0) && r.bottom >= -marginPx && r.top <= view.innerHeight + marginPx && r.right >= -marginPx && r.left <= view.innerWidth + marginPx) return true;
+      if ((r.width > 0 || r.height > 0) && r.bottom >= -marginPx && r.top <= view.innerHeight + marginPx && r.right >= -marginPx && r.left <= view.innerWidth + marginPx) return positiveBoxClipVisibility(node, el, r);
       return node.nodeType === 3 && r.width === 0 && r.height === 0 && [r.left, r.top, r.right, r.bottom].every(Number.isFinite) && visibleTextWithoutOwnerBox(node, el, r);
     };
     const add = (node) => {

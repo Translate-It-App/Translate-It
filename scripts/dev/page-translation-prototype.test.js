@@ -10,8 +10,10 @@ const DIAGNOSTIC_COUNTERS = [
 const VIEWPORT_ONLY_COUNTERS = DIAGNOSTIC_COUNTERS.filter(key => !['visitedNodes', 'discoveryPasses'].includes(key));
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   delete globalThis.TranslateItViewportPrototype;
   window.eval(readFileSync(resolve('scripts/dev/page-translation-prototype/engine.js'), 'utf8'));
+  Object.defineProperty(HTMLElement.prototype, 'checkVisibility', { configurable: true, value: undefined });
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
     const y = Number(this.dataset.y || 0);
     return { top: y, bottom: y + 20, left: 0, right: 100, width: 100, height: 20 };
@@ -332,6 +334,7 @@ describe('viewport DOM prototype', () => {
     await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(beforeNative));
     await engine.whenIdle();
     expect(engine.getStats().mutationRelevantAttributeRecords).toBeGreaterThanOrEqual(3);
+    target.hidden = false;
     target.removeAttribute('data-muted');
     await vi.waitFor(() => expect(target.textContent).toBe('⟦TI⟧Unblocked text'));
     await engine.whenIdle();
@@ -899,7 +902,7 @@ describe('viewport DOM prototype', () => {
   });
 
   it('uses Range visibility only for genuine zero-box text owners', async () => {
-    document.body.innerHTML = '<main><p id="normal">Normal box text</p><div id="zero">Zero box text</div></main>';
+    document.body.innerHTML = '<main><p id="normal" title="Normal box title">Normal box text</p><div id="zero">Zero box text</div></main>';
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
       if (this.id === 'zero') return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
       return { top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 };
@@ -911,10 +914,11 @@ describe('viewport DOM prototype', () => {
     const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
     await engine.start(); await engine.whenIdle();
     expect(document.querySelector('#normal').textContent).toBe('⟦TI⟧Normal box text');
+    expect(document.querySelector('#normal').title).toBe('⟦TI⟧Normal box title');
     expect(document.querySelector('#zero').textContent).toBe('⟦TI⟧Zero box text');
     expect(createRange).toHaveBeenCalledTimes(1);
     expect(getComputedStyle).toHaveBeenCalled();
-    expect(getComputedStyle.mock.calls.some(([owner]) => owner.id === 'normal')).toBe(false);
+    expect(getComputedStyle.mock.calls.some(([owner]) => owner.id === 'normal')).toBe(true);
     await engine.cleanup();
   });
 
@@ -938,6 +942,136 @@ describe('viewport DOM prototype', () => {
     expect(document.querySelector('#basic').textContent).toBe('⟦TI⟧Basic styles');
     for (const id of Object.keys(effects)) expect(document.querySelector(`#${id}`).textContent).not.toContain('⟦TI⟧');
     await engine.cleanup();
+  });
+
+  it('uses supported checkVisibility false results and falls back on missing or throwing APIs', async () => {
+    document.body.innerHTML = '<main><p id="hidden">Hidden by native API</p><p id="throws">Throwing native API</p><p id="missing">Missing native API</p><x-slot-host id="slot-host">Visible through slot override</x-slot-host></main>';
+    const hidden = document.querySelector('#hidden'), throws = document.querySelector('#throws'), missing = document.querySelector('#missing'), host = document.querySelector('#slot-host');
+    const calls = [];
+    Object.defineProperty(hidden, 'checkVisibility', { configurable: true, value(options) { calls.push(['hidden', options]); return false; } });
+    Object.defineProperty(throws, 'checkVisibility', { configurable: true, value() { throw new Error('native visibility unavailable'); } });
+    Object.defineProperty(missing, 'checkVisibility', { configurable: true, value: undefined });
+    const shadow = host.attachShadow({ mode: 'open' }), slot = document.createElement('slot'); slot.style.cssText = 'display:block;visibility:visible'; shadow.append(slot);
+    Object.defineProperty(host.firstChild, 'assignedSlot', { configurable: true, value: slot });
+    const shadowQueries = vi.spyOn(shadow, 'querySelectorAll'), assignedNodeLookups = vi.spyOn(slot, 'assignedNodes');
+    Object.defineProperty(host, 'checkVisibility', { configurable: true, value(options) { calls.push(['slot', options]); return false; } });
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+    await engine.start(); await engine.whenIdle();
+    expect(hidden.textContent).toBe('Hidden by native API');
+    expect(throws.textContent).toBe('⟦TI⟧Throwing native API');
+    expect(missing.textContent).toBe('⟦TI⟧Missing native API');
+    expect(host.firstChild.data).toBe('⟦TI⟧Visible through slot override');
+    expect(calls.find(([name]) => name === 'hidden')[1]).toMatchObject({ visibilityProperty: true, contentVisibilityAuto: true });
+    expect(calls.some(([name]) => name === 'slot')).toBe(false);
+    expect(shadowQueries).not.toHaveBeenCalled();
+    expect(assignedNodeLookups).not.toHaveBeenCalled();
+    await engine.cleanup();
+  });
+
+  it('rejects hidden ancestors even when unsupported positioning forces best-effort clipping', async () => {
+    document.body.innerHTML = '<main><section id="display-outer" style="display:none"><p id="display-child" style="position:absolute">Display hidden</p></section><section id="content-outer" style="content-visibility:hidden"><p id="content-child" style="position:fixed">Content hidden</p></section><section id="visibility-outer" style="visibility:hidden"><p id="visibility-child" style="visibility:visible">Visibility override</p></section></main>';
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 });
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+    await engine.start(); await engine.whenIdle();
+    expect(document.querySelector('#display-child').textContent).toBe('Display hidden');
+    expect(document.querySelector('#content-child').textContent).toBe('Content hidden');
+    expect(document.querySelector('#visibility-child').textContent).toBe('⟦TI⟧Visibility override');
+    await engine.cleanup();
+  });
+
+  it('records available hidden styles before falling back on incomplete style metadata', async () => {
+    document.body.innerHTML = '<main><p id="hidden-start">Hidden start</p><section id="hidden-outer" style="content-visibility:hidden"><p id="unsupported-inner">Hidden outer</p></section></main>';
+    const hiddenStart = document.querySelector('#hidden-start'), hiddenOuter = document.querySelector('#hidden-outer'), unsupportedInner = document.querySelector('#unsupported-inner');
+    Object.defineProperty(unsupportedInner, 'checkVisibility', { configurable: true, value: () => true });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 });
+    const nativeGetComputedStyle = window.getComputedStyle.bind(window);
+    vi.spyOn(window, 'getComputedStyle').mockImplementation(element => {
+      if (element === hiddenStart) return { display: 'block', visibility: 'hidden', overflowX: 'visible', overflowY: 'visible' };
+      if (element === unsupportedInner) return { display: 'block', visibility: 'visible', overflowX: 'visible', overflowY: 'visible' };
+      return nativeGetComputedStyle(element);
+    });
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+    await engine.start(); await engine.whenIdle();
+    expect(hiddenStart.textContent).toBe('Hidden start');
+    expect(unsupportedInner.textContent).toBe('Hidden outer');
+    await engine.cleanup();
+  });
+
+  it('uses best-effort admission beyond the positive-visibility ancestor cap', async () => {
+    document.body.innerHTML = '<main></main>';
+    const root = document.querySelector('main'); let parent = root, farAncestor;
+    for (let i = 0; i < 70; i++) { const ancestor = document.createElement('div'); parent.append(ancestor); parent = ancestor; farAncestor ??= ancestor; }
+    farAncestor.style.display = 'none';
+    const target = document.createElement('p'); target.textContent = 'Beyond visibility cap'; parent.append(target);
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    expect(target.textContent).toBe('⟦TI⟧Beyond visibility cap');
+    await engine.cleanup();
+  });
+
+  it('uses clip-intersected Range fragments for positive owners but keeps Attr owner-box visibility', async () => {
+    document.body.innerHTML = '<main><section id="clip"><p id="full" title="Full owner">Full clipped text</p><p id="partial" title="Partial owner">Partial clipped text</p></section></main>';
+    const clip = document.querySelector('#clip'), full = document.querySelector('#full'), partial = document.querySelector('#partial');
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
+      if (this === clip) return { top: 0, bottom: 30, left: 0, right: 50, width: 50, height: 30 };
+      if (this === full || this === partial) return { top: 0, bottom: 20, left: 0, right: 40, width: 40, height: 20 };
+      return { top: 0, bottom: 100, left: 0, right: 100, width: 100, height: 100 };
+    });
+    for (const key of ['clientLeft', 'clientTop']) Object.defineProperty(clip, key, { configurable: true, value: 0 });
+    Object.defineProperty(clip, 'clientWidth', { configurable: true, value: 50 });
+    Object.defineProperty(clip, 'clientHeight', { configurable: true, value: 30 });
+    Object.defineProperty(clip, 'clientWidth', { configurable: true, value: 50 });
+    Object.defineProperty(clip, 'clientHeight', { configurable: true, value: 30 });
+    const nativeGetComputedStyle = window.getComputedStyle.bind(window);
+    vi.spyOn(window, 'getComputedStyle').mockImplementation(element => element === clip
+      ? { display: 'block', visibility: 'visible', overflowX: 'hidden', overflowY: 'hidden', position: 'static' }
+      : nativeGetComputedStyle(element));
+    vi.spyOn(document, 'createRange').mockImplementation(() => {
+      let target;
+      return { selectNodeContents(node) { target = node; }, getClientRects() {
+        const rect = target.parentElement === full
+          ? { top: 0, bottom: 18, left: 60, right: 80, width: 20, height: 18 }
+          : { top: 0, bottom: 18, left: 10, right: 30, width: 20, height: 18 };
+        return { length: 1, item: () => rect };
+      } };
+    });
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+    await engine.start(); await engine.whenIdle();
+    expect(full.textContent).toBe('Full clipped text');
+    expect(full.title).toBe('⟦TI⟧Full owner');
+    expect(partial.textContent).toBe('⟦TI⟧Partial clipped text');
+    expect(partial.title).toBe('⟦TI⟧Partial owner');
+    await engine.cleanup();
+  });
+
+  it('keeps V1 positive-box admission on unsupported style, clip, and Range APIs', async () => {
+    for (const missing of ['style', 'clip', 'range']) {
+      document.body.innerHTML = '<main><section id="clip"><p id="target">Off-clip range</p></section></main>';
+      const clip = document.querySelector('#clip'), target = document.querySelector('#target');
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
+        if (this === clip) return { top: 0, bottom: 30, left: 0, right: 50, width: 50, height: 30 };
+        if (this === target) return { top: 0, bottom: 20, left: 0, right: 40, width: 40, height: 20 };
+        return { top: 0, bottom: 100, left: 0, right: 100, width: 100, height: 100 };
+      });
+      Object.defineProperty(clip, 'clientLeft', { configurable: true, value: 0 });
+      Object.defineProperty(clip, 'clientTop', { configurable: true, value: 0 });
+      Object.defineProperty(clip, 'clientWidth', { configurable: true, value: missing === 'clip' ? undefined : 50 });
+      Object.defineProperty(clip, 'clientHeight', { configurable: true, value: 30 });
+      const nativeGetComputedStyle = window.getComputedStyle.bind(window);
+      vi.spyOn(window, 'getComputedStyle').mockImplementation(element => {
+        if (missing === 'style' && element === target) throw new Error('computed style unavailable');
+        if (element === clip) return { display: 'block', visibility: 'visible', overflowX: 'hidden', overflowY: 'hidden', position: 'static' };
+        return nativeGetComputedStyle(element);
+      });
+      vi.spyOn(document, 'createRange').mockImplementation(() => {
+        if (missing === 'range') throw new Error('Range unavailable');
+        return { selectNodeContents() {}, getClientRects: () => ({ length: 1, item: () => ({ top: 0, bottom: 18, left: 60, right: 80, width: 20, height: 18 }) }) };
+      });
+      const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+      await engine.start(); await engine.whenIdle();
+      expect(target.textContent).toBe('⟦TI⟧Off-clip range');
+      await engine.cleanup();
+    }
   });
 
   it('fails closed for hidden zero-box text and unavailable Range geometry', async () => {
