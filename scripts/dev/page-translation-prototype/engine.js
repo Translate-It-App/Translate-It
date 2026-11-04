@@ -215,14 +215,15 @@
         recordShadowSheet(node);
         if (node.localName === 'style' && trackStylesheetResource(node)) markUncertainStylesheetRoot(node);
         if (updatePendingLink(node)) markUncertainStylesheetRoot(node);
-        if (!excluded(node)) for (const name of ATTRIBUTES) { const attr = node.getAttributeNode(name); if (attr) write(attr); }
-      } else if (node.nodeType === 3 && composedOwner(node) && !excluded(node) && node.nodeValue.trim()) write(node);
+        for (const name of ATTRIBUTES) { const attr = node.getAttributeNode(name); if (attr) write(attr); }
+      } else if (node.nodeType === 3) write(node);
     };
     const write = (node) => {
       if (stopped || !active) return;
+      if (owned.has(node)) { candidates.delete(node); return; }
       if (!connected(node) || excluded(node) || (node.nodeType === 2 && (!ATTRIBUTES.includes(node.name.toLowerCase()) || node.ownerElement.getAttributeNode(node.name) !== node))) { candidates.delete(node); return; }
       const value = own(node);
-      if (!value?.trim() || owned.has(node)) { candidates.delete(node); return; }
+      if (!value?.trim()) { candidates.delete(node); return; }
       const translated = mockTranslate(value);
       if (translated === value) { candidates.delete(node); return; }
       if (!visible(node)) return;

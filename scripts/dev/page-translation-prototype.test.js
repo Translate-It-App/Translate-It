@@ -201,6 +201,92 @@ describe('viewport DOM prototype', () => {
     await engine.cleanup();
   });
 
+  it('checks exclusions only for candidate writes instead of attrless containers or owned rediscovery', async () => {
+    const markup = '<main>' + '<div></div>'.repeat(60) + '<p data-y="0" title="Tip" alt="Alt">Visible</p></main>';
+    const originalMatches = Element.prototype.matches;
+    let selectorChecks = 0;
+    vi.spyOn(Element.prototype, 'matches').mockImplementation(function(selector) { selectorChecks++; return originalMatches.call(this, selector); });
+
+    document.body.innerHTML = markup;
+    const baseline = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main'), mode: 'baseline', excludedSelectors: ['.never-match'] });
+    selectorChecks = 0; await baseline.start();
+    const baselineChecks = selectorChecks;
+    await baseline.cleanup();
+
+    document.body.innerHTML = markup;
+    const root = document.querySelector('main'), engine = TranslateItViewportPrototype.createEngine({ root, excludedSelectors: ['.never-match'] });
+    selectorChecks = 0; await engine.start(); await engine.whenIdle();
+    const viewportChecks = selectorChecks;
+    expect(viewportChecks).toBeLessThan(baselineChecks);
+    expect(root.lastElementChild.textContent).toBe('⟦TI⟧Visible');
+    selectorChecks = 0; window.dispatchEvent(new Event('scroll')); await engine.whenIdle();
+    expect(selectorChecks).toBe(0);
+    await engine.cleanup();
+  });
+
+  it('does not trim large excluded text during discovery or rediscovery', async () => {
+    document.body.innerHTML = '<main><p data-y="0">Visible control</p></main>';
+    const root = document.querySelector('main'), payload = ' '.repeat(2 * 1024 * 1024);
+    for (const tag of ['script', 'code', 'pre']) {
+      const excluded = document.createElement(tag);
+      excluded.append(document.createTextNode(payload));
+      root.append(excluded);
+    }
+    const originalTrim = String.prototype.trim;
+    let largeStringTrims = 0;
+    vi.spyOn(String.prototype, 'trim').mockImplementation(function() {
+      if (this.length === payload.length) largeStringTrims++;
+      return originalTrim.call(this);
+    });
+
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    expect(largeStringTrims).toBe(0);
+    expect(root.querySelector('p').textContent).toBe('⟦TI⟧Visible control');
+    const initialVisits = engine.getStats().visitedNodes;
+    window.dispatchEvent(new Event('scroll')); await engine.whenIdle();
+    expect(engine.getStats().visitedNodes).toBeGreaterThan(initialVisits);
+    expect(largeStringTrims).toBe(0);
+    await engine.cleanup();
+  });
+
+  it('revalidates later attributes after synchronous custom-element reactions', async () => {
+    const eligibleTag = 'x-p2-reactive-eligibility', detachedTag = 'x-p2-reactive-detach';
+    if (!customElements.get(eligibleTag)) customElements.define(eligibleTag, class extends HTMLElement {
+      static observedAttributes = ['title'];
+      attributeChangedCallback(name, oldValue, value) { if (name === 'title' && value?.startsWith('⟦TI⟧')) this.setAttribute('contenteditable', 'true'); }
+    });
+    if (!customElements.get(detachedTag)) customElements.define(detachedTag, class extends HTMLElement {
+      static observedAttributes = ['title'];
+      attributeChangedCallback(name, oldValue, value) { if (name === 'title' && value?.startsWith('⟦TI⟧')) this.remove(); }
+    });
+    document.body.innerHTML = `<main><${eligibleTag} data-y="0" title="Eligible title" alt="Keep original">Editable reaction</${eligibleTag}><${detachedTag} data-y="0" title="Detached title" alt="Detached original">Detached reaction</${detachedTag}></main>`;
+    const root = document.querySelector('main'), eligible = root.querySelector(eligibleTag), detached = root.querySelector(detachedTag);
+    const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
+    await engine.start(); await engine.whenIdle();
+    expect(eligible.title).toBe('⟦TI⟧Eligible title');
+    expect(eligible.getAttribute('alt')).toBe('Keep original');
+    expect(eligible.textContent).toBe('Editable reaction');
+    expect(detached.title).toBe('⟦TI⟧Detached title');
+    expect(detached.getAttribute('alt')).toBe('Detached original');
+    await engine.cleanup();
+    expect(detached.title).toBe('Detached title');
+  });
+
+  it('preserves external edits to owned text and attributes during rediscovery and restore', async () => {
+    document.body.innerHTML = '<main><p data-y="0" title="Source title">Source text</p></main>';
+    const root = document.querySelector('main'), p = root.firstElementChild;
+    const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
+    await engine.start(); await engine.whenIdle();
+    p.firstChild.nodeValue = 'External text'; p.title = 'External title';
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    window.dispatchEvent(new Event('scroll')); await engine.whenIdle();
+    expect(p.textContent).toBe('External text'); expect(p.title).toBe('External title');
+    await engine.cleanup();
+    expect(p.textContent).toBe('External text'); expect(p.title).toBe('External title');
+    expect(engine.getStats().preservedExternalNodes).toBe(2);
+  });
+
   it('skips unrelated data attributes but reaudits CSS when stylesheets change', async () => {
     document.body.innerHTML = '<main><p id="plain">Plain text</p><x-card></x-card></main>';
     const shadow = document.querySelector('x-card').attachShadow({ mode: 'open' });
