@@ -97,11 +97,16 @@
       if (uncertainStylesheetRoots.size >= MAX_AUDIT_SCOPES) { uncertainRootsOverflow = true; return; }
       uncertainStylesheetRoots.add(node);
     }
+    const belongsToRemovedSubtree = (node, removed) => {
+      for (let current = node; current; current = current.parentNode?.host || current.parentNode || current.host || null) if (current === removed) return true;
+      return false;
+    };
+    const liveInDocument = (node) => !!node?.isConnected && (node.ownerDocument || node.host?.ownerDocument) === doc;
     const pruneStylesheetStateInSubtree = (removed) => {
       let relevant = false;
-      for (const node of stylesheetResources) if (node === removed || removed.contains?.(node)) { stylesheetResources.delete(node); relevant = true; }
-      for (const link of pendingStylesheetLinks.keys()) if (link === removed || removed.contains?.(link)) { pendingStylesheetLinks.delete(link); relevant = true; }
-      for (const rootNode of uncertainStylesheetRoots) if (rootNode === removed || removed.contains?.(rootNode)) { uncertainStylesheetRoots.delete(rootNode); relevant = true; }
+      for (const node of stylesheetResources) if (belongsToRemovedSubtree(node, removed) && !liveInDocument(node)) { stylesheetResources.delete(node); relevant = true; }
+      for (const link of pendingStylesheetLinks.keys()) if (belongsToRemovedSubtree(link, removed) && !liveInDocument(link)) { pendingStylesheetLinks.delete(link); relevant = true; }
+      for (const rootNode of uncertainStylesheetRoots) if (belongsToRemovedSubtree(rootNode, removed) && !liveInDocument(rootNode)) { uncertainStylesheetRoots.delete(rootNode); relevant = true; }
       return relevant || uncertainRootsOverflow;
     };
     const scanHeadResources = (start, added, budget = MAX_HEAD_NODES) => {
@@ -277,7 +282,7 @@
           const next = viewportJob.cleanup.next(); viewportJob.cleanupRemaining--;
           if (!next.done) {
             const [shadow, entry] = next.value;
-            if (!connected(entry.host)) {
+            if (shadow !== root && !connected(entry.host)) {
               entry.observer.disconnect(); entry.scrollTarget?.removeEventListener('scroll', onScroll, true);
               entry.scrollTarget?.removeEventListener('load', onStylesheetSettled, true); entry.scrollTarget?.removeEventListener('error', onStylesheetSettled, true);
               if (entry.scrollTarget) stylesheetEventTargets.delete(entry.scrollTarget);
@@ -328,7 +333,7 @@
           let next;
           if (job.kindCursor === 'observers') {
             next = job.iterator.next();
-            if (!next.done) { const [shadow, entry] = next.value; if (!connected(entry.host)) { entry.observer.disconnect(); entry.scrollTarget?.removeEventListener('scroll', onScroll, true); entry.scrollTarget?.removeEventListener('load', onStylesheetSettled, true); entry.scrollTarget?.removeEventListener('error', onStylesheetSettled, true); if (entry.scrollTarget) stylesheetEventTargets.delete(entry.scrollTarget); observers.delete(shadow); } }
+            if (!next.done) { const [shadow, entry] = next.value; if (shadow !== root && !connected(entry.host)) { entry.observer.disconnect(); entry.scrollTarget?.removeEventListener('scroll', onScroll, true); entry.scrollTarget?.removeEventListener('load', onStylesheetSettled, true); entry.scrollTarget?.removeEventListener('error', onStylesheetSettled, true); if (entry.scrollTarget) stylesheetEventTargets.delete(entry.scrollTarget); observers.delete(shadow); } }
           } else {
             next = job.iterator.next();
             if (!next.done) { const node = next.value; if (!connected(node) || (node.nodeType === 2 && (node.ownerElement.getAttributeNode(node.name) !== node || excluded(node)))) candidates.delete(node); }

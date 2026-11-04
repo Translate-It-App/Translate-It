@@ -176,6 +176,23 @@ describe('viewport DOM prototype', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('keeps the configured root observer while its root is detached and reinserted', async () => {
+    document.body.innerHTML = '<main><p data-y="0">Old subtree</p></main>';
+    const root = document.querySelector('main'), old = root.firstElementChild;
+    const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
+    await engine.start(); await engine.whenIdle();
+    root.remove(); old.remove();
+    const passes = engine.getStats().discoveryPasses;
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    await vi.waitFor(() => expect(engine.getStats().discoveryPasses).toBeGreaterThan(passes));
+    expect(engine.getStats().observerCount).toBe(1);
+    document.body.append(root);
+    const added = document.createElement('p'); added.dataset.y = '0'; added.textContent = 'Reinserted subtree'; root.append(added);
+    await vi.waitFor(() => expect(added.textContent).toBe('⟦TI⟧Reinserted subtree'));
+    expect(engine.getStats().observerCount).toBe(1);
+    await engine.cleanup();
+  });
+
   it('keeps eligible contenteditable=false descendants inside an editable ancestor', async () => {
     document.body.innerHTML = '<main><section contenteditable="true"><p contenteditable="false" data-y="0">Eligible child</p></section></main>';
     const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main'), maxStepsPerSlice: 1 });
@@ -320,6 +337,73 @@ describe('viewport DOM prototype', () => {
     await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
     expect(engine.getStats().discoveryPasses).toBe(afterRemoval);
     expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+    await engine.cleanup();
+  });
+
+  it('prunes nested-shadow uncertainty on detach but preserves it across same-batch reinsert', async () => {
+    document.body.innerHTML = '<main><x-outer></x-outer><p id="live">Live text</p></main>';
+    const root = document.querySelector('main'), outer = root.querySelector('x-outer');
+    const outerShadow = outer.attachShadow({ mode: 'open' }), inner = document.createElement('x-inner'); outerShadow.append(inner);
+    const innerShadow = inner.attachShadow({ mode: 'open' });
+    for (let i = 0; i < 129; i++) { const style = document.createElement('style'); style.textContent = `.nested-${i} { color: red }`; innerShadow.append(style); }
+    const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 100 });
+    await engine.start(); await engine.whenIdle();
+    const live = root.querySelector('#live');
+    live.dataset.noise = 'initial';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1)); await engine.whenIdle();
+
+    outer.remove(); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    let passes = engine.getStats().discoveryPasses;
+    live.dataset.noise = 'detached';
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().discoveryPasses).toBe(passes);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(1);
+
+    root.append(outer); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    live.dataset.noise = 'reattached';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(2)); await engine.whenIdle();
+    const beforeSameBatch = engine.getStats().mutationAuditFallbacks;
+    outer.remove(); root.append(outer);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    live.dataset.noise = 'same-batch-reinsert';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(beforeSameBatch + 1));
+    await engine.whenIdle();
+    await engine.cleanup();
+  });
+
+  it('retains fallback for a separate live uncertain stylesheet subtree', async () => {
+    document.body.innerHTML = '<main><p id="live">Live text</p></main>';
+    const root = document.querySelector('main'), live = root.querySelector('#live'), engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const makeGroup = (prefix) => {
+      const section = document.createElement('section');
+      for (let i = 0; i < 300; i++) { const style = document.createElement('style'); style.textContent = `.${prefix}-${i} { color:red }`; section.append(style); }
+      return section;
+    };
+    const first = makeGroup('first'), second = makeGroup('second');
+    document.body.append(first); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    document.body.append(second); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    live.dataset.noise = 'two-live-roots';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1)); await engine.whenIdle();
+    first.remove(); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    live.dataset.noise = 'second-root-remains';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(2)); await engine.whenIdle();
+    second.remove(); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    const passes = engine.getStats().discoveryPasses;
+    live.dataset.noise = 'all-roots-removed'; await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(engine.getStats().discoveryPasses).toBe(passes);
+    expect(engine.getStats().mutationAuditFallbacks).toBe(2);
+    await engine.cleanup();
+  });
+
+  it('keeps pending document stylesheets outside a removed translation subtree', async () => {
+    document.body.innerHTML = '<main><section id="removed"><i></i></section><p id="live">Live text</p></main><link rel="stylesheet" href="/outside-root.css">';
+    const root = document.querySelector('main'), removed = root.querySelector('#removed'), live = root.querySelector('#live');
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    removed.remove(); await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    live.dataset.noise = 'outside-resource-stays-live';
+    await vi.waitFor(() => expect(engine.getStats().mutationAuditFallbacks).toBe(1)); await engine.whenIdle();
     await engine.cleanup();
   });
 
