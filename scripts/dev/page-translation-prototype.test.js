@@ -898,6 +898,67 @@ describe('viewport DOM prototype', () => {
     await engine.cleanup();
   });
 
+  it('uses Range visibility only for genuine zero-box text owners', async () => {
+    document.body.innerHTML = '<main><p id="normal">Normal box text</p><div id="zero">Zero box text</div></main>';
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
+      if (this.id === 'zero') return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+      return { top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 };
+    });
+    const rangeRect = { top: 0, bottom: 18, left: 0, right: 100, width: 100, height: 18 };
+    const range = { selectNodeContents: vi.fn(), getClientRects: () => ({ length: 1, item: () => rangeRect }) };
+    const createRange = vi.spyOn(document, 'createRange').mockImplementation(() => range);
+    const getComputedStyle = vi.spyOn(window, 'getComputedStyle');
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+    await engine.start(); await engine.whenIdle();
+    expect(document.querySelector('#normal').textContent).toBe('⟦TI⟧Normal box text');
+    expect(document.querySelector('#zero').textContent).toBe('⟦TI⟧Zero box text');
+    expect(createRange).toHaveBeenCalledTimes(1);
+    expect(getComputedStyle).toHaveBeenCalled();
+    expect(getComputedStyle.mock.calls.some(([owner]) => owner.id === 'normal')).toBe(false);
+    await engine.cleanup();
+  });
+
+  it('defaults absent optional style properties but fails closed on unsupported effects', async () => {
+    document.body.innerHTML = '<main><div id="basic">Basic styles</div><div id="mask">Masked</div><div id="clip">Clipped</div><div id="transform">Transformed</div><div id="scale">Scaled</div></main>';
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
+      if (this.id) return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+      return { top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 };
+    });
+    const effects = {
+      mask: { maskImage: 'url(mask)' }, clip: { clipPath: 'circle(10px)' },
+      transform: { transform: 'matrix(1, 0, 0, 1, 0, 0)' }, scale: { scale: '2' },
+    };
+    vi.spyOn(window, 'getComputedStyle').mockImplementation(element => ({
+      display: 'contents', visibility: 'visible', overflowX: 'visible', overflowY: 'visible', ...effects[element.id],
+    }));
+    const rangeRect = { top: 0, bottom: 18, left: 0, right: 100, width: 100, height: 18 };
+    vi.spyOn(document, 'createRange').mockImplementation(() => ({ selectNodeContents() {}, getClientRects: () => ({ length: 1, item: () => rangeRect }) }));
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+    await engine.start(); await engine.whenIdle();
+    expect(document.querySelector('#basic').textContent).toBe('⟦TI⟧Basic styles');
+    for (const id of Object.keys(effects)) expect(document.querySelector(`#${id}`).textContent).not.toContain('⟦TI⟧');
+    await engine.cleanup();
+  });
+
+  it('fails closed for hidden zero-box text and unavailable Range geometry', async () => {
+    document.body.innerHTML = '<main><span id="display" style="display:none">Display hidden</span><span id="visibility" style="visibility:hidden">Visibility hidden</span><span id="content" style="content-visibility:hidden">Content hidden</span><span id="content-auto" style="content-visibility:auto">Content auto</span><span id="paint-contain" style="contain:paint">Paint contained</span><span id="range">Missing range</span><span id="style-api">Missing style API</span><span id="clip-api">Missing clip API</span></main>';
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function() {
+      if (this.id) return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+      return { top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 };
+    });
+    vi.spyOn(document, 'createRange').mockImplementation(() => ({ selectNodeContents() {}, getClientRects() { throw new Error('Range geometry unavailable'); } }));
+    const nativeGetComputedStyle = window.getComputedStyle.bind(window);
+    vi.spyOn(window, 'getComputedStyle').mockImplementation(element => {
+      if (element.id === 'style-api') throw new Error('Computed style unavailable');
+      if (element.id === 'clip-api') return { display: 'block' };
+      return nativeGetComputedStyle(element);
+    });
+    const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
+    await engine.start(); await engine.whenIdle();
+    for (const id of ['display', 'visibility', 'content', 'content-auto', 'paint-contain', 'range', 'style-api', 'clip-api']) expect(document.querySelector(`#${id}`).textContent).not.toContain('⟦TI⟧');
+    await engine.cleanup();
+  });
+
   it('processes mutations after idle and handles repeated scrolls and timer drainage', async () => {
     document.body.innerHTML = '<main><p data-y="5000">Offscreen</p></main>';
     const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main'), maxStepsPerSlice: 2 });
@@ -1004,6 +1065,60 @@ describe('viewport DOM prototype', () => {
       root.append(edited);
       expect(edited.textContent).toBe('External text');
       expect(edited.title).toBe('Replacement title');
+    }
+  });
+
+  it('restores unchanged owned text moved into a nested shadow root in both modes', async () => {
+    for (const mode of ['baseline', 'viewport']) {
+      document.body.innerHTML = '<main><p id="source">Moved source</p><x-shell></x-shell><p id="reordered">Same-owner reorder</p><p>Sibling</p></main>';
+      const root = document.querySelector('main'), source = root.querySelector('#source'), movedText = source.firstChild;
+      const outerShadow = root.querySelector('x-shell').attachShadow({ mode: 'open' });
+      const inner = document.createElement('x-inner'); outerShadow.append(inner);
+      const destinationShadow = inner.attachShadow({ mode: 'open' }), destination = document.createElement('span');
+      destinationShadow.append(destination);
+      const reordered = root.querySelector('#reordered');
+      const engine = TranslateItViewportPrototype.createEngine({ root, mode });
+      await engine.start(); await engine.whenIdle();
+      expect(movedText.data).toBe('⟦TI⟧Moved source');
+      root.append(reordered);
+      destination.append(movedText); source.remove();
+      await engine.restore();
+      expect(movedText.data).toBe('Moved source');
+      expect(reordered.textContent).toBe('Same-owner reorder');
+      expect(engine.getStats().restoredNodes).toBe(3);
+      expect(engine.getStats().preservedExternalNodes).toBe(0);
+    }
+  });
+
+  it('restores owned text moved within a temporarily detached root in both modes', async () => {
+    for (const mode of ['baseline', 'viewport']) {
+      document.body.innerHTML = '<main><p id="source" title="Source title">Moved source</p><p id="destination" title="Destination title"></p></main>';
+      const root = document.querySelector('main'), source = root.querySelector('#source'), destination = root.querySelector('#destination'), movedText = source.firstChild;
+      const engine = TranslateItViewportPrototype.createEngine({ root, mode });
+      await engine.start(); await engine.whenIdle();
+      destination.append(movedText); source.remove(); root.remove();
+      await engine.restore();
+      expect(movedText.data).toBe('Moved source');
+      expect(source.title).toBe('Source title');
+      expect(destination.title).toBe('Destination title');
+      expect(engine.getStats().restoredNodes).toBe(3);
+      expect(engine.getStats().preservedExternalNodes).toBe(0);
+    }
+  });
+
+  it('does not restore an unchanged Attr moved to a different owner inside the root', async () => {
+    for (const mode of ['baseline', 'viewport']) {
+      document.body.innerHTML = '<main><p id="source" title="Original"></p><p id="destination"></p></main>';
+      const root = document.querySelector('main'), source = root.querySelector('#source'), destination = root.querySelector('#destination');
+      const attr = source.getAttributeNode('title');
+      const engine = TranslateItViewportPrototype.createEngine({ root, mode });
+      await engine.start(); await engine.whenIdle();
+      expect(attr.value).toBe('⟦TI⟧Original');
+      source.removeAttributeNode(attr); destination.setAttributeNode(attr);
+      await engine.restore();
+      expect(destination.getAttributeNode('title')).toBe(attr);
+      expect(attr.value).toBe('⟦TI⟧Original');
+      expect(engine.getStats().restoredNodes).toBe(0);
     }
   });
 

@@ -6,6 +6,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 if (typeof WebSocket !== 'function') throw new Error('Node with native WebSocket is required (Node 22+).');
+const browserCheck = process.env.PAGE_TRANSLATION_BROWSER_CHECK;
+if (browserCheck && browserCheck !== 'coverage') throw new Error('PAGE_TRANSLATION_BROWSER_CHECK only supports the local coverage probe.');
+const coverageSource = browserCheck === 'coverage' ? await readFile(fileURLToPath(new URL('./coverage-checks.js', import.meta.url)), 'utf8') : null;
 const candidates = [process.env.CHROME_BIN, '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/opt/google/chrome/chrome', '/usr/lib/chromium/chromium', '/snap/bin/chromium'].filter(Boolean);
 const located = spawnSync('sh', ['-lc', 'command -v chromium chromium-browser google-chrome google-chrome-stable'], { encoding: 'utf8' }).stdout?.trim().split('\n') ?? [];
 let binary;
@@ -114,9 +117,10 @@ try {
   }
   if (!readyInPage) throw new Error('Fixture page scripts did not become ready.');
   if (sourcePath && !engineSourceServed) throw new Error(`Failed to serve requested engine override: ${sourcePath}`);
-  const response = await command('Runtime.evaluate', {
-    expression: `TranslateItPageBenchmark.run({samples:5, fixtureOptions:${JSON.stringify(process.env.PAGE_TRANSLATION_FIXTURE === 'flat' ? { branches: 2500, depth: 1, visibleCount: 24 } : { branches: 2500, depth: 4, visibleCount: 24 })}})`, awaitPromise: true, returnByValue: true,
-  }, 120000);
+  const expression = coverageSource
+    ? `(function(){ globalThis.eval(${JSON.stringify(coverageSource)}); return TranslateItPageCoverageChecks.run(); })()`
+    : `TranslateItPageBenchmark.run({samples:5, fixtureOptions:${JSON.stringify(process.env.PAGE_TRANSLATION_FIXTURE === 'flat' ? { branches: 2500, depth: 1, visibleCount: 24 } : { branches: 2500, depth: 4, visibleCount: 24 })}})`;
+  const response = await command('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, 120000);
   if (response.exceptionDetails) throw new Error(`Fixture benchmark failed: ${response.exceptionDetails.text}`);
   if (!response.result.value) throw new Error('Fixture benchmark returned no aggregate result.');
   response.result.value.environment.engineSource = sourcePath ?? 'working-tree engine.js';

@@ -37,6 +37,12 @@ pnpm exec node scripts/dev/page-translation-prototype/run-browser.mjs
 
 This is a convenience run, not Firefox validation. If browser startup or DevTools connection fails, report the failure; do not point it at an existing profile or weaken browser security settings.
 
+For the bounded rendered-geometry coverage checks (marked fixture only; numeric/boolean results, no DOM text output), run:
+
+```sh
+PAGE_TRANSLATION_BROWSER_CHECK=coverage pnpm exec node scripts/dev/page-translation-prototype/run-browser.mjs
+```
+
 ## Firefox DevTools on a real page (manual, explicit opt-in)
 
 1. Use a dedicated Firefox profile. Disable the extension's automatic Page Translation rule for the target page (or disable that feature in this profile) so it cannot mutate the DOM alongside the prototype. Keep the extension's production behavior otherwise untouched.
@@ -78,6 +84,10 @@ Viewport mutation handling observes all attributes. Namespaced attributes, non-`
 Over-budget added subtrees and stylesheet/pending-link cap overflow during a subtree scan are coalesced into one marker on that added subtree; resource caps found during per-node discovery mark the resource node. The bounded uncertainty-root set makes data audits fail closed while a marked subtree/resource remains live, then prunes its marker when the subtree is actually disconnected from the document (including through nested shadow hosts); a remove/reinsert within one mutation batch keeps the marker. The configured root observer also remains installed across temporary root detachment and is released on stop/restore. Body-link inventory and pending-map overflow are rechecked on body child-list changes and clear when the current bounded inventory fits. If the uncertainty-root set itself overflows, fallback remains conservative for the session because some live unknown roots can no longer be individually retired.
 
 IntersectionObserver was considered but is not used for discovery: it only reports on explicitly registered targets, so registering every descendant would reintroduce the full scan. Scroll-triggered root rediscovery reaches previously unregistered branches instead. This prototype deliberately has no eventual full-document fallback.
+
+For text nodes only, the existing composed-owner bounding-box fast path remains unchanged. If that owner has a finite, exactly zero-by-zero box, a fallback checks rendered `Range` fragments against the margin-expanded viewport and overflow clip boxes along the composed/assigned-slot ancestor chain, including ancestors above the configured root. Computed display/content visibility and the text owner's effective visibility are checked. Attributes, positive/one-dimensional boxes, failed geometry APIs, and unsupported clip/transform/zoom/paint-containment cases do not use this fallback; rounded overflow clips and nonzero overflow-clip margins fail closed. `geometryChecks` counts bounding-box reads used by the fallback; computed-style and Range calls are not included. This is conservative supplemental coverage, not a general painted-pixel oracle: unsupported effects and the existing positive-box fast path can still disagree with actual paint.
+
+Directly slotted text starts fallback ancestry and effective-visibility checks at its assigned slot. Only computed `display`, `visibility`, and both overflow axes are mandatory; absent optional effect properties use inactive defaults, while explicit masks, clips, transforms, zooms, and paint containment fail closed.
 
 ## Short report template
 

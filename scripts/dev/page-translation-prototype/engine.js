@@ -2,6 +2,7 @@
   'use strict';
   const ATTRIBUTES = ['title', 'alt', 'placeholder'];
   const DEFAULT_EXCLUDED = 'script,style,noscript,code,pre,textarea,input,select,button,[data-translate-it-ui]';
+  const CLIPPING_OVERFLOW = new Set(['hidden', 'clip', 'auto', 'scroll']);
   const MAX_AUDIT_SCOPES = 64, MAX_AUDIT_SHEETS = 128, MAX_AUDIT_RULES = 512, MAX_AUDIT_BYTES = 262144, MAX_BATCH_DATA_NAMES = 32, MAX_HEAD_NODES = 512;
   const own = (node) => node.nodeType === 2 ? node.value : node.nodeValue;
   const composedOwner = (node) => node.nodeType === 2 ? node.ownerElement : node.nodeType === 3 ? (node.parentElement || node.parentNode?.host) : node;
@@ -38,11 +39,55 @@
       }
       return editable;
     };
+    const visibleTextWithoutOwnerBox = (node, owner, ownerRect) => {
+      const allowed = { left: -marginPx, top: -marginPx, right: view.innerWidth + marginPx, bottom: view.innerHeight + marginPx };
+      const start = node.assignedSlot || owner;
+      const hasNonDefault = (value, fallback) => !!value && value !== fallback;
+      try {
+        for (let el = start; el; el = el.assignedSlot || el.parentElement || el.parentNode?.host) {
+          const style = view.getComputedStyle(el);
+          if (!style || typeof style.display !== 'string' || typeof style.visibility !== 'string' || typeof style.overflowX !== 'string' || typeof style.overflowY !== 'string') return false;
+          if (style.display === 'none' || (style.contentVisibility && style.contentVisibility !== 'visible') || (el === start && ['hidden', 'collapse'].includes(style.visibility))) return false;
+          if (hasNonDefault(style.transform, 'none') || hasNonDefault(style.perspective, 'none') || hasNonDefault(style.zoom, 'normal') && style.zoom !== '1' && style.zoom !== '100%' || hasNonDefault(style.scale, 'none') || hasNonDefault(style.rotate, 'none') || hasNonDefault(style.translate, 'none') || hasNonDefault(style.clipPath, 'none') || hasNonDefault(style.clip, 'auto') || hasNonDefault(style.maskImage, 'none') || hasNonDefault(style.webkitMaskImage, 'none') || hasNonDefault(style.maskBorderSource, 'none') || hasNonDefault(style.webkitMaskBoxImageSource, 'none') || (style.contain || '').split(/\s+/).some(value => ['paint', 'content', 'strict'].includes(value))) return false;
+          let clipX = CLIPPING_OVERFLOW.has(style.overflowX), clipY = CLIPPING_OVERFLOW.has(style.overflowY);
+          if (el === doc.documentElement || style.display === 'contents') clipX = clipY = false;
+          if (el === doc.body) {
+            const rootStyle = view.getComputedStyle(doc.documentElement);
+            if (!rootStyle || typeof rootStyle.overflowX !== 'string' || typeof rootStyle.overflowY !== 'string') return false;
+            if (rootStyle.overflowX === 'visible') clipX = false;
+            if (rootStyle.overflowY === 'visible') clipY = false;
+          }
+          if (clipX || clipY) {
+            const clipMargin = style.overflowClipMargin || '';
+            const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomLeftRadius, style.borderBottomRightRadius];
+            if (clipMargin && clipMargin.split(/\s+/).some(value => value !== '0px' && value !== '0') || radii.some(radius => radius && radius !== '0px' && radius !== '0')) return false;
+            let box = ownerRect;
+            if (el !== owner) { report.geometryChecks++; box = el.getBoundingClientRect(); }
+            const values = [box.left, box.top, el.clientLeft, el.clientTop, el.clientWidth, el.clientHeight];
+            if (!values.every(Number.isFinite)) return false;
+            const left = box.left + el.clientLeft, top = box.top + el.clientTop;
+            if (clipX) { allowed.left = Math.max(allowed.left, left); allowed.right = Math.min(allowed.right, left + el.clientWidth); }
+            if (clipY) { allowed.top = Math.max(allowed.top, top); allowed.bottom = Math.min(allowed.bottom, top + el.clientHeight); }
+            if (allowed.right <= allowed.left || allowed.bottom <= allowed.top) return false;
+          }
+          if (el === doc.documentElement) break;
+        }
+        const range = doc.createRange(); range.selectNodeContents(node);
+        const rects = range.getClientRects();
+        if (!rects || !Number.isFinite(rects.length)) return false;
+        for (let i = 0; i < rects.length; i++) {
+          const r = rects.item(i) ?? rects[i];
+          if ([r.left, r.top, r.right, r.bottom, r.width, r.height].every(Number.isFinite) && r.width > 0 && r.height > 0 && r.right > allowed.left && r.left < allowed.right && r.bottom > allowed.top && r.top < allowed.bottom) return true;
+        }
+      } catch { return false; }
+      return false;
+    };
     const visible = (node) => {
       const el = composedOwner(node);
       if (!el) return false;
       let r; try { report.geometryChecks++; r = el.getBoundingClientRect(); } catch { return false; }
-      return (r.width > 0 || r.height > 0) && r.bottom >= -marginPx && r.top <= view.innerHeight + marginPx && r.right >= -marginPx && r.left <= view.innerWidth + marginPx;
+      if ((r.width > 0 || r.height > 0) && r.bottom >= -marginPx && r.top <= view.innerHeight + marginPx && r.right >= -marginPx && r.left <= view.innerWidth + marginPx) return true;
+      return node.nodeType === 3 && r.width === 0 && r.height === 0 && [r.left, r.top, r.right, r.bottom].every(Number.isFinite) && visibleTextWithoutOwnerBox(node, el, r);
     };
     const add = (node) => {
       if (!node || stopped || queuedCandidates.has(node)) return;
@@ -701,7 +746,7 @@
             if (attr && owned.has(attr)) restoreOne(attr, owned.get(attr));
           }
         }
-        for (const [node, rec] of owned) if (!rec.owner?.isConnected || (node.nodeType === 3 && !node.parentNode)) restoreOne(node, rec);
+        for (const [node, rec] of owned) if ((!rec.owner?.isConnected || (node.nodeType === 3 && !node.parentNode)) && !belongsToRemovedSubtree(composedOwner(node), root)) restoreOne(node, rec);
         owned.clear(); candidates.clear();
         report.restoreMs += performance.now() - then; restorePromise = Promise.resolve(getStats()); return restorePromise;
       }
@@ -723,9 +768,10 @@
     };
     const restoreOne = (node, rec) => {
       const detachedText = node.nodeType === 3 && !node.parentNode;
-      if (composedOwner(node) !== rec.owner && !detachedText) return;
+      const currentInRoot = node.nodeType === 3 && belongsToRemovedSubtree(composedOwner(node), root);
+      if (!currentInRoot && composedOwner(node) !== rec.owner && !detachedText) return;
       if (node.nodeType === 2 && node.ownerElement.getAttributeNode(node.name) !== node) return;
-      if (rec.owner.isConnected && !connected(rec.owner)) return;
+      if (!currentInRoot && rec.owner.isConnected && !connected(rec.owner)) return;
       if (own(node) !== rec.applied) { report.preservedExternalNodes++; return; }
       rec.setter(rec.original); report.restoredNodes++;
     };
