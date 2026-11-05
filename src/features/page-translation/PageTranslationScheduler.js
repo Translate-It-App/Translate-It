@@ -387,6 +387,7 @@ export class PageTranslationScheduler extends ResourceTracker {
           : standardDelay);
 
     if (this.batchTimer) {
+      if (this.isFirstBatch) return; // Preserve the deadline from the first enqueue.
       // If a high-priority item comes in, we might want to speed up the existing timer
       if (isHighPriority && this.batchTimerDelay > 100) {
         clearTimeout(this.batchTimer);
