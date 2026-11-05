@@ -17,7 +17,7 @@
     const customSelectors = excludedSelectors.filter((s) => { try { doc.createElement('div').matches(s); return true; } catch { return false; } });
     const owned = new Map(), candidates = new Set(), queuedCandidates = new Set(), queuedRoots = new Set(), observers = new Map();
     const changedNodes = new Set(), addedRoots = new Set();
-    const report = { mode, visitedNodes: 0, seedAncestorVisits: 0, seedSubtreeVisits: 0, rootTraversalVisits: 0, seedTargetRepeatVisits: 0, restoreVisitedNodes: 0, translatedNodes: 0, firstVisibleMs: null, processingMs: 0, restoreMs: 0, restoredNodes: 0, preservedExternalNodes: 0, ownedNodes: 0, maxSliceMs: 0, maxRestoreSliceMs: 0, geometryChecks: 0, prunedBranches: 0, discoveryPasses: 0, discoveryRequests: 0, discoveryRequestsStart: 0, discoveryRequestsScroll: 0, discoveryRequestsResize: 0, discoveryRequestsDomMutation: 0, discoveryRequestsHeadMutation: 0, discoveryRequestsBodyMutation: 0, discoveryRequestsStylesheetLoad: 0, discoveryRequestsStylesheetError: 0, discoveryRequestsImmediate: 0, discoveryRequestsCoalesced: 0, discoveryFollowupPasses: 0, domMutationObserverBatches: 0, rootMutationObserverBatches: 0, headMutationObserverBatches: 0, bodyMutationObserverBatches: 0, mutationChildListRecords: 0, mutationUnownedCharacterDataRecords: 0, mutationRelevantAttributeRecords: 0, mutationDataAttributeRecords: 0, mutationCssReferencedBatches: 0, mutationCssClearBatches: 0, mutationCssFallbackBatches: 0, mutationAuditMs: 0, mutationAuditCount: 0, mutationAuditFallbacks: 0 };
+    const report = { mode, visitedNodes: 0, seedAncestorVisits: 0, seedSubtreeVisits: 0, rootTraversalVisits: 0, seedTargetRepeatVisits: 0, restoreVisitedNodes: 0, translatedNodes: 0, firstVisibleMs: null, processingMs: 0, restoreMs: 0, restoredNodes: 0, preservedExternalNodes: 0, ownedNodes: 0, maxSliceMs: 0, maxRestoreSliceMs: 0, geometryChecks: 0, prunedBranches: 0, discoveryPasses: 0, discoveryRequests: 0, discoveryRequestsStart: 0, discoveryRequestsScroll: 0, discoveryRequestsResize: 0, discoveryRequestsDomMutation: 0, discoveryRequestsHeadMutation: 0, discoveryRequestsBodyMutation: 0, discoveryRequestsStylesheetLoad: 0, discoveryRequestsStylesheetError: 0, discoveryRequestsRefresh: 0, discoveryRequestsImmediate: 0, discoveryRequestsCoalesced: 0, discoveryFollowupPasses: 0, domMutationObserverBatches: 0, rootMutationObserverBatches: 0, headMutationObserverBatches: 0, bodyMutationObserverBatches: 0, mutationChildListRecords: 0, mutationUnownedCharacterDataRecords: 0, mutationRelevantAttributeRecords: 0, mutationDataAttributeRecords: 0, mutationCssReferencedBatches: 0, mutationCssClearBatches: 0, mutationCssFallbackBatches: 0, mutationAuditMs: 0, mutationAuditCount: 0, mutationAuditFallbacks: 0 };
     let active = false, stopped = false, initialDone = false, timer = null, queue = [], queueHead = 0, waiters = [], startResolve, startPromise, startedAt = 0, restorePromise = null, mutationsQueued = false, rescan = null, rescanDirty = false, maintenance = null, maintenanceDirty = false, viewportJob = null, viewportDirty = false, observerSweepDirty = false, bodyLinkInventoryOverflow = false, bodyPendingLinkOverflow = false, uncertainRootsOverflow = false, headObserver = null, bodyObserver = null;
     const pendingStylesheetLinks = new Map(), stylesheetResources = new Set(), uncertainStylesheetRoots = new Set(), stylesheetEventTargets = new Set(), handledStylesheetEvents = new WeakSet();
     const connected = (node) => {
@@ -386,6 +386,7 @@
         else if (trigger === 'bodyMutation') report.discoveryRequestsBodyMutation++;
         else if (trigger === 'stylesheetLoad') report.discoveryRequestsStylesheetLoad++;
         else if (trigger === 'stylesheetError') report.discoveryRequestsStylesheetError++;
+        else if (trigger === 'refresh') report.discoveryRequestsRefresh++;
         else report.discoveryRequestsDomMutation++;
       }
       if (viewportJob) {
@@ -852,7 +853,7 @@
       if (own(node) !== rec.applied) { report.preservedExternalNodes++; return; }
       rec.setter(rec.original); report.restoredNodes++;
     };
-    return { start, whenIdle, stop, restore, cleanup: restore, getStats };
+    return { start, whenIdle, refresh: () => { if (mode === 'viewport') requestViewportPass('refresh'); }, stop, restore, cleanup: restore, getStats };
   }
   globalThis.TranslateItViewportPrototype = { createEngine, mockTranslate };
 })();

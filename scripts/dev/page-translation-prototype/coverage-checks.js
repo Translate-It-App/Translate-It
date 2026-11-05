@@ -231,7 +231,70 @@
       const node = makeText(owner, 'scroll target'); return [{ node, owner, original: node.data }];
     }, { afterStart: () => window.scrollTo(0, 1000), expectedInitial: [false], expectedAfter: [true], expectedGeometry: [[true, true, false]] });
 
-    return { environment: { userAgent: navigator.userAgent, viewport: `${innerWidth}x${innerHeight}` }, cases };
+    if (typeof TranslateItViewportPrototype.createEngine({ root: fixture, mode: 'viewport' }).refresh !== 'function') {
+      throw new Error('Coverage checks require the public viewport engine.refresh() API.');
+    }
+    {
+      window.scrollTo(0, 0); await delay(50); fixture.replaceChildren();
+      const style = document.createElement('style');
+      style.textContent = '.coverage-cssom-target { position:absolute; left:20px; top:1400px; width:160px; height:24px }';
+      document.head.append(style);
+      const owner = document.createElement('p'); owner.className = 'coverage-cssom-target';
+      const node = makeText(owner, 'cssom refresh target'); fixture.append(owner);
+      const original = node.data, before = rect(owner);
+      const engine = TranslateItViewportPrototype.createEngine({ root: fixture, mode: 'viewport' });
+      let activeStats, cleanupStats, cssomGeometry;
+      try {
+        await engine.start(); await engine.whenIdle();
+        if (node.data !== original || !Number.isFinite(before.y) || before.y < 1200) throw new Error('Coverage check cssom-refresh: target was not initially beyond the discovery margin.');
+        style.sheet.insertRule('.coverage-cssom-target { top:40px }', style.sheet.cssRules.length);
+        const afterRule = rect(owner);
+        cssomGeometry = { beforeY: before.y, afterY: afterRule.y };
+        if (!Number.isFinite(afterRule.y) || afterRule.y < 0 || afterRule.y >= innerHeight || afterRule.y === before.y) throw new Error(`Coverage check cssom-refresh: Chrome did not apply the CSSOM geometry change (${before.y} -> ${afterRule.y}).`);
+        await delay(50); await engine.whenIdle();
+        if (node.data !== original) throw new Error('Coverage check cssom-refresh: CSSOM-only change unexpectedly requested discovery.');
+        engine.refresh(); await engine.whenIdle();
+        if (!node.data.startsWith('⟦TI⟧')) throw new Error('Coverage check cssom-refresh: refresh did not discover the newly eligible target.');
+        node.data = 'external cssom edit';
+        await engine.restore();
+        if (node.data !== 'external cssom edit') throw new Error('Coverage check cssom-refresh: external edit was not preserved on restore.');
+        activeStats = engine.getStats();
+      } finally {
+        await engine.cleanup(); cleanupStats = engine.getStats(); style.remove();
+      }
+      window.dispatchEvent(new Event('scroll')); await delay(30);
+      if (node.data !== 'external cssom edit' || cleanupStats.observerCount !== 0 || cleanupStats.pendingJobCount !== 0 || cleanupStats.ownedNodes !== 0 || activeStats.discoveryRequestsRefresh !== 1) throw new Error('Coverage check cssom-refresh: cleanup, refresh-count, or late-write regression.');
+      cases.push({ name: 'cssom-only-geometry-change-refresh', geometry: cssomGeometry, translatedInitially: false, translatedAfterRefresh: true, externalEditPreserved: true, lateWritesAbsent: true, stats: { discoveryRequestsRefresh: activeStats.discoveryRequestsRefresh, observersAfterCleanup: cleanupStats.observerCount, pendingAfterCleanup: cleanupStats.pendingJobCount, ownedAfterCleanup: cleanupStats.ownedNodes } });
+    }
+    {
+      window.scrollTo(0, 0); await delay(50); fixture.replaceChildren();
+      const host = document.createElement('x-coverage-late-shadow');
+      host.style.cssText = 'display:block;width:160px;height:40px;margin-top:20px'; fixture.append(host);
+      const engine = TranslateItViewportPrototype.createEngine({ root: fixture, mode: 'viewport' });
+      let activeStats, cleanupStats;
+      let first, second;
+      try {
+        await engine.start(); await engine.whenIdle();
+        const shadow = host.attachShadow({ mode: 'open' });
+        const nestedHost = document.createElement('span'); nestedHost.style.cssText = 'display:block;width:150px;height:24px'; shadow.append(nestedHost);
+        const nested = nestedHost.attachShadow({ mode: 'open' });
+        first = makeText(nested, 'late nested shadow target');
+        await delay(50); await engine.whenIdle();
+        if (first.data.startsWith('⟦TI⟧')) throw new Error('Coverage check late-shadow-refresh: late root translated without a refresh request.');
+        engine.refresh(); await engine.whenIdle();
+        if (!first.data.startsWith('⟦TI⟧')) throw new Error('Coverage check late-shadow-refresh: refresh did not discover nested late root content.');
+        second = makeText(nested, 'observed shadow addition'); await delay(50); await engine.whenIdle();
+        if (!second.data.startsWith('⟦TI⟧')) throw new Error('Coverage check late-shadow-refresh: discovered root was not observed for dynamic content.');
+        activeStats = engine.getStats();
+      } finally {
+        await engine.cleanup(); cleanupStats = engine.getStats();
+      }
+      window.dispatchEvent(new Event('scroll')); await delay(30);
+      if (first.data !== 'late nested shadow target' || second.data !== 'observed shadow addition' || cleanupStats.observerCount !== 0 || cleanupStats.pendingJobCount !== 0 || cleanupStats.ownedNodes !== 0 || activeStats.discoveryRequestsRefresh !== 1) throw new Error('Coverage check late-shadow-refresh: restoration, cleanup, refresh-count, or late-write regression.');
+      cases.push({ name: 'late-nested-open-shadow-refresh-and-observation', discoveredByRefresh: true, dynamicContentObserved: true, restored: true, lateWritesAbsent: true, stats: { discoveryRequestsRefresh: activeStats.discoveryRequestsRefresh, observersAfterCleanup: cleanupStats.observerCount, pendingAfterCleanup: cleanupStats.pendingJobCount, ownedAfterCleanup: cleanupStats.ownedNodes } });
+    }
+
+    return { environment: { userAgent: navigator.userAgent, viewport: `${innerWidth}x${innerHeight}` }, caseCount: cases.length, cases };
     } finally {
       fixture.replaceChildren(); window.scrollTo(0, 0);
     }

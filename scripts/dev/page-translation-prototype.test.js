@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const DIAGNOSTIC_COUNTERS = [
   'visitedNodes', 'seedAncestorVisits', 'seedSubtreeVisits', 'rootTraversalVisits', 'seedTargetRepeatVisits', 'discoveryPasses',
-  'discoveryRequests', 'discoveryRequestsStart', 'discoveryRequestsScroll', 'discoveryRequestsResize', 'discoveryRequestsDomMutation', 'discoveryRequestsHeadMutation', 'discoveryRequestsBodyMutation', 'discoveryRequestsStylesheetLoad', 'discoveryRequestsStylesheetError', 'discoveryRequestsImmediate', 'discoveryRequestsCoalesced', 'discoveryFollowupPasses',
+  'discoveryRequests', 'discoveryRequestsStart', 'discoveryRequestsScroll', 'discoveryRequestsResize', 'discoveryRequestsDomMutation', 'discoveryRequestsHeadMutation', 'discoveryRequestsBodyMutation', 'discoveryRequestsStylesheetLoad', 'discoveryRequestsStylesheetError', 'discoveryRequestsRefresh', 'discoveryRequestsImmediate', 'discoveryRequestsCoalesced', 'discoveryFollowupPasses',
   'domMutationObserverBatches', 'rootMutationObserverBatches', 'headMutationObserverBatches', 'bodyMutationObserverBatches', 'mutationChildListRecords', 'mutationUnownedCharacterDataRecords', 'mutationRelevantAttributeRecords', 'mutationDataAttributeRecords', 'mutationCssReferencedBatches', 'mutationCssClearBatches', 'mutationCssFallbackBatches', 'mutationAuditMs', 'mutationAuditCount', 'mutationAuditFallbacks',
 ];
 const VIEWPORT_ONLY_COUNTERS = DIAGNOSTIC_COUNTERS.filter(key => !['visitedNodes', 'discoveryPasses'].includes(key));
@@ -84,12 +84,117 @@ describe('viewport DOM prototype', () => {
       await vi.advanceTimersToNextTimerAsync(); // initialize the pass
       await vi.advanceTimersToNextTimerAsync(); // advance one root-traversal node
       window.dispatchEvent(new Event('scroll')); // leave a dirty follow-up pending
-      expect(engine.getStats()).toMatchObject({ discoveryRequests: 2, discoveryRequestsStart: 1, discoveryRequestsScroll: 1, discoveryRequestsCoalesced: 1, discoveryPasses: 1, discoveryFollowupPasses: 0 });
+      engine.refresh(); engine.refresh(); // refreshes coalesce into the same active pass
+      expect(engine.getStats()).toMatchObject({ discoveryRequests: 4, discoveryRequestsStart: 1, discoveryRequestsScroll: 1, discoveryRequestsRefresh: 2, discoveryRequestsImmediate: 1, discoveryRequestsCoalesced: 3, discoveryPasses: 1, discoveryFollowupPasses: 0 });
+      const stats = engine.getStats();
+      expect(stats.discoveryRequests).toBe(stats.discoveryRequestsStart + stats.discoveryRequestsScroll + stats.discoveryRequestsResize + stats.discoveryRequestsDomMutation + stats.discoveryRequestsHeadMutation + stats.discoveryRequestsBodyMutation + stats.discoveryRequestsStylesheetLoad + stats.discoveryRequestsStylesheetError + stats.discoveryRequestsRefresh);
+      expect(stats.discoveryRequestsImmediate + stats.discoveryRequestsCoalesced).toBe(stats.discoveryRequests);
       engine.stop(); await started;
       const stopped = Object.fromEntries(DIAGNOSTIC_COUNTERS.map(key => [key, engine.getStats()[key]]));
       await engine.restore(); await vi.runAllTimersAsync();
       expect(Object.fromEntries(DIAGNOSTIC_COUNTERS.map(key => [key, engine.getStats()[key]]))).toEqual(stopped);
       expect(engine.getStats().discoveryFollowupPasses).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('refresh rescans CSSOM-only eligibility changes through the viewport pass', async () => {
+    document.body.innerHTML = '<main><style id="cssom">#cssom-target { display: none }</style><p id="cssom-target">CSSOM-only source</p></main>';
+    const root = document.querySelector('main'), style = root.querySelector('style'), target = root.querySelector('p');
+    expect(window.getComputedStyle(target).display).toBe('none');
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    expect(target.textContent).toBe('CSSOM-only source');
+    const beforeCssom = engine.getStats();
+    expect(style.sheet.cssRules).toHaveLength(1);
+    style.sheet.deleteRule(0);
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(window.getComputedStyle(target).display).toBe('block');
+    expect(target.textContent).toBe('CSSOM-only source');
+    expect(engine.getStats()).toMatchObject({ discoveryPasses: beforeCssom.discoveryPasses, discoveryRequests: beforeCssom.discoveryRequests, discoveryRequestsRefresh: 0, pendingJobCount: 0 });
+
+    engine.refresh(); await engine.whenIdle();
+    expect(target.textContent).toBe('⟦TI⟧CSSOM-only source');
+    const refreshed = engine.getStats();
+    expect(refreshed).toMatchObject({ discoveryRequestsRefresh: 1, discoveryRequestsImmediate: beforeCssom.discoveryRequestsImmediate + 1, discoveryRequestsCoalesced: beforeCssom.discoveryRequestsCoalesced, discoveryPasses: beforeCssom.discoveryPasses + 1, discoveryFollowupPasses: beforeCssom.discoveryFollowupPasses });
+    expect(refreshed.discoveryRequests).toBe(refreshed.discoveryRequestsStart + refreshed.discoveryRequestsScroll + refreshed.discoveryRequestsResize + refreshed.discoveryRequestsDomMutation + refreshed.discoveryRequestsHeadMutation + refreshed.discoveryRequestsBodyMutation + refreshed.discoveryRequestsStylesheetLoad + refreshed.discoveryRequestsStylesheetError + refreshed.discoveryRequestsRefresh);
+    expect(refreshed.discoveryRequestsImmediate + refreshed.discoveryRequestsCoalesced).toBe(refreshed.discoveryRequests);
+    expect(refreshed.discoveryPasses).toBe(refreshed.discoveryRequestsImmediate + refreshed.discoveryFollowupPasses);
+    await engine.cleanup();
+    expect(engine.getStats()).toMatchObject({ ownedNodes: 0, observerCount: 0, pendingJobCount: 0 });
+  });
+
+  it('refresh discovers nested open roots attached after their hosts were scanned', async () => {
+    document.body.innerHTML = '<main><x-late-host data-y="0"></x-late-host></main>';
+    const root = document.querySelector('main'), host = root.querySelector('x-late-host');
+    const engine = TranslateItViewportPrototype.createEngine({ root });
+    await engine.start(); await engine.whenIdle();
+    const initial = engine.getStats();
+    const outer = host.attachShadow({ mode: 'open' }), innerHost = document.createElement('x-late-inner'); outer.append(innerHost);
+    const inner = innerHost.attachShadow({ mode: 'open' }), p = document.createElement('p'); p.dataset.y = '0'; p.textContent = 'Nested late shadow source'; inner.append(p);
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(p.textContent).toBe('Nested late shadow source');
+    expect(engine.getStats()).toMatchObject({ discoveryPasses: initial.discoveryPasses, discoveryRequests: initial.discoveryRequests, observerCount: initial.observerCount });
+
+    engine.refresh(); await engine.whenIdle();
+    expect(p.textContent).toBe('⟦TI⟧Nested late shadow source');
+    expect(engine.getStats()).toMatchObject({ discoveryPasses: initial.discoveryPasses + 1, discoveryRequests: initial.discoveryRequests + 1, discoveryRequestsRefresh: initial.discoveryRequestsRefresh + 1, observerCount: initial.observerCount + 2 });
+
+    const afterRefresh = engine.getStats();
+    const dynamic = document.createTextNode('Dynamic nested shadow source'); p.append(dynamic);
+    await new Promise(resolve => setTimeout(resolve, 0)); await engine.whenIdle();
+    expect(dynamic.data).toBe('⟦TI⟧Dynamic nested shadow source');
+    expect(engine.getStats()).toMatchObject({ discoveryPasses: afterRefresh.discoveryPasses + 1, discoveryRequestsRefresh: afterRefresh.discoveryRequestsRefresh, discoveryRequestsDomMutation: afterRefresh.discoveryRequestsDomMutation + 1 });
+    expect(engine.getStats().discoveryRequests).toBe(afterRefresh.discoveryRequests + 1);
+    await engine.cleanup();
+    expect(engine.getStats()).toMatchObject({ ownedNodes: 0, observerCount: 0, pendingJobCount: 0 });
+  });
+
+  it('refresh is a no-op outside an active viewport session', async () => {
+    document.body.innerHTML = '<main><p data-y="0">Refresh lifecycle source</p></main>';
+    const root = document.querySelector('main');
+    const diagnostics = engine => Object.fromEntries(DIAGNOSTIC_COUNTERS.map(key => [key, engine.getStats()[key]]));
+    const viewport = TranslateItViewportPrototype.createEngine({ root });
+    let before = diagnostics(viewport);
+    expect(viewport.refresh()).toBeUndefined();
+    expect(diagnostics(viewport)).toEqual(before);
+    expect(viewport.getStats().pendingJobCount).toBe(0);
+    await viewport.start(); await viewport.whenIdle();
+    viewport.stop(); before = diagnostics(viewport);
+    viewport.refresh(); await viewport.whenIdle();
+    expect(diagnostics(viewport)).toEqual(before);
+    await viewport.restore(); before = diagnostics(viewport);
+    viewport.refresh(); expect(diagnostics(viewport)).toEqual(before);
+    await viewport.cleanup(); before = diagnostics(viewport);
+    viewport.refresh(); expect(diagnostics(viewport)).toEqual(before);
+    expect(viewport.getStats()).toMatchObject({ ownedNodes: 0, observerCount: 0, pendingJobCount: 0 });
+
+    const baseline = TranslateItViewportPrototype.createEngine({ root, mode: 'baseline' });
+    before = diagnostics(baseline); baseline.refresh(); expect(diagnostics(baseline)).toEqual(before);
+    await baseline.start(); await baseline.whenIdle(); before = diagnostics(baseline);
+    baseline.refresh(); expect(diagnostics(baseline)).toEqual(before);
+    expect(baseline.getStats().discoveryRequestsRefresh).toBe(0);
+    await baseline.cleanup();
+  });
+
+  it('coalesces refreshes into one follow-up pass for an active explicit viewport pass', async () => {
+    document.body.innerHTML = '<main>' + '<p>Refresh target</p>'.repeat(20) + '</main>';
+    const root = document.querySelector('main'); document.elementFromPoint = () => null;
+    vi.useFakeTimers();
+    try {
+      const engine = TranslateItViewportPrototype.createEngine({ root, maxStepsPerSlice: 1 });
+      const started = engine.start(); await vi.runAllTimersAsync(); await started; await engine.whenIdle();
+      const translated = engine.getStats().translatedNodes;
+      engine.refresh();
+      await vi.advanceTimersToNextTimerAsync(); await vi.advanceTimersToNextTimerAsync();
+      engine.refresh(); engine.refresh();
+      expect(engine.getStats()).toMatchObject({ discoveryRequestsRefresh: 3, discoveryRequestsStart: 1, discoveryRequests: 4, discoveryRequestsImmediate: 2, discoveryRequestsCoalesced: 2, discoveryPasses: 2, discoveryFollowupPasses: 0 });
+      await vi.runAllTimersAsync(); await engine.whenIdle();
+      const stats = engine.getStats();
+      expect(stats).toMatchObject({ discoveryRequests: 4, discoveryRequestsRefresh: 3, discoveryRequestsImmediate: 2, discoveryRequestsCoalesced: 2, discoveryPasses: 3, discoveryFollowupPasses: 1, translatedNodes: translated, pendingJobCount: 0 });
+      expect(stats.discoveryRequests).toBe(stats.discoveryRequestsStart + stats.discoveryRequestsScroll + stats.discoveryRequestsResize + stats.discoveryRequestsDomMutation + stats.discoveryRequestsHeadMutation + stats.discoveryRequestsBodyMutation + stats.discoveryRequestsStylesheetLoad + stats.discoveryRequestsStylesheetError + stats.discoveryRequestsRefresh);
+      expect(stats.discoveryPasses).toBe(stats.discoveryRequestsImmediate + stats.discoveryFollowupPasses);
+      const cleanup = engine.cleanup(); await vi.runAllTimersAsync(); await cleanup;
+      expect(engine.getStats()).toMatchObject({ ownedNodes: 0, observerCount: 0, pendingJobCount: 0 });
     } finally { vi.useRealTimers(); }
   });
 
@@ -982,7 +1087,6 @@ describe('viewport DOM prototype', () => {
   it('records available hidden styles before falling back on incomplete style metadata', async () => {
     document.body.innerHTML = '<main><p id="hidden-start">Hidden start</p><section id="hidden-outer" style="content-visibility:hidden"><p id="unsupported-inner">Hidden outer</p></section></main>';
     const hiddenStart = document.querySelector('#hidden-start'), hiddenOuter = document.querySelector('#hidden-outer'), unsupportedInner = document.querySelector('#unsupported-inner');
-    Object.defineProperty(hiddenStart, 'checkVisibility', { configurable: true, value: () => true });
     Object.defineProperty(unsupportedInner, 'checkVisibility', { configurable: true, value: () => true });
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 });
     const nativeGetComputedStyle = window.getComputedStyle.bind(window);
