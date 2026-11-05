@@ -98,6 +98,8 @@ When enabled in Appearance, Page Translation resolves the existing `TRANSLATION_
 
 Discovery-pending state prevents premature empty, complete, or idle settlement; it ends after enumeration and observer registration, without waiting for offscreen lazy targets or provider results. Stop, Restore, cleanup, and session invalidation cancel remaining discovery. Discovery failure stops the session while preserving accepted translations for Restore; it never restarts legacy enumeration within that session. Legacy discovery remains available for subsequent sessions with the flag disabled. Mutation-time coverage is stable-tree parity plus revalidated live admission, not an atomic DOM snapshot.
 
+`PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY` is a separate internal, default-off option and has effect only when sliced discovery is enabled. It performs a single bounded reorder window on the initial canonical cursor: eligible primitives in the first 100 traversal steps (at most 100 candidates) are measured and stably admitted viewport-intersecting first, then traversal resumes at that same cursor. Enumeration, geometry checks, partition work, and admissions all consume the normal slice step/time budget; the configured eligible attribute names are visited incrementally instead of copying each element's full live attribute collection. This is a bounded-window fallback, not a viewport hit-test seed: it cannot prioritize visible content beyond the initial window, does not prune canonical traversal, and scrolling does not restart it. No speedup is guaranteed. Disable this flag to roll back to sliced-only discovery, or disable both flags to restore legacy traversal in the next session.
+
 ## Stability & Resiliency
 
 ### 1. Background Timeout

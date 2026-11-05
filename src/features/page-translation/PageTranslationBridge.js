@@ -18,8 +18,12 @@ import { walkOpenShadowTree } from '@/utils/dom/walkOpenShadowTree.js';
 import { getTranslationFontTarget } from '@/shared/fonts/TranslationFontPolicy.js';
 import {
   PAGE_TRANSLATION_SLICED_DISCOVERY,
+  PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY,
   PAGE_TRANSLATION_DISCOVERY_SLICE_MAX_STEPS,
   PAGE_TRANSLATION_DISCOVERY_SLICE_BUDGET_MS,
+  PAGE_TRANSLATION_VIEWPORT_WINDOW_ENUMERATION_STEPS,
+  PAGE_TRANSLATION_VIEWPORT_WINDOW_MAX_CANDIDATES,
+  PAGE_TRANSLATION_VIEWPORT_WINDOW_MAX_GEOMETRY_CHECKS,
 } from './PageTranslationConstants.js';
 
 const FORM_VALUE_TAGS = new Set(['INPUT', 'TEXTAREA', 'BUTTON']);
@@ -207,6 +211,16 @@ export class PageTranslationBridge extends ResourceTracker {
       translationFontFamily: settings.translationFontFamily || null,
       fontOwnership: new Map(),
       slicedDiscoveryEnabled: PAGE_TRANSLATION_SLICED_DISCOVERY,
+      viewportFirstDiscoveryEnabled: PAGE_TRANSLATION_SLICED_DISCOVERY
+        && PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY,
+      viewportAttributeNames: PAGE_TRANSLATION_SLICED_DISCOVERY && PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY
+        ? new Set(settings.attributesToTranslate || ['title', 'alt', 'placeholder'])
+        : null,
+      viewportWindowRoot: null,
+      viewportWindowStarted: false,
+      admissionContext: null,
+      admissionDisposers: PAGE_TRANSLATION_SLICED_DISCOVERY && PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY
+        ? new Set() : null,
       discovery: null,
       onDiscoveryStateChange,
       onDiscoveryError,
@@ -412,12 +426,18 @@ export class PageTranslationBridge extends ResourceTracker {
       translateNodeContent(node, callback) {
         const nodeData = this.nodeStorage.get(node);
         if (!nodeData) throw new Error('Node is not register');
-        if (node.nodeValue === null) return;
+        if (node.nodeValue === null) {
+          finishAdmission(node, nodeData, nodeData.pageTranslationAdmission);
+          return;
+        }
 
         const nodeId = nodeData.id;
         const nodeContext = nodeData.updateId;
         const taskGeneration = this.currentTaskGeneration;
-        return this.translateCallback(node.nodeValue, nodeData.importanceScore).then((text) => {
+        const admissionRecord = currentSession.admissionContext?.node === node
+          ? currentSession.admissionContext : nodeData.pageTranslationAdmission;
+        const providerResult = this.translateCallback(node.nodeValue, nodeData.importanceScore);
+        return providerResult.then((text) => {
           const actualNodeData = this.nodeStorage.get(node);
           const decision = getApplyDecision(node, taskGeneration);
           const isCurrentStorage = actualNodeData
@@ -435,6 +455,7 @@ export class PageTranslationBridge extends ResourceTracker {
               ? 'stale'
               : 'cancelled';
             forgetApplyDecision(node, taskGeneration);
+            finishAdmission(node, nodeData, admissionRecord);
             return;
           }
 
@@ -445,13 +466,22 @@ export class PageTranslationBridge extends ResourceTracker {
             && decision.settlement?.state === 'failed';
 
           if (canPreserveProviderFailure) {
-            actualNodeData.originalText = getCurrentNodeValue(node);
+            const failedSource = getCurrentNodeValue(node);
+            actualNodeData.originalText = failedSource;
             setCurrentNodeValue(node, text);
+            if (admissionRecord?.session === currentSession
+                && currentSession.viewportFirstDiscoveryEnabled) {
+              actualNodeData.pageTranslationFailure = {
+                sourceValue: admissionRecord.sourceValue,
+                updateId: actualNodeData.updateId,
+              };
+            }
             decision.outcome = 'failed-applied';
             try {
               if (callback) callback(node);
             } finally {
               forgetApplyDecision(node, taskGeneration);
+              finishAdmission(node, nodeData, admissionRecord);
             }
             return;
           }
@@ -486,12 +516,14 @@ export class PageTranslationBridge extends ResourceTracker {
               ? 'stale'
               : 'cancelled';
             forgetApplyDecision(node, taskGeneration);
+            finishAdmission(node, nodeData, admissionRecord);
             return;
           }
 
           try {
             actualNodeData.originalText = getCurrentNodeValue(node);
             setCurrentNodeValue(node, text);
+            delete actualNodeData.pageTranslationFailure;
             actualNodeData.acceptedTranslation = {
               originalText: actualNodeData.originalText,
               text: getCurrentNodeValue(node),
@@ -507,6 +539,7 @@ export class PageTranslationBridge extends ResourceTracker {
               ? 'stale'
               : 'cancelled';
             forgetApplyDecision(node, taskGeneration);
+            finishAdmission(node, nodeData, admissionRecord);
             throw error;
           }
           decision.outcome = 'applied';
@@ -515,13 +548,31 @@ export class PageTranslationBridge extends ResourceTracker {
             if (callback) callback(node);
           } finally {
             forgetApplyDecision(node, taskGeneration);
+            finishAdmission(node, nodeData, admissionRecord);
           }
+        }, error => {
+          const actualNodeData = this.nodeStorage.get(node);
+          if (admissionRecord?.session === currentSession
+              && currentSession.viewportFirstDiscoveryEnabled
+              && actualNodeData === nodeData
+              && actualNodeData.id === nodeId
+              && actualNodeData.updateId === nodeContext
+              && targetGenerations.get(node) === admissionRecord.generation) {
+            actualNodeData.pageTranslationFailure = {
+              sourceValue: admissionRecord.sourceValue,
+              updateId: actualNodeData.updateId,
+            };
+          }
+          finishAdmission(node, nodeData, admissionRecord);
+          throw error;
         });
       }
 
       restore(node, callback) {
         const nodeData = this.nodeStorage.get(node);
         const accepted = nodeData?.acceptedTranslation;
+        retireAdmission(nodeData?.pageTranslationAdmission, { removeObserver: true });
+        if (nodeData?.pageTranslationAdmission) delete nodeData.pageTranslationAdmission;
         // Detached targets are retired by active shadow observers; only stopped owners require connectivity.
         if ((!currentSession.active && !isConnectedTarget(node))
             || node.ownerDocument !== document
@@ -562,21 +613,85 @@ export class PageTranslationBridge extends ResourceTracker {
       return true;
     };
 
+    const clearAdmissionCallbacks = (record) => {
+      if (!record) return;
+      record.retired = true;
+      record.phase = 'terminal';
+      record.callbackGroups.clear();
+      record.directCallbacks.clear();
+      if (record.nodeData?.pageTranslationAdmission === record) {
+        delete record.nodeData.pageTranslationAdmission;
+      }
+      record.nodeData = null;
+      record.node = null;
+      record.owner = null;
+      record.domAction = null;
+      if (record.dispose) currentSession.admissionDisposers?.delete(record.dispose);
+      record.dispose = null;
+    };
+
+    const removeLazyAdmission = (record) => {
+      if (!record) return;
+      const observer = currentSession.intersectionScheduler?.intersectionObserver;
+      if (!observer) return;
+      const action = observer.nodeCallbacksMap?.get(record.node);
+      if (action?.pageTranslationAdmission === record) observer.nodeCallbacksMap.delete(record.node);
+      const ownedNodes = observer.elementNodesMap?.get(record.owner);
+      if (!ownedNodes?.delete(record.node)) return;
+      if (ownedNodes.size === 0) {
+        observer.elementNodesMap.delete(record.owner);
+        observer.intersectionObserver?.unobserve(record.owner);
+      }
+    };
+
+    const retireAdmission = (record, { removeObserver = false } = {}) => {
+      if (!record) return;
+      if (removeObserver) removeLazyAdmission(record);
+      clearAdmissionCallbacks(record);
+    };
+
+    const finishAdmission = (node, nodeData, record) => {
+      if (nodeData?.pageTranslationAdmission === record) {
+        delete nodeData.pageTranslationAdmission;
+      }
+      retireAdmission(record);
+    };
+
     if (currentSession.intersectionScheduler) {
       const originalAdd = currentSession.intersectionScheduler.add;
       currentSession.intersectionScheduler.add = function(node, callback) {
         // Restore ownership must survive even when visibility defers translation.
         if (retainAcceptedTranslation(node)) return;
         if (!currentSession.slicedDiscoveryEnabled) return originalAdd.call(this, node, callback);
-        const sourceValue = getCurrentNodeValue(node);
-        const generation = targetGenerations.get(node);
-        return originalAdd.call(this, node, (target) => {
-          if (isFreshTarget(target, sourceValue, generation)
-              && targetGenerations.get(target) === generation
-              && filter(target)) {
-            callback(target);
+        const record = currentSession.admissionContext?.node === node
+          ? currentSession.admissionContext : null;
+        const sourceValue = record?.sourceValue ?? getCurrentNodeValue(node);
+        const generation = record?.generation ?? targetGenerations.get(node);
+        const owner = getFilterElement(node);
+        if (record) {
+          record.owner = owner;
+          record.phase = 'intersection';
+          record.domAction = callback;
+        }
+        const action = (target) => {
+          if (record?.retired || !isFreshTarget(target, sourceValue, generation)
+              || targetGenerations.get(target) !== generation || !filter(target)) {
+            if (record) retireAdmission(record);
+            return;
           }
-        });
+          const previousAdmission = currentSession.admissionContext;
+          if (record) {
+            record.phase = 'provider';
+            currentSession.admissionContext = record;
+          }
+          try {
+            callback(target);
+          } finally {
+            currentSession.admissionContext = previousAdmission;
+          }
+        };
+        if (record) action.pageTranslationAdmission = record;
+        return originalAdd.call(this, node, action);
       };
     }
 
@@ -589,18 +704,38 @@ export class PageTranslationBridge extends ResourceTracker {
     nodesTranslator.translate = function(node, callback) {
       retainAcceptedTranslation(node);
       if (this.has(node)) return originalTranslate.call(this, node, callback);
+      const admission = currentSession.admissionContext?.node === node
+        ? currentSession.admissionContext : null;
       this.currentNode = node;
-      this.currentTaskGeneration = nextTargetGeneration(node);
+      this.currentTaskGeneration = admission?.generation ?? nextTargetGeneration(node);
+      if (admission) admission.generation = this.currentTaskGeneration;
       this.currentTaskOwnsStorage = typeof this.has === 'function' ? !this.has(node) : true;
-      return originalTranslate.call(this, node, callback);
+      const result = originalTranslate.call(this, node, callback);
+      const nodeData = this.nodeStorage?.get?.(node);
+      if (admission && nodeData) {
+        nodeData.pageTranslationAdmission = admission;
+        admission.nodeData = nodeData;
+        admission.phase = 'provider';
+      }
+      return result;
     };
 
     const originalUpdate = nodesTranslator.update;
     nodesTranslator.update = function(node, callback) {
+      const admission = currentSession.admissionContext?.node === node
+        ? currentSession.admissionContext : null;
       this.currentNode = node;
-      this.currentTaskGeneration = nextTargetGeneration(node);
+      this.currentTaskGeneration = admission?.generation ?? nextTargetGeneration(node);
+      if (admission) admission.generation = this.currentTaskGeneration;
       this.currentTaskOwnsStorage = false;
-      return originalUpdate.call(this, node, callback);
+      const result = originalUpdate.call(this, node, callback);
+      const nodeData = this.nodeStorage?.get?.(node);
+      if (admission && nodeData) {
+        nodeData.pageTranslationAdmission = admission;
+        admission.nodeData = nodeData;
+        admission.phase = 'provider';
+      }
+      return result;
     };
 
     /**
@@ -736,7 +871,131 @@ export class PageTranslationBridge extends ResourceTracker {
     };
 
     const originalDomTranslate = currentSession.domTranslator.translate;
+    const originalDomUpdate = currentSession.domTranslator.update;
+    const getPendingAdmission = (node) => {
+      const nodeData = nodesTranslator.nodeStorage.get(node);
+      if (nodeData?.pageTranslationAdmission) return nodeData.pageTranslationAdmission;
+      const observer = currentSession.intersectionScheduler?.intersectionObserver;
+      return observer?.nodeCallbacksMap?.get(node)?.pageTranslationAdmission || null;
+    };
+
+    const mergeAdmissionCallbacks = (record, callbacks) => {
+      if (callbacks instanceof Set) record.callbackGroups.add(callbacks);
+      else if (typeof callbacks === 'function') record.directCallbacks.add(callbacks);
+      else callbacks?.forEach?.(callback => {
+        if (typeof callback === 'function') record.directCallbacks.add(callback);
+      });
+    };
+
+    const makeAdmissionCallback = (record) => (node) => {
+      if (record.retired || !currentSession.active || this.session !== currentSession) return;
+      let firstError = null;
+      const callbacks = new Set(record.directCallbacks);
+      for (const group of record.callbackGroups) {
+        for (const callback of group) callbacks.add(callback);
+      }
+      for (const callback of callbacks) {
+        try {
+          callback(node);
+        } catch (error) {
+          firstError ||= error;
+        }
+      }
+      if (firstError) throw firstError;
+    };
+
+    const reobserveAdmission = (record, owner) => {
+      removeLazyAdmission(record);
+      record.owner = owner;
+      const previousAdmission = currentSession.admissionContext;
+      currentSession.admissionContext = record;
+      try {
+        currentSession.intersectionScheduler.add(record.node, record.domAction);
+      } finally {
+        currentSession.admissionContext = previousAdmission;
+      }
+    };
+
+    const admitPrimitive = (node, callbacks = null) => {
+      const owner = getFilterElement(node);
+      if (!currentSession.active || this.session !== currentSession
+          || window.location.href !== currentSession.url
+          || !isOwnedTarget(owner, currentSession.root)
+          || (node.nodeType === Node.ATTRIBUTE_NODE
+            && owner.getAttributeNode(node.name) !== node)
+          || (node.nodeType === Node.TEXT_NODE && !node.isConnected)
+          || !filter(node)) return;
+      retainAcceptedTranslation(node);
+      const sourceValue = getCurrentNodeValue(node);
+      if (!sourceValue.trim()) return;
+      const nodeData = nodesTranslator.nodeStorage.get(node);
+      const accepted = nodeData?.acceptedTranslation;
+      if (accepted && nodeData.updateId === accepted.updateId && accepted.text === sourceValue) return;
+      const failed = nodeData?.pageTranslationFailure;
+      if (failed && failed.updateId === nodeData.updateId && failed.sourceValue === sourceValue) return;
+      if (failed) delete nodeData.pageTranslationFailure;
+
+      let existing = getPendingAdmission(node);
+      if (existing && !existing.retired && existing.sourceValue === sourceValue
+          && existing.session === currentSession) {
+        mergeAdmissionCallbacks(existing, callbacks);
+        if (existing.owner !== owner) {
+          if (nodeData) existing.owner = owner;
+          else reobserveAdmission(existing, owner);
+        }
+        return;
+      }
+      if (existing) retireAdmission(existing, { removeObserver: existing.owner !== owner });
+
+      const record = {
+        node,
+        owner,
+        sourceValue,
+        generation: nextTargetGeneration(node),
+        session: currentSession,
+        phase: 'created',
+        callbackGroups: new Set(),
+        directCallbacks: new Set(),
+        retired: false,
+      };
+      mergeAdmissionCallbacks(record, callbacks);
+      record.dispose = () => {
+        if (record.phase === 'intersection') removeLazyAdmission(record);
+        retireAdmission(record);
+      };
+      record.dispose.record = record;
+      currentSession.admissionDisposers?.add(record.dispose);
+      const previousAdmission = currentSession.admissionContext;
+      currentSession.admissionContext = record;
+      try {
+        const completion = makeAdmissionCallback(record);
+        if (nodeData && nodesTranslator.has(node)) {
+          originalDomUpdate.call(currentSession.domTranslator, node, completion);
+        } else {
+          originalDomTranslate.call(currentSession.domTranslator, node, completion);
+        }
+      } catch (error) {
+        retireAdmission(record);
+        throw error;
+      } finally {
+        currentSession.admissionContext = previousAdmission;
+      }
+    };
+
+    const translateDiscoveredPrimitive = (node, callbacks) => {
+      if (currentSession.viewportFirstDiscoveryEnabled) return admitPrimitive(node, callbacks);
+      const callback = callbacks instanceof Set
+        ? (callbacks.size
+          ? processedNode => callbacks.forEach(notify => notify?.(processedNode))
+          : undefined)
+        : callbacks;
+      return originalDomTranslate.call(currentSession.domTranslator, node, callback);
+    };
+
     if (currentSession.slicedDiscoveryEnabled) {
+      if (currentSession.viewportFirstDiscoveryEnabled) {
+        currentSession.domTranslator.update = (node, callback) => admitPrimitive(node, callback);
+      }
       const discovery = {
         queue: [],
         head: 0,
@@ -783,7 +1042,22 @@ export class PageTranslationBridge extends ResourceTracker {
         shadowRoot: isShadowRoot(root),
         iterator: document.createNodeIterator(root, NodeFilter.SHOW_ALL),
         attributes: null,
+        attributeNames: null,
+        attributeOwner: null,
         attributeIndex: 0,
+      });
+
+      const createViewportWindow = () => ({
+        phase: 'collect',
+        enumerationSteps: 0,
+        candidates: [],
+        geometryIndex: 0,
+        visibleCandidates: [],
+        otherCandidates: [],
+        partitionIndex: 0,
+        visibleAdmissionIndex: 0,
+        otherAdmissionIndex: 0,
+        canonicalDone: false,
       });
 
       const nextDiscoveryStep = (task) => {
@@ -794,6 +1068,15 @@ export class PageTranslationBridge extends ResourceTracker {
         if (task.rootPrimitiveDone) return { done: true };
         while (task.frames.length) {
           const frame = task.frames.at(-1);
+          if (frame.attributeNames) {
+            const { value: name, done } = frame.attributeNames.next();
+            if (done) {
+              frame.attributeNames = null;
+              frame.attributeOwner = null;
+            } else {
+              return { node: frame.attributeOwner.getAttributeNode(name) };
+            }
+          }
           if (frame.attributes) {
             if (frame.attributeIndex < frame.attributes.length) {
               const attribute = frame.attributes[frame.attributeIndex++];
@@ -817,7 +1100,12 @@ export class PageTranslationBridge extends ResourceTracker {
             return { node: node.nodeType === Node.TEXT_NODE && !isUnsupportedDirectShadowText ? node : null };
           }
 
-          frame.attributes = Array.from(node.attributes);
+          if (currentSession.viewportFirstDiscoveryEnabled) {
+            frame.attributeNames = currentSession.viewportAttributeNames.values();
+            frame.attributeOwner = node;
+          } else {
+            frame.attributes = Array.from(node.attributes);
+          }
           frame.attributeIndex = 0;
           if (node.shadowRoot && currentSession.autoTranslateOnDOMChanges
               && isCurrentDiscoverySession()) {
@@ -835,6 +1123,12 @@ export class PageTranslationBridge extends ResourceTracker {
         if (discovery.timer !== null) {
           this.clearTimer(discovery.timer);
           discovery.timer = null;
+        }
+        for (const dispose of currentSession.admissionDisposers || []) dispose();
+        for (const task of discovery.queue) {
+          if (!task) continue;
+          task.backlog.length = 0;
+          task.viewportWindow = null;
         }
         discovery.queue.length = 0;
         discovery.head = 0;
@@ -877,12 +1171,103 @@ export class PageTranslationBridge extends ResourceTracker {
               discovery.head++;
               continue;
             }
-            const step = task.translateNodes && task.backlogIndex < task.backlog.length
-              ? { node: task.backlog[task.backlogIndex++] }
-              : nextDiscoveryStep(task);
+            const viewportWindow = task.viewportWindow;
+            if (task.translateNodes && viewportWindow?.phase === 'collect') {
+              if (viewportWindow.enumerationSteps >= PAGE_TRANSLATION_VIEWPORT_WINDOW_ENUMERATION_STEPS
+                  || viewportWindow.candidates.length >= PAGE_TRANSLATION_VIEWPORT_WINDOW_MAX_CANDIDATES) {
+                viewportWindow.phase = 'geometry';
+                steps++;
+                continue;
+              }
+              const step = nextDiscoveryStep(task);
+              steps++;
+              viewportWindow.enumerationSteps++;
+              if (step.done) {
+                viewportWindow.canonicalDone = true;
+                viewportWindow.phase = 'geometry';
+              } else if (step.node && isCurrentDiscoveryTarget(step.node) && filter(step.node)) {
+                viewportWindow.candidates.push({ node: step.node, visible: false });
+              }
+              continue;
+            }
+
+            if (task.translateNodes && viewportWindow?.phase === 'geometry') {
+              if (viewportWindow.geometryIndex >= viewportWindow.candidates.length
+                  || viewportWindow.geometryIndex >= PAGE_TRANSLATION_VIEWPORT_WINDOW_MAX_GEOMETRY_CHECKS) {
+                viewportWindow.phase = 'partition';
+                steps++;
+                continue;
+              }
+              const candidate = viewportWindow.candidates[viewportWindow.geometryIndex++];
+              steps++;
+              const owner = candidate && getFilterElement(candidate.node);
+              if (candidate && isCurrentDiscoveryTarget(candidate.node) && filter(candidate.node) && owner) {
+                try {
+                  const rect = owner.getBoundingClientRect();
+                  candidate.visible = rect.bottom > 0 && rect.right > 0
+                    && rect.top < (window.innerHeight || document.documentElement.clientHeight)
+                    && rect.left < (window.innerWidth || document.documentElement.clientWidth);
+                } catch {
+                  candidate.visible = false;
+                }
+              }
+              continue;
+            }
+
+            if (task.translateNodes && viewportWindow?.phase === 'partition') {
+              if (viewportWindow.partitionIndex >= viewportWindow.candidates.length) {
+                viewportWindow.phase = 'admit';
+                steps++;
+                continue;
+              }
+              const candidate = viewportWindow.candidates[viewportWindow.partitionIndex++];
+              steps++;
+              if (candidate) {
+                (candidate.visible ? viewportWindow.visibleCandidates : viewportWindow.otherCandidates).push(candidate);
+              } else {
+                viewportWindow.visibleCandidates.push(null);
+              }
+              continue;
+            }
+
+            if (task.translateNodes && viewportWindow?.phase === 'admit') {
+              if (viewportWindow.visibleAdmissionIndex < viewportWindow.visibleCandidates.length) {
+                const candidate = viewportWindow.visibleCandidates[viewportWindow.visibleAdmissionIndex++];
+                steps++;
+                if (candidate && isCurrentDiscoveryTarget(candidate.node) && filter(candidate.node)) {
+                  translateDiscoveredPrimitive(candidate.node, task.callbacks);
+                }
+                continue;
+              }
+              viewportWindow.phase = 'admit-rest';
+              steps++;
+              continue;
+            }
+
+            if (task.translateNodes && viewportWindow?.phase === 'admit-rest') {
+              if (viewportWindow.otherAdmissionIndex >= viewportWindow.otherCandidates.length) {
+                task.viewportWindow = null;
+                steps++;
+                continue;
+              }
+              const candidate = viewportWindow.otherCandidates[viewportWindow.otherAdmissionIndex++];
+              steps++;
+              if (candidate && isCurrentDiscoveryTarget(candidate.node) && filter(candidate.node)) {
+                translateDiscoveredPrimitive(candidate.node, task.callbacks);
+              }
+              continue;
+            }
+
+            let step;
+            if (task.translateNodes && task.backlogIndex < task.backlog.length) {
+              step = { node: task.backlog[task.backlogIndex++] };
+            } else {
+              step = nextDiscoveryStep(task);
+            }
             if (step.done) {
               task.backlog.length = 0;
               task.backlogIndex = 0;
+              task.viewportWindow = null;
               discovery.queue[discovery.head++] = null;
               discovery.queuedRoots.delete(task.root);
               continue;
@@ -894,11 +1279,7 @@ export class PageTranslationBridge extends ResourceTracker {
               task.backlog.push(node);
               continue;
             }
-            const callbacks = task.callbacks;
-            const callback = callbacks.size
-              ? (processedNode) => callbacks.forEach((notify) => notify?.(processedNode))
-              : undefined;
-            originalDomTranslate.call(currentSession.domTranslator, node, callback);
+            translateDiscoveredPrimitive(node, task.callbacks);
           }
         } catch (error) {
           notifyDiscoveryError(error);
@@ -924,9 +1305,9 @@ export class PageTranslationBridge extends ResourceTracker {
             || !isCurrentDiscoverySession()) return;
         if (translateNodes
             && [Node.TEXT_NODE, Node.ATTRIBUTE_NODE].includes(root.nodeType)) {
-          if (!isCurrentDiscoveryTarget(root) || !filter(root)) return;
           try {
-            originalDomTranslate.call(currentSession.domTranslator, root, callback);
+            if (!isCurrentDiscoveryTarget(root) || !filter(root)) return;
+            translateDiscoveredPrimitive(root, callback);
           } catch (error) {
             notifyDiscoveryError(error);
           }
@@ -939,6 +1320,13 @@ export class PageTranslationBridge extends ResourceTracker {
           return;
         }
         try {
+          const isInitialViewportRoot = currentSession.viewportFirstDiscoveryEnabled
+            && currentSession.viewportWindowRoot === root
+            && !currentSession.viewportWindowStarted;
+          if (isInitialViewportRoot) {
+            currentSession.viewportWindowStarted = true;
+            currentSession.viewportWindowRoot = null;
+          }
           task = {
             root,
             rootPrimitive: [Node.TEXT_NODE, Node.ATTRIBUTE_NODE].includes(root.nodeType) ? root : null,
@@ -947,6 +1335,7 @@ export class PageTranslationBridge extends ResourceTracker {
             translateNodes,
             backlog: [],
             backlogIndex: 0,
+            viewportWindow: isInitialViewportRoot ? createViewportWindow() : null,
             callbacks: new Set(callback ? [callback] : []),
           };
         } catch (error) {
@@ -971,6 +1360,13 @@ export class PageTranslationBridge extends ResourceTracker {
           this.clearTimer(discovery.timer);
           discovery.timer = null;
         }
+        for (const dispose of currentSession.admissionDisposers || []) dispose();
+        for (const task of discovery.queue) {
+          if (!task) continue;
+          task.backlog.length = 0;
+          task.viewportWindow = null;
+          task.callbacks.clear();
+        }
         discovery.queue.length = 0;
         discovery.head = 0;
         discovery.queuedRoots = new WeakMap();
@@ -978,15 +1374,34 @@ export class PageTranslationBridge extends ResourceTracker {
       };
       currentSession.cancelDiscoveryUnder = (subtree) => {
         let hasPendingTask = false;
+        for (const dispose of currentSession.admissionDisposers || []) {
+          if (isComposedDescendant(subtree, dispose.record?.owner)) dispose();
+        }
         for (let index = discovery.head; index < discovery.queue.length; index++) {
           const task = discovery.queue[index];
           if (!task) continue;
           if (!isComposedDescendant(subtree, task.root)) {
+            if (task.viewportWindow) {
+              const retireCandidatesUnderSubtree = (candidates) => {
+                for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+                  const candidate = candidates[candidateIndex];
+                  if (!candidate) continue;
+                  const owner = candidate.node.nodeType === Node.ATTRIBUTE_NODE
+                    ? candidate.node.ownerElement : getComposedParent(candidate.node);
+                  if (isComposedDescendant(subtree, owner)) candidates[candidateIndex] = null;
+                }
+              };
+              retireCandidatesUnderSubtree(task.viewportWindow.candidates);
+              retireCandidatesUnderSubtree(task.viewportWindow.visibleCandidates);
+              retireCandidatesUnderSubtree(task.viewportWindow.otherCandidates);
+            }
             hasPendingTask = true;
             continue;
           }
           task.backlog.length = 0;
           task.backlogIndex = 0;
+          task.viewportWindow = null;
+          task.callbacks.clear();
           discovery.queue[index] = null;
           discovery.queuedRoots.delete(task.root);
         }
@@ -1192,9 +1607,15 @@ export class PageTranslationBridge extends ResourceTracker {
     if (this.session.autoTranslateOnDOMChanges && this.session.persistentTranslator) {
       this.logger.debug('Starting persistent translation (Auto-translate enabled)');
       this.session.startShadowPersistence?.(element);
+      if (this.session.viewportFirstDiscoveryEnabled && !this.session.viewportWindowStarted) {
+        this.session.viewportWindowRoot = element;
+      }
       this.session.persistentTranslator.translate(element);
     } else if (this.session.domTranslator) {
       this.logger.debug('Starting single-pass translation (Auto-translate disabled)');
+      if (this.session.viewportFirstDiscoveryEnabled && !this.session.viewportWindowStarted) {
+        this.session.viewportWindowRoot = element;
+      }
       this.session.domTranslator.translate(element);
     }
   }
