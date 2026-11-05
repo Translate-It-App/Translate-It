@@ -106,7 +106,7 @@ export const CONFIG = {
 
 
   // --- API Settings ---
-  TRANSLATION_API: isFirefox ? ProviderRegistryIds.YANDEX : ProviderRegistryIds.GOOGLE_V2, // gemini, webai, openai, openrouter, requesty, deepseek, custom, google, browserapi
+  TRANSLATION_API: isFirefox ? ProviderRegistryIds.YANDEX : ProviderRegistryIds.GOOGLE_V2, // gemini, webai, openai, openrouter, requesty, cheaperinference, deepseek, custom, google, browserapi
 
   // --- Live Dubbing Settings ---
   POPUP_ACTIVE_VIEW: 'translate',
@@ -207,6 +207,21 @@ export const CONFIG = {
     { value: "claude-sonnet-4-6", name: "Anthropic Claude Sonnet 4.6" },
     { value: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
     { value: "mistral-small-2603", name: "Mistral Small" },
+    { value: "qwen3.8-flash", name: "Qwen 3.8 Flash" },
+    { value: "custom", name: "Custom Model" }
+  ],
+  CHEAPERINFERENCE_API_KEY: "",
+  CHEAPERINFERENCE_API_URL: "https://api.cheaperinference.com/v1/chat/completions",
+  CHEAPERINFERENCE_API_MODEL: "gpt-5.4-mini",
+  CHEAPERINFERENCE_MODELS: [
+    { value: "gpt-5.4-mini", name: "OpenAI GPT-5.4 Mini" },
+    { value: "gpt-5.4", name: "OpenAI GPT-5.4" },
+    { value: "gemini-3.5-flash-lite", name: "Google Gemini 3.5 Flash-Lite" },
+    { value: "gemini-3.5-flash", name: "Google Gemini 3.5 Flash" },
+    { value: "claude-haiku-4.5", name: "Anthropic Claude Haiku 4.5" },
+    { value: "claude-sonnet-5", name: "Anthropic Claude Sonnet 5" },
+    { value: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+    { value: "glm-5.3", name: "Z.ai GLM 5.3" },
     { value: "qwen3.8-flash", name: "Qwen 3.8 Flash" },
     { value: "custom", name: "Custom Model" }
   ],
@@ -1139,6 +1154,18 @@ export const getRequestyApiModelAsync = async () => {
   );
 };
 
+// Cheaper Inference Specific
+export const getCheaperInferenceApiKeyAsync = async () => {
+  return getSettingValueAsync("CHEAPERINFERENCE_API_KEY", CONFIG.CHEAPERINFERENCE_API_KEY);
+};
+
+export const getCheaperInferenceApiModelAsync = async () => {
+  return getSettingValueAsync(
+    "CHEAPERINFERENCE_API_MODEL",
+    CONFIG.CHEAPERINFERENCE_API_MODEL
+  );
+};
+
 // --- New Activation Settings Getters ---
 export const getShowDesktopFabAsync = async () => {
   return getSettingValueAsync(
@@ -1263,6 +1290,10 @@ export const getRequestyModelSelectionAsync = async () => {
   return getSettingValueAsync("REQUESTY_API_MODEL", CONFIG.REQUESTY_API_MODEL);
 };
 
+export const getCheaperInferenceModelSelectionAsync = async () => {
+  return getSettingValueAsync("CHEAPERINFERENCE_API_MODEL", CONFIG.CHEAPERINFERENCE_API_MODEL);
+};
+
 export const getEnableScreenCaptureAsync = async () => {
   return getSettingValueAsync("ENABLE_SCREEN_CAPTURE", CONFIG.ENABLE_SCREEN_CAPTURE);
 };
@@ -1334,6 +1365,15 @@ export const getOpenRouterApiKeysAsync = async () => {
 export const getRequestyApiKeysAsync = async () => {
   const { ApiKeyManager } = await import("@/features/translation/providers/ApiKeyManager.js");
   return ApiKeyManager.getKeys('REQUESTY_API_KEY');
+};
+
+/**
+ * Get all Cheaper Inference API keys as array
+ * @returns {Promise<string[]>} - Array of API keys
+ */
+export const getCheaperInferenceApiKeysAsync = async () => {
+  const { ApiKeyManager } = await import("@/features/translation/providers/ApiKeyManager.js");
+  return ApiKeyManager.getKeys('CHEAPERINFERENCE_API_KEY');
 };
 
 /**

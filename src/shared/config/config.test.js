@@ -208,6 +208,23 @@ describe('Config Module', () => {
       ]);
     });
 
+    it('should expose the curated Cheaper Inference models in order', () => {
+      expect(CONFIG.CHEAPERINFERENCE_API_MODEL).toBe('gpt-5.4-mini');
+      expect(CONFIG.CHEAPERINFERENCE_API_URL).toBe('https://api.cheaperinference.com/v1/chat/completions');
+      expect(CONFIG.CHEAPERINFERENCE_MODELS).toEqual([
+        { value: 'gpt-5.4-mini', name: 'OpenAI GPT-5.4 Mini' },
+        { value: 'gpt-5.4', name: 'OpenAI GPT-5.4' },
+        { value: 'gemini-3.5-flash-lite', name: 'Google Gemini 3.5 Flash-Lite' },
+        { value: 'gemini-3.5-flash', name: 'Google Gemini 3.5 Flash' },
+        { value: 'claude-haiku-4.5', name: 'Anthropic Claude Haiku 4.5' },
+        { value: 'claude-sonnet-5', name: 'Anthropic Claude Sonnet 5' },
+        { value: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+        { value: 'glm-5.3', name: 'Z.ai GLM 5.3' },
+        { value: 'qwen3.8-flash', name: 'Qwen 3.8 Flash' },
+        { value: 'custom', name: 'Custom Model' }
+      ]);
+    });
+
     it('should expose approved Gemini selector models in order', () => {
       expect(CONFIG.GEMINI_MODEL).toBe('gemini-3.8-flash');
       expect(CONFIG.GEMINI_MODEL_SOURCE).toBe('legacy');

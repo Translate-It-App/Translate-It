@@ -60,6 +60,7 @@ const PROVIDER_SETTINGS_KEYS = {
   DEEPSEEK: 'DEEPSEEK_API_KEY',
   OPENROUTER: 'OPENROUTER_API_KEY',
   REQUESTY: 'REQUESTY_API_KEY',
+  CHEAPERINFERENCE: 'CHEAPERINFERENCE_API_KEY',
   DEEPL: 'DEEPL_API_KEY',
   CUSTOM: 'CUSTOM_API_KEY'
 };
@@ -73,6 +74,7 @@ const PROVIDER_NAMES = {
   DEEPSEEK: 'DeepSeek',
   OPENROUTER: 'OpenRouter',
   REQUESTY: 'Requesty',
+  CHEAPERINFERENCE: 'Cheaper Inference',
   DEEPL: 'DeepL',
   CUSTOM: 'Custom'
 };
@@ -253,6 +255,7 @@ class ApiKeyManager {
       [ProviderRegistryIds.DEEPSEEK]: async (key) => await this._testDeepSeekKey(key),
       [ProviderRegistryIds.OPENROUTER]: async (key) => await this._testOpenRouterKey(key),
       [ProviderRegistryIds.REQUESTY]: async (key) => await this._testRequestyKey(key),
+      [ProviderRegistryIds.CHEAPERINFERENCE]: async (key) => await this._testCheaperInferenceKey(key),
       [ProviderRegistryIds.DEEPL]: async (key) => await this._testDeepLKey(key, deepLContext),
       [ProviderRegistryIds.CUSTOM]: async (key) => await this._testCustomKey(key)
     };
@@ -338,6 +341,7 @@ class ApiKeyManager {
       [ProviderRegistryIds.DEEPSEEK]: async (key) => await this._testDeepSeekKey(key, context),
       [ProviderRegistryIds.OPENROUTER]: async (key) => await this._testOpenRouterKey(key, context),
       [ProviderRegistryIds.REQUESTY]: async (key) => await this._testRequestyKey(key, context),
+      [ProviderRegistryIds.CHEAPERINFERENCE]: async (key) => await this._testCheaperInferenceKey(key, context),
       [ProviderRegistryIds.DEEPL]: async (key) => await this._testDeepLKey(key, context),
       [ProviderRegistryIds.CUSTOM]: async (key) => await this._testCustomKey(key, context)
     };
@@ -589,6 +593,29 @@ class ApiKeyManager {
           'Authorization': `Bearer ${key}`,
           'HTTP-Referer': 'https://github.com/Translate-It-App/Translate-It',
           'X-Title': 'Translate-It Extension'
+        }
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Test Cheaper Inference API key
+   * @param {string} key - API key to test
+   * @param {Object} [context={}] - Optional context with URL
+   * @returns {Promise<boolean>} - True if key is valid
+   * @private
+   */
+  static async _testCheaperInferenceKey(key, context = {}) {
+    try {
+      // Authenticated models request returns 401 for an invalid key
+      const apiUrl = context.apiUrl || 'https://api.cheaperinference.com/v1/models';
+      const response = await this._fetchWithCurrentProxy(apiUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${key}`
         }
       });
       return response.ok;

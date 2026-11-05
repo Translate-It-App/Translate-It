@@ -454,9 +454,10 @@ describe('ProviderSelector provider list contract', () => {
     registry.providers.push(
       { id: 'openrouter', name: 'OpenRouter', category: 'ai', icon: 'providers/openrouter.svg', supported: true, features: ['translation'] },
       { id: 'requesty', name: 'Requesty', category: 'ai', icon: 'providers/requesty.svg', supported: true, features: ['translation'] },
+      { id: 'cheaperinference', name: 'CheaperInference', category: 'ai', icon: 'providers/cheaperinference.svg', supported: true, features: ['translation'] },
       { id: 'webai', name: 'WebAI', category: 'ai', icon: 'providers/webai.svg', supported: true, features: ['translation'] },
     )
-    const invertedIds = new Set(['deepl', 'openai', 'openrouter', 'requesty', 'webai'])
+    const invertedIds = new Set(['deepl', 'openai', 'openrouter', 'requesty', 'cheaperinference', 'webai'])
     const providerIds = [...invertedIds, 'googlev2', 'gemini']
 
     for (const mode of ['icon-only', 'split']) {

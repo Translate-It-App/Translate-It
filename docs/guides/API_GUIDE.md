@@ -18,6 +18,7 @@ Below are the most common providers and how to get their API keys.
 | **DeepL** | Free/Paid | [DeepL API Keys](https://www.deepl.com/en/your-account/keys/) |
 | **OpenRouter** | Paid | [OpenRouter API Keys](https://openrouter.ai/settings/keys/) |
 | **Requesty** | Paid | [Requesty API Keys](https://app.requesty.ai/api-keys) |
+| **Cheaper Inference** | Paid | [Cheaper Inference](https://cheaperinference.com) |
 | **OpenAI** | Paid | [OpenAI API Keys](https://platform.openai.com/api-keys/) |
 | **DeepSeek** | Paid | [DeepSeek API Keys](https://platform.deepseek.com/api-keys/) |
 | **WebAI to API** | Free | [Local Server](https://github.com/Amm1rr/WebAI-to-API/) |
@@ -40,6 +41,7 @@ You can customize each provider's settings to balance quality and cost:
 - **OpenAI:** Enter specific model names like `gpt-6-luna` or `gpt-6-sol`, or browse and search the model catalog after adding an API key.
 - **OpenRouter:** Support for a variety of models; browse and search the catalog, or use the model name from the [OpenRouter Docs](https://openrouter.ai/models).
 - **Requesty:** Access many models through one API; browse and search the catalog, or enter any model ID (e.g., `openai/gpt-4o-mini`) from the [Requesty Docs](https://docs.requesty.ai).
+- **Cheaper Inference:** Access models from several labs through one OpenAI-compatible API; browse and search the catalog, or enter any model ID (e.g., `gpt-5.4-mini`) from the [Cheaper Inference Docs](https://cheaperinference.com/docs).
 - **DeepSeek:** Customize model settings as per [DeepSeek Docs](https://api-docs.deepseek.com/api/list-models/); browse and search the catalog after adding an API key, and optionally set a thinking level.
 - **WebAI to API:** Browse the models advertised by your local server after entering its URL, or enter a custom model name manually.
 - **DeepL:** Configure API tier (Free or Pro) and formality settings.
@@ -49,9 +51,9 @@ You can customize each provider's settings to balance quality and cost:
 
 ## Browsing and Selecting Models
 
-For **Google Gemini**, **OpenAI**, **OpenRouter**, **Requesty**, and **DeepSeek**, the provider panel can load a searchable model catalog for you:
+For **Google Gemini**, **OpenAI**, **OpenRouter**, **Requesty**, **Cheaper Inference**, and **DeepSeek**, the provider panel can load a searchable model catalog for you:
 
-1. Enter the required credentials: an API key is required for Gemini, OpenAI, and DeepSeek, while OpenRouter and Requesty can also browse public catalogs without one.
+1. Enter the required credentials: an API key is required for Gemini, OpenAI, and DeepSeek, while OpenRouter, Requesty, and Cheaper Inference can also browse public catalogs without one.
 2. Wait for the model catalog to load — the panel shows loading, failure, and empty states.
 3. Use the search field to filter by model ID or name. Up to 50 matching models are displayed at a time; when more results are available, the panel shows how many matches were found.
 4. Pick a model from the catalog picker, or keep a curated or saved model from the main Model selector. OpenRouter also displays per-model pricing.
@@ -72,6 +74,7 @@ If you don't specify a model, these are the defaults used:
 - **OpenAI:** `gpt-6-luna`
 - **OpenRouter:** `openai/gpt-6-luna`
 - **Requesty:** `openai/gpt-4o-mini`
+- **Cheaper Inference:** `gpt-5.4-mini`
 - **Google Gemini:** `gemini-3.8-flash`
 - **WebAI to API:** `gemini-3-flash`
 - **DeepSeek:** `deepseek-flash`
