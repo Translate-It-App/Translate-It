@@ -512,11 +512,13 @@ export class PageTranslationBridge extends ResourceTracker {
       restore(node, callback) {
         const nodeData = this.nodeStorage.get(node);
         const accepted = nodeData?.acceptedTranslation;
-        // A stopped SPA owner may outlive host edits while its replacement loads.
-        if (!currentSession.active && (!isConnectedTarget(node)
+        // Detached targets are retired by active shadow observers; only stopped owners require connectivity.
+        if ((!currentSession.active && !isConnectedTarget(node))
             || node.ownerDocument !== document
             || !accepted || nodeData.updateId !== accepted.updateId
-            || getCurrentNodeValue(node) !== accepted.text)) {
+            || (node.nodeType === Node.ATTRIBUTE_NODE
+              && node.ownerElement?.getAttributeNode(node.name) !== node)
+            || getCurrentNodeValue(node) !== accepted.text) {
           this.nodeStorage.delete(node);
           callback?.(node);
           return;

@@ -290,6 +290,140 @@ describe('PageTranslationBridge stale settlement integration', () => {
     expect(failed).not.toHaveBeenCalled();
   });
 
+  it.each(['text', 'title'])('restores the original %s while the owner is active', async (kind) => {
+    const element = document.createElement('div');
+    document.body.appendChild(element);
+    let node;
+    if (kind === 'title') {
+      element.setAttribute('title', 'Original');
+      node = element.getAttributeNode('title');
+    } else {
+      element.textContent = 'Original';
+      node = element.firstChild;
+    }
+    const { pending } = await startDeferredTranslation();
+    pending.find(item => item.node === node).resolve(settlement('Translated'));
+    await vi.waitFor(() => expect(node.nodeValue).toContain('Translated'));
+
+    bridge.restore(document.body);
+    bridge.restore(document.body);
+
+    expect(node.nodeValue).toBe('Original');
+  });
+
+  it('recognizes a source-equal accepted translation as restorable ownership', async () => {
+    const node = document.createTextNode('Original');
+    document.body.appendChild(node);
+    const { pending } = await startDeferredTranslation();
+    const accepted = vi.fn();
+    pending[0].resolve(settlement('Original', accepted));
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledWith('accepted'));
+    const storage = bridge.session.nodesTranslator.nodeStorage;
+
+    bridge.restore(document.body);
+
+    expect(node.nodeValue).toBe('Original');
+    expect(storage.has(node)).toBe(false);
+  });
+
+  it.each(['text', 'title'])('preserves an externally edited %s when restoring an active owner', async (kind) => {
+    const element = document.createElement('div');
+    document.body.appendChild(element);
+    let node;
+    if (kind === 'title') {
+      element.setAttribute('title', 'Original');
+      node = element.getAttributeNode('title');
+    } else {
+      element.textContent = 'Original';
+      node = element.firstChild;
+    }
+    const { pending } = await startDeferredTranslation();
+    pending.find(item => item.node === node).resolve(settlement('Translated'));
+    await vi.waitFor(() => expect(node.nodeValue).toContain('Translated'));
+    if (kind === 'title') element.setAttribute('title', 'Host edit');
+    else node.nodeValue = 'Host edit';
+
+    bridge.restore(document.body);
+
+    expect(kind === 'title' ? element.getAttribute('title') : node.nodeValue).toBe('Host edit');
+  });
+
+  it.each(['text', 'title'])('preserves an externally edited %s after stopping persistence', async (kind) => {
+    const element = document.createElement('div');
+    document.body.appendChild(element);
+    let node;
+    if (kind === 'title') {
+      element.setAttribute('title', 'Original');
+      node = element.getAttributeNode('title');
+    } else {
+      element.textContent = 'Original';
+      node = element.firstChild;
+    }
+    const { pending } = await startDeferredTranslation();
+    pending.find(item => item.node === node).resolve(settlement('Translated'));
+    await vi.waitFor(() => expect(node.nodeValue).toContain('Translated'));
+    bridge.stopPersistence();
+    if (kind === 'title') element.setAttribute('title', 'Host edit');
+    else node.nodeValue = 'Host edit';
+
+    bridge.restore(document.body);
+
+    expect(kind === 'title' ? element.getAttribute('title') : node.nodeValue).toBe('Host edit');
+  });
+
+  it.each(['text', 'title'])('does not restore over a pending update to %s', async (kind) => {
+    const element = document.createElement('div');
+    document.body.appendChild(element);
+    let node;
+    if (kind === 'title') {
+      element.setAttribute('title', 'Original');
+      node = element.getAttributeNode('title');
+    } else {
+      element.textContent = 'Original';
+      node = element.firstChild;
+    }
+    const { pending } = await startDeferredTranslation();
+    pending.find(item => item.node === node).resolve(settlement('Translated'));
+    await vi.waitFor(() => expect(node.nodeValue).toContain('Translated'));
+    if (kind === 'title') element.setAttribute('title', 'Host edit');
+    else node.nodeValue = 'Host edit';
+    bridge.session.nodesTranslator.update(node);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+
+    bridge.restore(document.body);
+    pending[1].resolve(settlement('Late update'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(kind === 'title' ? element.getAttribute('title') : node.nodeValue).toBe('Host edit');
+  });
+
+  it('does not restore an initial translation that is still pending', async () => {
+    const node = document.createTextNode('Original');
+    document.body.appendChild(node);
+    const { pending } = await startDeferredTranslation();
+
+    bridge.restore(document.body);
+    pending[0].resolve(settlement('Late translation'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(node.nodeValue).toBe('Original');
+  });
+
+  it('does not treat failed provider storage as an accepted restore value', async () => {
+    const node = document.createTextNode('Original');
+    document.body.appendChild(node);
+    const { pending } = await startDeferredTranslation();
+    pending[0].resolve(terminalSettlement('Original', 'failed'));
+    await vi.waitFor(() => expect(bridge.session.nodesTranslator.has(node)).toBe(true));
+    node.nodeValue = 'Host edit';
+
+    bridge.restore(document.body);
+
+    expect(node.nodeValue).toBe('Host edit');
+  });
+
   it('preserves user edit after stale update and restore', async () => {
     const node = document.createTextNode('Original');
     document.body.appendChild(node);
