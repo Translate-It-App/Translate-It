@@ -1,5 +1,4 @@
 const EXPECTED = Symbol('expectedText');
-const ORIGINAL = Symbol('originalText');
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const until = async predicate => {
@@ -15,7 +14,6 @@ const paragraph = (id, text, expected) => {
   const node = document.createElement('p');
   node.dataset.benchId = id;
   node[EXPECTED] = expected;
-  node[ORIGINAL] = text;
   node.textContent = text;
   return node;
 };
@@ -52,7 +50,6 @@ const makePrefixAndTail = prefixCount => {
 
 const LRM = '\u200e';
 const expected = node => `${LRM}${node[EXPECTED]}`;
-const original = node => node[ORIGINAL];
 
 export const calibrateLongTaskObserver = async () => {
   if (!PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
@@ -78,6 +75,7 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
   const panel = makeViewportPanel();
   const offscreen = makePrefixAndTail(prefixCount);
   const targets = [...offscreen.targets, ...panel.targets];
+  const originalContents = new Map(targets.map(node => [node, node.textContent]));
 
   if (fixture === 'late-dom') {
     document.body.append(offscreen.fragment, panel.panel);
@@ -135,9 +133,10 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
   };
   const bridge = new Bridge();
   let initialized = false;
-  let successful = false;
   let result;
+  let primaryError;
   let restoreError;
+  let cleanupError;
   let restoredTargets = 0;
   try {
   await bridge.initialize({
@@ -227,26 +226,32 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
     throw new Error(`Fixture invariant failed: ${JSON.stringify(result)}`);
   }
 
-  successful = true;
+  } catch (error) {
+    primaryError = error;
   } finally {
-    observer.disconnect();
-    longTasks?.disconnect();
+    try { observer.disconnect(); } catch (error) { cleanupError ||= error; }
+    try { longTasks?.disconnect(); } catch (error) { cleanupError ||= error; }
     if (initialized) {
-      try { bridge.restore(document.body); } catch (error) { restoreError = error; }
-      const originals = new Map(targets.map(node => [node.dataset.benchId, original(node)]));
-      for (const node of document.querySelectorAll('[data-bench-id]')) {
-        if (originals.has(node.dataset.benchId)) node.textContent = originals.get(node.dataset.benchId);
+      try {
+        bridge.restore(document.body);
+      } catch (error) {
+        restoreError = error;
       }
-      restoredTargets = [...document.querySelectorAll('[data-bench-id]')]
-        .filter(node => originals.get(node.dataset.benchId) === node.textContent).length;
-      bridge.cleanup();
-    } else {
-      bridge.cleanup();
+      const mismatchedTargets = targets.filter(node => node.textContent !== originalContents.get(node));
+      restoredTargets = targets.length - mismatchedTargets.length;
+      if (mismatchedTargets.length) {
+        const invariantError = new Error(
+          `Restore invariant failed: restored=${restoredTargets} expected=${targets.length}; mismatched IDs=${mismatchedTargets.map(node => node.dataset.benchId).join(',')}`,
+        );
+        restoreError = restoreError
+          ? new AggregateError([restoreError, invariantError], 'Production fixture restore failed.')
+          : invariantError;
+      }
     }
+    try { bridge.cleanup(); } catch (error) { cleanupError ||= error; }
   }
-  if (restoreError) throw restoreError;
-  if (successful && restoredTargets !== expectedIds.size) {
-    throw new Error(`Restore invariant failed: restored=${restoredTargets}, expected=${expectedIds.size}`);
-  }
+  const failures = [primaryError, restoreError, cleanupError].filter(Boolean);
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, 'Production fixture failed during translation, restore, or cleanup.');
   return result;
 };
