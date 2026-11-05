@@ -92,6 +92,12 @@ Static utilities for DOM calculations and shared system values.
 
 When enabled in Appearance, Page Translation resolves the existing `TRANSLATION_FONT_FAMILY` setting and best-effort applies only `font-family` to safe translated text parents after accepted text writes. The option defaults to off, and font setting or resolution failures do not fail translation.
 
+## Internal Sliced Discovery (Default Off)
+
+`PAGE_TRANSLATION_SLICED_DISCOVERY` in `PageTranslationConstants.js` is an internal, default-off rollout flag, captured when a Bridge session is created. It adds no UI or persisted setting. When enabled, complete discovery of the existing supported tree, including initial open-shadow-root observation, runs in cooperative time/step slices without viewport pruning. Filtering, lazy intersection scheduling, provider batching, and guarded DOM application remain feature-owned.
+
+Discovery-pending state prevents premature empty, complete, or idle settlement; it ends after enumeration and observer registration, without waiting for offscreen lazy targets or provider results. Stop, Restore, cleanup, and session invalidation cancel remaining discovery. Discovery failure stops the session while preserving accepted translations for Restore; it never restarts legacy enumeration within that session. Legacy discovery remains available for subsequent sessions with the flag disabled. Mutation-time coverage is stable-tree parity plus revalidated live admission, not an atomic DOM snapshot.
+
 ## Stability & Resiliency
 
 ### 1. Background Timeout

@@ -258,6 +258,87 @@ describe('PageTranslationScheduler', () => {
   });
 
   describe('Initialization & State', () => {
+    it('holds completion while discovery is pending and rechecks when discovery drains', async () => {
+      vi.useFakeTimers();
+      try {
+        const onLifecycleEvent = vi.fn();
+        const context = {};
+        const discovered = new PageTranslationScheduler({ onLifecycleEvent });
+        discovered.setTranslationState(true, 'discovery-session', context);
+        discovered.totalTasks = 1;
+        discovered.translatedCount = 1;
+        discovered.setDiscoveryPending(true, context);
+        discovered._checkCompletion();
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).not.toHaveBeenCalled();
+
+        expect(discovered.setDiscoveryPending(false, {})).toBe(false);
+        expect(discovered.discoveryPending).toBe(true);
+        expect(discovered.setDiscoveryPending(false, context)).toBe(true);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_COMPLETE, expect.objectContaining({
+          totalCount: 1,
+          translatedCount: 1,
+        }));
+        discovered.reset();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('suppresses visibility idle while discovery is pending and clears the gate on stop/reset', async () => {
+      vi.useFakeTimers();
+      try {
+        const onLifecycleEvent = vi.fn();
+        const context = {};
+        const discovered = new PageTranslationScheduler({ onLifecycleEvent });
+        discovered.setTranslationState(true, 'visibility-session', context);
+        discovered.isWaitingForVisibility = true;
+        discovered.setDiscoveryPending(true, context);
+        discovered._checkCompletion();
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).not.toHaveBeenCalled();
+
+        discovered.stop();
+        expect(discovered.discoveryPending).toBe(false);
+        discovered.setTranslationState(true, 'replacement-session', context);
+        discovered.setDiscoveryPending(true, context);
+        discovered.reset();
+        expect(discovered.discoveryPending).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not complete when a provider finishes between discovery slices', async () => {
+      vi.useFakeTimers();
+      try {
+        const onLifecycleEvent = vi.fn();
+        const context = {};
+        const discovered = new PageTranslationScheduler({ onLifecycleEvent });
+        discovered.setTranslationState(true, 'provider-session', context);
+        discovered.setSettings({ autoTranslateOnDOMChanges: false });
+        discovered.setDiscoveryPending(true, context);
+        const item = { id: 'discovered-item', text: 'source', score: 1, resolve: vi.fn() };
+        discovered.queue.push(item);
+        discovered.totalTasks = 1;
+        PageTranslationFluidFilter.process.mockReturnValue({ batchItems: [item], remainingItems: [] });
+        vi.spyOn(discovered, '_getBatchConfig').mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'fa' });
+        safeSendMessage.mockResolvedValue({ success: true, translatedText: '["translated"]' });
+
+        await discovered.flush();
+        getSettlement(item.resolve).settle('accepted');
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).not.toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_COMPLETE, expect.anything());
+
+        discovered.setDiscoveryPending(false, context);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_COMPLETE, expect.objectContaining({ totalCount: 1 }));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('uses trusted lifecycle callback instead of aggregate PageEventBus transport', () => {
       const onLifecycleEvent = vi.fn();
       const directScheduler = new PageTranslationScheduler({ onLifecycleEvent });

@@ -52,6 +52,11 @@ export const DEFAULT_PAGE_TRANSLATION_SETTINGS = {
   priorityThreshold: 1
 };
 
+// Internal rollout switch; enabling it changes traversal scheduling, not saved user settings.
+export const PAGE_TRANSLATION_SLICED_DISCOVERY = false;
+export const PAGE_TRANSLATION_DISCOVERY_SLICE_MAX_STEPS = 100;
+export const PAGE_TRANSLATION_DISCOVERY_SLICE_BUDGET_MS = 8;
+
 /**
  * Timing and duration constants for page translation
  */

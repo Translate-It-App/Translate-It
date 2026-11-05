@@ -62,13 +62,24 @@ vi.mock('./PageTranslationHelper.js', () => ({
         this.onInternalError = onInternalError;
         this.reset = vi.fn();
         this.setSettings = vi.fn();
-        this.setTranslationState = vi.fn();
+        this.setTranslationState = vi.fn((active, sessionId, context) => {
+          this.isTranslated = active;
+          if (active) {
+            this.translationSessionId = sessionId;
+            this.sessionContext = context;
+          } else {
+            this.sessionContext = null;
+            this.discoveryPending = false;
+          }
+        });
+        this.setDiscoveryPending = vi.fn((pending) => { this.discoveryPending = pending; return true; });
         this.enqueue = vi.fn();
         this.recordRetainedTranslation = vi.fn(() => {
           this.totalTasks++;
           this.translatedCount++;
         });
         this.translatedCount = 0;
+        this.discoveryPending = false;
         this.translationSessionId = null;
         this.sessionContext = null;
         this.signalScrollStop = vi.fn();
@@ -765,6 +776,145 @@ describe('PageTranslationManager', () => {
       // Check for layout fix injection
       expect(document.getElementById('ti-translation-layout-fix')).not.toBeNull();
       expect(document.documentElement.classList.contains('ti-translation-active')).toBe(true);
+    });
+
+    it('passes attempt-owned discovery callbacks and ignores callbacks after session replacement', async () => {
+      await manager.translatePage();
+      const options = manager.bridge.initialize.mock.calls[0][3];
+      expect(options.onDiscoveryStateChange).toEqual(expect.any(Function));
+      expect(options.onDiscoveryError).toEqual(expect.any(Function));
+      const oldContext = manager.sessionContext;
+      options.onDiscoveryStateChange(true);
+      expect(manager.scheduler.setDiscoveryPending).toHaveBeenCalledWith(true, oldContext);
+      const controller = manager.abortController;
+
+      manager.sessionContext = Symbol('replacement');
+      manager.scheduler.sessionContext = manager.sessionContext;
+      const calls = manager.scheduler.setDiscoveryPending.mock.calls.length;
+      options.onDiscoveryStateChange(false);
+      options.onDiscoveryError(new Error('stale discovery'));
+      expect(manager.scheduler.setDiscoveryPending).toHaveBeenCalledTimes(calls);
+      expect(manager.scheduler.discoveryPending).toBe(true);
+      expect(manager.abortController).toBe(controller);
+      expect(manager.bridge.stopPersistence).not.toHaveBeenCalled();
+      expect(pageEventBus.emit).not.toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_ERROR, expect.objectContaining({ error: 'stale discovery' }));
+    });
+
+    it('settles empty initial discovery once after the queued drain callback', async () => {
+      PageTranslationSettingsLoader.load.mockResolvedValue({ ...acceptedSettings, lazyLoading: false, autoTranslateOnDOMChanges: false });
+      manager.bridge.translate.mockImplementation(() => {
+        const callbacks = manager.bridge.initialize.mock.calls.at(-1)[3];
+        callbacks.onDiscoveryStateChange(true);
+        expect(manager.bridge.stopPersistence).not.toHaveBeenCalled();
+        callbacks.onDiscoveryStateChange(false);
+      });
+
+      const result = await manager.translatePage();
+      expect(result.success).toBe(true);
+      expect(manager.bridge.stopPersistence).toHaveBeenCalledOnce();
+      expect(pageEventBus.emit.mock.calls.filter(([action]) => action === MessageActions.PAGE_TRANSLATE_IDLE)).toHaveLength(1);
+    });
+
+    it.each([
+      { lazyLoading: true, autoTranslateOnDOMChanges: false },
+      { lazyLoading: false, autoTranslateOnDOMChanges: true },
+    ])('keeps eligible empty discovery sessions active for future work: %o', async (settings) => {
+      PageTranslationSettingsLoader.load.mockResolvedValue({ ...acceptedSettings, ...settings });
+      manager.bridge.translate.mockImplementation(() => {
+        const callbacks = manager.bridge.initialize.mock.calls.at(-1)[3];
+        callbacks.onDiscoveryStateChange(true);
+        callbacks.onDiscoveryStateChange(false);
+      });
+
+      await manager.translatePage();
+      await Promise.resolve();
+      expect(pageEventBus.emit).toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_IDLE, expect.objectContaining({ isTranslating: false }));
+      expect(manager.bridge.stopPersistence).not.toHaveBeenCalled();
+      expect(manager.scheduler.isTranslated).toBe(true);
+      expect(manager.scheduler.setTranslationState).not.toHaveBeenCalledWith(false, undefined, undefined, 'operation-abort');
+    });
+
+    it('does not reconcile a queued discovery drain after the session is replaced', async () => {
+      manager.bridge.translate.mockImplementation(() => {
+        const callbacks = manager.bridge.initialize.mock.calls.at(-1)[3];
+        callbacks.onDiscoveryStateChange(true);
+        callbacks.onDiscoveryStateChange(false);
+        const replacementContext = Symbol('replacement');
+        manager.sessionContext = replacementContext;
+        manager.scheduler.sessionContext = replacementContext;
+      });
+
+      await manager.translatePage();
+      await Promise.resolve();
+      expect(manager.bridge.stopPersistence).not.toHaveBeenCalled();
+      expect(pageEventBus.emit).not.toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_IDLE, expect.anything());
+    });
+
+    it('stops owned discovery on a normal error while retaining accepted partial output and restore identity', async () => {
+      manager.scheduler.translatedCount = 2;
+      manager.scheduler.failedCount = 1;
+      manager.scheduler.totalTasks = 3;
+      manager.bridge.translate.mockImplementation(() => {
+        manager.bridge.initialize.mock.calls.at(-1)[3].onDiscoveryError(new Error('enumeration failed'));
+      });
+
+      const result = await manager.translatePage();
+      expect(result.success).toBe(true);
+      expect(manager.bridge.stopPersistence).toHaveBeenCalledOnce();
+      expect(manager.scheduler.setTranslationState).toHaveBeenLastCalledWith(false, undefined, undefined, 'operation-abort');
+      expect(manager.scheduler.translatedCount).toBe(2);
+      expect(manager.scheduler.failedCount).toBe(1);
+      expect(manager.isTranslated).toBe(true);
+      expect(manager.acceptedLifecycleSessionId).toBe(result.messageId);
+      expect(manager.abortController).toBeNull();
+      expect(pageEventBus.emit.mock.calls.filter(([action]) => action === MessageActions.PAGE_TRANSLATE_ERROR)).toHaveLength(1);
+      expect(document.getElementById('ti-translation-layout-fix')).not.toBeNull();
+
+      await manager.restorePage();
+      expect(pageEventBus.emit).toHaveBeenCalledWith(MessageActions.PAGE_RESTORE_COMPLETE, expect.objectContaining({ sessionId: result.messageId }));
+    });
+
+    it('stops silent discovery failure even after auto mode has gone idle', async () => {
+      PageTranslationSettingsLoader.load.mockResolvedValue({ ...acceptedSettings, autoTranslateOnDOMChanges: true });
+      let callbacks;
+      manager.bridge.translate.mockImplementation(() => {
+        callbacks = manager.bridge.initialize.mock.calls.at(-1)[3];
+        callbacks.onDiscoveryStateChange(true);
+        callbacks.onDiscoveryStateChange(false);
+      });
+      await manager.translatePage();
+      await Promise.resolve();
+      expect(manager.isTranslating).toBe(false);
+      manager.scheduler.translatedCount = 2;
+      manager.scheduler.failedCount = 1;
+      manager.scheduler.totalTasks = 3;
+      callbacks.onDiscoveryStateChange(true);
+      const silentError = Object.assign(new Error('context unavailable'), { type: ErrorTypes.EXTENSION_CONTEXT_INVALIDATED });
+      callbacks.onDiscoveryError(silentError);
+
+      expect(manager.bridge.stopPersistence).toHaveBeenCalledOnce();
+      expect(manager.scheduler.discoveryPending).toBe(false);
+      expect(manager.scheduler.isTranslated).toBe(false);
+      expect(manager.abortController).toBeNull();
+      expect(manager.isTranslated).toBe(true);
+      expect(manager.isAutoTranslating).toBe(false);
+      expect(pageEventBus.emit.mock.calls.filter(([action, data]) => (
+        action === MessageActions.PAGE_TRANSLATE_IDLE
+        && data?.sessionId === manager.acceptedLifecycleSessionId
+        && data?.isAutoTranslating === false
+      ))).toHaveLength(1);
+      expect(pageEventBus.emit).toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_IDLE, expect.objectContaining({
+        translatedCount: 2,
+        failedCount: 1,
+        totalCount: 3,
+        isTranslated: true,
+        isTranslating: false,
+        isAutoTranslating: false,
+      }));
+      expect(pageEventBus.emit).not.toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_ERROR, expect.anything());
+      callbacks.onDiscoveryError(silentError);
+      expect(manager.bridge.stopPersistence).toHaveBeenCalledOnce();
+      expect(pageEventBus.emit.mock.calls.filter(([action]) => action === MessageActions.PAGE_TRANSLATE_IDLE)).toHaveLength(2);
     });
 
     it.each([

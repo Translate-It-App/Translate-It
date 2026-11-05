@@ -125,6 +125,7 @@ export class PageTranslationManager extends ResourceTracker {
       || (this.featureManager && !this.featureManager.acceptPageNavigation?.(cursor))
     )) return { success: false, reason: ActionReasons.SILENT_ERROR };
     let hasAcceptedStart = false;
+    let discoveryLifecycleObserved = false;
     // 1. Check for URL change - ALWAYS reset for a clean slate in SPAs
     if (this.currentUrl !== window.location.href) {
       this.resetLocalState({ preserveAcceptedTranslations: !!options.isAuto && !!options.preserveAcceptedTranslations });
@@ -298,6 +299,15 @@ export class PageTranslationManager extends ResourceTracker {
               this.scheduler.recordRetainedTranslation(attempt.sessionContext);
             }
           },
+          onDiscoveryStateChange: (pending) => {
+            if (!this._ownsDiscoveryAttempt(attempt)) return;
+            discoveryLifecycleObserved = true;
+            this.scheduler.setDiscoveryPending(pending, attempt.sessionContext);
+            if (!pending) {
+              queueMicrotask(() => this._reconcileDiscoveredWork(attempt));
+            }
+          },
+          onDiscoveryError: (error) => this._handleDiscoveryError(attempt, error),
         }
       );
       if (!this._isCurrentPreStartAttempt(attempt)) return this._settleStalePreStartAttempt(attempt);
@@ -305,9 +315,18 @@ export class PageTranslationManager extends ResourceTracker {
       // CRITICAL: Translate only document.body to prevent scroll jumps and HEAD-tag interference.
       // Translating documentElement causes jumps to top on sites with complex scrollers (like Twitter).
       this.bridge.translate(document.body);
+      if (!this._ownsDiscoveryAttempt(attempt)) {
+        return {
+          success: true,
+          url: attempt.url,
+          messageId: attempt.messageId,
+          isAutoTranslating: !!this.settings.autoTranslateOnDOMChanges,
+        };
+      }
 
       // Non-lazy, non-auto translation has no future work when no task was scheduled.
-      if (!this.isAutoTranslating && !this.settings.lazyLoading && this.scheduler.totalTasks === 0) {
+      if (!discoveryLifecycleObserved && !this.scheduler.discoveryPending
+          && !this.isAutoTranslating && !this.settings.lazyLoading && this.scheduler.totalTasks === 0) {
         const result = {
           success: true,
           url: this.currentUrl,
@@ -358,6 +377,85 @@ export class PageTranslationManager extends ResourceTracker {
     } finally {
       if (this.pendingSettingsAttempt === attempt) this.pendingSettingsAttempt = null;
     }
+  }
+
+  _ownsDiscoveryAttempt(attempt) {
+    return this._isCurrentPreStartAttempt(attempt)
+      && this.scheduler.sessionContext === attempt.sessionContext;
+  }
+
+  _reconcileDiscoveredWork(attempt) {
+    if (!this._ownsDiscoveryAttempt(attempt) || this.scheduler.discoveryPending) return;
+    if (this.scheduler.totalTasks > 0) return;
+
+    if (!this.isAutoTranslating && !this.settings.lazyLoading) {
+      this._settleSilentPostStart();
+      return;
+    }
+
+    this.isTranslating = false;
+    this.isTranslated = this.scheduler.translatedCount > 0;
+    this._broadcastEvent(MessageActions.PAGE_TRANSLATE_IDLE, {
+      url: this.currentUrl,
+      messageId: attempt.messageId,
+      sessionId: attempt.messageId,
+      translatedCount: this.scheduler.translatedCount || 0,
+      failedCount: this.scheduler.failedCount || 0,
+      totalCount: this.scheduler.totalTasks || 0,
+      isTranslated: this.isTranslated,
+      isTranslating: false,
+      isAutoTranslating: this.isAutoTranslating,
+    }, attempt.messageId);
+  }
+
+  _handleDiscoveryError(attempt, error) {
+    if (!this._ownsDiscoveryAttempt(attempt)) return false;
+    if (isSilentError(error)) {
+      if (this.isTranslating) {
+        this._settleSilentPostStart();
+      } else {
+        this.bridge.stopPersistence();
+        this.scheduler.setTranslationState(false, undefined, undefined, INTERNAL_CANCELLATION_REASON);
+        this.scrollTracker.stop();
+        this.abortController?.abort();
+        this.abortController = null;
+        this._cleanupSession(attempt.messageId);
+        this.isAutoTranslating = false;
+        this.isTranslating = false;
+        this.isTranslated = (this.scheduler.translatedCount || 0) > 0;
+        this.sessionContext = null;
+        if (!this.isTranslated) this._removeLayoutFix();
+        this._broadcastEvent(MessageActions.PAGE_TRANSLATE_IDLE, {
+          url: attempt.url,
+          messageId: attempt.messageId,
+          sessionId: attempt.messageId,
+          translatedCount: this.scheduler.translatedCount || 0,
+          failedCount: this.scheduler.failedCount || 0,
+          totalCount: this.scheduler.totalTasks || 0,
+          isTranslated: this.isTranslated,
+          isTranslating: false,
+          isAutoTranslating: false,
+        }, attempt.messageId);
+      }
+      return true;
+    }
+
+    this.bridge.stopPersistence();
+    this.scheduler.setTranslationState(false, undefined, undefined, INTERNAL_CANCELLATION_REASON);
+    this.scrollTracker.stop();
+    this.abortController?.abort();
+    this.abortController = null;
+    this._cleanupSession(attempt.messageId);
+    this.isTranslating = false;
+    this.isAutoTranslating = false;
+    this.isTranslated = (this.scheduler.translatedCount || 0) > 0;
+    this.sessionContext = null;
+    if (!this.isTranslated) this._removeLayoutFix();
+    this._broadcastEvent(MessageActions.PAGE_TRANSLATE_ERROR, {
+      error: error?.message || String(error),
+      errorDetails: MessageFormat.serializeTranslationError(error),
+    }, attempt.messageId);
+    return true;
   }
 
   _isCurrentPreStartAttempt(attempt) {
