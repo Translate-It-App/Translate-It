@@ -110,34 +110,33 @@
       if (!fallback) return false;
       const start = assignedTextSlot(node) || owner;
       const clips = [];
-      let startHidden = false, unsupported = false;
+      let unsupported = false;
       for (let el = start, depth = 0; el; el = el.assignedSlot || el.parentElement || el.parentNode?.host, depth++) {
-        if (depth >= MAX_POSITIVE_VISIBILITY_ANCESTORS) return startHidden ? false : fallback;
+        if (depth >= MAX_POSITIVE_VISIBILITY_ANCESTORS) return fallback;
         let style;
         try { style = view.getComputedStyle(el); } catch { unsupported = true; continue; }
         if (!style) { unsupported = true; continue; }
-        if (style.display === 'none' || style.contentVisibility === 'hidden') startHidden = true;
-        if (el === start && ['hidden', 'collapse'].includes(style.visibility)) startHidden = true;
+        if (style.display === 'none' || style.contentVisibility === 'hidden' || (el === start && ['hidden', 'collapse'].includes(style.visibility))) return false;
+        if (unsupported) continue;
         if (typeof style.display !== 'string' || typeof style.visibility !== 'string' || typeof style.overflowX !== 'string' || typeof style.overflowY !== 'string' || typeof style.position !== 'string') { unsupported = true; continue; }
-        if (['absolute', 'fixed'].includes(style.position) || style.contentVisibility === 'auto') unsupported = true;
+        if (['absolute', 'fixed'].includes(style.position) || style.contentVisibility === 'auto') { unsupported = true; continue; }
         const active = (key, inactive) => { const value = style[key]; return typeof value === 'string' && value !== '' && value !== inactive; };
-        if (active('transform', 'none') || active('perspective', 'none') || active('scale', 'none') || active('rotate', 'none') || active('translate', 'none') || active('filter', 'none') || active('backdropFilter', 'none') || active('webkitBackdropFilter', 'none') || active('clipPath', 'none') || active('clip', 'auto') || active('maskImage', 'none') || active('webkitMaskImage', 'none') || active('maskBorderSource', 'none') || active('webkitMaskBoxImageSource', 'none') || (style.zoom && !['normal', '1', '100%'].includes(style.zoom)) || (style.contain || '').split(/\s+/).some(value => ['paint', 'content', 'strict'].includes(value))) unsupported = true;
+        if (active('transform', 'none') || active('perspective', 'none') || active('scale', 'none') || active('rotate', 'none') || active('translate', 'none') || active('filter', 'none') || active('backdropFilter', 'none') || active('webkitBackdropFilter', 'none') || active('clipPath', 'none') || active('clip', 'auto') || active('maskImage', 'none') || active('webkitMaskImage', 'none') || active('maskBorderSource', 'none') || active('webkitMaskBoxImageSource', 'none') || (style.zoom && !['normal', '1', '100%'].includes(style.zoom)) || (style.contain || '').split(/\s+/).some(value => ['paint', 'content', 'strict'].includes(value))) { unsupported = true; continue; }
         let clipX = CLIPPING_OVERFLOW.has(style.overflowX), clipY = CLIPPING_OVERFLOW.has(style.overflowY);
         if (el === doc.documentElement || style.display === 'contents') clipX = clipY = false;
         if (el === doc.body) {
           let rootStyle;
-          try { rootStyle = view.getComputedStyle(doc.documentElement); } catch { unsupported = true; }
-          if (!rootStyle || typeof rootStyle.overflowX !== 'string' || typeof rootStyle.overflowY !== 'string') { unsupported = true; clipX = clipY = false; }
+          try { rootStyle = view.getComputedStyle(doc.documentElement); } catch { unsupported = true; continue; }
+          if (!rootStyle || typeof rootStyle.overflowX !== 'string' || typeof rootStyle.overflowY !== 'string') { unsupported = true; continue; }
           else {
             if (rootStyle.overflowX === 'visible') clipX = false;
             if (rootStyle.overflowY === 'visible') clipY = false;
           }
         }
-        if ((clipX || clipY) && style.display === 'inline') unsupported = true;
+        if ((clipX || clipY) && style.display === 'inline') { unsupported = true; continue; }
         if (clipX || clipY) clips.push({ el, clipX, clipY, style });
         if (el === doc.documentElement) break;
       }
-      if (startHidden) return false;
       if (unsupported || !clips.length) return fallback;
 
       const clipBoxes = [];

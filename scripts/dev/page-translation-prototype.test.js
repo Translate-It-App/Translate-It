@@ -982,18 +982,34 @@ describe('viewport DOM prototype', () => {
   it('records available hidden styles before falling back on incomplete style metadata', async () => {
     document.body.innerHTML = '<main><p id="hidden-start">Hidden start</p><section id="hidden-outer" style="content-visibility:hidden"><p id="unsupported-inner">Hidden outer</p></section></main>';
     const hiddenStart = document.querySelector('#hidden-start'), hiddenOuter = document.querySelector('#hidden-outer'), unsupportedInner = document.querySelector('#unsupported-inner');
+    Object.defineProperty(hiddenStart, 'checkVisibility', { configurable: true, value: () => true });
     Object.defineProperty(unsupportedInner, 'checkVisibility', { configurable: true, value: () => true });
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 });
     const nativeGetComputedStyle = window.getComputedStyle.bind(window);
+    const styleCalls = [], styleReads = { hiddenStart: {}, hiddenOuter: {}, unsupportedInner: {} };
+    const trackedStyle = (name, values) => new Proxy(values, { get(target, key, receiver) {
+      styleReads[name][key] = (styleReads[name][key] || 0) + 1;
+      return Reflect.get(target, key, receiver);
+    } });
     vi.spyOn(window, 'getComputedStyle').mockImplementation(element => {
-      if (element === hiddenStart) return { display: 'block', visibility: 'hidden', overflowX: 'visible', overflowY: 'visible' };
-      if (element === unsupportedInner) return { display: 'block', visibility: 'visible', overflowX: 'visible', overflowY: 'visible' };
+      styleCalls.push(element);
+      if (element === hiddenStart) return trackedStyle('hiddenStart', { display: 'block', visibility: 'hidden', overflowX: 'visible', overflowY: 'visible' });
+      if (element === unsupportedInner) return trackedStyle('unsupportedInner', { display: 'block', visibility: 'visible', overflowX: 'visible', overflowY: 'visible' });
+      if (element === hiddenOuter) return trackedStyle('hiddenOuter', { display: 'block', visibility: 'visible', contentVisibility: 'hidden', overflowX: 'visible', overflowY: 'visible', position: 'static' });
       return nativeGetComputedStyle(element);
     });
     const engine = TranslateItViewportPrototype.createEngine({ root: document.querySelector('main') });
     await engine.start(); await engine.whenIdle();
     expect(hiddenStart.textContent).toBe('Hidden start');
     expect(unsupportedInner.textContent).toBe('Hidden outer');
+    expect(styleCalls.filter(element => element === hiddenStart)).toHaveLength(1);
+    expect(styleCalls.filter(element => element === unsupportedInner)).toHaveLength(1);
+    expect(styleCalls.filter(element => element === hiddenOuter)).toHaveLength(1);
+    expect(styleReads.hiddenStart.position).toBeUndefined();
+    expect(styleReads.unsupportedInner.position).toBe(1);
+    expect(styleReads.hiddenOuter.display).toBe(1);
+    expect(styleReads.hiddenOuter.contentVisibility).toBe(1);
+    for (const key of ['visibility', 'overflowX', 'overflowY', 'position', 'transform', 'filter']) expect(styleReads.hiddenOuter[key]).toBeUndefined();
     await engine.cleanup();
   });
 
