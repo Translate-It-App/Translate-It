@@ -3,10 +3,11 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { serializeBenchmarkArtifact, writeBenchmarkArtifact } from './page-translation-e2e-benchmark/artifact-writer.mjs';
+import { createCancellationRequestLifecycle, promoteRequestDiagnostics } from './page-translation-e2e-benchmark/cancellation-probes.mjs';
 
-async function runActualFinalization({ failAt = null, cleanupFailure = false } = {}) {
+async function runActualFinalization({ failAt = null, cleanupFailure = false, trialCleanupErrors = [], trialCleanupReport = null, trialDiagnostics = null } = {}) {
   const runner = await readFile(new URL('./page-translation-e2e-benchmark/run.mjs', import.meta.url), 'utf8');
   const start = runner.indexOf('let globalRunOrder = 0;');
   expect(start).toBeGreaterThanOrEqual(0);
@@ -21,6 +22,7 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false } =
     harness,
     artifactPath: path,
     requestedModes: ['legacy', 'sliced', 'viewport'],
+    cancellationProbes: [],
     modes: ['legacy', 'sliced', 'viewport'],
     scenarios: ['small'],
     samples: 4,
@@ -42,12 +44,20 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false } =
     runNetworkGuardNegativeProbe: async () => {},
     runTrial: async options => {
       const failed = failAt && options.mode === failAt.mode && options.phase === failAt.phase && options.ordinal === failAt.ordinal;
-      return {
+      const run = {
         ...options,
-        status: failed ? 'failed' : 'passed',
-        cleanupErrors: failed ? ['fixture cleanup error'] : [],
+        status: failed || trialCleanupErrors.length ? 'failed' : 'passed',
+        cleanupErrors: [...(failed ? ['fixture cleanup error'] : []), ...trialCleanupErrors],
+        ...(trialCleanupReport ? { cancellation: { cleanup: { requestLifecycle: trialCleanupReport } } } : {}),
         ...(failed ? { error: { message: 'fixture trial failure' }, rawDOM: { translated: [['target-1', 'raw failed DOM']] } } : {}),
       };
+      if (trialDiagnostics) {
+        run.cancellation ??= {};
+        run.cancellation.observationErrors = trialDiagnostics.observationErrors ?? [];
+        run.transportErrors = trialDiagnostics.transportErrors ?? [];
+        promoteRequestDiagnostics(run);
+      }
+      return run;
     },
     writeArtifact: async () => {
       writes.push({ count: harness.results.length, status: harness.status });
@@ -159,4 +169,77 @@ describe('streamed benchmark artifact serialization', () => {
     expect(artifact.primaryError).toBeNull();
     expect(artifact.finishedAt).toBe(123);
   });
+
+  it('persists unexpected held-Fetch cleanup errors and raw request outcomes through runner finalization', async () => {
+    const lifecycle = createCancellationRequestLifecycle(async () => { throw new Error('Session closed unexpectedly.'); });
+    const request = lifecycle.reserve({ requestId: 'fetch-unexpected-error', sessionId: 'A' });
+    const handler = lifecycle.trackHandler(request, (async () => request.release('fail'))());
+    const cleanup = await lifecycle.closeAndDrain({ disableFetch: async () => {}, timeoutMs: 500 });
+    await handler;
+    expect(cleanup.ok).toBe(false);
+    expect(cleanup.errors).toContain('Fetch fetch-unexpected-error teardown release failed: Session closed unexpectedly.');
+    expect(cleanup.reservations[0].releaseOutcome).toMatchObject({ ok: false, error: 'Session closed unexpectedly.' });
+
+    const { artifact, writes } = await runActualFinalization({
+      trialCleanupErrors: cleanup.errors,
+      trialCleanupReport: cleanup,
+    });
+    expect(writes).toEqual([{ count: 1, status: 'failed' }]);
+    expect(artifact.status).toBe('failed');
+    expect(artifact.results[0].cleanupErrors).toEqual(cleanup.errors);
+    expect(artifact.results[0].cancellation.cleanup.requestLifecycle.reservations[0].releaseOutcome.error)
+      .toBe('Session closed unexpectedly.');
+    expect(artifact.finishedAt).toBe(123);
+  });
+
+  it('promotes observation and transport diagnostics to failure and persists them even after Fetch ACK', async () => {
+    const trialDiagnostics = {
+      observationErrors: [{ requestId: 'fetch-1', issues: ['provider/controller correlation failed'], fetchAck: 'fulfilled' }],
+      transportErrors: ['request handler failed after a response ACK'],
+    };
+    const { artifact, writes } = await runActualFinalization({ trialDiagnostics });
+    expect(writes).toEqual([{ count: 1, status: 'failed' }]);
+    expect(artifact.status).toBe('failed');
+    expect(artifact.results[0].status).toBe('failed');
+    expect(artifact.results[0].error.cancellationDiagnostics).toEqual(trialDiagnostics);
+    expect(artifact.results[0].cancellation.diagnosticFailures).toEqual(trialDiagnostics);
+    expect(artifact.finishedAt).toBe(123);
+  });
+
+  it('bounds a never-settling held Fetch, reports it, and persists the failed cleanup record', async () => {
+    vi.useFakeTimers();
+    try {
+      const lifecycle = createCancellationRequestLifecycle(async () => new Promise(() => {}));
+      const request = lifecycle.reserve({ requestId: 'fetch-never-settles', sessionId: 'A' });
+      lifecycle.trackHandler(request, (async () => request.release('fail'))());
+      const cleanupPromise = lifecycle.closeAndDrain({ disableFetch: async () => {}, timeoutMs: 50 });
+      let targetClosed = false;
+      await vi.advanceTimersByTimeAsync(50);
+      const cleanup = await cleanupPromise;
+      expect(targetClosed).toBe(false);
+      expect(cleanup.ok).toBe(false);
+      expect(cleanup.handlerCount).toBe(1);
+      expect(cleanup.errors).toEqual(expect.arrayContaining([
+        expect.stringContaining('Request handlers did not drain before deadline'),
+        expect.stringContaining('Fetch release commands did not settle before deadline'),
+      ]));
+      targetClosed = true;
+
+      vi.useRealTimers();
+      const { artifact, writes } = await runActualFinalization({
+        trialCleanupErrors: cleanup.errors,
+        trialCleanupReport: cleanup,
+      });
+      expect(writes).toEqual([{ count: 1, status: 'failed' }]);
+      expect(artifact.status).toBe('failed');
+      expect(artifact.results[0].cleanupErrors).toEqual(cleanup.errors);
+      expect(artifact.results[0].cancellation.cleanup.requestLifecycle.reservations[0]).toMatchObject({
+        requestId: 'fetch-never-settles', releaseOutcome: null, handlerSettled: false,
+      });
+      expect(artifact.finishedAt).toBe(123);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
 });

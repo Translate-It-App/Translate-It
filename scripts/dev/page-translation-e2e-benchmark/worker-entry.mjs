@@ -3,10 +3,18 @@ import { unifiedTranslationService } from '../../../src/core/services/translatio
 import { QueueManager } from '../../../src/features/translation/core/QueueManager.js';
 import { RateLimitManager } from '../../../src/features/translation/core/RateLimitManager.js';
 import { ProviderRequestEngine } from '../../../src/features/translation/providers/utils/ProviderRequestEngine.js';
+import { BaseProvider } from '../../../src/features/translation/providers/BaseProvider.js';
 import { MicrosoftEdgeProvider } from '../../../src/features/translation/providers/MicrosoftEdgeProvider.js';
 import { makeTrace, installCallThrough, installTimedCallThrough } from './trace.mjs';
+import { createCancellationLedger } from './cancellation-probes.mjs';
 
 const trace = makeTrace('worker');
+const cancellationLedger = createCancellationLedger();
+const providerRoots = [];
+const lifecycleControllers = new Map();
+const cancellationInstrumentationErrors = [];
+let cancellationProbeEnabled = false;
+let cancellationInstrumentationReady = false;
 installCallThrough(unifiedTranslationService, 'handleTranslationRequest', function ([message]) {
   trace.record('background.translationRequest.entry', {
     action: message?.action ?? null,
@@ -32,10 +40,29 @@ installTimedCallThrough(ProviderRequestEngine, 'executeApiCall', ([provider, opt
     method: options?.fetchOptions?.method ?? null,
     urlOrigin: (() => { try { return new URL(options?.url).origin; } catch { return null; } })(),
     bodyBytes: typeof options?.fetchOptions?.body === 'string' ? new TextEncoder().encode(options.fetchOptions.body).length : null,
+    ...(cancellationProbeEnabled ? { sessionId: options?.sessionId ?? null } : {}),
   });
-  return { startedAt };
+  const controllerMatch = options?.abortController
+    ? [...lifecycleControllers.entries()].find(([, entry]) => entry.controller === options.abortController)
+    : null;
+  const operation = cancellationProbeEnabled
+    ? cancellationLedger.begin('provider.physical', options?.sessionId ?? null, {
+      messageId: controllerMatch?.[0] ?? null,
+      url: options?.url ?? null,
+      method: options?.fetchOptions?.method ?? null,
+      requestBody: typeof options?.fetchOptions?.body === 'string' ? options.fetchOptions.body : null,
+      controllerAbortedAtStart: options?.abortController?.signal?.aborted ?? null,
+    })
+    : null;
+  return { startedAt, operation, abortController: options?.abortController ?? null };
 }, (token, error) => {
   trace.record('providerRequestEngine.executeApiCall.end', { startedAt: token?.startedAt ?? null, failed: !!error, errorName: error?.name ?? null });
+  if (token?.operation) cancellationLedger.settle(token.operation, error ? 'rejected' : 'fulfilled', {
+    errorName: error?.name ?? null,
+    error: error?.message ?? null,
+    operationAborted: error?.operationAborted === true,
+    controllerAbortedAtEnd: token.abortController?.signal?.aborted ?? null,
+  });
 });
 installTimedCallThrough(MicrosoftEdgeProvider.prototype, '_translateChunk', ([texts, , , , , , , chunkIndex, totalChunks]) => {
   const startedAt = Date.now();
@@ -50,6 +77,106 @@ const marker = {
   entry: 'src/core/background/index.js',
   unifiedTranslationService,
   trace,
+  enableCancellationProbe() {
+    cancellationProbeEnabled = true;
+    if (!cancellationInstrumentationReady) {
+      cancellationInstrumentationReady = true;
+      const originalTranslate = BaseProvider.prototype.translate;
+      BaseProvider.prototype.translate = function (text, sourceLanguage, targetLanguage, options = {}) {
+        const texts = Array.isArray(text) ? text.map(item => typeof item === 'string' ? item : item?.text) : [text];
+        const operation = cancellationLedger.begin('provider.root', options?.sessionId ?? null, {
+          messageId: options?.messageId ?? null,
+          texts,
+          controllerAbortedAtStart: options?.abortController?.signal?.aborted ?? null,
+        });
+        const root = { operation, messageId: options?.messageId ?? null, sessionId: options?.sessionId ?? null, controller: options?.abortController ?? null };
+        providerRoots.push(root);
+        let result;
+        try { result = originalTranslate.call(this, text, sourceLanguage, targetLanguage, options); }
+        catch (error) {
+          cancellationLedger.settle(operation, 'rejected', { errorName: error?.name ?? 'Error', error: error?.message ?? String(error) });
+          throw error;
+        }
+        if (!result || typeof result.then !== 'function') {
+          cancellationInstrumentationErrors.push(`provider.translate for ${options?.messageId ?? 'unknown-message'} returned a non-Promise.`);
+          cancellationLedger.record('instrumentation.promise-unavailable', options?.sessionId ?? null, {
+            operation: 'provider.root', messageId: options?.messageId ?? null,
+          });
+          return result;
+        }
+        result.then(
+          value => cancellationLedger.settle(operation, 'fulfilled', { resultSuccess: value?.success !== false, controllerAbortedAtEnd: options?.abortController?.signal?.aborted ?? null }),
+          error => cancellationLedger.settle(operation, 'rejected', { errorName: error?.name ?? null, error: error?.message ?? null, operationAborted: error?.operationAborted === true, controllerAbortedAtEnd: options?.abortController?.signal?.aborted ?? null }),
+        );
+        return result;
+      };
+
+      const registry = unifiedTranslationService.translationEngine?.lifecycleRegistry;
+      if (registry && typeof registry.registerRequest === 'function') {
+        const originalRegister = registry.registerRequest;
+        registry.registerRequest = function (messageId, ...args) {
+          const controller = originalRegister.call(this, messageId, ...args);
+          if (controller) {
+            const context = args[1] ?? null;
+            lifecycleControllers.set(messageId, { controller, context });
+            cancellationLedger.record('controller.register', providerRoots.find(root => root.messageId === messageId)?.sessionId ?? null, {
+              messageId, context, alreadyAborted: controller.signal.aborted,
+            });
+            controller.signal.addEventListener('abort', () => cancellationLedger.record('controller.abort',
+              providerRoots.find(root => root.messageId === messageId)?.sessionId ?? null,
+              { messageId, reason: controller.signal.reason ?? null }), { once: true });
+          }
+          return controller;
+        };
+      }
+
+      const service = unifiedTranslationService;
+      const originalCancelRequest = service.cancelRequest;
+      if (typeof originalCancelRequest === 'function') {
+        service.cancelRequest = function (messageId, ...args) {
+          const root = [...providerRoots].reverse().find(candidate => candidate.messageId === messageId);
+          const controller = lifecycleControllers.get(messageId)?.controller ?? this.translationEngine?.getAbortController?.(messageId) ?? null;
+          const operation = cancellationLedger.begin('service.cancelRequest', root?.sessionId ?? null, {
+            messageId, controllerMatched: !!controller, controllerAbortedBefore: controller?.signal?.aborted ?? null,
+          });
+          let result;
+          try { result = originalCancelRequest.call(this, messageId, ...args); }
+          catch (error) {
+            cancellationLedger.settle(operation, 'rejected', { errorName: error?.name ?? 'Error', error: error?.message ?? String(error) });
+            throw error;
+          }
+          if (!result || typeof result.then !== 'function') {
+            cancellationInstrumentationErrors.push(`UnifiedTranslationService.cancelRequest for ${messageId} returned a non-Promise.`);
+            cancellationLedger.settle(operation, 'unsupported-non-promise', { controllerAbortedAfter: controller?.signal?.aborted ?? null });
+            return result;
+          }
+          result.then(
+            value => cancellationLedger.settle(operation, 'fulfilled', { response: value, controllerAbortedAfter: controller?.signal?.aborted ?? null }),
+            error => cancellationLedger.settle(operation, 'rejected', { errorName: error?.name ?? 'Error', error: error?.message ?? String(error), controllerAbortedAfter: controller?.signal?.aborted ?? null }),
+          );
+          return result;
+        };
+      }
+    }
+    return {
+      enabled: true,
+      lifecycleRegistryObserved: !!unifiedTranslationService.translationEngine?.lifecycleRegistry,
+      instrumentationErrors: [...cancellationInstrumentationErrors],
+    };
+  },
+  cancellationSnapshot(sessionId) {
+    const roots = providerRoots.filter(root => sessionId === undefined || root.sessionId === sessionId);
+    return {
+      sessionId,
+      ledger: cancellationLedger.snapshot(sessionId),
+      instrumentationErrors: [...cancellationInstrumentationErrors],
+      providerRoots: roots.map(root => ({ messageId: root.messageId, sessionId: root.sessionId, texts: root.operation.texts, status: root.operation.status, controllerAborted: root.controller?.signal?.aborted ?? null, errorName: root.operation.errorName ?? null, error: root.operation.error ?? null, settledSequence: root.operation.settledSequence ?? null })),
+      controllers: [...lifecycleControllers.entries()].map(([messageId, entry]) => ({
+        messageId, context: entry.context, aborted: entry.controller.signal.aborted,
+        sessionId: providerRoots.find(root => root.messageId === messageId)?.sessionId ?? null,
+      })).filter(entry => sessionId === undefined || entry.sessionId === sessionId),
+    };
+  },
   snapshot: () => trace.snapshot(),
 };
 globalThis.__pageTranslationBenchmark = marker;

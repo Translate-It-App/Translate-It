@@ -2,9 +2,11 @@ import { PageTranslationManager } from '../../../src/features/page-translation/P
 import { FeatureManager } from '../../../src/core/managers/content/FeatureManager.js';
 import { PageTranslationScheduler } from '../../../src/features/page-translation/PageTranslationScheduler.js';
 import { PageTranslationBridge } from '../../../src/features/page-translation/PageTranslationBridge.js';
+import { MainFrameCoordinator } from '../../../src/core/content-scripts/main/MainFrameCoordinator.js';
 import { PAGE_TRANSLATION_SLICED_DISCOVERY, PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY } from '../../../src/features/page-translation/PageTranslationConstants.js';
 import { captureViewportWindow, installCallThrough, installPrimitiveAdmissionObserver } from './trace.mjs';
 import { drainAndDisconnectMeasurementObservers, groupMutationRecords, isDuplicateAcceptedMutation, trackAcceptedTarget } from './measurement-lifecycle.mjs';
+import { createCancellationLedger, installCancellationRuntimeMessageObserver, installTrustedLifecycleObserver, sessionIdForTranslationContext } from './cancellation-probes.mjs';
 
 const trace = {
   entry: 'src/core/content-scripts/index-main.js',
@@ -20,6 +22,186 @@ const trace = {
   discoveryFlags: {
     slicedDiscoveryEnabled: PAGE_TRANSLATION_SLICED_DISCOVERY,
     viewportFirstDiscoveryEnabled: PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY,
+  },
+  cancellationLedger: null,
+  cancellationSessions: new Map(),
+  cancellationSessionOwners: new WeakMap(),
+  cancellationContextOwners: new Map(),
+  cancellationAcceptedTransitions: new Map(),
+  cancellationInstrumentationErrors: [],
+  enableCancellationProbe() {
+    if (this.cancellationLedger) return { enabled: true, reused: true };
+    const ledger = this.cancellationLedger = createCancellationLedger();
+    const manager = () => FeatureManager.getInstance().getFeatureHandler('pageTranslation');
+    const currentSessionId = () => manager()?.scheduler?.translationSessionId ?? null;
+    const observePromise = (kind, sessionId, result, detail = {}, detailOnSettlement = () => ({}), expectPromise = false) => {
+      if (!result || typeof result.then !== 'function') {
+        ledger.record(expectPromise ? 'instrumentation.promise-unavailable' : kind, sessionId, {
+          ...detail, operation: kind, status: 'synchronous',
+        });
+        if (expectPromise) this.cancellationInstrumentationErrors.push(`${kind} returned a non-Promise result.`);
+        return result;
+      }
+      const operation = ledger.begin(kind, sessionId, detail);
+      result.then(
+        value => ledger.settle(operation, 'fulfilled', { response: value, ...detailOnSettlement(value) }),
+        error => ledger.settle(operation, 'rejected', { errorName: error?.name ?? 'Error', error: error?.message ?? String(error) }),
+      );
+      return result;
+    };
+    const scheduler = PageTranslationScheduler.prototype;
+    for (const method of ['flush']) {
+      if (typeof scheduler[method] !== 'function' || scheduler[method].__cancellationObserved) continue;
+      const original = scheduler[method];
+      const wrapped = function (...args) {
+        const owner = this.translationSessionId;
+        return observePromise(`scheduler.${method}`, owner, original.apply(this, args), { sessionContextOwned: !!this.sessionContext }, undefined, true);
+      };
+      wrapped.__cancellationObserved = true;
+      scheduler[method] = wrapped;
+    }
+    if (typeof scheduler._executeBatchRequest === 'function' && !scheduler._executeBatchRequest.__cancellationObserved) {
+      const original = scheduler._executeBatchRequest;
+      const wrapped = function (batch, config, context, sessionId, ...rest) {
+        const ids = Array.isArray(batch) ? batch.map(item => benchmarkTargetId(item?.node)) : [];
+        return observePromise('scheduler.batch', sessionId, original.call(this, batch, config, context, sessionId, ...rest), { targetIds: ids }, undefined, true);
+      };
+      wrapped.__cancellationObserved = true;
+      scheduler._executeBatchRequest = wrapped;
+    }
+    if (typeof scheduler._createSettlement === 'function' && !scheduler._createSettlement.__cancellationObserved) {
+      const original = scheduler._createSettlement;
+      const wrapped = function (item, ...args) {
+        const settlement = original.call(this, item, ...args);
+        const owner = sessionIdForTranslationContext(trace.cancellationContextOwners, item?.context);
+        const id = benchmarkTargetId(item?.node);
+        if (owner === null) trace.cancellationInstrumentationErrors.push(`No captured origin session for settlement ${id ?? 'unknown-target'}`);
+        const settle = settlement.settle;
+        settlement.settle = function (outcome) {
+          const before = settlement.state;
+          const result = settle.call(this, outcome);
+          const transition = ledger.record('scheduler.settlement', owner, {
+            id, outcome, before, changed: result === true,
+            transition: result === true ? 'changed' : 'ignored', originContextCaptured: owner !== null,
+          });
+          if (result === true && outcome === 'accepted' && id && owner !== null) {
+            trace.cancellationAcceptedTransitions.set(id, { sessionId: owner, sequence: transition.sequence });
+          }
+          return result;
+        };
+        return settlement;
+      };
+      wrapped.__cancellationObserved = true;
+      scheduler._createSettlement = wrapped;
+    }
+
+    const bridgeTranslate = PageTranslationBridge.prototype.translate;
+    if (typeof bridgeTranslate === 'function' && !bridgeTranslate.__cancellationObserved) {
+      const wrapped = function (...args) {
+        const session = this.session;
+        const owner = currentSessionId();
+        if (session && owner) {
+          trace.cancellationSessions.set(owner, session);
+          trace.cancellationSessionOwners.set(session, owner);
+          if (session.context) trace.cancellationContextOwners.set(session.context, owner);
+          const nodesTranslator = session.domTranslator?.nodesTranslator;
+          if (nodesTranslator && !nodesTranslator.translateNodeContent?.__cancellationObserved) {
+            const originalNodeTranslate = nodesTranslator.translateNodeContent;
+            if (typeof originalNodeTranslate === 'function') {
+              const observedNodeTranslate = function (node, ...nodeArgs) {
+                const id = benchmarkTargetId(node);
+                const sourceAtStart = node?.nodeValue ?? node?.value ?? null;
+                return observePromise('node.continuation', owner,
+                  originalNodeTranslate.call(this, node, ...nodeArgs),
+                  { id, sourceAtStart, sessionContextOwned: session.context === manager()?.scheduler?.sessionContext },
+                  () => ({ actualDomValueAtSettlement: node?.nodeValue ?? node?.value ?? null }), true);
+              };
+              observedNodeTranslate.__cancellationObserved = true;
+              nodesTranslator.translateNodeContent = observedNodeTranslate;
+            }
+          }
+        }
+        const result = bridgeTranslate.apply(this, args);
+        return observePromise('bridge.discovery', owner, result, { capturedSession: !!session });
+      };
+      wrapped.__cancellationObserved = true;
+      PageTranslationBridge.prototype.translate = wrapped;
+    }
+
+    for (const method of ['stopPersistence', 'cleanup']) {
+      const original = PageTranslationBridge.prototype[method];
+      if (typeof original !== 'function' || original.__cancellationObserved) continue;
+      const wrapped = function (...args) {
+        const session = this.session;
+        const owner = session ? trace.cancellationSessionOwners.get(session) ?? null : null;
+        const result = original.apply(this, args);
+        if (session && owner === null) trace.cancellationInstrumentationErrors.push(`No captured origin session for Bridge.${method}`);
+        else if (session) ledger.record('session.invalidation', owner, {
+          method, capturedSessionActive: session.active,
+          discoveryCancelled: session.discovery?.cancelled ?? null,
+          bridgeStillOwnsCapturedSession: this.session === session,
+        });
+        return result;
+      };
+      wrapped.__cancellationObserved = true;
+      PageTranslationBridge.prototype[method] = wrapped;
+    }
+
+    const publish = PageTranslationManager.prototype._publishLifecycle;
+    if (typeof publish === 'function' && !publish.__cancellationObserved) {
+      const wrapped = function (action, data = {}, sessionId = null) {
+        ledger.record('lifecycle.emission', sessionId ?? data?.sessionId ?? data?.messageId ?? null, { action, data });
+        return publish.call(this, action, data, sessionId);
+      };
+      wrapped.__cancellationObserved = true;
+      PageTranslationManager.prototype._publishLifecycle = wrapped;
+    }
+
+    const lifecycleHandler = MainFrameCoordinator.prototype.handleTrustedPageLifecycle;
+    if (typeof lifecycleHandler === 'function' && !lifecycleHandler.__cancellationObserved) {
+      const installed = installTrustedLifecycleObserver(MainFrameCoordinator.prototype, 'handleTrustedPageLifecycle', event => {
+        ledger.record('lifecycle.delivery', event.sessionId, { action: event.action, accepted: event.accepted, result: event.result });
+      });
+      if (!installed) this.cancellationInstrumentationErrors.push('Could not install trusted lifecycle observer.');
+      else MainFrameCoordinator.prototype.handleTrustedPageLifecycle.__cancellationObserved = true;
+    }
+
+    const runtime = globalThis.browser?.runtime ?? globalThis.chrome?.runtime;
+    const sendMessageObserver = installCancellationRuntimeMessageObserver(runtime, ledger,
+      message => this.cancellationInstrumentationErrors.push(message));
+    const sendMessageWrapped = sendMessageObserver.installed;
+    if (!sendMessageWrapped) this.cancellationInstrumentationErrors.push(`runtime.sendMessage wrapper failed: ${sendMessageObserver.reason ?? 'assignment was not retained'}`);
+
+    this.drainCancellationMutations = () => {
+      if (!measurement) return null;
+      const records = measurement.observer.takeRecords();
+      if (records.length) measurement.processMutations(records);
+      return {
+        recordCount: measurement.observerState.recordCount,
+        acceptedIds: [...measurement.acceptedIds],
+        duplicateAcceptedIds: [...measurement.duplicateAcceptedIds],
+        mutations: measurement.mutations.map(mutation => ({ ...mutation })),
+      };
+    };
+    this.cancellationSnapshot = sessionId => {
+      const session = this.cancellationSessions.get(sessionId);
+      const activeManager = manager();
+      const selectedOperations = ledger.snapshot(sessionId);
+      const latestB = activeManager?.scheduler?.translationSessionId ?? null;
+      return {
+        sessionId,
+        activeManagerSessionId: latestB,
+        capturedSessionActive: session?.active ?? null,
+        discoveryCancelled: session?.discovery?.cancelled ?? null,
+        currentBridgeOwnsSession: activeManager?.bridge?.session === session,
+        schedulerSessionContextOwned: !!session && activeManager?.scheduler?.sessionContext === session.context,
+        pendingOperations: selectedOperations.pending,
+        operations: selectedOperations.operations,
+        instrumentationErrors: [...this.cancellationInstrumentationErrors],
+        mutationSnapshot: this.drainCancellationMutations?.(),
+      };
+    };
+    return { enabled: true, sendMessageWrapped, instrumentationErrors: [...this.cancellationInstrumentationErrors] };
   },
   record(name, detail = {}) { this.events.push({ name, at: Date.now(), ...detail }); },
   featureState() {
@@ -155,6 +337,15 @@ trace.startMeasurement = () => {
         resultingText: target.element.textContent, records: group.records,
       });
       mutations.push({ at: Date.now(), id: target.id, recordCount: group.records.length, types: [...new Set(group.records.map(record => record.type))], acceptedWrite, duplicateAcceptedWrite });
+      if (trace.cancellationLedger && acceptedWrite) {
+        const ownership = trace.cancellationAcceptedTransitions.get(target.id);
+        trace.cancellationLedger.record('dom.acceptedMutation', ownership?.sessionId ?? null, {
+          id: target.id,
+          originTransitionSequence: ownership?.sequence ?? null,
+          originTransitionCaptured: ownership !== undefined,
+          duplicateAcceptedWrite,
+        });
+      }
       if (!acceptedWrite) {
         acceptedIds.delete(target.id);
         continue;
