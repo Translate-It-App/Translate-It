@@ -7,13 +7,16 @@ import { dirname, resolve } from 'node:path';
 import process from 'node:process';
 import { buildBenchmarkExtension } from './build.mjs';
 import { launchChrome } from './chrome.mjs';
-import { classifyTransportRequest, mapEdgeResponse, summarizeIntervals, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation } from './metrics.mjs';
-import { startFixture, startupVoicesResponse, targetTexts } from './fixture.mjs';
-import { cleanupMeasurementBeforeResources, completeTranslationMeasurement } from './measurement-lifecycle.mjs';
+import { writeBenchmarkArtifact } from './artifact-writer.mjs';
+import { classifyTransportRequest, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
+import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
+import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
+import { candidateModeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './scenario-plan.mjs';
 
 const root = process.cwd();
-const requestedModes = (process.env.BENCH_MODES ?? 'legacy,sliced,viewport').split(',').map(value => value.trim()).filter(Boolean);
+const requestedModes = [...new Set((process.env.BENCH_MODES ?? 'legacy,sliced,viewport').split(',').map(value => value.trim()).filter(Boolean))];
 const modes = ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
+const scenarios = parseScenarioSelection(process.env.BENCH_SCENARIOS ?? 'small');
 const samples = Number(process.env.BENCH_SAMPLES ?? 5);
 const warmups = Number(process.env.BENCH_WARMUPS ?? 1);
 const defaultArtifact = `/tmp/opencode/page-translation-e2e-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}.json`;
@@ -24,6 +27,7 @@ const sourcePaths = [
   'src/features/page-translation/PageTranslationManager.js',
   'src/features/page-translation/PageTranslationScheduler.js',
   'src/features/page-translation/PageTranslationBridge.js',
+  'src/features/page-translation/PageTranslationConstants.js',
   'src/features/translation/providers/MicrosoftEdgeProvider.js',
   'src/core/services/translation/UnifiedTranslationService.js',
   'scripts/dev/page-translation-e2e-benchmark/run.mjs',
@@ -35,8 +39,12 @@ const sourcePaths = [
   'scripts/dev/page-translation-e2e-benchmark/content-entry.mjs',
   'scripts/dev/page-translation-e2e-benchmark/trace.mjs',
   'scripts/dev/page-translation-e2e-benchmark/measurement-lifecycle.mjs',
+  'scripts/dev/page-translation-e2e-benchmark/artifact-writer.mjs',
+  'scripts/dev/page-translation-e2e-benchmark/scenario-plan.mjs',
   'scripts/dev/page-translation-e2e-runtime.test.js',
   'scripts/dev/page-translation-e2e-measurement.test.js',
+  'scripts/dev/page-translation-e2e-large-page.test.js',
+  'scripts/dev/page-translation-e2e-artifact-writer.test.js',
 ];
 const settings = Object.freeze({
   WHOLE_PAGE_LAZY_LOADING: false,
@@ -82,8 +90,7 @@ function findTrace(events, name, predicate = () => true) { return events.find(ev
 function deriveTimings(trial, workerTrace, contentTrace, contentEvents) {
   const workerEvents = traceEvents(workerTrace);
   contentEvents ??= Array.isArray(contentTrace?.events) ? contentTrace.events : [];
-  const mutations = contentTrace?.mutations ?? [];
-  const acceptedWrites = mutations.filter(mutation => mutation.acceptedWrite);
+  const acceptance = summarizeAcceptanceTimes(contentTrace?.firstAcceptedAtById, trial.fixture.visibleIds, trial.fixture.targets.map(target => target.id));
   const backgroundAdmission = findTrace(workerEvents, 'background.translationRequest.entry');
   const queueAdmission = findTrace(workerEvents, 'queueManager.enqueue');
   const providerStart = findTrace(workerEvents, 'providerRequestEngine.executeApiCall.start');
@@ -91,7 +98,7 @@ function deriveTimings(trial, workerTrace, contentTrace, contentEvents) {
   const discoveryStart = findTrace(contentEvents, 'bridge.discovery.pending', event => event.pending === true);
   const discoveryDrained = [...contentEvents].reverse().find(event => event.name === 'bridge.discovery.pending' && event.pending === false);
   const schedulerFlush = findTrace(contentEvents, 'scheduler.flush.entry');
-  const firstWrite = acceptedWrites.find(write => write.visibleAtStart) ?? acceptedWrites[0];
+  const schedulerRequestEntry = findTrace(contentEvents, 'scheduler.executeBatchRequest.entry');
   return {
     translationCommand: trial.timestamps.translationCommand,
     discoveryStart: discoveryStart?.at ?? null,
@@ -100,7 +107,8 @@ function deriveTimings(trial, workerTrace, contentTrace, contentEvents) {
     discoveryDrainUnavailableReason: discoveryDrained ? null : 'Bridge discovery-drained transition not observed',
     firstSchedulerFlush: schedulerFlush?.at ?? null,
     schedulerFlushUnavailableReason: schedulerFlush ? null : 'Scheduler.flush entry not observed',
-    schedulerRequestEntry: findTrace(contentEvents, 'scheduler.executeBatchRequest.entry')?.at ?? null,
+    schedulerRequestEntry: schedulerRequestEntry?.at ?? null,
+    schedulerRequestEntryUnavailableReason: schedulerRequestEntry ? null : 'Scheduler batch-entry instrumentation was not observed',
     runtimeMessageHandoff: null,
     runtimeMessageHandoffUnavailableReason: 'No transparent runtime.sendMessage wrapper installed; not inferred from request-entry timing',
     backgroundAdmission: backgroundAdmission?.at ?? null,
@@ -112,10 +120,13 @@ function deriveTimings(trial, workerTrace, contentTrace, contentEvents) {
     providerRequestUnavailableReason: providerStart && providerEnd ? null : 'ProviderRequestEngine wrapper did not observe both boundaries',
     transportAttempts: trial.requests.filter(request => request.category === 'provider-translation').map(request => ({ startedAt: request.startedAt, endedAt: request.endedAt, bodyLength: request.bodyLength, batchSize: request.batchSize })),
     firstVisibleAcceptedWrite: contentTrace?.firstVisibleAcceptedWriteAt ?? null,
-    firstAcceptedWrite: firstWrite?.at ?? null,
-    firstAcceptedWriteUnavailableReason: firstWrite ? null : 'No accepted DOM mutation was captured',
-    allAcceptedWrites: acceptedWrites.length === targetTexts.length ? Math.max(...acceptedWrites.map(write => write.at)) : null,
-    allAcceptedWritesUnavailableReason: acceptedWrites.length === targetTexts.length ? null : `MutationObserver captured ${acceptedWrites.length} accepted target writes; expected ${targetTexts.length}`,
+    firstAcceptedWrite: acceptance.firstAcceptedAt,
+    firstAcceptedWriteUnavailableReason: acceptance.firstAcceptedAtUnavailableReason,
+    visibleSetCompletion: acceptance.visibleSetCompletionAt,
+    visibleSetCompletionUnavailableReason: acceptance.visibleSetCompletionUnavailableReason,
+    allAcceptedWrites: acceptance.allTargetsCompletionAt,
+    allAcceptedWritesUnavailableReason: acceptance.allTargetsCompletionUnavailableReason,
+    acceptance,
     completion: trial.terminal?.receivedAt ?? null,
     restoreStart: trial.timestamps.restoreStarted,
     restoreEnd: trial.timestamps.restoreCompleted,
@@ -124,6 +135,7 @@ function deriveTimings(trial, workerTrace, contentTrace, contentEvents) {
     visibleAtStartIds: contentEvents.filter(event => event.name === 'dom.acceptedWrite' && event.visibleAtStart === true).map(event => event.id),
     visibleAtStartCount: contentEvents.filter(event => event.name === 'dom.acceptedWrite' && event.visibleAtStart === true).length,
     longTasks: contentTrace?.longTasks ?? null,
+    longTaskSummary: summarizeLongTasks(contentTrace?.longTasks ?? null),
     longTaskUnavailableReason: contentTrace?.longTasks === null
       ? (contentTrace.longTasksUnavailableReason ?? 'Trace writer omitted an unavailable-reason detail')
       : null,
@@ -135,10 +147,19 @@ function measureMode(runs) {
   const intervals = (start, end) => summarizeIntervals(runs.map(start), runs.map(end));
   const times = {
     commandToFirstVisibleWrite: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.firstVisibleAcceptedWrite),
+    commandToVisibleCompletion: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.visibleSetCompletion),
     commandToAllWrites: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.allAcceptedWrites),
     commandToCompletion: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.completion),
+    commandToDiscoveryDrain: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.discoveryDrained),
+    commandToFirstFlush: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.firstSchedulerFlush),
+    commandToBatchEntry: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.schedulerRequestEntry),
+    commandToBackgroundAdmission: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.backgroundAdmission),
     restoreDuration: intervals(run => run.derivedTimings?.restoreStart, run => run.derivedTimings?.restoreEnd),
   };
+  const taskEntries = runs.map(run => run.derivedTimings?.longTasks);
+  const longTaskSummary = taskEntries.some(entries => entries === null || entries === undefined)
+    ? { ...summarizeLongTasks(null), unavailableReason: 'One or more trials lacked calibrated long-task observations.' }
+    : { ...summarizeLongTasks(taskEntries.flat()), unavailableReason: null };
   return {
     n: runs.length,
     times,
@@ -146,6 +167,7 @@ function measureMode(runs) {
     providerBatchSizes: runs.map(run => run.providerBatchSizes),
     startupMetadataFixtureCount: runs.map(run => run.requests.filter(request => request.category === 'startup-metadata-fixture').length),
     longTaskSamples: runs.map(run => run.derivedTimings?.longTasks ?? null),
+    longTaskSummary,
     longTaskCalibration: runs.map(run => run.longTaskCalibration ?? { supported: false, reason: 'calibration was not run' }),
   };
 }
@@ -169,7 +191,11 @@ const harness = {
   artifactPath,
   provenance: {},
   settings,
-  fixture: { targetCount: targetTexts.length, targetTexts },
+  scenarios: scenarios.map(scenario => {
+    const fixture = createFixture(scenario);
+    return { scenario, targetCount: fixture.targetCount, visibleIds: fixture.visibleIds, viewport: fixture.viewport, scroll: fixture.scroll, responseDelayMs: fixture.responseDelayMs };
+  }),
+  fixtureWarmupSemantics: 'Each trial starts a fresh Chrome process/profile; warmups are discarded cold-profile runs, not persistent-process/JIT warmups.',
   requestedModes: modes,
   warmups,
   measuredSamples: samples,
@@ -186,7 +212,7 @@ const harness = {
   networkGuardScope: 'Fetch request-stage guard is installed before the test extension service worker resumes and before the top-level fixture page navigates. It covers that worker and the page target, including its isolated content world; iframe targets and Chrome process/component-extension telemetry are outside the measured scope.',
   limitations: {
     runtimeMessageHandoff: 'Not observed with a transparent runtime.sendMessage call-through; scheduler request entry and background admission remain separately timestamped.',
-    performanceScope: 'Fixture has 12 short static targets and does not isolate the viewport-first benefit on offscreen-heavy pages.',
+    performanceScope: 'Small fixture is 12 static targets. Large fixtures use a four-target visible window with three DOM/visual orders; results remain exploratory. The 800ms initial batch timer and 1000-item queue emergency bound can mask priority benefits.',
     heapLeak: 'Not measured; no heap-leak claim.',
   },
   status: 'running',
@@ -196,7 +222,7 @@ const buildDirs = [];
 
 async function writeArtifact() {
   await mkdir(dirname(artifactPath), { recursive: true });
-  await writeFile(artifactPath, JSON.stringify(harness, null, 2));
+  await writeBenchmarkArtifact(artifactPath, harness);
 }
 
 async function compileMode(mode) {
@@ -223,13 +249,22 @@ async function compileMode(mode) {
   return built.outputDir;
 }
 
-async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe = false }) {
+async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false }) {
   const trial = {
-    mode, ordinal, phase, status: 'running',
+    mode, scenario: fixtureConfig.scenario, ordinal, globalRunOrder, phase, status: 'running',
     timestamps: { trialStart: now() },
     contexts: [], workerReadiness: [], contentReadiness: [], commands: [], lifecycle: [],
     console: [], exceptions: [], requests: [], rawDOM: {}, cleanupErrors: [],
-    fixture: { targetCount: targetTexts.length, targetTexts },
+    fixture: {
+      scenario: fixtureConfig.scenario,
+      targetCount: fixtureConfig.targetCount,
+      targets: fixtureConfig.targets,
+      targetTexts: fixtureConfig.targetTexts,
+      visibleIds: fixtureConfig.visibleIds,
+      viewport: fixtureConfig.viewport,
+      scroll: fixtureConfig.scroll,
+      responseDelayMs: fixtureConfig.responseDelayMs,
+    },
     settings,
   };
   let chrome;
@@ -268,8 +303,8 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
         requestRecord.bodyBytes = Buffer.byteLength(request.postData ?? '', 'utf8');
         requestRecord.batchSize = body.length;
         requestRecord.batchTexts = body;
-        requestRecord.fixtureDelayMs = 50;
-        await wait(50);
+        requestRecord.fixtureDelayMs = fixtureConfig.responseDelayMs;
+        await wait(fixtureConfig.responseDelayMs);
         const bodyString = JSON.stringify(responseBody);
         await send('Fetch.fulfillRequest', {
           requestId, responseCode: 200,
@@ -310,7 +345,7 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
   };
 
   try {
-    fixture = await startFixture();
+    fixture = await startFixture(fixtureConfig);
     trial.fixture.url = fixture.url;
     trial.stage = 'chrome-launch';
     chrome = await launchChrome({
@@ -353,6 +388,12 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
     sendBySession.set(pageSession, chrome.send);
     extensionOriginBySession.set(pageSession, testExtensionOrigin);
     await chrome.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, pageSession);
+    await chrome.send('Emulation.setDeviceMetricsOverride', {
+      width: fixtureConfig.viewport.width,
+      height: fixtureConfig.viewport.height,
+      deviceScaleFactor: 1,
+      mobile: false,
+    }, pageSession);
     const contentContextPromise = new Promise((resolveContext, rejectContext) => {
       const timeout = setTimeout(() => rejectContext(new Error('No extension content execution context appeared')), 20_000);
       const off = chrome.onEvent(event => {
@@ -397,12 +438,25 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
         && state.features?.active && state.features?.handlerActive;
     });
 
-    const originals = targetTexts.map((text, index) => [`target-${index}`, text]);
+    trial.discoveryFlagsObserved = await evaluate(chrome, pageSession,
+      'window.__pageTranslationBenchmark.discoveryFlags', contentContext, false);
+    trial.discoveryFlagsValidation = validateDiscoveryFlags(mode, trial.discoveryFlagsObserved);
+    if (!trial.discoveryFlagsValidation.ok) throw new Error(trial.discoveryFlagsValidation.issues.join('; '));
+
+    trial.scrollState = await evaluate(chrome, pageSession,
+      `(()=>{window.scrollTo(${fixtureConfig.scroll.x},${fixtureConfig.scroll.y});return {x:window.scrollX,y:window.scrollY}})()`, undefined, false);
+    const actualGeometry = await evaluate(chrome, pageSession,
+      `(()=>{const targets=[...document.querySelectorAll('[data-bench-id]')];const visible=targets.filter(element=>{const rect=element.getBoundingClientRect();const style=getComputedStyle(element);return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>0&&rect.height>0&&rect.bottom>0&&rect.right>0&&rect.top<innerHeight&&rect.left<innerWidth}).map(element=>element.dataset.benchId);return {targetCount:targets.length,visibleIds:visible,viewport:{width:innerWidth,height:innerHeight},scroll:{x:scrollX,y:scrollY}}})()`, undefined, false);
+    trial.actualGeometry = actualGeometry;
+    trial.fixtureGeometryValidation = validateFixtureGeometry(fixtureConfig, actualGeometry);
+    if (!trial.fixtureGeometryValidation.ok) throw new Error(trial.fixtureGeometryValidation.issues.join('; '));
+    const originals = fixtureConfig.targets.map(target => [target.id, target.source]);
+    const originalById = new Map(originals);
     trial.rawDOM.original = await evaluate(chrome, pageSession,
       `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext);
-    if (trial.rawDOM.original.length !== targetTexts.length
+    if (trial.rawDOM.original.length !== fixtureConfig.targetCount
         || JSON.stringify(trial.rawDOM.original) !== JSON.stringify(originals)) {
-      throw new Error('Pre-translation fixture DOM does not exactly match the 12 source targets.');
+      throw new Error(`Pre-translation fixture DOM does not exactly match ${fixtureConfig.targetCount} source targets.`);
     }
     trial.longTaskCalibration = await evaluate(chrome, pageSession,
       'window.__pageTranslationBenchmark.calibrateLongTasks?.()??{supported:false,reason:"trace writer calibration unavailable"}', contentContext);
@@ -415,6 +469,10 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
     measurementState.attempted = true;
     trial.measurementStart = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.startMeasurement()', contentContext);
     measurementState.started = true;
+    if (trial.measurementStart.targetCount !== fixtureConfig.targetCount
+        || JSON.stringify(trial.measurementStart.visibleIds) !== JSON.stringify(actualGeometry.visibleIds)) {
+      throw new Error('MutationObserver target/visible-ID snapshot does not match actual viewport geometry.');
+    }
     trial.timestamps.translationCommand = now();
     const started = await evaluate(chrome, pageSession,
       `chrome.runtime.sendMessage(${JSON.stringify({ action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' } })})`, contentContext);
@@ -443,11 +501,12 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
           trial.lifecycle = events;
           const terminal = events.find(event => ['page-translate-complete', 'page-translate-idle'].some(action => isSessionEvent(event, action, sessionId)));
           if (terminal) trial.terminal = terminal;
+          if (!terminal) return null;
           const dom = await evaluate(chrome, pageSession,
             `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
           trial.rawDOM.translated = dom;
-          return terminal && dom.length === targetTexts.length && dom.every(([id, value]) => {
-            const source = originals.find(([expectedId]) => expectedId === id)?.[1];
+          return dom.length === fixtureConfig.targetCount && dom.every(([id, value]) => {
+            const source = originalById.get(id);
             return source !== undefined && value === `\u200efixture translation: ${source}`;
           }) ? { terminal, dom } : null;
         }, 60_000);
@@ -477,11 +536,12 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
           trial.lifecycle = events;
           const done = events.find(event => isSessionEvent(event, 'page-restore-complete', sessionId));
           if (done) trial.restoreTerminal = done;
+          if (!done) return null;
           const dom = await evaluate(chrome, pageSession,
             `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
           trial.rawDOM.restored = dom;
-          return done && dom.length === targetTexts.length
-            && dom.every(([id, text]) => originals.find(([expectedId]) => expectedId === id)?.[1] === text) ? { done, dom } : null;
+          return dom.length === fixtureConfig.targetCount
+            && dom.every(([id, text]) => originalById.get(id) === text) ? { done, dom } : null;
         }, 30_000);
         return restored;
       },
@@ -490,10 +550,13 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
     trial.measurements.content = contentTrace;
     trial.timestamps.restoreCompleted = lifecycle.restoreCompletedAt;
     const restoredLifecycle = lifecycle.restored;
-    const [workerTrace, contentEvents] = await Promise.all([
+    const [workerTrace, contentObservation] = await Promise.all([
       evaluate(chrome, workerSession, 'globalThis.__pageTranslationBenchmark.snapshot()'),
-      evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.events.map(event=>({...event}))', contentContext),
+      evaluate(chrome, pageSession,
+        `(()=>{const trace=window.__pageTranslationBenchmark;return {events:trace.events.map(event=>({...event})),discoveryFlags:trace.discoveryFlags,admissionHookInstalled:trace.admissionHookInstalled,discoveryAdmissionOrder:trace.discoveryAdmissionOrder,schedulerEnqueueOrder:trace.schedulerEnqueueOrder,selectedBatchMembers:trace.selectedBatchMembers,viewportWindowObservation:trace.viewportWindowObservation}})()`, contentContext),
     ]);
+    const contentEvents = contentObservation.events;
+    trial.contentObservation = contentObservation;
     trial.measurements.contentEvents = contentEvents;
     trial.measurements.worker = workerTrace;
     const calibratedLongTasks = validatedLongTaskObservation(trial.longTaskCalibration, contentTrace.longTasks);
@@ -505,7 +568,73 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
     const originalsFromDom = trial.rawDOM.original;
     const translatedFromDom = trial.rawDOM.translated;
     const providerSources = providerAttempts.flatMap(request => request.batchTexts ?? []);
-    trial.validation = validateTranslation({ originals: originalsFromDom, translated: translatedFromDom, requests: providerSources, restored: new Map(restoredLifecycle.dom), expectedCount: targetTexts.length });
+    const expectedIds = originalsFromDom.map(([id]) => id);
+    const sourceToId = new Map(fixtureConfig.targets.map(target => [target.source, target.id]));
+    if (sourceToId.size !== fixtureConfig.targetCount) throw new Error('Fixture source texts are not unique; HTTP body-to-target order cannot be proven.');
+    const admissionIds = contentObservation.discoveryAdmissionOrder;
+    if (contentObservation.admissionHookInstalled !== true) throw new Error('Per-session primitive-admission instrumentation was not installed.');
+    const enqueuedIds = contentObservation.schedulerEnqueueOrder;
+    const acceptedIds = contentTrace.acceptedIds;
+    const selectedBatchIds = Array.isArray(contentObservation.selectedBatchMembers)
+      ? contentObservation.selectedBatchMembers.flatMap(batch => Array.isArray(batch) ? batch : null)
+      : null;
+    trial.discoveryAdmissionOrder = admissionIds ?? null;
+    trial.admissionStage = 'filtered DOMTranslator primitive admission, before PageTranslationScheduler.enqueue';
+    trial.schedulerEnqueueOrder = enqueuedIds;
+    trial.selectedBatchMembers = contentObservation.selectedBatchMembers;
+    trial.acceptedDomOrder = contentEvents.filter(event => event.name === 'dom.acceptedWrite').map(event => event.id);
+    trial.duplicateAcceptedWriteIds = contentTrace.duplicateAcceptedIds ?? [];
+    const orderValidation = [
+      validateExactTargetIds('Scheduler enqueue', enqueuedIds, expectedIds),
+      validateExactTargetIds('filtered primitive admission', admissionIds, expectedIds),
+      validateExactTargetIds('accepted DOM write', acceptedIds, expectedIds),
+      validateExactTargetIds('selected scheduler batch', selectedBatchIds, expectedIds),
+    ];
+    const orderIssues = orderValidation.flatMap(validation => validation.issues);
+    if (trial.duplicateAcceptedWriteIds.length) orderIssues.push(`duplicate accepted DOM writes: ${trial.duplicateAcceptedWriteIds.join(',')}`);
+    if (orderIssues.length) throw new Error(orderIssues.join('; '));
+
+    if (mode === 'viewport' && ['early-visible', 'in-window-visible', 'late-visible'].includes(fixtureConfig.scenario)) {
+      const observation = contentObservation.viewportWindowObservation;
+      if (!observation) throw new Error('Viewport-first mode did not capture the active discovery window before it was cleared.');
+      if (observation.enumerationSteps !== 100 || observation.candidateCount > 100) {
+        throw new Error(`Viewport window did not show the real 100-step boundary: steps=${observation.enumerationSteps}, candidates=${observation.candidateCount}`);
+      }
+      if (observation.windowCandidateIds.some(id => typeof id !== 'string')) throw new Error('Viewport window contains candidate IDs that are not fixture targets.');
+      const expectedWindowVisibleIds = fixtureConfig.scenario === 'late-visible' ? [] : actualGeometry.visibleIds;
+      if (JSON.stringify(observation.visibleCandidateIds) !== JSON.stringify(expectedWindowVisibleIds)) {
+        throw new Error(`Viewport window visible membership differs from actual geometry: ${JSON.stringify(observation.visibleCandidateIds)}`);
+      }
+      trial.windowMembership = {
+        ...validateWindowMembership({
+          scenario: fixtureConfig.scenario,
+          visibleIds: actualGeometry.visibleIds,
+          windowCandidateIds: observation.windowCandidateIds,
+          enumerationSteps: observation.enumerationSteps,
+        }),
+        observation,
+      };
+      if (!trial.windowMembership.ok) throw new Error(trial.windowMembership.issues.join('; '));
+    } else {
+      trial.windowMembership = { ok: null, reason: mode !== 'viewport' ? 'Viewport-first discovery disabled for this mode.' : 'Small fixture does not measure the large-page window boundary.' };
+    }
+
+    trial.providerRequestOrder = mapProviderBatchIds(providerAttempts.map(request => request.batchTexts ?? []), sourceToId);
+    const providerRequestIds = trial.providerRequestOrder.flat();
+    const providerOrderValidation = validateExactTargetIds('provider request source', providerRequestIds, expectedIds);
+    if (!providerOrderValidation.ok) throw new Error(providerOrderValidation.issues.join('; '));
+    trial.providerRequestOrderValidation = providerOrderValidation;
+    trial.providerHTTPRequestSequence = providerAttempts.map(request => ({ at: request.startedAt, ids: (request.batchTexts ?? []).map(source => sourceToId.get(source) ?? null), bodyBytes: request.bodyBytes }));
+    trial.validation = validateTranslation({
+      originals: originalsFromDom,
+      translated: translatedFromDom,
+      requests: providerSources,
+      restored: new Map(restoredLifecycle.dom),
+      expectedCount: fixtureConfig.targetCount,
+      acceptedIds,
+      enqueuedIds,
+      admittedIds: admissionIds,
+    });
     if (!trial.validation.ok) throw new Error(trial.validation.issues.join('; '));
     const unexpectedExternal = trial.requests.find(request => request.category === 'blocked');
     if (unexpectedExternal) throw new Error(`Unexpected external request blocked: ${unexpectedExternal.url}`);
@@ -539,7 +668,7 @@ async function runTrial({ mode, ordinal, phase, extensionPath, networkGuardProbe
 
 async function runNetworkGuardNegativeProbe(extensionPath) {
   const probeArtifactPath = `${artifactPath.replace(/\.json$/i, '')}-network-guard-probe.json`;
-  const run = await runTrial({ mode: 'legacy', ordinal: 1, phase: 'non-performance-network-guard-probe', extensionPath, networkGuardProbe: true });
+  const run = await runTrial({ mode: 'legacy', scenario: 'small', ordinal: 1, globalRunOrder: ++globalRunOrder, phase: 'non-performance-network-guard-probe', extensionPath, fixtureConfig: createFixture('small'), networkGuardProbe: true });
   const blockedRequests = run.networkGuardProbe?.map(result => ({ world: result.world, url: result.url, method: result.request.method, blocked: result.request.blocked, reason: result.request.error })) ?? [];
   const probe = {
     command: 'runTrial legacy negative network guard probe (non-performance; excluded from aggregates)',
@@ -555,9 +684,18 @@ async function runNetworkGuardNegativeProbe(extensionPath) {
   if (probe.status !== 'passed') throw new Error(`Negative network guard probe failed; see ${probeArtifactPath}`);
 }
 
+let globalRunOrder = 0;
+async function runRecordedTrial(options) {
+  const run = await runTrial({ ...options, globalRunOrder: ++globalRunOrder });
+  harness.results.push(run);
+  if (run.browser?.browserVersion) harness.provenance.browserVersion = run.browser.browserVersion;
+  if (run.status !== 'passed') throw new Error(`${run.mode}/${run.scenario} ${run.phase} ${run.ordinal} failed: ${run.error?.message ?? run.cleanupErrors.join('; ')}`);
+  return run;
+}
+
 try {
   if (!requestedModes.length || requestedModes.some(mode => !['legacy', 'sliced', 'viewport'].includes(mode))) throw new TypeError(`Unsupported BENCH_MODES: ${requestedModes.join(',')}`);
-  if (!Number.isInteger(samples) || samples < 3 || samples > 5) throw new TypeError('BENCH_SAMPLES must be 3, 4, or 5.');
+  validateSampleCount(samples);
   if (!Number.isInteger(warmups) || warmups < 1 || warmups > 3) throw new TypeError('BENCH_WARMUPS must be 1, 2, or 3.');
   harness.provenance = {
     gitSha: git('rev-parse', 'HEAD'),
@@ -567,36 +705,59 @@ try {
     browserVersion: null,
     fileSha256: Object.fromEntries(await Promise.all(sourcePaths.map(async path => [path, await hashFile(path)]))),
   };
-  for (const mode of modes) {
-    const extensionPath = await compileMode(mode);
-    const modeRuns = [];
-    for (let index = 1; index <= warmups; index++) {
-      const run = await runTrial({ mode, ordinal: index, phase: 'warmup', extensionPath });
-      modeRuns.push(run);
-      harness.results.push(run);
-      if (run.browser?.browserVersion) harness.provenance.browserVersion = run.browser.browserVersion;
-      if (run.status !== 'passed') throw new Error(`${mode} warmup ${index} failed: ${run.error?.message ?? run.cleanupErrors.join('; ')}`);
+  harness.comparisonOrdering = 'All per-scenario Legacy qualification runs complete before candidates. Candidate warmups and each measured ordinal rotate sliced/viewport order by scenario index plus ordinal; this retains a Legacy-first ordering bias.';
+  const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario) }));
+  const legacyOutput = await compileMode('legacy');
+  const legacyRuns = [];
+  harness.scenarioSummaries = {};
+  for (const plan of scenarioPlans) {
+    const measuredRuns = [];
+    for (let ordinal = 1; ordinal <= warmups; ordinal++) {
+      const run = await runRecordedTrial({ mode: 'legacy', scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: legacyOutput, fixtureConfig: plan.fixture });
+      legacyRuns.push(run);
     }
-    for (let index = 1; index <= samples; index++) {
-      const run = await runTrial({ mode, ordinal: index, phase: 'measured', extensionPath });
-      modeRuns.push(run);
-      harness.results.push(run);
-      if (run.status !== 'passed') throw new Error(`${mode} measured sample ${index} failed: ${run.error?.message ?? run.cleanupErrors.join('; ')}`);
+    for (let ordinal = 1; ordinal <= samples; ordinal++) {
+      const run = await runRecordedTrial({ mode: 'legacy', scenario: plan.scenario, ordinal, phase: 'measured', extensionPath: legacyOutput, fixtureConfig: plan.fixture });
+      legacyRuns.push(run);
+      measuredRuns.push(run);
     }
-    harness.modeSummaries ??= {};
-    harness.modeSummaries[mode] = measureMode(modeRuns.filter(run => run.phase === 'measured'));
-    if (mode === 'legacy' && modes.length > 1) {
-      harness.comparisonGate = validateRunGate({ legacyResults: modeRuns, measuredSamples: modeRuns.filter(run => run.phase === 'measured') });
-      if (!harness.comparisonGate.comparisonsAllowed) throw new Error('Sliced/viewport comparisons gated: Legacy warmup or measured correctness failed.');
+    harness.scenarioSummaries[plan.scenario] = { legacy: measureMode(measuredRuns) };
+  }
+  harness.comparisonGate = validateRunGate({ legacyResults: legacyRuns, measuredSamples: legacyRuns.filter(run => run.phase === 'measured') });
+  if (!harness.comparisonGate.comparisonsAllowed) throw new Error('Candidate comparisons gated: a Legacy scenario did not pass every warmup and measured run.');
+  await runNetworkGuardNegativeProbe(legacyOutput);
+
+  const candidateModes = modes.filter(mode => mode !== 'legacy');
+  const candidateOutputs = new Map();
+  for (const mode of candidateModes) {
+    candidateOutputs.set(mode, await compileMode(mode));
+  }
+  for (const plan of scenarioPlans) {
+    for (const mode of candidateModeOrder(plan.index, 0).filter(candidate => candidateModes.includes(candidate))) {
+      for (let ordinal = 1; ordinal <= warmups; ordinal++) {
+        await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: candidateOutputs.get(mode), fixtureConfig: plan.fixture });
+      }
     }
-    if (mode === 'legacy') await runNetworkGuardNegativeProbe(extensionPath);
-    if (mode !== 'legacy') {
-      const baseline = harness.modeSummaries.legacy.times;
-      const current = harness.modeSummaries[mode].times;
-      harness.comparisons ??= {};
-      harness.comparisons[mode] = Object.fromEntries(Object.keys(current).map(metric => {
+  }
+  for (const plan of scenarioPlans) {
+    for (let ordinal = 1; ordinal <= samples; ordinal++) {
+      for (const mode of candidateModeOrder(plan.index, ordinal - 1).filter(candidate => candidateModes.includes(candidate))) {
+        await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'measured', extensionPath: candidateOutputs.get(mode), fixtureConfig: plan.fixture });
+      }
+    }
+  }
+
+  harness.comparisons = {};
+  for (const plan of scenarioPlans) {
+    for (const mode of candidateModes) {
+      const measuredRuns = harness.results.filter(run => run.scenario === plan.scenario && run.mode === mode && run.phase === 'measured');
+      const summary = measureMode(measuredRuns);
+      harness.scenarioSummaries[plan.scenario][mode] = summary;
+      const baseline = harness.scenarioSummaries[plan.scenario].legacy.times;
+      harness.comparisons[plan.scenario] ??= {};
+      harness.comparisons[plan.scenario][mode] = Object.fromEntries(Object.keys(summary.times).map(metric => {
         const baselineP50 = baseline[metric]?.p50;
-        const modeP50 = current[metric]?.p50;
+        const modeP50 = summary.times[metric]?.p50;
         return [metric, { baselineP50: baselineP50 ?? null, modeP50: modeP50 ?? null, delta: Number.isFinite(baselineP50) && Number.isFinite(modeP50) ? modeP50 - baselineP50 : null }];
       }));
     }

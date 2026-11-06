@@ -1,4 +1,4 @@
-export function validateTranslation({ originals, translated, requests, restored, expectedCount = originals.length }) {
+export function validateTranslation({ originals, translated, requests, restored, expectedCount = originals.length, acceptedIds, admittedIds, enqueuedIds }) {
   const issues = [];
   const expected = new Map();
   const actual = new Map();
@@ -31,7 +31,68 @@ export function validateTranslation({ originals, translated, requests, restored,
   }
   for (const [id, source] of originals) if (restored.get(id) !== source) issues.push(`restore mismatch: ${id}`);
   for (const id of restored.keys()) if (!expected.has(id)) issues.push(`unexpected restored target: ${id}`);
+  for (const [name, ids] of [['accepted', acceptedIds], ['admitted', admittedIds], ['enqueued', enqueuedIds]]) {
+    if (ids === undefined) continue;
+    if (!Array.isArray(ids)) {
+      issues.push(`${name} target IDs unavailable or invalid`);
+      continue;
+    }
+    const counts = new Map();
+    for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
+    for (const [id, count] of counts) {
+      if (!expected.has(id)) issues.push(`unexpected ${name} target: ${id}`);
+      if (count > 1) issues.push(`duplicate ${name} target: ${id}`);
+    }
+    for (const id of expected.keys()) if (!counts.has(id)) issues.push(`missing ${name} target: ${id}`);
+  }
   return { ok: issues.length === 0, issues, translatedCount: actual.size, originalCount: expected.size };
+}
+
+export function summarizeLongTasks(entries) {
+  if (entries == null) return { count: null, maxDurationMs: null, blockingTimeMs: null };
+  if (!Array.isArray(entries)) throw new TypeError('Long-task entries must be an array or unavailable.');
+  const durations = entries.map(entry => entry?.duration);
+  if (durations.some(duration => !Number.isFinite(duration) || duration < 0)) {
+    throw new TypeError('Long-task durations must be finite non-negative numbers.');
+  }
+  return {
+    count: entries.length,
+    maxDurationMs: durations.length ? Math.max(...durations) : 0,
+    blockingTimeMs: durations.reduce((total, duration) => total + Math.max(0, duration - 50), 0),
+  };
+}
+
+export function validateWindowMembership({ scenario, visibleIds, windowCandidateIds, enumerationSteps }) {
+  const issues = [];
+  if (!['early-visible', 'in-window-visible', 'late-visible'].includes(scenario)) issues.push('window scenario unavailable or invalid');
+  if (!Array.isArray(visibleIds) || !Array.isArray(windowCandidateIds)) issues.push('window membership data unavailable');
+  if (!Number.isInteger(enumerationSteps) || enumerationSteps <= 0) issues.push('enumeration step count unavailable or invalid');
+  else if (enumerationSteps > 100) issues.push(`enumeration step limit exceeded: ${enumerationSteps}`);
+  if (Array.isArray(visibleIds) && visibleIds.length === 0) issues.push('visible target IDs unavailable');
+  if (Array.isArray(windowCandidateIds) && windowCandidateIds.length === 0) issues.push('window candidate IDs unavailable');
+  if (Array.isArray(windowCandidateIds) && Number.isInteger(enumerationSteps) && windowCandidateIds.length > enumerationSteps) {
+    issues.push(`window candidate count exceeds enumeration steps: ${windowCandidateIds.length} > ${enumerationSteps}`);
+  }
+  if (Array.isArray(visibleIds) && new Set(visibleIds).size !== visibleIds.length) issues.push('duplicate visible target ID');
+  if (Array.isArray(windowCandidateIds) && new Set(windowCandidateIds).size !== windowCandidateIds.length) issues.push('duplicate window candidate ID');
+
+  if (Array.isArray(visibleIds) && Array.isArray(windowCandidateIds) && ['early-visible', 'in-window-visible'].includes(scenario)) {
+    const candidates = new Set(windowCandidateIds);
+    for (const id of visibleIds) if (!candidates.has(id)) issues.push(`visible target missing from window candidates: ${id}`);
+    const firstVisible = windowCandidateIds.findIndex(id => visibleIds.includes(id));
+    if (scenario === 'in-window-visible' && firstVisible >= 0 && !windowCandidateIds.slice(0, firstVisible).some(id => !visibleIds.includes(id))) {
+      issues.push('in-window scenario has no offscreen candidate before visible targets');
+    }
+    if (scenario === 'early-visible' && firstVisible >= 0) {
+      const lastVisible = windowCandidateIds.reduce((last, id, index) => visibleIds.includes(id) ? index : last, -1);
+      const firstOffscreen = windowCandidateIds.findIndex(id => !visibleIds.includes(id));
+      if (firstOffscreen >= 0 && lastVisible >= firstOffscreen) issues.push('early visible targets do not precede offscreen candidates');
+    }
+  }
+  if (scenario === 'late-visible' && Array.isArray(visibleIds) && Array.isArray(windowCandidateIds)) {
+    for (const id of visibleIds) if (windowCandidateIds.includes(id)) issues.push(`late visible target unexpectedly in window candidates: ${id}`);
+  }
+  return { ok: issues.length === 0, issues };
 }
 
 export function summarize(values, minimumP95Samples = 40) {

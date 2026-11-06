@@ -5,18 +5,21 @@ Run the real MV3 background/content entries against a local synthetic page. Tran
 ```sh
 pnpm exec node scripts/dev/page-translation-e2e-benchmark/run.mjs
 # Optional controls
-BENCH_MODES=legacy,sliced,viewport BENCH_SAMPLES=5 BENCH_WARMUPS=1 \
+BENCH_MODES=legacy,sliced,viewport BENCH_SCENARIOS=small,early-visible,in-window-visible,late-visible \
+  BENCH_SAMPLES=5 BENCH_WARMUPS=1 \
   BENCH_OUTPUT=/tmp/opencode/page-translation-e2e-custom.json \
   pnpm exec node scripts/dev/page-translation-e2e-benchmark/run.mjs
 ```
 
-Legacy always runs first (one discarded preliminary run plus at least three measured runs). This preliminary run uses a fresh Chrome process/profile too: it is a cold-profile baseline check, **not** a persistent-process or JIT warmup. Sliced/viewport comparisons run only after every Legacy preliminary and measured run passes exact translation and true-restore validation. Each run uses a fresh Chrome profile; one mode bundle is reused for its runs. Defaults are five measured samples per mode; p95 stays unavailable below 40 observations.
+`BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `early-visible`, `in-window-visible`, and `late-visible`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
 
-Every mode uses the same 12 static short targets, French target, Edge provider, non-lazy/Fluid settings and 50 ms fixture transport delay. Effective target language, lazy loading, scroll-stop and auto-DOM-change Manager settings are asserted on every trial. The fixture is small and visible; it does **not** isolate viewport-first behavior or establish a performance benefit for offscreen-heavy pages. Reports include raw runs, provider request batch sizes, lifecycle/DOM trace observations, unavailable metrics with reasons and sample counts, provenance hashes, browser version, and cleanup status. Do not infer provider concurrency or queue throughput unless trace counts show those components actually ran.
+All per-scenario Legacy warmups and measured runs finish and pass exact translation/true-Restore validation before candidates are allowed. Candidate warmups and each measured ordinal rotate sliced/viewport order by scenario and ordinal; this still retains a Legacy-first ordering bias. Each trial uses a fresh Chrome process/profile, while each compiled mode bundle is reused for that mode's trials. A warmup is a discarded cold-profile run, not a persistent-process/JIT warmup. The `small` fixture retains 12 static visible targets; large fixtures use the same French target, Edge provider, non-lazy/Fluid settings, and 50 ms response delay. Effective Manager settings and the content bundle's actual sliced/viewport discovery flags are asserted on every trial. Filtered primitive admissions are observed per session in all modes, separately from scheduler enqueue. Reports include per-trial artifacts, exact ID/admission/enqueue/batch observations, viewport-window membership where applicable, provider request batches, provenance hashes, and cleanup status. The mutation observer and instrumentation add overhead; accepted DOM text is a DOM-write observation, not paint or visual-presentation timing. Duplicate-write flags require a directly observed repeated accepted character-data write or accepted subtree replacement; coalesced records do not prove intermediate states that the observer did not expose. Unsupported or unobserved timings remain null with reasons; Legacy discovery-drain timing remains unavailable unless the runtime transition is observed. p95 remains unavailable below 40 samples. The 800 ms initial batch timer and 1,000-item emergency bound can mask priority differences; large-layout results are exploratory, not a general performance claim. Do not infer provider concurrency or queue throughput unless trace counts show those components actually ran.
 
 Artifacts default to a unique `/tmp/opencode/page-translation-e2e-<timestamp>-<pid>.json`; set `BENCH_OUTPUT` to choose a path. The separate network-guard negative probe has a sibling `*-network-guard-probe.json` artifact. Failures, including later samples and cleanup failures, are retained and produce a nonzero exit. A malformed `chrome-extension://invalid/` placeholder request is blocked and recorded separately; it is not an HTTP(S) request or an allowed extension asset. The harness does not claim coverage of Chrome’s own process/component traffic, heap-leak behavior, or paint timing.
 
-## Latest Chrome result
+The main report is atomically streamed once after normal completion or a handled failure, retaining all raw trials without quadratic full-report rewrites. Progress is otherwise memory-only; abnormal process termination is not guaranteed to leave a current main report. The separate negative-probe artifact is still written when that probe runs.
+
+## Historical small-fixture Chrome result
 
 Artifacts:
 - Benchmark: `/tmp/opencode/page-translation-e2e-2026-11-05T23-15-41.190Z-3726452.json`
@@ -35,3 +38,27 @@ Measured p50 milliseconds (p95 is null for n=3):
 Observed path counts per trial: 12 `PageTranslationScheduler.enqueue`, one flush, one batch request entry, one background admission, one `QueueManager.enqueue`/`_processItem`, one `RateLimitManager.executeWithRateLimit`, one Edge chunk, one `ProviderRequestEngine.executeApiCall`, and one outbound translation POST. This does not establish AI-limiter use or queue concurrency. The observed effective Manager settings were `targetLanguage: fr`, `lazyLoading: false`, `translateAfterScrollStop: false`, and `autoTranslateOnDOMChanges: false` on all trials. All 12 targets were visible at the start, so these exploratory numbers do not show viewport-first benefit for offscreen-heavy pages. Runtime-message handoff time was unavailable; it was not inferred from adjacent trace events. Long-task calibration captured a 75 ms task before each timed translation interval; the measured observers reported no long tasks in these runs.
 
 Cancellation with a held stale response was not run; the raw artifact records this as unavailable, and no stale-write cancellation claim is made. The negative probe separately blocked an unexpected HTTPS `fetch` from both page main world and extension isolated content world. A malformed non-HTTP `chrome-extension://invalid/` request was also blocked and recorded; it was not continued or fulfilled. This Fetch scope does not cover Chrome’s own process/component-extension telemetry or iframes. Nonfatal ActionbarIconManager warnings about missing `icons/extension/extension_icon_128.png` and `icons/providers/google.png` are captured in the raw Chrome console trace; the background and translation pipeline initialized and completed despite them. No real credentials or external translation service were used.
+
+## Latest large-page exploratory Chrome result
+
+Artifacts:
+- Benchmark: `/tmp/opencode/page-translation-e2e-2026-11-06T02-07-55.972Z-3824097.json`
+- Network negative probe: `/tmp/opencode/page-translation-e2e-2026-11-06T02-07-55.972Z-3824097-network-guard-probe.json`
+
+This run used Chrome 156.0.8078.79 at HEAD `26c80831953ba721034a909e51a629fa5ebe29ee`, with working-tree changes recorded in the artifact's provenance and source SHA-256 map. It covered three large layouts (`early-visible`, `in-window-visible`, `late-visible`) across `legacy`, `sliced`, and `viewport`: 36 trials total (9 warmups/preflights and 27 measured). Each large fixture had 1,000 exact targets. All measured runs passed translation, 1,000-target admission/enqueue, provider-request-order, and 1,000-target restore checks. Each run issued 40 physical provider requests in batches of 25; all returned HTTP 200. The viewport-first observations recorded 100 enumeration steps and 12 candidates per sample: 4/4 visible IDs for early and in-window layouts, 0/4 for late. Window membership validation passed. The network negative probe passed; there were no cleanup errors. The separately blocked `chrome-extension://invalid/` placeholder is not an unexpected HTTP(S) request.
+
+Measured p50 milliseconds (n=3 per row; p95 unavailable). Long-task totals are aggregated across the three measured samples in that row: observed-entry count / maximum duration / total blocking time (TBT), in ms.
+
+| Layout | Mode | First visible write | Visible completion | Total completion | Long tasks across 3 samples: count / max ms / TBT ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Early-visible | Legacy | 296 | 297 | 3441 | 3 / 125 / 203 |
+| Early-visible | Sliced | 275 | 275 | 2871 | 0 / 0 / 0 |
+| Early-visible | Viewport | 299 | 299 | 2898 | 0 / 0 / 0 |
+| In-window-visible | Legacy | 323 | 323 | 3458 | 3 / 135 / 225 |
+| In-window-visible | Sliced | 326 | 326 | 2964 | 0 / 0 / 0 |
+| In-window-visible | Viewport | 302 | 302 | 2953 | 0 / 0 / 0 |
+| Late-visible | Legacy | 327 | 328 | 3558 | 3 / 144 / 245 |
+| Late-visible | Sliced | 347 | 347 | 2924 | 1 / 54 / 4 |
+| Late-visible | Viewport | 476 | 476 | 2931 | 0 / 0 / 0 |
+
+These three-sample results do not establish a performance benefit, provide p95, or justify enabling flags by default. Legacy discovery-drain timing was unavailable, not zero. The 104 MB raw artifact predates a reporting-only change that streams trials individually and atomically replaces the report, avoiding Node's whole-string size limit. Focused writer tests cover a synthetic 369-trial report and preservation of the previous artifact on serialization failure; a rewrite of the complete recorded artifact was byte-identical. Measurement logic is unchanged. No 40-sample Chrome matrix was run. Raw trials remain in memory, so larger matrices still incur memory and I/O costs.

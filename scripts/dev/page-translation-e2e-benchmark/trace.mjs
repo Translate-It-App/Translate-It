@@ -8,6 +8,28 @@ export function installCallThrough(target, method, observe) {
   return true;
 }
 
+export function installPrimitiveAdmissionObserver(session, observe) {
+  const nodesTranslator = session?.domTranslator?.nodesTranslator;
+  return nodesTranslator ? installCallThrough(nodesTranslator, 'translate', observe) : false;
+}
+
+export function captureViewportWindow(session, targetIdForNode) {
+  const window = session?.discovery?.queue?.find(candidate => candidate.viewportWindow)?.viewportWindow;
+  if (!window) return null;
+  const candidateDetails = window.candidates.map(candidate => ({
+    id: targetIdForNode(candidate.node),
+    visible: candidate.visible === true,
+  }));
+  return {
+    phaseAtAdmission: window.phase,
+    enumerationSteps: window.enumerationSteps,
+    candidateCount: window.candidates.length,
+    candidateDetails,
+    windowCandidateIds: candidateDetails.map(candidate => candidate.id),
+    visibleCandidateIds: candidateDetails.filter(candidate => candidate.visible).map(candidate => candidate.id),
+  };
+}
+
 export function installTimedCallThrough(target, method, onStart, onEnd) {
   const original = target?.[method];
   if (typeof original !== 'function') return false;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, drainAndDisconnectMeasurementObservers } from './page-translation-e2e-benchmark/measurement-lifecycle.mjs';
+import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, drainAndDisconnectMeasurementObservers, groupMutationRecords, isDuplicateAcceptedMutation } from './page-translation-e2e-benchmark/measurement-lifecycle.mjs';
 
 describe('translation measurement lifecycle boundary', () => {
   it('stops translation observers after exact completion/DOM acceptance and before real Restore', async () => {
@@ -160,5 +160,22 @@ describe('translation measurement lifecycle boundary', () => {
       processLongTasks() {},
     })).toThrow(AggregateError);
     expect(order).toEqual(['take-mutations', 'disconnect-mutations', 'take-longtasks', 'disconnect-longtasks']);
+  });
+
+  it('coalesces mutation records per target and only calls a repeated accepted text write a duplicate', () => {
+    const element = { dataset: { benchId: 'target-1' } };
+    const records = [
+      { target: { element }, type: 'characterData', oldValue: 'source' },
+      { target: { element }, type: 'characterData', oldValue: 'intermediate' },
+    ];
+    const groups = groupMutationRecords(records, record => record.target.element.dataset.benchId);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].records).toHaveLength(2);
+    const expectedText = '\u200efixture translation: source';
+    expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: false, expectedText, resultingText: expectedText, records: groups[0].records })).toBe(false);
+    expect(isDuplicateAcceptedMutation({
+      wasAlreadyAccepted: true, expectedText, resultingText: expectedText,
+      records: [{ type: 'characterData', oldValue: expectedText, target: { nodeValue: expectedText } }],
+    })).toBe(true);
   });
 });
