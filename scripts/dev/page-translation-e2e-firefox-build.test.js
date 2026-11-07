@@ -3,14 +3,21 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { buildConfigs, baseConfigs } = vi.hoisted(() => ({ buildConfigs: [], baseConfigs: [] }));
+const { buildConfigs, baseConfigs, buildFailure } = vi.hoisted(() => ({ buildConfigs: [], baseConfigs: [], buildFailure: { value: null } }));
 
 vi.mock('vite', () => ({
   build: vi.fn(async config => {
+    if (buildFailure.value) throw new Error(buildFailure.value);
     buildConfigs.push(config);
     await mkdir(config.build.outDir, { recursive: true });
     const [name] = Object.keys(config.build.rollupOptions.input);
-    await writeFile(resolve(config.build.outDir, `${name}.js`), `// ${name}`);
+    const virtualEntry = config.build.rollupOptions.input[name];
+    const virtualPlugin = config.plugins?.find(plugin => plugin.name === 'firefox-runtime-bridge');
+    const bridgeSource = virtualEntry === 'virtual:page-translation-probe-worker'
+      ? virtualPlugin?.load('\0virtual:page-translation-probe-worker')
+      : virtualEntry === 'virtual:page-translation-probe-content'
+        ? virtualPlugin?.load('\0virtual:page-translation-probe-content') : null;
+    await writeFile(resolve(config.build.outDir, `${name}.js`), bridgeSource ?? `// ${name}`);
   }),
 }));
 
@@ -34,6 +41,7 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true })));
   buildConfigs.length = 0;
   baseConfigs.length = 0;
+  buildFailure.value = null;
 });
 
 describe('page translation benchmark build browser support', () => {
@@ -97,9 +105,61 @@ describe('page translation benchmark build browser support', () => {
     expect(await readFile(constantsPath, 'utf8')).toBe(originalFile);
   });
 
+  it('keeps bridge report credentials in worker output and public content config secret-free', async () => {
+    const outputDir = await freshOutputDir();
+    const bridge = {
+      runId: 'run-123', fixtureUrl: 'http://127.0.0.1:4321/fixture',
+      bindingUrl: 'http://127.0.0.1:4321/__benchmark/bind/run-123',
+      reportUrl: 'http://127.0.0.1:4321/__benchmark/runtime', authToken: 'a'.repeat(64),
+    };
+    await buildBenchmarkExtension({ browser: 'firefox', mode: 'sliced', outputDir, workerEntry: resolve('scripts/dev/page-translation-e2e-benchmark/worker-entry.mjs'), contentEntry: resolve('scripts/dev/page-translation-e2e-benchmark/content-entry.mjs'), runtimeBridge: bridge });
+    const plugin = baseConfigs[0].options.extraPlugins.find(item => item.name === 'firefox-runtime-bridge');
+    const workerSource = plugin.load('\0virtual:page-translation-probe-worker');
+    const contentSource = plugin.load('\0virtual:page-translation-probe-content');
+    expect(workerSource).toContain(bridge.authToken);
+    expect(workerSource).not.toContain('privateToken');
+    expect(contentSource).toContain(bridge.fixtureUrl);
+    expect(contentSource).not.toContain(bridge.authToken);
+    expect(contentSource).not.toContain('privateToken');
+    expect(await readFile(resolve(outputDir, 'content-loader.js'), 'utf8')).not.toContain(bridge.authToken);
+    const emittedWorker = await readFile(resolve(outputDir, 'worker.js'), 'utf8');
+    const emittedContent = await readFile(resolve(outputDir, 'content-entry.js'), 'utf8');
+    expect(emittedWorker).toContain(bridge.authToken);
+    expect(emittedContent).not.toContain(bridge.authToken);
+    const backgroundPath = resolve('src/core/background/index.js');
+    const backgroundOriginal = await readFile(backgroundPath, 'utf8');
+    const backgroundTransformed = plugin.transform(backgroundOriginal, backgroundPath);
+    expect(backgroundTransformed).toContain('const startup = initializeBackgroundService(backgroundService, postInitializeBackgroundService');
+    expect(backgroundTransformed).toContain('startup.then(() => { globalThis.__firefoxProbeStartup');
+    const contentPath = resolve('src/core/content-scripts/index-main.js');
+    const contentOriginal = await readFile(contentPath, 'utf8');
+    expect(plugin.transform(contentOriginal, contentPath)).toContain('window.__firefoxProbeStartup = { complete: true, success: initialized === true };');
+    expect(await readFile(backgroundPath, 'utf8')).toBe(backgroundOriginal);
+    expect(await readFile(contentPath, 'utf8')).toBe(contentOriginal);
+    expect(() => plugin.transform('source drift', backgroundPath)).toThrow('instrumentation drifted');
+  });
+
+  it('redacts generated credentials from build failures', async () => {
+    const outputDir = await freshOutputDir();
+    const secret = 'f'.repeat(64);
+    buildFailure.value = `synthetic bundler detail ${secret}`;
+    const buildPromise = buildBenchmarkExtension({ browser: 'firefox', mode: 'sliced', outputDir,
+      workerEntry: resolve('scripts/dev/page-translation-e2e-benchmark/worker-entry.mjs'),
+      contentEntry: resolve('scripts/dev/page-translation-e2e-benchmark/content-entry.mjs'),
+      runtimeBridge: { runId: 'run-safe', fixtureUrl: 'http://127.0.0.1:4321/fixture', bindingUrl: 'http://127.0.0.1:4321/__benchmark/bind/run-safe', reportUrl: 'http://127.0.0.1:4321/__benchmark/runtime', authToken: secret },
+    });
+    await expect(buildPromise).rejects.toThrow('generated configuration details were suppressed');
+    await expect(buildPromise).rejects.not.toThrow(secret);
+  });
+
   it('rejects unsupported browsers and preserves output directory guards', async () => {
     const outputDir = await freshOutputDir();
     await expect(buildBenchmarkExtension({ outputDir, browser: 'safari' })).rejects.toThrow('Unknown browser');
+    await expect(buildBenchmarkExtension({ outputDir, browser: 'chrome', runtimeBridge: {} })).rejects.toThrow('requires a sliced Firefox build');
+    await expect(buildBenchmarkExtension({ outputDir, browser: 'firefox', runtimeBridge: {
+      runId: 'run-123', fixtureUrl: 'http://127.0.0.1:4321/fixture', bindingUrl: 'http://127.0.0.1:4322/__benchmark/bind/run-123',
+      reportUrl: 'http://127.0.0.1:4321/__benchmark/runtime', authToken: 'a'.repeat(63),
+    } })).rejects.toThrow('requires a sliced Firefox build');
     await expect(buildBenchmarkExtension({ outputDir: resolve('dist/firefox'), browser: 'firefox' }))
       .rejects.toThrow('outside the repository');
     const nonEmptyDir = await freshOutputDir();

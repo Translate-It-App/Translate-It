@@ -205,9 +205,16 @@ const trace = {
   },
   record(name, detail = {}) { this.events.push({ name, at: Date.now(), ...detail }); },
   featureState() {
+    const core = window.translateItContentCore;
     const manager = FeatureManager.getInstance();
     const messageHandler = manager.getFeatureHandler('contentMessageHandler');
-    return { initialized: manager.initialized, active: manager.isFeatureActive('contentMessageHandler'), handlerActive: !!messageHandler?.isActive };
+    return {
+      initialized: manager.initialized,
+      active: manager.isFeatureActive('contentMessageHandler'),
+      handlerActive: !!messageHandler?.isActive,
+      handlerIsActive: messageHandler?.isActive === true,
+      listenerActive: core?.messageHandler?.isListenerActive === true,
+    };
   },
 };
 const originalTranslate = PageTranslationManager.prototype.translatePage;

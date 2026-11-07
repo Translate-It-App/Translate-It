@@ -7,6 +7,7 @@ export function capability(status, detail = {}) {
 
 export const requiredCapabilities = Object.freeze([
   'isolation', 'fixture', 'bidiSession', 'protocol', 'interceptionSetup', 'interceptionDispatch', 'extensionInstall',
+  'runtimeBridge', 'backgroundLoaded', 'contentLoaded', 'runtimeHandshake', 'hostPermissions',
   'backgroundInspection', 'backgroundReadiness', 'contentInspection', 'contentReadiness', 'discoveryFlags',
   'backgroundProviderInterception', 'providerRequestBody', 'providerResponse',
   'backgroundNegativeFetch', 'contentNegativeFetch', 'pageNegativeFetch',
@@ -17,6 +18,7 @@ export function notTested(reason) { return capability('NOT_TESTED', { reason });
 
 export function classifyRequestAction(kind) {
   if (kind === 'local') return 'continue-local';
+  if (kind === 'runtime-bridge-report') return 'continue-runtime-report';
   if (kind === 'startup-metadata-fixture') return 'provide-known-empty-voices';
   return 'fail-closed';
 }
@@ -57,4 +59,13 @@ export function runtimeProbeGate(capabilities) {
 
 export function retainExecutedCapability(current, reason) {
   return current && current.status !== 'NOT_TESTED' ? current : notTested(reason);
+}
+
+export function blockRuntimeBridgePrerequisite(capabilities, name, status, reason, { bridgeAttempted = false } = {}) {
+  if (!['interceptionSetup', 'extensionInstall'].includes(name) || !['UNSUPPORTED', 'FAILED'].includes(status)) {
+    throw new TypeError('Invalid runtime bridge prerequisite classification.');
+  }
+  capabilities[name] = capability(status, { reason });
+  if (!bridgeAttempted) capabilities.runtimeBridge = retainExecutedCapability(capabilities.runtimeBridge, `${name} prerequisite not met; runtime reports were not attempted.`);
+  return capabilities;
 }

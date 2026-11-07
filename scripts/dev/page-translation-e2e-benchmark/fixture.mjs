@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createRuntimeCollector, validateRuntimeBridgeConfig } from '../page-translation-e2e-firefox/runtime-collector.mjs';
 
 export const targetTexts = Array.from({ length: 12 }, (_, index) => `Benchmark sentence ${index + 1} has stable fixture content.`);
 export const startupVoicesEndpoint = Object.freeze({ hostname: 'speech.platform.bing.com', pathname: '/consumer/speech/synthesize/readaloud/voices/list', method: 'GET' });
@@ -48,12 +49,45 @@ export function createFixture(scenario = 'small') {
   };
 }
 
-export async function startFixture(fixture = createFixture()) {
+export async function startFixture(fixture = createFixture(), { runtimeBridge } = {}) {
+  if (runtimeBridge) validateRuntimeBridgeConfig(runtimeBridge);
+  let bridge;
+  const sockets = new Set();
   const server = createServer((request, response) => {
+    if (bridge) {
+      let url;
+      try { url = new URL(request.url, `http://127.0.0.1:${server.address().port}`); } catch { response.writeHead(400).end(); return; }
+      void bridge._handle(request, response, url).then(handled => {
+        if (handled) return;
+        if (url.pathname !== '/' || url.search) { response.writeHead(404).end(); return; }
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fixture.html);
+      }).catch(() => {
+        if (response.destroyed) return;
+        if (response.headersSent) response.destroy();
+        else { response.writeHead(500).end(); response.once('finish', () => request.destroy()); }
+      });
+      return;
+    }
     if (request.url !== '/') { response.writeHead(404).end(); return; }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(fixture.html);
   });
+  if (runtimeBridge) server.on('connection', socket => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    const deadline = setTimeout(() => socket.destroy(), 3000);
+    deadline.unref();
+    socket.once('close', () => clearTimeout(deadline));
+  });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  return { server, url: `http://127.0.0.1:${server.address().port}/` };
+  const url = `http://127.0.0.1:${server.address().port}/`;
+  if (runtimeBridge) {
+    server.maxConnections = 16;
+    server.requestTimeout = 3000;
+    server.headersTimeout = 3000;
+    bridge = createRuntimeCollector(runtimeBridge, url);
+    bridge._attach(server, sockets);
+    return { server, url, bridge };
+  }
+  return { server, url };
 }
