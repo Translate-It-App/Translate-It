@@ -10,8 +10,9 @@ const flags = {
   viewport: [true, true],
 };
 
-export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', workerEntry, contentEntry }) {
+export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry }) {
   if (!flags[mode]) throw new TypeError(`Unknown discovery mode: ${mode}`);
+  if (browser !== 'chrome' && browser !== 'firefox') throw new TypeError(`Unknown browser: ${browser}`);
   if (typeof outputDir !== 'string' || !isAbsolute(outputDir)) {
     throw new TypeError('outputDir must be an absolute path to a fresh temporary directory.');
   }
@@ -31,7 +32,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', work
       throw new TypeError(`${name} must be an absolute file path.`);
     }
   }
-  const base = createBaseConfig('chrome', { outDir, extraPlugins: [
+  const base = createBaseConfig(browser, { outDir, extraPlugins: [
     {
       name: 'benchmark-discovery-flags',
       transform(source, id) {
@@ -92,11 +93,13 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', work
   } finally {
     await Promise.all([rm(workerOut, { recursive: true, force: true }), rm(contentOut, { recursive: true, force: true })]);
   }
-  await writeFile(resolve(outDir, 'manifest.json'), JSON.stringify({
+  const manifest = {
     manifest_version: 3,
     name: 'Translate-It page translation benchmark',
     version: '1.0.0',
-    background: { service_worker: 'worker.js', type: 'module' },
+    background: browser === 'firefox'
+      ? { scripts: ['worker.js'], type: 'module' }
+      : { service_worker: 'worker.js', type: 'module' },
     permissions: ['storage', 'alarms', 'tabs', 'scripting', 'notifications', 'contextMenus', 'webNavigation'],
     host_permissions: ['http://127.0.0.1/*', 'https://*/*', 'http://*/*'],
     content_scripts: [{ matches: ['http://127.0.0.1/*'], js: ['content-loader.js'], run_at: 'document_idle' }],
@@ -107,7 +110,18 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', work
       },
     },
     web_accessible_resources: [{ resources: ['content-entry.js', 'chunks/*'], matches: ['http://127.0.0.1/*'] }],
-  }, null, 2));
-  await writeFile(resolve(outDir, 'content-loader.js'), "import(chrome.runtime.getURL('content-entry.js')).catch(error => console.error('Benchmark content entry failed', error));\n");
+  };
+  if (browser === 'firefox') {
+    manifest.browser_specific_settings = {
+      gecko: {
+        id: 'page-translation-e2e-benchmark@translate-it.test',
+        strict_min_version: '142.0',
+        data_collection_permissions: { required: ['none'] },
+      },
+    };
+  }
+  await writeFile(resolve(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+  const runtime = browser === 'firefox' ? 'browser' : 'chrome';
+  await writeFile(resolve(outDir, 'content-loader.js'), `import(${runtime}.runtime.getURL('content-entry.js')).catch(error => console.error('Benchmark content entry failed', error));\n`);
   return outDir;
 }
