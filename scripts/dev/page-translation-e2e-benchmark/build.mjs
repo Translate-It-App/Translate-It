@@ -180,9 +180,38 @@ function createRuntimeBridgePlugins({ runtimeBridge, workerEntry, contentEntry }
     transform(source, id) {
       if (id.endsWith('/src/core/background/index.js')) return transformBackgroundStartup(source, id);
       if (id.endsWith('/src/core/content-scripts/index-main.js')) return transformContentStartup(source, id);
+      if (id.endsWith('/src/shared/proxy/ProxyManager.js')) return transformFirefoxProviderFetch(source, id);
+      if (id.endsWith('/scripts/dev/page-translation-e2e-benchmark/content-entry.mjs')) return transformProviderContentEntry(source, id);
       return null;
     },
   }];
+}
+
+function transformProviderContentEntry(source, id) {
+  const site = 'window.__pageTranslationBenchmark = trace;';
+  if (source.split(site).length !== 2) throw new Error(`Firefox content provider instrumentation drifted in ${id}`);
+  return source.replace(site, `if (window.__firefoxProviderProbeEnabled === true) {
+  trace.installProviderProbe = async (report, fixtureUrl) => {
+    const { installContentProviderProbe } = await import('./provider-probe-content.mjs');
+    const handler = FeatureManager.getInstance().getFeatureHandler('contentMessageHandler');
+    return installContentProviderProbe({ handler, report, fixtureUrl });
+  };
+}
+${site}`);
+}
+
+function transformFirefoxProviderFetch(source, id) {
+  const site = `if (!this.isEnabled(config)) {
+      this.logger.debug('Proxy disabled, using direct fetch');
+      return fetch(url, options);
+    }`;
+  if (source.split(site).length !== 2) throw new Error(`Firefox provider fetch instrumentation drifted in ${id}`);
+  return source.replace(site, `if (!this.isEnabled(config)) {
+      this.logger.debug('Proxy disabled, using direct fetch');
+      const directFetchPromise = fetch(url, options);
+      try { globalThis.__pageTranslationBenchmark?.providerProbe?.observeDirectFetch(url, options, directFetchPromise, true); } catch { /* observer must not affect the actual native fetch */ }
+      return directFetchPromise;
+    }`);
 }
 
 function transformBackgroundStartup(source, id) {

@@ -1,8 +1,13 @@
+import { proxyManager } from '../../../src/shared/proxy/ProxyManager.js';
+import { createEdgeProviderProbe } from '../page-translation-e2e-benchmark/provider-probe.mjs';
+
 const ACTION = '__PAGE_TRANSLATION_RUNTIME_PROBE_V1';
+const PROVIDER_ACTION = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
 const VERSION = 1;
 const DEADLINE_MS = 15_000;
 const REPORT_TIMEOUT_MS = 3_000;
 const ERRORS = new Set(['IMPORT_FAILED', 'STARTUP_FAILED', 'READINESS_TIMEOUT', 'HANDSHAKE_FAILED', 'SENDER_REJECTED', 'PROTOCOL_REJECTED', 'NAVIGATION_INVALID', 'REPORT_FAILED', 'PERMISSION_DENIED', 'BINDING_FAILED', 'DISCOVERY_FLAGS_MISMATCH']);
+const PROVIDER_CODES = new Set(['INTERCEPTION_UNSUPPORTED', 'BODY_UNSUPPORTED', 'INVALID_BODY', 'PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN', 'COMPLETED']);
 
 export function exactKeys(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -26,7 +31,10 @@ export function validateSender(sender, browser, tabId, fixtureUrl, navigationGen
 export async function installBackgroundProbe(config, importEntry) {
   const { browser } = globalThis;
   if (!browser?.runtime?.onMessage || !config?.authToken) return;
-  const state = { phase: 'bootstrap', tabId: null, generation: 0, nonce: randomToken(), seq: 0, reporting: Promise.resolve(), startupEntryImported: false };
+  const state = {
+    phase: 'bootstrap', tabId: null, generation: 0, nonce: randomToken(), seq: 0, reporting: Promise.resolve(), startupEntryImported: false,
+     provider: { seq: 0, reporting: Promise.resolve(), armed: false, terminal: false, stopping: false, invocations: new Set(), attempts: new Map() },
+  };
   const extensionUrl = new URL(browser.runtime.getURL(''));
   if (extensionUrl.protocol !== 'moz-extension:' || !extensionUrl.host) return;
   const extensionOrigin = `${extensionUrl.protocol}//${extensionUrl.host}`;
@@ -44,6 +52,10 @@ export async function installBackgroundProbe(config, importEntry) {
     if (tabId === state.tabId) state.tabRemoved = true;
   });
   const listener = (message, sender) => {
+    if (message?.action === PROVIDER_ACTION) {
+      return withDeadline(onProviderProbeMessage(message, sender, config, browser, state), REPORT_TIMEOUT_MS)
+        .catch(() => providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' }));
+    }
     if (message?.action !== ACTION) return false;
     return withDeadline(onProbeMessage(message, sender, config, browser, state), REPORT_TIMEOUT_MS)
       .catch(() => failRuntime(config, state, 'HANDSHAKE_FAILED').then(() => protocolError(config, state, message, 'HANDSHAKE_FAILED')));
@@ -73,6 +85,12 @@ async function beginBackground(config, browser, state, extensionOrigin, importEn
     const permissions = await browser.permissions.contains({ origins: ['http://127.0.0.1/*'] });
     if (!permissions) throw codeError('PERMISSION_DENIED');
     await report(config, state, 'background', 'bootstrap', { extensionId: browser.runtime.id, extensionOrigin, tabId: state.tabId });
+    globalThis.__firefoxProviderProbeEnabled = true;
+    globalThis.__firefoxProviderProbeRuntime = {
+      createEdgeProviderProbe,
+      proxyManager,
+      report: (event, evidence) => reportProviderOperation(config, state, event, evidence),
+    };
     try { await withDeadline(importEntry(), Math.max(1, deadline - Date.now()), 'READINESS_TIMEOUT'); state.startupEntryImported = true; }
     catch (error) { throw error?.message === 'READINESS_TIMEOUT' ? error : codeError('IMPORT_FAILED'); }
     await report(config, state, 'background', 'loaded', { entry: 'src/core/background/index.js' });
@@ -90,6 +108,147 @@ async function beginBackground(config, browser, state, extensionOrigin, importEn
   } catch (error) {
     await failRuntime(config, state, ERRORS.has(error?.message) ? error.message : 'STARTUP_FAILED');
   }
+}
+
+function providerResponse(config, state, type, detail = {}) {
+  const nonce = state.handshakeStarted && detail.nonce === undefined ? { nonce: state.nonce } : {};
+  return { action: PROVIDER_ACTION, v: VERSION, runId: config.runId, type, ...nonce, ...detail };
+}
+
+async function reportProviderOperation(config, state, event, evidence) {
+  const provider = state.provider;
+  const admittedSettlement = event === 'physical-settled' && provider.attempts.has(evidence?.attemptId) && !provider.attempts.get(evidence.attemptId);
+  const admittedProviderSettlement = event === 'provider-settled' && provider.invocations.has(evidence?.invocationId);
+  const admittedFailure = event === 'command-result' && evidence?.success === false && provider.armed;
+  if (provider.seq >= 65 || provider.terminal && event !== 'error' && !admittedSettlement && !admittedProviderSettlement && !admittedFailure
+      || provider.stopping && event !== 'error' && !admittedSettlement && !admittedProviderSettlement && !admittedFailure) return false;
+  const opSeq = ++provider.seq;
+  if (event === 'provider-invoked') provider.invocations.add(evidence.invocationId);
+  if (event === 'physical-start') provider.attempts.set(evidence.attemptId, false);
+  if (event === 'physical-settled') provider.attempts.set(evidence.attemptId, true);
+  const payload = { v: VERSION, runId: config.runId, op: 'edge-fr-page-once', opSeq, event, evidence };
+  let acceptedReceipt;
+  provider.reporting = provider.reporting.then(async () => {
+    const response = await fetch(config.reportUrl, {
+      method: 'POST', headers: { Authorization: `Bearer ${config.authToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify(payload), redirect: 'error', signal: AbortSignal.timeout(REPORT_TIMEOUT_MS),
+    });
+    const receipt = await response.json();
+    const gated = event === 'armed' || event === 'translated';
+    const keys = gated ? ['v', 'runId', 'op', 'opSeq', 'accepted', 'decision'] : ['v', 'runId', 'op', 'opSeq', 'accepted'];
+    const decisions = event === 'armed' ? ['start', 'stop'] : ['restore', 'stop'];
+    if (!response.ok || !exactKeys(receipt, keys) || receipt.v !== VERSION || receipt.runId !== config.runId
+        || receipt.op !== 'edge-fr-page-once' || receipt.opSeq !== opSeq || receipt.accepted !== true
+        || (gated && !decisions.includes(receipt.decision))) throw codeError('REPORT_FAILED');
+    acceptedReceipt = receipt;
+  }).catch(() => { throw codeError('REPORT_FAILED'); });
+  return provider.reporting.then(() => {
+    if (event === 'error') provider.terminal = true;
+    return acceptedReceipt;
+  }, () => null);
+}
+
+async function providerOperationFailure(config, state, code) {
+  const accepted = await reportProviderOperation(config, state, 'error', { code });
+  return accepted
+    ? providerResponse(config, state, 'accepted', { nonce: state.nonce })
+    : providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+}
+
+async function onProviderProbeMessage(message, sender, config, browser, state) {
+  const arm = message?.type === 'arm';
+  const stop = message?.type === 'stop';
+  const event = message?.type === 'event';
+  const keys = arm ? ['action', 'v', 'runId', 'type', 'nonce', 'observersInstalled']
+    : stop ? ['action', 'v', 'runId', 'type', 'nonce', 'code']
+      : event ? ['action', 'v', 'runId', 'type', 'nonce', 'event', 'evidence'] : [];
+  if (!keys.length || !exactKeys(message, keys) || message.action !== PROVIDER_ACTION || message.v !== VERSION
+      || message.runId !== config.runId || !state.handshakeStarted || message.nonce !== state.nonce) {
+    return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+  }
+  if (!validateSender(sender, browser, state.tabId, config.fixtureUrl, state.generation) || !sameSender(state.sender, senderEvidence(sender))) {
+    return providerResponse(config, state, 'error', { code: 'SENDER_REJECTED' });
+  }
+  if (!await validateCurrentContext(browser, config, state, sender, 'complete') || state.phase !== 'complete') {
+    return arm ? rejectProviderArm(config, state, 'PROTOCOL_ERROR') : providerOperationFailure(config, state, 'PROTOCOL_ERROR');
+  }
+  if (arm) {
+    if (state.provider.armed) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+     if (message.observersInstalled !== true) return rejectProviderArm(config, state, 'PROTOCOL_ERROR');
+    const hasPermission = await browser.permissions.contains({ origins: ['https://edge.microsoft.com/*'] });
+    if (!await providerContextIsCurrent(sender, browser, config, state)) return rejectProviderArm(config, state, 'PROTOCOL_ERROR');
+    const providerProbe = globalThis.__pageTranslationBenchmark?.providerProbe;
+     if (!hasPermission || globalThis.__pageTranslationBenchmark?.providerProbeInstalled !== true || providerProbe?.proxyDisabled?.() !== true) {
+       return rejectProviderArm(config, state, 'PROTOCOL_ERROR');
+    }
+    providerProbe.arm();
+    const evidence = { sender: senderEvidence(sender), navigationGeneration: 1, edgeHostPermission: true, proxyDisabled: true, observersInstalled: true };
+    const receipt = await reportProviderOperation(config, state, 'armed', evidence);
+    if (!receipt) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    if (receipt.decision === 'stop') {
+      state.provider.stopping = true;
+      providerProbe.stop();
+      return providerResponse(config, state, 'armed-ack', { nonce: state.nonce, decision: 'stop' });
+    }
+    const permissionAfterGate = await browser.permissions.contains({ origins: ['https://edge.microsoft.com/*'] });
+    if (receipt.decision !== 'start' || !permissionAfterGate || !await providerContextIsCurrent(sender, browser, config, state)
+        || globalThis.__pageTranslationBenchmark?.providerProbe !== providerProbe || providerProbe.proxyDisabled?.() !== true) {
+      return rejectProviderArm(config, state, 'PROTOCOL_ERROR');
+    }
+    state.provider.armed = true;
+    return providerResponse(config, state, 'armed-ack', { nonce: state.nonce, decision: 'start' });
+  }
+  if (stop) {
+    if (!PROVIDER_CODES.has(message.code)) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    state.provider.stopping = true;
+    globalThis.__pageTranslationBenchmark?.providerProbe?.stop?.();
+    return providerResponse(config, state, 'accepted', { nonce: state.nonce });
+  }
+  if (event && message.event === 'error') {
+    if (!exactKeys(message.evidence, ['code']) || !PROVIDER_CODES.has(message.evidence.code)) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    const accepted = await reportProviderOperation(config, state, 'error', message.evidence);
+    state.provider.terminal = true;
+    return accepted ? providerResponse(config, state, 'accepted', { nonce: state.nonce }) : providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+  }
+  if (!event || !state.provider.armed || state.provider.terminal || !['command-result', 'translated', 'restored'].includes(message.event)) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+  const accepted = await reportProviderOperation(config, state, message.event, message.evidence);
+  if (!accepted) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+  if (message.event === 'translated') {
+    if (!['restore', 'stop'].includes(accepted.decision)) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    if (accepted.decision === 'stop') {
+      state.provider.stopping = true;
+      globalThis.__pageTranslationBenchmark?.providerProbe?.stop?.();
+    }
+    if (accepted.decision === 'restore' && !await providerContextIsCurrent(sender, browser, config, state)) {
+      await reportProviderOperation(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+      state.provider.terminal = true;
+      state.provider.stopping = true;
+      return providerResponse(config, state, 'accepted', { nonce: state.nonce, decision: 'stop' });
+    }
+    return providerResponse(config, state, 'accepted', { nonce: state.nonce, decision: accepted.decision });
+  }
+   if (!await providerContextIsCurrent(sender, browser, config, state)) {
+     await reportProviderOperation(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+     state.provider.terminal = true;
+     state.provider.stopping = true;
+     globalThis.__pageTranslationBenchmark?.providerProbe?.stop?.();
+     return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+   }
+   if (message.event === 'restored') state.provider.terminal = true;
+  return providerResponse(config, state, 'accepted', { nonce: state.nonce });
+}
+
+async function providerContextIsCurrent(sender, browser, config, state) {
+  return state.phase === 'complete' && validateSender(sender, browser, state.tabId, config.fixtureUrl, state.generation)
+    && sameSender(state.sender, senderEvidence(sender))
+    && await validateCurrentContext(browser, config, state, sender, 'complete');
+}
+
+async function rejectProviderArm(config, state, code) {
+  await providerOperationFailure(config, state, code);
+  state.provider.stopping = true;
+  globalThis.__pageTranslationBenchmark?.providerProbe?.stop?.();
+  return providerResponse(config, state, 'armed-ack', { nonce: state.nonce, decision: 'stop' });
 }
 
 async function failRuntime(config, state, code, realm = 'background') {

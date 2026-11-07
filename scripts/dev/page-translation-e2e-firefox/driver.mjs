@@ -1,12 +1,12 @@
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { classifyTransportRequest } from '../page-translation-e2e-benchmark/metrics.mjs';
+import { classifyTransportRequest, mapEdgeResponse } from '../page-translation-e2e-benchmark/metrics.mjs';
 import { blockRuntimeBridgePrerequisite, capability, classifyObservedRealm, classifyRequestAction, isolationSnapshot, notTested, requiredCapabilities, retainExecutedCapability, runtimeProbeGate } from './capabilities.mjs';
 
 const withTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
@@ -43,6 +43,27 @@ function sanitizeError(error, secrets = []) {
   const safe = new Error(sanitizePrivate(error?.message ?? String(error), secrets));
   if (error?.code !== undefined) safe.code = error.code;
   if (error?.method !== undefined) safe.method = error.method;
+  return safe;
+}
+
+function bodyJournalSummary(body) {
+  if (!body || typeof body !== 'object' || typeof body.value !== 'string' || !['string', 'base64'].includes(body.type)) return { redacted: true, available: false };
+  let bytes;
+  try { bytes = body.type === 'base64' ? Buffer.from(body.value, 'base64') : Buffer.from(body.value, 'utf8'); }
+  catch { return { redacted: true, available: false, type: body.type }; }
+  return { redacted: true, type: body.type, byteLength: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+}
+
+function journalCommand(method, command, secrets) {
+  const safe = sanitizePrivate(command, secrets);
+  safe.direction = 'command';
+  if (method === 'network.provideResponse' && safe.params?.body) safe.params.body = bodyJournalSummary(command.params.body);
+  return safe;
+}
+
+function journalResponse(method, message, secrets) {
+  const safe = sanitizePrivate(message, secrets);
+  if (method === 'network.getData' && message.type === 'success') safe.result = bodyJournalSummary(message.result);
   return safe;
 }
 
@@ -127,7 +148,7 @@ export function validateRuntimeBridgeSnapshot(snapshot, expectedReports, contrac
   return { failure: null, reports: expectedReports, rejections: Object.fromEntries(Object.entries(snapshot.rejections ?? {})) };
 }
 
-export async function reconcileFinalRuntimeBridge({ bridge, expectedReports, contract, capabilities, artifact, secrets = [], timeoutMs = 4000 }) {
+export async function reconcileFinalRuntimeBridge({ bridge, expectedReports, contract, capabilities, artifact, secrets = [], timeoutMs = 4000, drainSucceeded = true }) {
   let snapshot;
   try {
     snapshot = await withTimeout(Promise.resolve(bridge.snapshot()), timeoutMs, 'final runtime bridge collector snapshot');
@@ -166,6 +187,7 @@ export async function reconcileFinalRuntimeBridge({ bridge, expectedReports, con
   if (!validationError && terminalError && snapshot.failure?.code !== terminalError.evidence.code) validationError = 'Final runtime bridge failure does not match its authenticated terminal error report.';
   if (!validationError && snapshot.failure && !terminalError) validationError = `Final runtime bridge collector failed without a valid authenticated error report (${snapshot.failure.code ?? 'unknown'}).`;
   if (!validationError && expectedReports.length !== 5) validationError = 'The authenticated runtime bridge did not complete all five required reports.';
+  if (!validationError && !drainSucceeded) validationError = 'Runtime bridge producers/collector did not drain before the final snapshot.';
 
   if (terminalError) applyRuntimeBridgeReportedError(capabilities, terminalError, `final collector report ${terminalError.seq}`);
   else if (validationError && capabilities.runtimeBridge?.status !== 'FAILED') capabilities.runtimeBridge = capability('FAILED', { reason: sanitizePrivate(validationError, secrets) });
@@ -177,7 +199,7 @@ export async function reconcileFinalRuntimeBridge({ bridge, expectedReports, con
   return { ok: !validationError && !terminalError, error: terminalError, reason: validationError ?? (terminalError ? `Authenticated runtime bridge ${terminalError.evidence.code}` : null), snapshot: finalEvidence };
 }
 
-export async function recordUnattemptedRuntimeBridge({ bridge, capabilities, artifact, secrets = [], timeoutMs = 3000 }) {
+export async function recordUnattemptedRuntimeBridge({ bridge, capabilities, artifact, secrets = [], timeoutMs = 3000, drainSucceeded = true }) {
   let snapshot;
   try { snapshot = await withTimeout(Promise.resolve(bridge.snapshot()), timeoutMs, 'unattempted runtime bridge snapshot'); }
   catch (error) {
@@ -188,7 +210,7 @@ export async function recordUnattemptedRuntimeBridge({ bridge, capabilities, art
   }
   const counts = Object.values(snapshot?.rejections ?? {});
   const hasEvidence = !Array.isArray(snapshot?.reports) || snapshot.reports.length > 0 || snapshot.failure != null
-    || counts.some(count => !Number.isSafeInteger(count) || count < 0 || count > 0);
+    || counts.some(count => !Number.isSafeInteger(count) || count < 0 || count > 0) || !drainSucceeded;
   const safeSnapshot = sanitizePrivate(snapshot, secrets);
   artifact.runtimeBridge = { ...(artifact.runtimeBridge ?? {}), attempted: false, snapshot: safeSnapshot };
   if (hasEvidence && capabilities.runtimeBridge?.status === 'NOT_TESTED') {
@@ -311,7 +333,7 @@ export class BiDi {
         if (message.type === 'error' && (typeof message.error !== 'string' || typeof message.message !== 'string')) { this.failProtocol(new Error(`Malformed BiDi error response for ${pending.method}.`)); return; }
         this.pending.delete(message.id);
         if (message.type === 'error') { const error = new Error(`${message.error}: ${message.message}`); error.code = message.error; error.method = pending.method; this.journal.push({ direction: 'response', method: pending.method, id: message.id, at: Date.now(), error: { code: error.code, message: error.message } }); pending.reject(error); }
-        else { this.journal.push({ direction: 'response', method: pending.method, id: message.id, at: Date.now(), response: message }); pending.resolve(message); }
+        else { this.journal.push({ direction: 'response', method: pending.method, id: message.id, at: Date.now(), response: journalResponse(pending.method, message, this.secretValues) }); pending.resolve(message); }
       } else {
         if (message.type !== 'event' || typeof message.method !== 'string' || !message.params || typeof message.params !== 'object' || Array.isArray(message.params)) { this.failProtocol(new Error('Malformed BiDi event envelope.')); return; }
         this.events.push(message);
@@ -344,7 +366,7 @@ export class BiDi {
     if (this.closed || this.protocolError) return Promise.reject(this.closed ?? this.protocolError);
     const id = ++this.nextId;
     const command = { id, method, params, at: Date.now() };
-    this.journal.push(sanitizePrivate({ direction: 'command', ...command }, this.secretValues));
+    this.journal.push(journalCommand(method, { ...command }, this.secretValues));
     return withTimeout(new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject, method, params });
       try { this.socket.send(JSON.stringify({ id, method, params })); } catch (error) { this.pending.delete(id); reject(error); }
@@ -371,27 +393,776 @@ export function classifyProtocolFailure(error) {
     : capability('FAILED', { reason: error?.message ?? String(error), protocolCode: error?.code ?? null, command: error?.method ?? null });
 }
 
+const providerStopCodes = new Set(['INTERCEPTION_UNSUPPORTED', 'BODY_UNSUPPORTED', 'INVALID_BODY', 'PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN', 'COMPLETED']);
+const providerDiagnosticCodes = new Set([...providerStopCodes, 'ABORTED', 'NETWORK_ERROR', 'HTTP_ERROR', 'FETCH_ERROR']);
+const operationEvents = new Set(['armed', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
+const operationName = 'edge-fr-page-once';
+const operationExact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+  && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+
+export function validEdgePageTranslateUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'edge.microsoft.com' || parsed.pathname !== '/translate/translatetext'
+        || parsed.port || parsed.username || parsed.password || parsed.hash) return false;
+    const allowed = new Set(['to', 'from', 'isEnterpriseClient']);
+    for (const key of parsed.searchParams.keys()) if (!allowed.has(key) || parsed.searchParams.getAll(key).length !== 1) return false;
+    return parsed.searchParams.get('to') === 'fr' && parsed.searchParams.get('isEnterpriseClient') === 'false'
+      && (!parsed.searchParams.has('from') || (parsed.searchParams.get('from') !== '' && parsed.searchParams.get('from').length <= 32));
+  } catch { return false; }
+}
+
+function isEdgeProviderCandidate(value) {
+  try { const parsed = new URL(value); return parsed.hostname === 'edge.microsoft.com'; }
+  catch { return false; }
+}
+
+export function decodeEdgeRequestBody(data, { maxBytes = 65536 } = {}) {
+  if (!data || typeof data !== 'object' || !['string', 'base64'].includes(data.type) || typeof data.value !== 'string') throw new TypeError('Edge request body data type unavailable.');
+  let bytes;
+  if (data.type === 'string') bytes = Buffer.from(data.value, 'utf8');
+  else {
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data.value)) throw new TypeError('Edge request body base64 is malformed.');
+    bytes = Buffer.from(data.value, 'base64');
+    if (bytes.toString('base64') !== data.value) throw new TypeError('Edge request body base64 is non-canonical.');
+  }
+  if (bytes.length === 0 || bytes.length > maxBytes) throw new TypeError(`Edge request body size is invalid: ${bytes.length}.`);
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch { throw new TypeError('Edge request body is not valid UTF-8.'); }
+  let body;
+  try { body = JSON.parse(text); } catch { throw new TypeError('Edge request body is not valid JSON.'); }
+  if (!Array.isArray(body) || body.length === 0 || body.some(item => typeof item !== 'string' || !item.trim()) || new Set(body).size !== body.length) {
+    throw new TypeError('Edge request body must be a non-empty array of unique non-empty strings.');
+  }
+  return { bytes, body };
+}
+
+export function validateProviderOperationReport(report, { runId, event, opSeq, extensionId, fixtureUrl, tabId, priorSender = null }) {
+  if (!operationExact(report, ['v', 'runId', 'op', 'opSeq', 'event', 'evidence']) || report.v !== 1 || report.runId !== runId
+      || report.op !== operationName || report.event !== event || !Number.isSafeInteger(report.opSeq) || report.opSeq <= 0
+      || (opSeq !== undefined && report.opSeq !== opSeq) || !operationEvents.has(event) || !operationExact(report.evidence, Object.keys(report.evidence ?? {}))) {
+    throw new Error(`Provider operation report envelope invalid for ${String(event)}.`);
+  }
+  const evidence = report.evidence;
+  if (event === 'armed') {
+    if (!operationExact(evidence, ['sender', 'navigationGeneration', 'edgeHostPermission', 'proxyDisabled', 'observersInstalled']) || evidence.navigationGeneration !== 1
+        || evidence.edgeHostPermission !== true || evidence.proxyDisabled !== true || evidence.observersInstalled !== true) throw new Error('Provider probe arm checks failed.');
+    if (extensionId && fixtureUrl && !normalizeSender(evidence.sender, { extensionId, fixtureUrl, tabId, priorSender })) throw new Error('Provider arm sender is invalid.');
+  } else if (event === 'provider-invoked') {
+    if (!operationExact(evidence, ['invocationId', 'sessionId', 'messageId', 'provider', 'itemCount', 'sourceIndexes']) || !safeId(evidence.invocationId)
+        || !safeId(evidence.sessionId) || (evidence.messageId !== null && !safeId(evidence.messageId)) || evidence.provider !== 'edge'
+        || evidence.itemCount !== evidence.sourceIndexes?.length || !indexesSubset012(evidence.sourceIndexes)) throw new Error('Provider invocation evidence is invalid.');
+  } else if (event === 'physical-start') {
+    if (!operationExact(evidence, ['attemptId', 'invocationId', 'sessionId', 'messageId', 'provider', 'method', 'url', 'bodyBytes', 'bodyHash', 'sourceIndexes'])
+        || !safeId(evidence.attemptId) || !safeId(evidence.invocationId) || !safeId(evidence.sessionId) || (evidence.messageId !== null && !safeId(evidence.messageId))
+        || evidence.provider !== 'edge' || evidence.method !== 'POST' || !validEdgePageTranslateUrl(evidence.url)
+        || !Number.isSafeInteger(evidence.bodyBytes) || evidence.bodyBytes < 1 || evidence.bodyBytes > 65536
+        || !/^[a-f\d]{64}$/i.test(evidence.bodyHash) || !indexesSubset012(evidence.sourceIndexes)) throw new Error('Native Edge physical-start evidence is invalid.');
+  } else if (event === 'physical-settled') {
+    if (!operationExact(evidence, ['attemptId', 'sessionId', 'outcome', 'status', 'code']) || !safeId(evidence.attemptId) || !safeId(evidence.sessionId)
+        || !['fulfilled', 'rejected', 'cancelled'].includes(evidence.outcome) || (evidence.status !== null && !Number.isInteger(evidence.status))
+        || (evidence.code !== null && !['ABORTED', 'NETWORK_ERROR', 'HTTP_ERROR', 'FETCH_ERROR'].includes(evidence.code))) throw new Error('Native Edge physical-settled evidence is invalid.');
+  } else if (event === 'parser-success') {
+    if (!operationExact(evidence, ['invocationId', 'sessionId', 'sourceIndexes', 'resultsMatch']) || !safeId(evidence.invocationId) || !safeId(evidence.sessionId)
+        || !indexesSubset012(evidence.sourceIndexes) || evidence.resultsMatch !== true) throw new Error('Edge parser-success evidence is invalid.');
+  } else if (event === 'provider-settled') {
+    if (!operationExact(evidence, ['invocationId', 'sessionId', 'outcome', 'code']) || !safeId(evidence.invocationId) || !safeId(evidence.sessionId)
+        || !['fulfilled', 'rejected', 'cancelled'].includes(evidence.outcome) || (evidence.code !== null && !providerStopCodes.has(evidence.code))) throw new Error('Provider settlement evidence is invalid.');
+  } else if (event === 'command-result') {
+    if (!operationExact(evidence, ['success', 'sessionId', 'code']) || typeof evidence.success !== 'boolean'
+        || (evidence.sessionId !== null && !safeId(evidence.sessionId)) || (evidence.code !== null && !providerStopCodes.has(evidence.code))
+        || (evidence.success && (!safeId(evidence.sessionId) || evidence.code !== null))) throw new Error('Production page-translate command result is invalid.');
+  } else if (event === 'translated') {
+    if (!operationExact(evidence, ['sessionId', 'acceptedTargetIds', 'acceptedCount', 'duplicateAcceptances', 'staleWrites', 'domMatches', 'sessionOwned', 'quiescent'])
+        || !safeId(evidence.sessionId) || !targetIds012(evidence.acceptedTargetIds) || evidence.acceptedCount !== 12 || evidence.duplicateAcceptances !== 0
+        || evidence.staleWrites !== 0 || evidence.domMatches !== true || evidence.sessionOwned !== true || evidence.quiescent !== true) throw new Error('Real translated DOM acceptance evidence is invalid.');
+  } else if (event === 'restored') {
+    if (!operationExact(evidence, ['sessionId', 'commandSuccess', 'domMatchesOriginal', 'metadataRestored', 'restoreObserved']) || !safeId(evidence.sessionId)
+        || evidence.commandSuccess !== true || evidence.domMatchesOriginal !== true || evidence.metadataRestored !== true || evidence.restoreObserved !== true) throw new Error('Real page-restore evidence is invalid.');
+  } else if (event === 'error') {
+    if (!operationExact(evidence, ['code']) || !providerStopCodes.has(evidence.code)) throw new Error('Provider operation error code is invalid.');
+  }
+  return { v: 1, runId, op: operationName, opSeq: report.opSeq, event, evidence: { ...evidence } };
+}
+
+export function validateProviderReleaseReceipt(receipt) {
+  if (!operationExact(receipt, ['decision']) || !['start', 'stop'].includes(receipt.decision)) throw new Error('Provider release receipt must explicitly decide start or stop.');
+  return receipt.decision;
+}
+
+export function validateProviderOperationSnapshot(snapshot, { runId, extensionId, fixtureUrl, tabId, sender = null }) {
+  const baseSnapshotKeys = ['op', 'released', 'restoreDecision', 'stopped', 'stopCode', 'reports', 'rejections', 'failure'];
+  const snapshotEnvelope = operationExact(snapshot, baseSnapshotKeys)
+    || operationExact(snapshot, [...baseSnapshotKeys, 'lastRejection'])
+      && (snapshot.lastRejection === null || sanitizeProviderLastRejection(snapshot.lastRejection, []) !== null);
+  if (!snapshotEnvelope
+      || snapshot.op !== operationName || typeof snapshot.released !== 'boolean' || typeof snapshot.stopped !== 'boolean'
+      || !Array.isArray(snapshot.reports) || snapshot.reports.length > 64
+      || (snapshot.restoreDecision !== null && !['restore', 'stop'].includes(snapshot.restoreDecision))
+      || (snapshot.stopCode !== null && !providerStopCodes.has(snapshot.stopCode))) throw new Error('Provider operation snapshot envelope invalid.');
+  if (snapshot.failure !== null && (!operationExact(snapshot.failure, ['code']) || !providerStopCodes.has(snapshot.failure.code))) throw new Error('Provider operation snapshot failure is invalid.');
+  if (!operationExact(snapshot.rejections, ['originOrType', 'protocol']) || Object.values(snapshot.rejections).some(count => !Number.isSafeInteger(count) || count < 0 || count > 0)) throw new Error('Provider operation collector recorded rejected telemetry.');
+  const reports = snapshot.reports.map((report, index) => validateProviderOperationReport(report, {
+    runId, event: report?.event, opSeq: index + 1, extensionId, fixtureUrl, tabId,
+    priorSender: report?.event === 'armed' ? sender : null,
+  }));
+  const seenEvents = new Set();
+  for (const report of reports) {
+    if (seenEvents.has(report.event) && !['provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled'].includes(report.event)) throw new Error(`Provider operation duplicated ${report.event}.`);
+    seenEvents.add(report.event);
+  }
+  const evidence = event => reports.find(report => report.event === event)?.evidence;
+  const invocations = reports.filter(report => report.event === 'provider-invoked').map(report => report.evidence);
+  const invocationById = new Map(invocations.map(report => [report.invocationId, report]));
+  if (invocationById.size !== invocations.length || new Set(invocations.map(report => report.sessionId)).size > 1) throw new Error('Provider invocation identity/session is duplicated or changed.');
+  const physicals = reports.filter(report => report.event === 'physical-start').map(report => report.evidence);
+  const settlements = reports.filter(report => report.event === 'physical-settled').map(report => report.evidence);
+  const physicalById = new Map(physicals.map(report => [report.attemptId, report]));
+  if (physicalById.size !== physicals.length) throw new Error('Provider operation duplicated a physical attempt ID.');
+  const settledIds = new Set();
+  for (const report of physicals) {
+    const invocation = invocationById.get(report.invocationId);
+    if (!invocation || report.sessionId !== invocation.sessionId || report.messageId !== invocation.messageId
+        || JSON.stringify(report.sourceIndexes) !== JSON.stringify(invocation.sourceIndexes)) throw new Error('Provider physical-start is not correlated to provider-invoked.');
+  }
+  for (const report of settlements) {
+    const physical = physicalById.get(report.attemptId);
+    if (!physical || settledIds.has(report.attemptId) || report.sessionId !== physical.sessionId) throw new Error('Provider physical-settled is not correlated to a unique physical-start.');
+    settledIds.add(report.attemptId);
+  }
+  for (const report of reports.filter(item => item.event === 'provider-settled').map(item => item.evidence)) {
+    const invocation = invocationById.get(report.invocationId);
+    if (!invocation || report.sessionId !== invocation.sessionId) throw new Error('Provider settlement does not match an authenticated invocation.');
+  }
+  const parsers = reports.filter(report => report.event === 'parser-success').map(report => report.evidence);
+  const commands = reports.filter(report => report.event === 'command-result').map(report => report.evidence);
+  const parserByInvocation = new Map(parsers.map(report => [report.invocationId, report]));
+  if (parserByInvocation.size !== parsers.length) throw new Error('Provider invocation has duplicate parser-success reports.');
+  const globalCoverage = new Map();
+  for (const [invocationId, parser] of parserByInvocation) {
+    const invocation = invocationById.get(invocationId);
+    if (!invocation || parser.sessionId !== invocation.sessionId || JSON.stringify(parser.sourceIndexes) !== JSON.stringify(invocation.sourceIndexes)) throw new Error('Parser-success does not match its logical invocation.');
+    const covered = new Map();
+    for (const physical of physicals.filter(item => item.invocationId === invocationId)) {
+      const settled = settlements.find(item => item.attemptId === physical.attemptId);
+      if (!settled) throw new Error('Parser-success has an unsettled native attempt.');
+      if (settled.outcome === 'fulfilled') {
+        if (settled.status !== 200 || settled.code !== null) throw new Error('Fulfilled native provider attempt did not consume HTTP 200.');
+        for (const index of physical.sourceIndexes) covered.set(index, (covered.get(index) ?? 0) + 1);
+      }
+    }
+    if (invocation.sourceIndexes.some(index => covered.get(index) !== 1)) throw new Error('Parser-success lacks exact-once fulfilled source coverage.');
+    for (const index of parser.sourceIndexes) globalCoverage.set(index, (globalCoverage.get(index) ?? 0) + 1);
+  }
+  if (commands.some(command => command.sessionId !== null && invocations.some(invocation => command.sessionId !== invocation.sessionId))) throw new Error('Production command-result does not match provider session.');
+  const command = commands.at(-1); const translated = evidence('translated'); const restored = evidence('restored');
+  if (translated && (invocations.length === 0 || parserByInvocation.size !== invocations.length || !command?.success
+      || !indexes012([...globalCoverage.keys()].sort((a, b) => a - b)) || translated.sessionId !== invocations[0].sessionId)) throw new Error('Translated DOM acceptance lacks complete parser and command success evidence.');
+  if (restored && (!translated || restored.sessionId !== translated.sessionId)) throw new Error('Restore report does not match the translated session.');
+  return { op: snapshot.op, released: snapshot.released, restoreDecision: snapshot.restoreDecision, stopped: snapshot.stopped, stopCode: snapshot.stopCode, reports, failure: snapshot.failure };
+}
+
+export async function reconcileFinalProviderOperation({ bridge, state, contract, capabilities, artifact, secrets = [], timeoutMs = 3000 }) {
+  let snapshot; let rawSnapshot = null;
+  try {
+    rawSnapshot = await withTimeout(Promise.resolve(bridge.operationSnapshot()), timeoutMs, 'final provider operation snapshot');
+    snapshot = rawSnapshot;
+    snapshot = validateProviderOperationSnapshot(snapshot, contract);
+  } catch (error) {
+    const reason = sanitizePrivate(`Final provider operation snapshot failed: ${error.message}`, secrets);
+    capabilities.providerOperation = capability('FAILED', { reason });
+    if (state?.attempted && capabilities.providerPhysicalRequest?.status === 'NOT_TESTED') capabilities.providerPhysicalRequest = capability('FAILED', { reason });
+    artifact.providerOperation = { status: 'FAILED', reason, finalSnapshot: boundedProviderSnapshotDiagnostic(rawSnapshot, secrets, contract) };
+    return { ok: false, reason };
+  }
+  if (!state?.attempted) {
+    capabilities.providerOperation = retainExecutedCapability(capabilities.providerOperation, 'Provider operation was not released because a prerequisite failed.');
+    artifact.providerOperation = sanitizePrivate({ attempted: false, snapshot }, secrets);
+    return { ok: capabilities.providerOperation.status === 'NOT_TESTED', snapshot };
+  }
+
+  let reason = null;
+  if (!snapshot.released || !snapshot.stopped || (state.stopCode && snapshot.stopCode !== state.stopCode)) reason = 'Provider operation release/stop state differs from the driver lifecycle.';
+  if (state.receiptDecision === 'stop' && (!snapshot.stopped || !providerStopCodes.has(snapshot.stopCode))) reason ??= 'Authenticated stop release receipt has no recognized final stop code.';
+  const reportError = snapshot.reports.find(report => report.event === 'error');
+  if (snapshot.failure && (!reportError || reportError.evidence.code !== snapshot.failure.code)) reason ??= 'Operation failure snapshot has no matching authenticated error report.';
+  const byEvent = event => snapshot.reports.find(report => report.event === event)?.evidence;
+  const physicals = snapshot.reports.filter(report => report.event === 'physical-start').map(report => report.evidence);
+  const settlements = snapshot.reports.filter(report => report.event === 'physical-settled').map(report => report.evidence);
+  const invocations = snapshot.reports.filter(report => report.event === 'provider-invoked').map(report => report.evidence);
+  const parsers = snapshot.reports.filter(report => report.event === 'parser-success').map(report => report.evidence);
+  const physical = physicals[0];
+  const parser = byEvent('parser-success'); const command = byEvent('command-result'); const translated = byEvent('translated'); const restored = byEvent('restored');
+  if (snapshot.stopCode === 'COMPLETED') {
+    const requiredEvents = ['armed', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'command-result', 'translated', 'restored'];
+    if (requiredEvents.some(event => !byEvent(event)) || snapshot.failure || snapshot.restoreDecision !== 'restore'
+        || settlements.length !== physicals.length || physicals.some(item => !settlements.some(settled => settled.attemptId === item.attemptId))
+        || parsers.length !== invocations.length || invocations.length === 0
+        || parser?.resultsMatch !== true || command?.success !== true || translated?.domMatches !== true || restored?.restoreObserved !== true) reason ??= 'Provider operation omitted required native consumption, DOM, or restore proof.';
+    const providerSettlements = snapshot.reports.filter(report => report.event === 'provider-settled').map(report => report.evidence);
+    if (providerSettlements.some(item => item.outcome !== 'fulfilled')) reason ??= 'Provider settlement did not fulfill.';
+    if (['providerPhysicalRequest', 'backgroundProviderInterception', 'providerDataCollector', 'providerRequestBody', 'providerResponse', 'providerConsumption', 'domAcceptance', 'providerRestore']
+      .some(name => capabilities[name]?.status !== 'SUPPORTED')) reason ??= 'A required provider physical/interception/body/response/consumption/DOM/restore capability was not supported.';
+  }
+  if (reportError) applyProviderOperationError(capabilities, reportError.evidence.code);
+  const protocolFailure = reportError?.evidence.code === 'PROTOCOL_ERROR' || snapshot.failure?.code === 'PROTOCOL_ERROR';
+  if (protocolFailure) {
+    reason ??= 'Authenticated provider operation reported a protocol failure.';
+    capabilities.providerOperation = capability('FAILED', { reason });
+  }
+  else if (!reason && snapshot.stopCode === 'INTERCEPTION_UNSUPPORTED' && physical && capabilities.providerPhysicalRequest.status === 'SUPPORTED' && capabilities.backgroundProviderInterception.status === 'UNSUPPORTED') capabilities.providerOperation = capability('UNSUPPORTED', { reason: 'Native provider request was proven but a matching BiDi interception was unavailable.' });
+  else if (!reason && snapshot.stopCode === 'BODY_UNSUPPORTED' && physical && capabilities.providerPhysicalRequest.status === 'SUPPORTED' && capabilities.backgroundProviderInterception.status === 'SUPPORTED' && capabilities.providerRequestBody.status === 'UNSUPPORTED') capabilities.providerOperation = capability('UNSUPPORTED', { reason: 'The intercepted native request body was unavailable.' });
+  else if (reason || snapshot.stopCode !== 'COMPLETED') capabilities.providerOperation = capability('FAILED', { reason: reason ?? `Provider operation stopped with ${snapshot.stopCode ?? 'no stop code'}.` });
+  else capabilities.providerOperation = capability('SUPPORTED', { stopCode: 'COMPLETED', reportCount: snapshot.reports.length });
+  if (reason && capabilities.providerPhysicalRequest.status === 'NOT_TESTED') capabilities.providerPhysicalRequest = capability('FAILED', { reason });
+  const safeSnapshot = sanitizePrivate(snapshot, secrets);
+  artifact.providerOperation = { attempted: true, snapshot: safeSnapshot };
+  if (reportError) artifact.providerOperation.error = { code: reportError.evidence.code };
+  return { ok: !reason && ['SUPPORTED', 'UNSUPPORTED'].includes(capabilities.providerOperation.status), reason, snapshot: safeSnapshot };
+}
+
+function boundedProviderSnapshotDiagnostic(snapshot, secrets, contract) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return { available: false, valueType: snapshot === null ? 'null' : typeof snapshot };
+  const reportCount = Array.isArray(snapshot.reports) && Number.isSafeInteger(snapshot.reports.length) ? snapshot.reports.length : null;
+  const reports = Array.isArray(snapshot.reports) ? snapshot.reports.slice(0, 64).flatMap(report => {
+    try {
+      return [validateProviderOperationReport(report, {
+        ...contract, event: report?.event, opSeq: report?.opSeq,
+        extensionId: contract?.extensionId, fixtureUrl: contract?.fixtureUrl, tabId: contract?.tabId,
+      })];
+    } catch { return []; }
+  }) : [];
+  const diagnosticRejections = snapshot.rejections && typeof snapshot.rejections === 'object' ? {
+    originOrType: Number.isSafeInteger(snapshot.rejections.originOrType) && snapshot.rejections.originOrType >= 0 && snapshot.rejections.originOrType <= 1000 ? snapshot.rejections.originOrType : null,
+    protocol: Number.isSafeInteger(snapshot.rejections.protocol) && snapshot.rejections.protocol >= 0 && snapshot.rejections.protocol <= 1000 ? snapshot.rejections.protocol : null,
+  } : null;
+  const lastRejection = sanitizeProviderLastRejection(snapshot.lastRejection, secrets);
+  const diagnostic = sanitizePrivate({
+    available: true, op: snapshot.op === operationName ? operationName : null,
+    released: typeof snapshot.released === 'boolean' ? snapshot.released : null,
+    restoreDecision: snapshot.restoreDecision === null || ['restore', 'stop'].includes(snapshot.restoreDecision) ? snapshot.restoreDecision : null,
+    stopped: typeof snapshot.stopped === 'boolean' ? snapshot.stopped : null,
+    stopCode: snapshot.stopCode === null || providerStopCodes.has(snapshot.stopCode) ? snapshot.stopCode : null,
+    rejections: diagnosticRejections,
+    failure: snapshot.failure === null ? null : snapshot.failure && typeof snapshot.failure === 'object'
+      ? { code: providerStopCodes.has(snapshot.failure.code) ? snapshot.failure.code : null } : null,
+    ...(lastRejection ? { lastRejection } : {}),
+    reportCount,
+    reports,
+  }, secrets);
+  if (Buffer.byteLength(JSON.stringify(diagnostic)) <= 65536) return diagnostic;
+  const bounded = { ...diagnostic, reports: [], reportsTruncated: true };
+  if (Buffer.byteLength(JSON.stringify(bounded)) <= 65536) return bounded;
+  return { available: true, op: operationName, released: null, restoreDecision: null, stopped: null, stopCode: null,
+    rejections: null, failure: null, reportCount: null, reports: [], reportsTruncated: true };
+}
+
+function sanitizeProviderLastRejection(value, secrets) {
+  if (value === null) return null;
+  const keys = ['event', 'opSeq', 'reason', 'released', 'armed', 'stopped', 'sessionMatchesAdmitted', 'invocationKnown', 'attemptKnown', 'codeKnown', 'code', 'success', 'outcome'];
+  if (!operationExact(value, keys) || (!operationEvents.has(value.event) && value.event !== 'unknown')
+      || (value.opSeq !== null && (!Number.isSafeInteger(value.opSeq) || value.opSeq < 0 || value.opSeq > 65))
+      || !['ENVELOPE_INVALID', 'SEQUENCE_INVALID', 'LIMIT_EXCEEDED', 'OPERATION_FAILED', 'EVENT_INVALID'].includes(value.reason)
+      || ['released', 'armed', 'stopped', 'sessionMatchesAdmitted', 'codeKnown'].some(key => typeof value[key] !== 'boolean')
+      || ['invocationKnown', 'attemptKnown'].some(key => value[key] !== null && typeof value[key] !== 'boolean')
+      || (value.code !== null && !providerDiagnosticCodes.has(value.code))
+      || (value.success !== null && typeof value.success !== 'boolean')
+      || (value.outcome !== null && !['fulfilled', 'rejected', 'cancelled'].includes(value.outcome))) return null;
+  return sanitizePrivate(Object.fromEntries(keys.map(key => [key, value[key]])), secrets);
+}
+
+function applyProviderOperationError(capabilities, code) {
+  if (code === 'INTERCEPTION_UNSUPPORTED') capabilities.backgroundProviderInterception = capability('UNSUPPORTED', { reason: 'Authenticated operation reports that matching BiDi interception is unavailable.' });
+  if (code === 'BODY_UNSUPPORTED') capabilities.providerRequestBody = capability('UNSUPPORTED', { reason: 'Authenticated operation reports request body collection is unavailable.' });
+  if (code === 'INVALID_BODY') capabilities.providerRequestBody = capability('FAILED', { reason: 'Authenticated operation rejected the Edge request body.' });
+  if (code === 'PROTOCOL_ERROR') capabilities.providerOperation = capability('FAILED', { reason: 'Authenticated provider operation protocol error.' });
+  if (code === 'TIMEOUT' && capabilities.providerPhysicalRequest.status === 'NOT_TESTED') capabilities.providerPhysicalRequest = capability('FAILED', { reason: 'Authenticated provider operation timed out before native physical proof.' });
+}
+
+export function validateEdgeProviderCorrelation(invocation, physical, request) {
+  if (!invocation || !physical || !request || !validEdgePageTranslateUrl(physical.url) || !validEdgePageTranslateUrl(request.url)
+      || request.isBlocked !== true || request.method !== 'POST' || request.url !== physical.url
+      || (request.redirectCount != null && request.redirectCount !== 0)
+      || physical.method !== 'POST' || physical.invocationId !== invocation.invocationId || physical.sessionId !== invocation.sessionId
+      || physical.messageId !== invocation.messageId || request.method !== physical.method) {
+    throw new Error('Native Edge attempt and paused BiDi request identity do not match.');
+  }
+  if (Number.isSafeInteger(request.bodySize) && request.bodySize > 0 && request.bodySize !== physical.bodyBytes) throw new Error('BiDi and native Edge body byte counts differ.');
+  return true;
+}
+
+export function validateEdgeBodyAgainstNative(decoded, physical, fixtureTexts) {
+  if (!Array.isArray(fixtureTexts) || fixtureTexts.length !== 12 || new Set(fixtureTexts).size !== 12) throw new TypeError('Provider fixture source oracle must contain twelve unique target texts.');
+  const bodyHash = createHash('sha256').update(decoded.bytes).digest('hex');
+  const indexByText = new Map(fixtureTexts.map((text, index) => [text, index]));
+  const sourceIndexes = decoded.body.map(text => indexByText.get(text));
+  if (decoded.bytes.length !== physical.bodyBytes || bodyHash !== physical.bodyHash.toLowerCase()
+      || sourceIndexes.some(index => index === undefined) || new Set(sourceIndexes).size !== sourceIndexes.length
+      || JSON.stringify(sourceIndexes) !== JSON.stringify(physical.sourceIndexes)) throw new Error('Native Edge request body differs from authenticated physical evidence or known fixture targets.');
+  return { body: decoded.body, sourceIndexes, bodyBytes: decoded.bytes.length, bodyHash };
+}
+
+export async function setupProviderDataCollector(bidi, capabilities) {
+  try {
+    const response = await bidi.command('network.addDataCollector', { collectorType: 'blob', dataTypes: ['request'], maxEncodedDataSize: 65536 });
+    const collectorId = response.result?.collector ?? null;
+    capabilities.providerDataCollector = collectorId
+      ? capability('SUPPORTED', { collectorType: 'blob', dataTypes: ['request'], maxEncodedDataSize: 65536 })
+      : capability('UNSUPPORTED', { reason: 'network.addDataCollector returned no collector ID; the native provider path remains enabled.' });
+    return collectorId;
+  } catch (error) {
+    if (bidi.protocolError) throw error;
+    const unsupported = ['unknown command', 'unsupported operation', 'no such network data', 'no-such-network-data'].includes(error.code);
+    capabilities.providerDataCollector = capability(unsupported ? 'UNSUPPORTED' : 'FAILED', { reason: sanitizePrivate(`BiDi request data collector setup failed: ${error.code ?? error.message}`) });
+    return null;
+  }
+}
+
+export async function removeProviderNetworkControls({ bidi, collectorId, interceptId, secrets = [], timeoutMs = 3000 }) {
+  const errors = [];
+  if (collectorId) {
+    try { await withTimeout(bidi.command('network.removeDataCollector', { collector: collectorId }), timeoutMs, 'remove network data collector'); }
+    catch (error) { errors.push(sanitizePrivate(`Request data collector removal failed: ${error.message}`, secrets)); }
+  }
+  if (interceptId) {
+    try { await withTimeout(bidi.command('network.removeIntercept', { intercept: interceptId }), timeoutMs, 'remove network intercept'); }
+    catch (error) { errors.push(sanitizePrivate(`BiDi intercept removal failed: ${error.message}`, secrets)); }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, collectorId, fixtureTexts, runId, extensionId, fixtureUrl, tabId, startupSender = null, capabilities, timeoutMs = 12000 }) {
+  if (!Array.isArray(fixtureTexts) || fixtureTexts.length !== 12 || new Set(fixtureTexts).size !== 12 || fixtureTexts.some(text => typeof text !== 'string' || !text.trim())) throw new TypeError('Provider fixture source oracle must contain twelve unique target texts.');
+  const state = { attempted: false, released: false, receiptDecision: null, stopped: false, stopCode: null, reports: [], cursor: 0, pendingReports: [], invocations: new Map(), attempts: new Map(), parsers: new Map(), providerSettlements: new Map(), successfulCoverage: new Map(), invocation: null, armed: null, physical: null, physicalStarts: [], requests: [], bodyProofs: [], settlements: [], request: null, bodyProof: null, physicalSettlement: null, parser: null, command: null, translated: null, restored: null, error: null, contract: { runId, extensionId, fixtureUrl, tabId } };
+  let operationDeadline = 0;
+  const candidateBuffer = [];
+  const seenRequestIds = new Set();
+  const failHeld = async (event, reason) => {
+    if (event?.action === 'provider-held') await dispatcher.failProviderRequest(event, reason);
+  };
+  let failPendingRequests = async () => {};
+  const stop = async code => {
+    if (state.stopped) return;
+    try { await failPendingRequests(`provider-operation-${code.toLowerCase()}`); }
+    catch (error) { state.error ??= sanitizePrivate(`Could not fail every held provider request: ${error.message}`, [runId]); }
+    state.stopCode = code;
+    try { await bridge.stopProviderProbe(code); state.stopped = true; }
+    catch (error) { state.error ??= sanitizePrivate(`Could not stop provider operation: ${error.message}`, [runId]); }
+  };
+  const collectSnapshot = () => {
+    const snapshot = bridge.operationSnapshot();
+    if (!snapshot || !Array.isArray(snapshot.reports) || snapshot.reports.length > 64) throw new Error('Provider operation snapshot is invalid while collecting reports.');
+    return snapshot;
+  };
+  const wait = async expected => {
+    const events = Array.isArray(expected) ? expected : [expected];
+    const server = bridge.server;
+    while (Date.now() < operationDeadline) {
+      let wake;
+      let listener;
+      let timer;
+      if (server?.on && server?.removeListener) {
+        wake = new Promise(resolve => {
+          listener = () => resolve();
+          server.on('runtime-provider-operation', listener);
+          timer = setTimeout(resolve, Math.max(1, operationDeadline - Date.now()));
+        });
+      }
+      try {
+        const snapshot = collectSnapshot();
+        const raw = snapshot.reports.find(item => item?.opSeq === state.cursor + 1);
+        if (raw) {
+          const report = validateProviderOperationReport(raw, {
+            ...state.contract, event: raw?.event, opSeq: raw?.opSeq, extensionId, fixtureUrl, tabId,
+            priorSender: raw?.event === 'armed' ? startupSender : null,
+          });
+          state.cursor = report.opSeq;
+          state.reports.push(report);
+          state.pendingReports.push(report);
+        }
+        const index = state.pendingReports.findIndex(report => events.includes(report.event));
+        if (index >= 0) return state.pendingReports.splice(index, 1)[0];
+        if (raw) continue;
+        if (snapshot.reports.some(item => item?.opSeq > state.cursor)) throw new Error(`Provider operation opSeq gap after ${state.cursor}.`);
+        if (server?.on && server?.removeListener) await wake;
+        else {
+          try { await withTimeout(bridge.waitForOperation(events[0], { timeoutMs: Math.max(1, operationDeadline - Date.now()) }), Math.max(1, operationDeadline - Date.now()), `provider operation ${events.join('|')}`); }
+          catch (error) { if (Date.now() >= operationDeadline) throw error; }
+          await delay(5);
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (listener) server.removeListener('runtime-provider-operation', listener);
+      }
+    }
+    throw Object.assign(new Error(`Timed out waiting for provider operation ${events.join('|')}`), { code: 'timeout' });
+  };
+  const markFailure = (name, reason) => { capabilities[name] = capability('FAILED', { reason }); };
+  const markLaterNotTested = reason => {
+    for (const name of ['providerResponse', 'providerConsumption', 'domAcceptance', 'providerRestore']) capabilities[name] = retainExecutedCapability(capabilities[name], reason);
+  };
+  const recordAttemptOutcome = (physical, outcome) => {
+    state.attempts.set(physical.attemptId, { physical, ...outcome });
+    state.physical = { evidence: physical };
+    state.physicalStarts.push(physical);
+    if (outcome.request) state.request = outcome.request;
+    if (outcome.request) state.requests.push(outcome.request);
+    if (outcome.bodyProof) state.bodyProof = outcome.bodyProof;
+    if (outcome.bodyProof) state.bodyProofs.push(outcome.bodyProof);
+    if (outcome.settlement) state.settlements.push(outcome.settlement);
+    if (outcome.settlement) state.physicalSettlement = { evidence: outcome.settlement };
+  };
+  const candidateMatches = (candidate, physical) => candidate.request.url === physical.url && candidate.request.method === physical.method
+    && candidate.bodyProof.bodyBytes === physical.bodyBytes && candidate.bodyProof.bodyHash === physical.bodyHash.toLowerCase()
+    && JSON.stringify(candidate.bodyProof.sourceIndexes) === JSON.stringify(physical.sourceIndexes);
+  const failCachedCandidates = async reason => {
+    for (const candidate of candidateBuffer.splice(0)) await failHeld(candidate.request, reason);
+    const pending = await dispatcher.failPendingProviderRequests?.(reason) ?? [];
+    if (pending.some(result => !result.ok)) throw new Error('One or more held provider requests could not be failed.');
+  };
+  failPendingRequests = failCachedCandidates;
+  const acquireCandidate = async physical => {
+    while (Date.now() < operationDeadline) {
+      const cachedIndex = candidateBuffer.findIndex(candidate => candidateMatches(candidate, physical));
+      if (cachedIndex >= 0) return candidateBuffer.splice(cachedIndex, 1)[0];
+      const remaining = Math.max(1, operationDeadline - Date.now());
+      let request;
+      try {
+        request = await dispatcher.waitForProviderRequest(event => event.classification?.kind === 'provider-translation' && event.method === 'POST'
+          && (!collectorId ? event.url === physical.url && event.bodySize === physical.bodyBytes : true),
+          { timeoutMs: Math.max(1, Math.min(2000, remaining - Math.min(500, remaining / 4))) });
+      } catch (error) {
+        if (Date.now() >= operationDeadline || /^Timed out waiting for intercepted Edge request/.test(error.message)) error.code = 'timeout';
+        throw error;
+      }
+      if (!request.isBlocked || request.observedAt < state.releasedAt) {
+        await failHeld(request, 'provider-request-outside-release-window');
+        throw new Error(request.isBlocked ? 'Edge request predates provider release.' : 'Edge candidate was not paused by BiDi.');
+      }
+      if (seenRequestIds.has(request.requestId)) throw new Error('BiDi repeated a provider request ID.');
+      seenRequestIds.add(request.requestId);
+      if (!validEdgePageTranslateUrl(request.url) || request.redirectCount !== 0 && request.redirectCount != null) {
+        await failHeld(request, 'invalid-edge-candidate');
+        throw new Error('Observed Edge candidate did not match the fixed Edge/fr endpoint contract.');
+      }
+      if (!collectorId) {
+        await failHeld(request, 'request-body-unavailable');
+        capabilities.backgroundProviderInterception = capability('SUPPORTED', { requestId: request.requestId, attemptId: physical.attemptId, url: request.url, method: request.method });
+        capabilities.providerRequestBody = capability('UNSUPPORTED', { reason: capabilities.providerDataCollector.reason ?? 'BiDi request body collector unavailable.' });
+        throw Object.assign(new Error('Intercepted native request body is unavailable.'), { code: 'BODY_UNSUPPORTED' });
+      }
+      let bodyProof;
+      try {
+        const collected = await bidi.command('network.getData', { request: request.requestId, dataType: 'request', collector: collectorId });
+        const decoded = decodeEdgeRequestBody(collected.result);
+        const indexByText = new Map(fixtureTexts.map((text, index) => [text, index]));
+        const sourceIndexes = decoded.body.map(text => indexByText.get(text));
+        if (sourceIndexes.some(index => index === undefined) || new Set(sourceIndexes).size !== sourceIndexes.length) throw new Error('Collected Edge body contains unknown or duplicate fixture source text.');
+        bodyProof = { body: decoded.body, sourceIndexes, bodyBytes: decoded.bytes.length, bodyHash: createHash('sha256').update(decoded.bytes).digest('hex') };
+      } catch (error) {
+        const unsupported = ['no such network data', 'no-such-network-data', 'unknown command', 'unsupported operation'].includes(error.code);
+        capabilities.providerRequestBody = capability(unsupported ? 'UNSUPPORTED' : 'FAILED', { reason: sanitizePrivate(error.message) });
+        if (unsupported && request.url === physical.url && request.bodySize === physical.bodyBytes) capabilities.backgroundProviderInterception = capability('SUPPORTED', { requestId: request.requestId, attemptId: physical.attemptId, url: request.url, method: request.method });
+        if (unsupported) capabilities.providerDataCollector = capability('UNSUPPORTED', { reason: `BiDi request body retrieval unavailable: ${error.code}.` });
+        await failHeld(request, 'request-body-unavailable');
+        throw Object.assign(error, { code: unsupported ? 'BODY_UNSUPPORTED' : 'INVALID_BODY' });
+      }
+      const candidate = { request, bodyProof };
+      if (candidateMatches(candidate, physical)) return candidate;
+      if (candidateBuffer.length >= 16) {
+        await failHeld(request, 'provider-candidate-buffer-limit');
+        throw new Error('Provider request candidate buffer limit reached.');
+      }
+      candidateBuffer.push(candidate);
+    }
+    throw Object.assign(new Error('Timed out waiting for a BiDi body matching an authenticated native attempt.'), { code: 'timeout' });
+  };
+  const servicePhysical = async physical => {
+    const owner = state.invocations.get(physical.invocationId);
+    if (!owner || owner.sessionId !== physical.sessionId || owner.messageId !== physical.messageId || JSON.stringify(owner.sourceIndexes) !== JSON.stringify(physical.sourceIndexes)) {
+      const reason = 'Authenticated native physical-start is not correlated to its logical invocation/session/source indexes.';
+      markFailure('providerPhysicalRequest', reason);
+      try {
+        const held = await dispatcher.waitForProviderRequest(event => event.classification?.kind === 'provider-translation' && event.url === physical.url, { timeoutMs: Math.max(1, Math.min(500, operationDeadline - Date.now())) });
+        await failHeld(held, 'native-invocation-mismatch');
+      } catch { /* A missing request is already captured as physical identity failure. */ }
+      await stop('PROTOCOL_ERROR');
+      try {
+        const settlement = await wait('physical-settled');
+        if (settlement.evidence.attemptId === physical.attemptId) recordAttemptOutcome(physical, { settlement: settlement.evidence, diagOnly: true });
+      } catch { /* Preserve the authenticated identity failure. */ }
+      return { failed: true };
+    }
+    capabilities.providerPhysicalRequest = capability('SUPPORTED', { attemptId: physical.attemptId, invocationId: owner.invocationId, sessionId: owner.sessionId, method: physical.method, url: physical.url, bodyBytes: physical.bodyBytes, bodyHash: physical.bodyHash, sourceIndexes: physical.sourceIndexes });
+    let candidate;
+    try { candidate = await acquireCandidate(physical); }
+    catch (error) {
+      const hadUnmatchedCandidates = candidateBuffer.length > 0;
+      if (error.code === 'BODY_UNSUPPORTED') {
+        capabilities.backgroundProviderInterception = retainExecutedCapability(capabilities.backgroundProviderInterception, 'An exact endpoint/size-matched request was paused, but its body was unavailable.');
+        markLaterNotTested('The actual provider request body was unavailable.');
+        await stop('BODY_UNSUPPORTED');
+      } else if (error.code === 'timeout' && !hadUnmatchedCandidates) {
+        capabilities.backgroundProviderInterception = capability('UNSUPPORTED', { reason: 'Native provider physical-start was authenticated, but no matching BiDi request/body arrived within the bounded operation window.' });
+        markLaterNotTested('The native physical POST was not paired with matching BiDi request/body evidence.');
+        await stop('INTERCEPTION_UNSUPPORTED');
+      } else {
+        capabilities.backgroundProviderInterception = capability('FAILED', { reason: error.message });
+        markLaterNotTested('The observed provider request could not be safely correlated to its native attempt.');
+        await stop(providerStopCodes.has(error.code) ? error.code : 'PROTOCOL_ERROR');
+      }
+      if (candidateBuffer.length) await failCachedCandidates('unmatched-provider-candidate-at-terminal-attempt');
+      const settlement = await wait('physical-settled');
+      if (settlement.evidence.attemptId === physical.attemptId) recordAttemptOutcome(physical, { settlement: settlement.evidence, diagOnly: true });
+      return { failed: error.code !== 'timeout' && error.code !== 'BODY_UNSUPPORTED' || hadUnmatchedCandidates, unsupported: error.code === 'BODY_UNSUPPORTED' || error.code === 'timeout' && !hadUnmatchedCandidates };
+    }
+    const { request, bodyProof } = candidate;
+    try { validateEdgeProviderCorrelation(owner, physical, request); }
+    catch (error) {
+      capabilities.backgroundProviderInterception = capability('FAILED', { reason: error.message, requestId: request.requestId });
+      markLaterNotTested('BiDi request identity did not match the native physical POST.');
+      await failHeld(request, 'native-bidi-correlation-failed'); await stop('PROTOCOL_ERROR');
+      const settlement = await wait('physical-settled');
+      if (settlement.evidence.attemptId === physical.attemptId) recordAttemptOutcome(physical, { request, settlement: settlement.evidence, diagOnly: true });
+      return { failed: true };
+    }
+    capabilities.backgroundProviderInterception = capability('SUPPORTED', { requestId: request.requestId, attemptId: physical.attemptId, url: request.url, method: request.method });
+    if (!candidateMatches(candidate, physical)) throw new Error('Cached BiDi candidate does not match authenticated native request bytes/hash/source indexes.');
+    capabilities.providerRequestBody = capability('SUPPORTED', { bodyBytes: bodyProof.bodyBytes, bodyHash: bodyProof.bodyHash, sourceIndexes: bodyProof.sourceIndexes });
+    let provided;
+    const responseBody = JSON.stringify(mapEdgeResponse(bodyProof.body));
+    try {
+      provided = await bidi.command('network.provideResponse', {
+        request: request.requestId, statusCode: 200, reasonPhrase: 'OK',
+        headers: [{ name: 'Content-Type', value: { type: 'string', value: 'application/json' } }],
+        body: { type: 'string', value: responseBody },
+      });
+      if (provided?.type !== 'success' || !provided.result || typeof provided.result !== 'object' || Array.isArray(provided.result)) throw new Error('BiDi did not acknowledge the controlled provider response.');
+    } catch (error) {
+      const unsupported = ['unknown command', 'unsupported operation'].includes(error.code);
+      capabilities.providerResponse = capability(unsupported ? 'UNSUPPORTED' : 'FAILED', { reason: sanitizePrivate(error.message) });
+      markLaterNotTested('The actual Edge response was not successfully provided to the paused native request.');
+      await failHeld(request, 'provider-response-failed'); await stop('PROTOCOL_ERROR');
+      const settlement = await wait('physical-settled');
+      if (settlement.evidence.attemptId === physical.attemptId) recordAttemptOutcome(physical, { request, bodyProof, settlement: settlement.evidence, diagOnly: true });
+      return { unsupported, failed: !unsupported };
+    }
+    request.action = 'provider-response-synthetic'; request.commandResponse = provided; request.requestResolved = true;
+    capabilities.providerResponse = capability('SUPPORTED', { requestId: request.requestId, statusCode: 200, responseBodyBytes: Buffer.byteLength(responseBody) });
+    const settlement = await wait('physical-settled');
+    if (settlement.evidence.attemptId !== physical.attemptId || settlement.evidence.sessionId !== owner.sessionId) throw new Error('Native settlement does not match the intercepted attempt/session.');
+    recordAttemptOutcome(physical, { request, bodyProof, settlement: settlement.evidence, successful: settlement.evidence.outcome === 'fulfilled' && settlement.evidence.status === 200 && settlement.evidence.code === null });
+    return { failed: false };
+  };
+
+  try {
+    const initial = validateProviderOperationSnapshot(bridge.operationSnapshot(), { runId, extensionId, fixtureUrl, tabId });
+    const prearmed = initial.reports.length === 1 && initial.reports[0].event === 'armed';
+    if ((!prearmed && initial.reports.length !== 0) || initial.released || initial.stopped || initial.failure) throw new Error('Provider operation snapshot was not idle or waiting at the authenticated arm gate.');
+    state.attempted = true;
+    if (prearmed) { state.cursor = initial.reports[0].opSeq; state.armed = initial.reports[0]; state.reports.push(initial.reports[0]); }
+    state.releasedAt = Date.now();
+    operationDeadline = state.releasedAt + timeoutMs;
+    state.receiptDecision = validateProviderReleaseReceipt(await bridge.releaseProviderProbe());
+    state.released = true;
+    state.armed ??= await wait('armed');
+    const armedSnapshot = collectSnapshot();
+    if (!armedSnapshot.released || armedSnapshot.reports[0]?.event !== 'armed') throw new Error('Provider release receipt was not followed by an authenticated armed report.');
+    if (state.receiptDecision === 'stop') {
+      if (!armedSnapshot.stopped || !providerStopCodes.has(armedSnapshot.stopCode)) throw new Error('Stop release receipt omitted the authenticated provider stop state.');
+      state.stopped = true; state.stopCode = armedSnapshot.stopCode;
+      const reason = `Authenticated provider arm stopped before a native physical POST (${state.stopCode}); this is not physical or interception proof.`;
+      capabilities.providerPhysicalRequest = capability('FAILED', { reason });
+      capabilities.backgroundProviderInterception = retainExecutedCapability(capabilities.backgroundProviderInterception, reason);
+      capabilities.providerRequestBody = retainExecutedCapability(capabilities.providerRequestBody, reason);
+      capabilities.providerOperation = capability('FAILED', { reason });
+      markLaterNotTested('Authenticated arm decision selected stop; no native Edge request was initiated.');
+      return state;
+    }
+    if (armedSnapshot.stopped || armedSnapshot.stopCode !== null || armedSnapshot.failure) throw new Error('Start receipt was contradicted by an authenticated stopped/failed operation snapshot.');
+    let nativeStarted = false;
+    let terminalFailure = null;
+    const providerWorkComplete = () => state.invocations.size > 0
+      && state.parsers.size === state.invocations.size && state.providerSettlements.size === state.invocations.size
+      && [...state.attempts.values()].every(attempt => attempt.settlement)
+      && state.successfulCoverage.size === 12 && indexes012([...state.successfulCoverage.keys()].sort((a, b) => a - b));
+    const providerProofComplete = () => state.command?.evidence.success === true
+      && state.invocation?.evidence.sessionId === state.command.evidence.sessionId && providerWorkComplete();
+    while (!providerProofComplete() && !terminalFailure) {
+      let report;
+      try { report = await wait(['provider-invoked', 'physical-start', 'parser-success', 'provider-settled', 'command-result', 'error']); }
+      catch (error) {
+        if (!nativeStarted) markFailure('providerPhysicalRequest', `No authenticated native physical POST was observed during the production command: ${error.message}`);
+        else capabilities.providerConsumption = capability('FAILED', { reason: `Native provider operation did not reach exact source coverage: ${error.message}` });
+        markLaterNotTested('Provider operation did not complete its native request/parser proof.');
+        await stop(error.code === 'timeout' ? 'TIMEOUT' : 'PROTOCOL_ERROR');
+        return state;
+      }
+      if (report.event === 'error') {
+        terminalFailure = report.evidence.code;
+        applyProviderOperationError(capabilities, terminalFailure);
+        if (terminalFailure === 'PROTOCOL_ERROR' && capabilities.providerOperation) capabilities.providerOperation = capability('FAILED', { reason: 'Authenticated provider operation protocol failure.' });
+        markLaterNotTested(`Authenticated provider operation stopped with ${terminalFailure}.`);
+        await stop(terminalFailure);
+      } else if (report.event === 'provider-invoked') {
+        const invocation = report.evidence;
+        if (state.invocations.size >= 12 || state.invocations.has(invocation.invocationId)
+            || (state.invocation && invocation.sessionId !== state.invocation.evidence.sessionId)
+            || (state.command?.evidence.sessionId && invocation.sessionId !== state.command.evidence.sessionId)) throw new Error('Provider logical invocation exceeded bounds or changed the acknowledged page session.');
+        state.invocations.set(invocation.invocationId, invocation);
+        state.invocation ??= report;
+      } else if (report.event === 'physical-start') {
+        nativeStarted = true;
+        const physical = report.evidence;
+        state.physical = report;
+        const result = await servicePhysical(physical);
+        if (result.failed || result.unsupported) { terminalFailure = state.stopCode ?? (result.unsupported ? 'INTERCEPTION_UNSUPPORTED' : 'PROTOCOL_ERROR'); break; }
+      } else if (report.event === 'parser-success') {
+        const invocation = state.invocations.get(report.evidence.invocationId);
+        const attempts = [...state.attempts.values()].filter(item => item.physical.invocationId === report.evidence.invocationId);
+        const successful = new Map();
+        for (const attempt of attempts) if (attempt.successful) for (const index of attempt.physical.sourceIndexes) successful.set(index, (successful.get(index) ?? 0) + 1);
+        if (!invocation || report.evidence.sessionId !== invocation.sessionId
+            || JSON.stringify(report.evidence.sourceIndexes) !== JSON.stringify(invocation.sourceIndexes)
+            || !invocation.sourceIndexes.every(index => successful.get(index) === 1)) throw new Error('Parser success lacks exact-once fulfilled HTTP 200 coverage for its logical invocation.');
+        if (invocation.sourceIndexes.some(index => state.successfulCoverage.has(index))) throw new Error('Successful logical batches overlap source coverage.');
+        for (const index of invocation.sourceIndexes) state.successfulCoverage.set(index, report.evidence.invocationId);
+        state.parsers.set(report.evidence.invocationId, report);
+        state.parser = report;
+      } else if (report.event === 'provider-settled') {
+        if (report.evidence.outcome !== 'fulfilled' || !state.parsers.has(report.evidence.invocationId)) {
+          terminalFailure = report.evidence.code ?? 'TEARDOWN';
+          capabilities.providerConsumption = capability('FAILED', { reason: 'A logical provider invocation did not fulfill after parser validation.' });
+          markLaterNotTested('A logical provider invocation failed.');
+          await stop(terminalFailure);
+        } else {
+          const invocation = state.invocations.get(report.evidence.invocationId);
+          if (!invocation || report.evidence.sessionId !== invocation.sessionId || state.providerSettlements.has(report.evidence.invocationId)) throw new Error('Provider settlement duplicated or mismatched a logical invocation.');
+          state.providerSettlements.set(report.evidence.invocationId, report);
+        }
+      } else if (report.event === 'command-result') {
+        if (state.command) throw new Error('Production page-translate emitted a duplicate or contradictory command acknowledgment.');
+        state.command = report;
+        if (!report.evidence.success) {
+          if (!nativeStarted) markFailure('providerPhysicalRequest', 'Production page-translate command failed before a native physical request.');
+          else capabilities.providerConsumption = capability('FAILED', { reason: 'Production page-translate command failed after native attempts.' });
+          markLaterNotTested('Production command did not succeed.');
+          await stop(report.evidence.code ?? 'TEARDOWN');
+          terminalFailure = report.evidence.code ?? 'TEARDOWN';
+        } else if (state.invocation && report.evidence.sessionId !== state.invocation.evidence.sessionId) {
+          if (providerWorkComplete()) capabilities.providerConsumption = capability('SUPPORTED', { sessionId: state.invocation.evidence.sessionId, sourceIndexes: [...state.successfulCoverage.keys()].sort((a, b) => a - b), attempts: state.attempts.size, invocations: state.invocations.size });
+          capabilities.domAcceptance = capability('FAILED', { reason: 'Production command success belongs to a different session than the fulfilled provider work.' });
+          throw new Error('Production page-translate command success belongs to a different session.');
+        }
+      }
+    }
+    if (terminalFailure) return state;
+    if (!providerProofComplete()) throw new Error('Provider acknowledgment did not complete independent parser, settlement, and exact-once source proof.');
+    if (candidateBuffer.length || dispatcher.requests?.some(event => event.classification?.kind === 'provider-translation' && event.isBlocked && !event.requestResolved)) {
+      await failCachedCandidates('unmatched-provider-request-at-provider-completion');
+      throw new Error('Provider work completed while unmatched paused Edge candidates remained.');
+    }
+    capabilities.providerConsumption = capability('SUPPORTED', { sessionId: state.invocation.evidence.sessionId, sourceIndexes: [...state.successfulCoverage.keys()].sort((a, b) => a - b), attempts: state.attempts.size, invocations: state.invocations.size });
+    const sessionId = state.invocation.evidence.sessionId;
+    try {
+      state.translated = await wait('translated');
+      if (state.translated.evidence.sessionId !== sessionId) throw new Error('Translated DOM evidence belongs to a different session.');
+      capabilities.domAcceptance = capability('SUPPORTED', { sessionId, acceptedTargetIds: state.translated.evidence.acceptedTargetIds, acceptedCount: 12, duplicateAcceptances: 0, staleWrites: 0, domMatches: true, sessionOwned: true, quiescent: true });
+    } catch (error) {
+      capabilities.domAcceptance = capability('FAILED', { reason: error.message });
+      markLaterNotTested('Translated DOM acceptance/session ownership was not proven.');
+      await stop(error.code === 'timeout' ? 'TIMEOUT' : 'PROTOCOL_ERROR'); return state;
+    }
+    try {
+      const decision = await bridge.decideRestore('restore');
+      if (decision !== 'restore') throw new Error('Runtime bridge rejected the sole post-success restore decision.');
+      state.restored = await wait('restored');
+      if (state.restored.evidence.sessionId !== sessionId) throw new Error('Restore evidence belongs to a different session.');
+      capabilities.providerRestore = capability('SUPPORTED', { sessionId, commandSuccess: true, domMatchesOriginal: true, metadataRestored: true, restoreObserved: true });
+      await stop('COMPLETED');
+    } catch (error) {
+      capabilities.providerRestore = capability('FAILED', { reason: error.message });
+      await stop(error.code === 'timeout' ? 'TIMEOUT' : 'PROTOCOL_ERROR');
+    }
+  } catch (error) {
+    state.error = sanitizePrivate(error.message ?? String(error));
+    if (capabilities.providerPhysicalRequest.status === 'NOT_TESTED') capabilities.providerPhysicalRequest = capability('FAILED', { reason: `Released provider operation did not produce a validated native physical POST: ${state.error}` });
+    for (const name of ['backgroundProviderInterception', 'providerRequestBody', 'providerResponse', 'providerConsumption', 'domAcceptance', 'providerRestore']) {
+      capabilities[name] = retainExecutedCapability(capabilities[name], `Provider probe stopped before ${name}: ${state.error}`);
+    }
+    await stop(error.code === 'timeout' ? 'TIMEOUT' : 'PROTOCOL_ERROR');
+  }
+  return state;
+}
+
+export function providerProbeArtifact(state) {
+  const request = state?.request;
+  return {
+    attempted: state?.attempted === true, released: state?.released === true, receiptDecision: state?.receiptDecision ?? null, stopped: state?.stopped === true, stopCode: state?.stopCode ?? null,
+    invocation: state?.invocation?.evidence ?? null,
+    physicalStart: state?.physical?.evidence ?? null,
+    request: request ? { requestId: request.requestId, url: request.url, method: request.method, bodySize: request.bodySize, isBlocked: request.isBlocked, action: request.action, commandError: request.commandError ?? null } : null,
+    requestBody: state?.bodyProof ? { bodyBytes: state.bodyProof.bodyBytes, bodyHash: state.bodyProof.bodyHash, sourceIndexes: state.bodyProof.sourceIndexes } : null,
+    physicalSettlement: state?.physicalSettlement?.evidence ?? state?.physicalSettlement ?? null,
+    physicalAttempts: [...(state?.attempts?.values?.() ?? [])].map(item => ({
+      physicalStart: item.physical, requestId: item.request?.requestId ?? null,
+      requestBody: item.bodyProof ? { bodyBytes: item.bodyProof.bodyBytes, bodyHash: item.bodyProof.bodyHash, sourceIndexes: item.bodyProof.sourceIndexes } : null,
+      settlement: item.settlement ?? null, successful: item.successful === true, diagnosticOnly: item.diagOnly === true,
+    })),
+    parser: state?.parser?.evidence ?? null, command: state?.command?.evidence ?? null,
+    translated: state?.translated?.evidence ?? null, restored: state?.restored?.evidence ?? null,
+    operationReports: state?.reports ?? [], error: state?.error ?? null,
+  };
+}
+
+export function providerProbeRequiresImmediateTeardown(state, capabilities) {
+  return state?.attempted === true && (state.stopCode !== 'COMPLETED'
+    || ['providerPhysicalRequest', 'providerConsumption', 'domAcceptance', 'providerRestore'].some(name => capabilities[name]?.status !== 'SUPPORTED'));
+}
+
+function safeId(value) { return typeof value === 'string' && value.length > 0 && value.length <= 256; }
+const indexes012 = value => Array.isArray(value) && value.length === 12 && value.every((item, index) => item === index);
+const indexesSubset012 = value => Array.isArray(value) && value.length > 0 && value.length <= 12 && value.every(item => Number.isInteger(item) && item >= 0 && item < 12) && new Set(value).size === value.length;
+const targetIds012 = value => Array.isArray(value) && value.length === 12 && value.every((id, index) => id === `target-${index}`);
+
 export function latestRealmObservations(observations) {
   const latestByRealm = new Map();
   for (const observation of observations) latestByRealm.set(observation.realm, observation);
   return [...latestByRealm.values()];
 }
 
-export function createRequestDispatcher({ bidi, fixtureOrigin, runtimeReportUrl = null, maxInFlight = 128 }) {
+export function createRequestDispatcher({ bidi, fixtureOrigin, runtimeReportUrl = null, onProviderRequest = () => {}, maxInFlight = 128 }) {
   const requests = []; const errors = []; const jobs = new Set(); let accepting = true; let droppedRecords = 0; let droppedErrors = 0;
+  const providerQueue = []; const providerWaiters = [];
   const recordError = error => { if (errors.length < 64) errors.push(error); else droppedErrors++; };
+  const publishProviderRequest = event => {
+    const waiting = providerWaiters.findIndex(waiter => waiter.predicate(event));
+    if (waiting >= 0) {
+      const [waiter] = providerWaiters.splice(waiting, 1); clearTimeout(waiter.timer); waiter.resolve(event); return;
+    }
+    if (providerQueue.length >= 16) { recordError(new Error('Provider intercept request buffer limit reached; request remains blocked.')); return; }
+    providerQueue.push(event);
+  };
   const actionFor = async (message, terminal = false) => {
     if (message.method !== 'network.beforeRequestSent') return;
     const params = message.params ?? {}; const request = params.request ?? {};
     const classified = request.url === runtimeReportUrl
       ? request.method === 'POST' ? { kind: 'runtime-bridge-report' } : { kind: 'blocked', reason: `unexpected runtime collector method: ${request.method}` }
-      : classifyTransportRequest({ method: request.method, url: request.url }, { fixtureOrigin });
-    const event = { requestId: request.request, url: request.url, method: request.method, isBlocked: params.isBlocked === true, classification: classified, action: null };
+      : isEdgeProviderCandidate(request.url) ? { kind: 'provider-translation' }
+        : classifyTransportRequest({ method: request.method, url: request.url }, { fixtureOrigin });
+    const event = { requestId: request.request, url: request.url, method: request.method, bodySize: request.bodySize ?? null, context: params.context ?? null, redirectCount: params.redirectCount ?? null, observedAt: Date.now(), isBlocked: params.isBlocked === true, requestResolved: false, classification: classified, action: null };
     if (requests.length < 512) requests.push(event);
     else { droppedRecords++; recordError(new Error('Request event evidence limit reached; refusing additional HTTP(S) work.')); }
     const scheme = (() => { try { return new URL(request.url).protocol; } catch { return null; } })();
     if (!request.request) {
       event.action = 'missing-request-id'; recordError(new Error(`BiDi request event has no request id: ${request.url ?? '<missing URL>'}`)); return;
+    }
+    if (classified.kind === 'provider-translation' && !terminal) {
+      event.action = params.isBlocked ? 'provider-held' : 'provider-unpaused';
+      publishProviderRequest(event);
+      try { await onProviderRequest(event); } catch (error) { recordError(error); }
+      return;
     }
     if (!params.isBlocked) {
       if (scheme !== 'http:' && scheme !== 'https:') { event.action = 'ignored-non-network-scheme'; return; }
@@ -401,7 +1172,7 @@ export function createRequestDispatcher({ bidi, fixtureOrigin, runtimeReportUrl 
     }
     if (terminal) {
       event.action = 'fail-terminal-request';
-      try { event.commandResponse = await bidi.command('network.failRequest', { request: request.request }); }
+      try { event.commandResponse = await bidi.command('network.failRequest', { request: request.request }); event.requestResolved = event.commandResponse?.type === 'success'; }
       catch (error) { event.commandError = error.message; recordError(error); }
       recordError(new Error(`HTTP(S) request arrived after request admission closed: ${request.url}`));
       return;
@@ -409,16 +1180,17 @@ export function createRequestDispatcher({ bidi, fixtureOrigin, runtimeReportUrl 
     const action = classifyRequestAction(classified.kind);
     try {
       if (action === 'continue-local') {
-        event.action = 'continue-local'; event.commandResponse = await bidi.command('network.continueRequest', { request: request.request }); return;
+        event.action = 'continue-local'; event.commandResponse = await bidi.command('network.continueRequest', { request: request.request }); event.requestResolved = event.commandResponse?.type === 'success'; return;
       }
       if (action === 'continue-runtime-report') {
-        event.action = 'continue-exact-runtime-report'; event.commandResponse = await bidi.command('network.continueRequest', { request: request.request }); return;
+        event.action = 'continue-exact-runtime-report'; event.commandResponse = await bidi.command('network.continueRequest', { request: request.request }); event.requestResolved = event.commandResponse?.type === 'success'; return;
       }
       if (action === 'provide-known-empty-voices') {
-        event.action = 'fixture-voices'; event.commandResponse = await bidi.command('network.provideResponse', { request: request.request, statusCode: 200, headers: [{ name: 'content-type', value: { type: 'string', value: 'application/json' } }], body: { type: 'base64', value: Buffer.from('[]').toString('base64') } }); return;
+        event.action = 'fixture-voices'; event.commandResponse = await bidi.command('network.provideResponse', { request: request.request, statusCode: 200, headers: [{ name: 'content-type', value: { type: 'string', value: 'application/json' } }], body: { type: 'base64', value: Buffer.from('[]').toString('base64') } }); event.requestResolved = event.commandResponse?.type === 'success'; return;
       }
       event.action = classified.kind === 'provider-translation' ? 'deny-provider-before-verified-context' : 'fail-unexpected';
       event.commandResponse = await bidi.command('network.failRequest', { request: request.request });
+      event.requestResolved = event.commandResponse?.type === 'success';
       if (classified.kind === 'provider-translation') recordError(new Error('Edge provider request occurred before both instrumented runtime realms were verified.'));
     } catch (error) { event.commandError = error.message; recordError(error); }
   };
@@ -428,7 +1200,7 @@ export function createRequestDispatcher({ bidi, fixtureOrigin, runtimeReportUrl 
     if (jobs.size >= maxInFlight) {
       const request = message.params?.request ?? {};
       const classified = classifyTransportRequest({ method: request.method, url: request.url }, { fixtureOrigin });
-      requests.push({ requestId: request.request, url: request.url, method: request.method, isBlocked: message.params?.isBlocked === true, classification: classified, action: 'fail-closed-overflow' });
+      requests.push({ requestId: request.request, url: request.url, method: request.method, bodySize: request.bodySize ?? null, context: message.params?.context ?? null, redirectCount: message.params?.redirectCount ?? null, observedAt: Date.now(), isBlocked: message.params?.isBlocked === true, requestResolved: false, classification: classified, action: 'fail-closed-overflow' });
       recordError(new Error(`Request handler admission limit reached (${maxInFlight}); request remains blocked.`));
       return Promise.resolve();
     }
@@ -440,7 +1212,40 @@ export function createRequestDispatcher({ bidi, fixtureOrigin, runtimeReportUrl 
   };
   return {
     requests, errors, onEvent, get droppedRecords() { return droppedRecords; }, get droppedErrors() { return droppedErrors; },
-    closeAdmission() { accepting = false; },
+    waitForProviderRequest(predicate = () => true, { timeoutMs = 10000 } = {}) {
+      const index = providerQueue.findIndex(predicate);
+      if (index >= 0) return Promise.resolve(providerQueue.splice(index, 1)[0]);
+      if (!accepting) return Promise.reject(new Error('BiDi request admission closed before an Edge candidate arrived.'));
+      return new Promise((resolve, reject) => {
+        const waiter = { predicate, resolve, reject, timer: null };
+        waiter.timer = setTimeout(() => {
+          const waiterIndex = providerWaiters.indexOf(waiter);
+          if (waiterIndex >= 0) providerWaiters.splice(waiterIndex, 1);
+          reject(new Error(`Timed out waiting for intercepted Edge request; queued ${providerQueue.length} candidate(s).`));
+        }, timeoutMs);
+        providerWaiters.push(waiter);
+      });
+    },
+    async failProviderRequest(event, reason) {
+      if (!event || !event.isBlocked || !event.requestId || event.requestResolved) return { ok: false, reason: 'Request was not held by BiDi or was already resolved.' };
+      try {
+        event.commandResponse = await bidi.command('network.failRequest', { request: event.requestId });
+        event.requestResolved = event.commandResponse?.type === 'success';
+        if (event.requestResolved) event.action = 'fail-provider-controlled';
+        event.stopReason = reason;
+        return { ok: event.commandResponse?.type === 'success', response: event.commandResponse };
+      } catch (error) { event.commandError = error.message; recordError(error); return { ok: false, error: error.message }; }
+    },
+    async failPendingProviderRequests(reason) {
+      const pending = requests.filter(event => event.isBlocked && event.requestId && !event.requestResolved); providerQueue.length = 0;
+      const results = await Promise.all(pending.map(event => this.failProviderRequest(event, reason)));
+      return results;
+    },
+    closeAdmission() {
+      accepting = false;
+      for (const waiter of providerWaiters) { clearTimeout(waiter.timer); waiter.reject(new Error('BiDi request admission closed.')); }
+      providerWaiters.length = 0;
+    },
     async drain(timeoutMs = 5000) {
       const deadline = Date.now() + timeoutMs;
       while (jobs.size) {
@@ -472,7 +1277,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
   const records = []; const errors = []; const cleanupErrors = []; const capabilities = Object.fromEntries(requiredCapabilities.map(name => [name, notTested('Blocked by an earlier capability gate.')]));
   const runId = artifact.runId ?? randomBytes(16).toString('hex'); const authToken = randomBytes(32).toString('hex'); const privateSecrets = [authToken];
   const expectedExtensionId = 'page-translation-e2e-benchmark@translate-it.test';
-  let fixture; let bridge; let bidi; let browser; let extensionId = null; let fixtureOrigin = null; let runtimeReportUrl; let aborted = false; let dispatcher; let interceptReady = false; let runtimeBridgeAttempted = false;
+  let fixture; let bridge; let bidi; let browser; let extensionId = null; let fixtureOrigin = null; let runtimeReportUrl; let requestDataCollectorId = null; let interceptId = null; let providerOperationState = null; let runtimeBridgeProof; let aborted = false; let dispatcher; let interceptReady = false; let runtimeBridgeAttempted = false; let bridgeDrainSucceeded = true;
   const bridgeAcceptedReports = []; let bridgeContract = null;
   const abort = signal => {
     aborted = true;
@@ -543,12 +1348,14 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     const intercept = await bidi.command('network.addIntercept', { phases: ['beforeRequestSent'] });
     records.push({ kind: 'network.addIntercept', result: intercept.result });
     interceptReady = !!intercept.result?.intercept;
+    interceptId = intercept.result?.intercept ?? null;
     capabilities.interceptionSetup = interceptReady ? capability('SUPPORTED', { intercept: intercept.result.intercept, subscribedEvents: ['network.beforeRequestSent'] }) : capability('FAILED', { reason: 'network.addIntercept returned no intercept identifier.' });
     if (!interceptReady) throw new Error('BiDi interception setup acknowledgment missing intercept ID.');
+    requestDataCollectorId = await setupProviderDataCollector(bidi, capabilities);
+    if (!capabilities.providerDataCollector.status) capabilities.providerDataCollector = notTested('BiDi request collector setup was not attempted.');
     const manifest = JSON.parse(await readFile(resolve(bundle, 'manifest.json'), 'utf8'));
     if (manifest.background?.scripts?.[0] !== 'worker.js' || manifest.browser_specific_settings?.gecko?.id !== expectedExtensionId) throw new Error('Firefox MV3 module-worker manifest or pinned Gecko ID missing.');
     const { result: created } = await bidi.command('browsingContext.create', { type: 'tab' });
-    let runtimeBridgeProof;
     try {
         runtimeBridgeProof = await runRuntimeBridgeSequence({
         bidi, bridge, context: created.context, bindingUrl, fixtureUrl: fixture.url, runId, extensionId: expectedExtensionId,
@@ -599,6 +1406,22 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     }
     capabilities.runtimeBridge = capability('SUPPORTED', { reportCount: runtimeBridgeProof.reports.length, snapshot: runtimeBridgeProof.snapshot, source: 'authenticated-runtime-bridge' });
     artifact.runtimeBridge = sanitizePrivate({ runId, tabId: runtimeBridgeProof.tabId, extensionOrigin: runtimeBridgeProof.extensionOrigin, reports: runtimeBridgeProof.reports, snapshot: runtimeBridgeProof.snapshot }, privateSecrets);
+    providerOperationState = await runEdgeFrenchProviderProbe({
+      bridge, bidi, dispatcher, collectorId: requestDataCollectorId, fixtureTexts: fixtureData.targetTexts,
+      runId, extensionId: expectedExtensionId, fixtureUrl: fixture.url, tabId: runtimeBridgeProof.tabId,
+      startupSender: runtimeBridgeProof.contentReady.sender,
+      capabilities, timeoutMs: 12000,
+    });
+    artifact.providerProbe = sanitizePrivate(providerProbeArtifact(providerOperationState), privateSecrets);
+    if (providerProbeRequiresImmediateTeardown(providerOperationState, capabilities)) {
+      const reason = `Optional realm and negative-fetch probes were not run because the provider lane stopped at ${providerOperationState.stopCode ?? 'an incomplete proof'}; producer teardown starts immediately.`;
+      for (const name of ['backgroundInspection', 'contentInspection', 'backgroundNegativeFetch', 'contentNegativeFetch', 'pageNegativeFetch', 'interceptionDispatch']) {
+        capabilities[name] = retainExecutedCapability(capabilities[name], reason);
+      }
+      records.push({ kind: 'optional-probes-skipped', reason });
+      artifact.runtimeEvidence = { observations: [], requests: dispatcher.requests, optionalProbeGate: { status: 'NOT_TESTED', reason } };
+      return capabilities;
+    }
     const expected = fixtureData.targetTexts[0];
     const deadline = Date.now() + 10000; const observations = []; const attemptsByRealm = new Map(); let pageRealm = null; let dom = null; let polls = 0;
     while (Date.now() < deadline) {
@@ -648,14 +1471,9 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     capabilities.fixture = dom?.text === expected ? capability('SUPPORTED', { url: fixture.url, targetCount: fixtureData.targetCount, observedFirstTarget: dom.text }) : capability('FAILED', { reason: `Fixture DOM did not expose exact expected first target: ${String(dom?.text)}` });
     capabilities.interceptionSetup = interceptReady ? capability('SUPPORTED', { interceptId: intercept.result.intercept, subscribedEvents: ['network.beforeRequestSent'] }) : capability('FAILED', { reason: 'Intercept setup missing.' });
     capabilities.interceptionDispatch = notTested('Awaiting a blocked fixture request and fail-closed native page fetch.');
-    const deferredReason = 'Deferred: this bounded probe does not implement the real provider-response and held-cancellation lifecycle scenario.';
-    capabilities.backgroundProviderInterception = notTested(deferredReason);
-    capabilities.providerRequestBody = notTested(deferredReason);
-    capabilities.providerResponse = notTested(deferredReason);
     capabilities.backgroundNegativeFetch = notTested('Background realm unavailable.');
     capabilities.contentNegativeFetch = notTested('Content realm unavailable.');
     capabilities.pageNegativeFetch = notTested('Page fetch probe not yet executed.');
-    for (const name of ['heldRequestAbort', 'rootSettlement', 'physicalSettlement', 'heldResponseRelease', 'staleDeliveryCheck', 'nostaleDOM']) capabilities[name] = notTested(deferredReason);
     if (pageRealm && dom?.text === expected) {
       const negative = await bidi.command('script.evaluate', { expression: 'fetch("https://example.invalid/page-translation-firefox-probe").then(()=>"resolved",e=>JSON.stringify({rejected:true,name:e.name}))', target: { realm: pageRealm.realm }, awaitPromise: true });
       const result = negative.result?.result?.value;
@@ -691,7 +1509,6 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       const reason = 'Deferred: both actual extension realms, readiness checks, and exact sliced-discovery flags must pass first.';
       capabilities.backgroundNegativeFetch = retainExecutedCapability(capabilities.backgroundNegativeFetch, reason);
       capabilities.contentNegativeFetch = retainExecutedCapability(capabilities.contentNegativeFetch, reason);
-      capabilities.backgroundProviderInterception = notTested(deferredReason);
     }
     capabilities.cleanup = notTested('Cleanup completion is recorded in the finally path.');
     artifact.runtimeEvidence = { observations, requests: dispatcher.requests };
@@ -730,9 +1547,19 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     }
   } finally {
     clearTimeout(deadline);
+    if (bridge && providerOperationState?.attempted && !providerOperationState.stopped) {
+      try { await withTimeout(Promise.resolve(bridge.stopProviderProbe('TEARDOWN')), 3000, 'provider operation stop during teardown'); providerOperationState.stopCode = 'TEARDOWN'; providerOperationState.stopped = true; }
+      catch (error) { cleanupErrors.push(`Provider operation teardown stop: ${sanitizePrivate(error.message, privateSecrets)}`); }
+    }
+    dispatcher?.closeAdmission();
+    try {
+      const failedPending = await withTimeout(dispatcher?.failPendingProviderRequests?.('TEARDOWN') ?? Promise.resolve([]), 3000, 'fail held Edge requests');
+      if (failedPending.some(result => !result.ok)) cleanupErrors.push('One or more paused Edge requests could not be failed during cleanup.');
+    } catch (error) { cleanupErrors.push(`Held Edge request cleanup: ${sanitizePrivate(error.message, privateSecrets)}`); }
+    try { if (dispatcher && !(await dispatcher.drain(3000))) cleanupErrors.push('Request handlers did not drain before interception removal.'); }
+    catch (error) { cleanupErrors.push(`Pre-removal request-handler drain: ${sanitizePrivate(error.message, privateSecrets)}`); }
     try { if (bridge?.closeAdmission) await withTimeout(Promise.resolve(bridge.closeAdmission()), 3000, 'runtime bridge close admission'); }
     catch (error) { cleanupErrors.push(`Runtime bridge admission close: ${sanitizePrivate(error.message, privateSecrets)}`); }
-    dispatcher?.closeAdmission();
     if (browser?.pid) {
       try {
         if (browser.exitCode === null && browser.signalCode === null) {
@@ -745,6 +1572,10 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       }
       catch (error) { cleanupErrors.push(`Firefox cleanup: ${error.message}`); }
     }
+    if (!browser?.pid) {
+      const networkCleanup = await removeProviderNetworkControls({ bidi, collectorId: requestDataCollectorId, interceptId, secrets: privateSecrets, timeoutMs: 3000 });
+      cleanupErrors.push(...networkCleanup.errors);
+    }
     try {
       if (dispatcher && !(await dispatcher.drain(5000))) cleanupErrors.push('Request-handler drain timed out.');
       await bidi?.drain();
@@ -752,16 +1583,32 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     try {
       if (bridge?.drain) {
         const drained = await withTimeout(Promise.resolve(bridge.drain({ timeoutMs: 3000 })), 3500, 'runtime bridge drain');
-        if (drained === false || drained?.timedOut === true || drained?.ok === false || drained?.errors?.length) cleanupErrors.push('Runtime bridge did not drain cleanly.');
+        bridgeDrainSucceeded = !(drained === false || drained?.timedOut === true || drained?.ok === false || drained?.errors?.length);
+        if (!bridgeDrainSucceeded) cleanupErrors.push('Runtime bridge did not drain cleanly.');
       }
-    } catch (error) { cleanupErrors.push(`Runtime bridge drain: ${sanitizePrivate(error.message, privateSecrets)}`); }
+    } catch (error) { bridgeDrainSucceeded = false; cleanupErrors.push(`Runtime bridge drain: ${sanitizePrivate(error.message, privateSecrets)}`); }
+    if (fixture?.server?.listening) {
+      try { await withTimeout(new Promise((resolve, reject) => fixture.server.close(error => error ? reject(error) : resolve())), 5000, 'fixture server close'); }
+      catch (error) { bridgeDrainSucceeded = false; cleanupErrors.push(`Fixture cleanup: ${error.message}`); }
+    }
+    if (bridge?.drain && !bridgeDrainSucceeded && !fixture?.server?.listening) {
+      try {
+        const finalDrain = await withTimeout(Promise.resolve(bridge.drain({ timeoutMs: 3000 })), 3500, 'final runtime bridge drain');
+        bridgeDrainSucceeded = !(finalDrain === false || finalDrain?.timedOut === true || finalDrain?.ok === false || finalDrain?.errors?.length);
+        if (!bridgeDrainSucceeded) cleanupErrors.push('Final runtime bridge drain failed.');
+      } catch (error) { cleanupErrors.push(`Final runtime bridge drain: ${sanitizePrivate(error.message, privateSecrets)}`); }
+    }
     if (bridge && runtimeBridgeAttempted) {
       const contract = bridgeContract ?? { runId, extensionId: expectedExtensionId, fixtureUrl: fixture?.url, tabId: undefined };
-      const reconciliation = await reconcileFinalRuntimeBridge({ bridge, expectedReports: bridgeAcceptedReports, contract, capabilities, artifact, secrets: privateSecrets, timeoutMs: 3000 });
+      const reconciliation = await reconcileFinalRuntimeBridge({ bridge, expectedReports: bridgeAcceptedReports, contract, capabilities, artifact, secrets: privateSecrets, timeoutMs: 3000, drainSucceeded: bridgeDrainSucceeded });
       if (!reconciliation.ok) errors.push(sanitizePrivate(`Final runtime bridge reconciliation failed: ${reconciliation.reason ?? 'collector evidence mismatch'}`, privateSecrets));
     } else if (bridge) {
-      const snapshot = await recordUnattemptedRuntimeBridge({ bridge, capabilities, artifact, secrets: privateSecrets, timeoutMs: 3000 });
+      const snapshot = await recordUnattemptedRuntimeBridge({ bridge, capabilities, artifact, secrets: privateSecrets, timeoutMs: 3000, drainSucceeded: bridgeDrainSucceeded });
       if (!snapshot.clean) errors.push(sanitizePrivate(snapshot.reason, privateSecrets));
+    }
+    if (bridge && providerOperationState) {
+      const operationResult = await reconcileFinalProviderOperation({ bridge, state: providerOperationState, contract: { runId, extensionId: expectedExtensionId, fixtureUrl: fixture?.url, tabId: runtimeBridgeProof?.tabId ?? bridgeContract?.tabId }, capabilities, artifact, secrets: privateSecrets, timeoutMs: 3000 });
+      if (!operationResult.ok) errors.push(sanitizePrivate(`Final provider operation reconciliation failed: ${operationResult.reason ?? 'operation evidence mismatch'}`, privateSecrets));
     }
     try { bidi?.close(); } catch (error) { cleanupErrors.push(`BiDi close: ${error.message}`); }
     try { if (dispatcher && !(await dispatcher.drain(1000))) cleanupErrors.push('Request handlers remained after BiDi disconnect.'); }
@@ -772,7 +1619,6 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       capabilities.protocol = capability('FAILED', { reason: 'Request dispatcher reported a dropped, late, unexpected, or failed HTTP(S) request.', errors: messages });
       capabilities.interceptionDispatch = capability('FAILED', { reason: 'Request dispatch errors occurred.', errors: messages });
     }
-    try { if (fixture?.server?.listening) await withTimeout(new Promise((resolve, reject) => fixture.server.close(error => error ? reject(error) : resolve())), 5000, 'fixture server close'); } catch (error) { cleanupErrors.push(`Fixture cleanup: ${error.message}`); }
     await rm(root, { recursive: true, force: true }).catch(error => cleanupErrors.push(`Temporary cleanup: ${error.message}`));
     process.off('SIGTERM', onSigterm); process.off('SIGINT', onSigint);
     capabilities.cleanup = cleanupErrors.length ? capability('FAILED', { errors: [...cleanupErrors] }) : capability('SUPPORTED', { browserExited: !browser || browser.exitCode !== null || browser.signalCode !== null, exitCode: browser?.exitCode ?? null, signalCode: browser?.signalCode ?? null, fixtureClosed: !fixture || !fixture.server.listening, tempRemoved: true });
@@ -784,7 +1630,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     artifact.protocolEvents = bidi?.events ?? [];
     artifact.networkRequests = artifact.requests;
     artifact.protocolJournal = bidi?.journal ?? [];
-    artifact.limitations = ['Real provider request-body/response and held-request cancellation/stale-delivery scenarios are explicitly deferred and not implemented in this bounded probe.', 'Background/content negative fetches only run when both actual realms, readiness, and exact sliced-discovery flags pass.', 'When a runtime gate is inaccessible, dependent checks remain NOT_TESTED.', 'No mock provider, fetch substitute, URL rewrite, or fabricated runtime result was used.', 'This is a small capability probe, not the full 1000-target E2E matrix.'];
+    artifact.limitations = ['Provider cancellation and stale-delivery lifecycle scenarios remain NOT_TESTED.', 'Background/content negative fetches only run when both actual realms, readiness, and exact sliced-discovery flags pass.', 'When a runtime gate is inaccessible, dependent checks remain NOT_TESTED.', 'No mock provider, fetch substitute, URL rewrite, or fabricated runtime result was used.', 'This is a small capability probe, not the full 1000-target E2E matrix.'];
     for (const key of Object.keys(artifact)) artifact[key] = sanitizePrivate(artifact[key], privateSecrets);
   }
   return capabilities;

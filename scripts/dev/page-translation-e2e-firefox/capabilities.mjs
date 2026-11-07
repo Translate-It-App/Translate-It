@@ -10,6 +10,7 @@ export const requiredCapabilities = Object.freeze([
   'runtimeBridge', 'backgroundLoaded', 'contentLoaded', 'runtimeHandshake', 'hostPermissions',
   'backgroundInspection', 'backgroundReadiness', 'contentInspection', 'contentReadiness', 'discoveryFlags',
   'backgroundProviderInterception', 'providerRequestBody', 'providerResponse',
+  'providerDataCollector', 'providerOperation', 'providerPhysicalRequest', 'providerConsumption', 'domAcceptance', 'providerRestore',
   'backgroundNegativeFetch', 'contentNegativeFetch', 'pageNegativeFetch',
   'heldRequestAbort', 'rootSettlement', 'physicalSettlement', 'heldResponseRelease', 'staleDeliveryCheck', 'nostaleDOM', 'cleanup',
 ]);

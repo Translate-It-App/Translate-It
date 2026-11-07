@@ -134,9 +134,20 @@ describe('page translation benchmark build browser support', () => {
     const contentPath = resolve('src/core/content-scripts/index-main.js');
     const contentOriginal = await readFile(contentPath, 'utf8');
     expect(plugin.transform(contentOriginal, contentPath)).toContain('window.__firefoxProbeStartup = { complete: true, success: initialized === true };');
+    const contentEntryPath = resolve('scripts/dev/page-translation-e2e-benchmark/content-entry.mjs');
+    const contentEntryOriginal = await readFile(contentEntryPath, 'utf8');
+    expect(plugin.transform(contentEntryOriginal, contentEntryPath)).toContain('trace.installProviderProbe = async (report, fixtureUrl) =>');
+    const proxyPath = resolve('src/shared/proxy/ProxyManager.js');
+    const proxyOriginal = await readFile(proxyPath, 'utf8');
+    const proxyTransformed = plugin.transform(proxyOriginal, proxyPath);
+    expect(proxyTransformed).toContain('const directFetchPromise = fetch(url, options);');
+    expect(proxyTransformed).toContain('observeDirectFetch(url, options, directFetchPromise, true)');
+    expect(await readFile(proxyPath, 'utf8')).toBe(proxyOriginal);
     expect(await readFile(backgroundPath, 'utf8')).toBe(backgroundOriginal);
     expect(await readFile(contentPath, 'utf8')).toBe(contentOriginal);
+    expect(await readFile(contentEntryPath, 'utf8')).toBe(contentEntryOriginal);
     expect(() => plugin.transform('source drift', backgroundPath)).toThrow('instrumentation drifted');
+    expect(() => plugin.transform('source drift', proxyPath)).toThrow('provider fetch instrumentation drifted');
   });
 
   it('redacts generated credentials from build failures', async () => {

@@ -4,6 +4,9 @@ import { Buffer } from 'node:buffer';
 const LIMIT = 16 * 1024;
 const phases = ['bootstrap', 'loaded', 'ready'];
 const errorCodes = new Set(['IMPORT_FAILED', 'STARTUP_FAILED', 'READINESS_TIMEOUT', 'HANDSHAKE_FAILED', 'SENDER_REJECTED', 'PROTOCOL_REJECTED', 'NAVIGATION_INVALID', 'REPORT_FAILED', 'PERMISSION_DENIED', 'BINDING_FAILED', 'DISCOVERY_FLAGS_MISMATCH']);
+const providerStopCodes = new Set(['INTERCEPTION_UNSUPPORTED', 'BODY_UNSUPPORTED', 'INVALID_BODY', 'PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN', 'COMPLETED']);
+const providerDiagnosticCodes = new Set([...providerStopCodes, 'ABORTED', 'NETWORK_ERROR', 'HTTP_ERROR', 'FETCH_ERROR']);
+const providerEventNames = new Set(['armed', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
 const exact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const checks = value => exact(value, ['lifecycleInitialized', 'translationEngineInitialized', 'enginePresent', 'unifiedEngineMatches', 'unifiedServiceMatches', 'messageListenerActive', 'startupComplete']) && Object.values(value).every(item => item === true);
 const nonnegative = value => Number.isSafeInteger(value) && value >= 0;
@@ -27,8 +30,10 @@ function createCollector(options, fixtureUrl) {
   const reports = [], rejectionCounts = { unauthorized: 0, originOrType: 0, route: 0, malformed: 0, protocol: 0, bodyLimit: 0 };
   const reject = code => { rejectionCounts[code] = Math.min(1000, rejectionCounts[code] + 1); };
   const stages = { background: [], content: [] };
+  const operation = { released: false, startDecision: null, restoreDecision: null, stopped: false, stopCode: null, failure: null, seq: 0, reports: [], rejections: { originOrType: 0, protocol: 0 }, waiters: new Set(), decisionWaiters: new Set(), invocations: new Map(), attempts: new Map(), coverage: new Set(), terminal: false };
   const pending = new Set(), waiters = new Set();
   const failWaiters = error => { for (const waiter of waiters) waiter.reject(error); };
+  const notifyOperationChange = () => { bridge.server?.emit?.('runtime-provider-operation'); };
   const notify = () => {
     for (const waiter of waiters) {
       const report = reports.find(item => item.realm === waiter.realm && item.phase === waiter.phase);
@@ -39,6 +44,7 @@ function createCollector(options, fixtureUrl) {
     if (failed) return;
     failed = true; failureCode = code;
     failWaiters(new Error('Firefox runtime collector reached terminal failure'));
+    notifyOperationChange();
   };
 
   function sender(value) {
@@ -94,6 +100,45 @@ function createCollector(options, fixtureUrl) {
     let report;
     try { report = JSON.parse(body); } catch { reject('malformed'); terminal('PROTOCOL_REJECTED'); response.writeHead(400).end(); return true; }
     const origin = request.headers.origin;
+    if (report?.op !== undefined) {
+      if (request.headers['content-type']?.toLowerCase() !== 'application/json'
+          || (origin !== undefined && (!validOrigin(origin) || origin !== pinnedOrigin))) {
+        operation.rejections.originOrType = Math.min(1000, operation.rejections.originOrType + 1);
+        response.writeHead(403).end(); return true;
+      }
+      const acceptedReport = acceptProviderOperation(report);
+      if (!acceptedReport) {
+        operation.rejections.protocol = Math.min(1000, operation.rejections.protocol + 1);
+        if (report?.runId === runId && report?.op === 'edge-fr-page-once') {
+          operation.lastRejection = providerRejectionDiagnostic(report);
+          failOperation('PROTOCOL_ERROR');
+        }
+        response.writeHead(failed || operation.failure ? 503 : 400).end(); return true;
+      }
+      let decision = report.event === 'armed'
+        ? await waitForDecision('start', 2500, 'stop')
+        : report.event === 'translated' ? await waitForDecision('restore', 2500, 'stop') : undefined;
+      if (!admissionOpen || failed || operation.failure || operation.stopped) {
+        if (report.event === 'armed' || report.event === 'translated') {
+          decision = 'stop';
+          operation.stopped = true;
+          operation.stopCode ??= failed ? 'PROTOCOL_ERROR' : 'TEARDOWN';
+          const gate = report.event === 'armed' ? 'start' : 'restore';
+          if (!(gate === 'start' ? operation.startDecision : operation.restoreDecision)) decideOperation(gate, 'stop');
+          notifyOperationChange();
+        }
+        else if (!isAdmittedPostStopEvent(report)) {
+          reject('route'); if (!response.destroyed) response.writeHead(503).end(); return true;
+        }
+      }
+      if (decision === 'stop' && !providerStopCodes.has(operation.stopCode)) {
+        failOperation('PROTOCOL_ERROR');
+        response.writeHead(503).end(); return true;
+      }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        .end(JSON.stringify({ v: 1, runId, op: 'edge-fr-page-once', opSeq: report.opSeq, accepted: true, ...(decision ? { decision } : {}) }));
+      return true;
+    }
     const firstBootstrap = report?.realm === 'background' && report?.phase === 'bootstrap' && pinnedOrigin === undefined;
     const firstError = report?.phase === 'error' && pinnedOrigin === undefined;
     if (request.headers['content-type']?.toLowerCase() !== 'application/json' || (origin !== undefined && (firstBootstrap ? origin !== report.evidence?.extensionOrigin : firstError ? !validOrigin(origin) : !validOrigin(origin) || origin !== pinnedOrigin))) {
@@ -115,14 +160,276 @@ function createCollector(options, fixtureUrl) {
     return true;
   }
 
+  function acceptProviderOperation(report) {
+    const terminalEvent = report?.event === 'error';
+    if (!exact(report, ['v', 'runId', 'op', 'opSeq', 'event', 'evidence']) || report.v !== 1
+        || report.runId !== runId || report.op !== 'edge-fr-page-once' || report.opSeq !== operation.seq + 1
+        || report.opSeq > 65 || operation.reports.length >= 64 + (terminalEvent ? 1 : 0)
+        || (operation.failure && !terminalEvent && !isAdmittedPostStopEvent(report))) return false;
+    if (!validProviderEvent(report.event, report.evidence)) return false;
+    operation.seq = report.opSeq;
+    const copied = structuredClone(report);
+    operation.reports.push(copied);
+    if (report.event === 'armed') operation.armedSender = structuredClone(report.evidence.sender);
+    if (report.event === 'provider-invoked') operation.invocations.set(report.evidence.invocationId, { ...structuredClone(report.evidence), attempts: new Set() });
+    if (report.event === 'physical-start') {
+      const attempt = { settled: false, invocationId: report.evidence.invocationId, sessionId: report.evidence.sessionId, sourceIndexes: [...report.evidence.sourceIndexes] };
+      operation.attempts.set(report.evidence.attemptId, attempt);
+      operation.invocations.get(report.evidence.invocationId)?.attempts.add(report.evidence.attemptId);
+    }
+    if (report.event === 'physical-settled') Object.assign(operation.attempts.get(report.evidence.attemptId), { settled: true, outcome: report.evidence.outcome });
+    if (report.event === 'parser-success') for (const index of report.evidence.sourceIndexes) operation.coverage.add(index);
+    if (report.event === 'provider-settled') operation.invocations.get(report.evidence.invocationId).settled = true;
+    if (report.event === 'error') failOperation(report.evidence.code);
+    notifyOperation(report.event, copied);
+    notifyOperationChange();
+    return true;
+  }
+
+  function providerRejectionDiagnostic(report) {
+    const envelopeValid = exact(report, ['v', 'runId', 'op', 'opSeq', 'event', 'evidence'])
+      && report.v === 1 && report.runId === runId && report.op === 'edge-fr-page-once';
+    const reason = !envelopeValid ? 'ENVELOPE_INVALID'
+      : report.opSeq !== operation.seq + 1 || !Number.isSafeInteger(report.opSeq) ? 'SEQUENCE_INVALID'
+        : report.opSeq > 65 || operation.reports.length >= 64 + (report.event === 'error' ? 1 : 0) ? 'LIMIT_EXCEEDED'
+          : operation.failure ? 'OPERATION_FAILED' : 'EVENT_INVALID';
+    const evidence = report?.evidence && typeof report.evidence === 'object' && !Array.isArray(report.evidence) ? report.evidence : {};
+    const invocationId = typeof evidence.invocationId === 'string' ? evidence.invocationId : null;
+    const attemptId = typeof evidence.attemptId === 'string' ? evidence.attemptId : null;
+    const sessionId = typeof evidence.sessionId === 'string' ? evidence.sessionId : null;
+    const knownCode = providerDiagnosticCodes.has(evidence.code) ? evidence.code : null;
+    const knownOutcome = ['fulfilled', 'rejected', 'cancelled'].includes(evidence.outcome) ? evidence.outcome : null;
+    return {
+      event: providerEventNames.has(report?.event) ? report.event : 'unknown',
+      opSeq: Number.isSafeInteger(report?.opSeq) && report.opSeq >= 0 && report.opSeq <= 65 ? report.opSeq : null,
+      reason,
+      released: operation.released,
+      armed: !!operation.armedSender,
+      stopped: operation.stopped,
+      sessionMatchesAdmitted: sessionId !== null
+        && ([...operation.invocations.values()].some(item => item.sessionId === sessionId)
+          || [...operation.attempts.values()].some(item => item.sessionId === sessionId)),
+      invocationKnown: invocationId === null ? null : operation.invocations.has(invocationId),
+      attemptKnown: attemptId === null ? null : operation.attempts.has(attemptId),
+      codeKnown: knownCode !== null,
+      code: knownCode,
+      success: typeof evidence.success === 'boolean' ? evidence.success : null,
+      outcome: knownOutcome,
+    };
+  }
+
+  function isAdmittedPostStopEvent(report) {
+    const evidence = report?.evidence;
+    if (report?.event === 'error') return operation.reports.some(item => item.opSeq === report.opSeq && item.event === report.event);
+    if (report?.event === 'physical-settled') return operation.attempts.has(evidence?.attemptId);
+    if (report?.event === 'provider-settled') return operation.invocations.has(evidence?.invocationId);
+    return report?.event === 'command-result' && evidence?.success === false && operation.released && !!operation.armedSender
+      && (!operation.reports.some(item => item.event === 'command-result') || operation.reports.some(item => item.opSeq === report.opSeq && item.event === report.event));
+  }
+
+  function validProviderEvent(event, evidence) {
+    if (!providerEventNames.has(event) || !evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return false;
+    if (event === 'armed') {
+      return operation.reports.length === 0 && !operation.stopped && stages.background.includes('ready') && stages.content.includes('ready')
+        && exact(evidence, ['sender', 'navigationGeneration', 'edgeHostPermission', 'proxyDisabled', 'observersInstalled'])
+        && sender(evidence.sender) && evidence.navigationGeneration === 1 && evidence.edgeHostPermission === true
+        && evidence.proxyDisabled === true && evidence.observersInstalled === true;
+    }
+    if (event === 'error') return !operation.terminal && !operation.stopped && exact(evidence, ['code']) && providerStopCodes.has(evidence.code);
+    const admittedSettlement = event === 'physical-settled' && operation.attempts.has(evidence.attemptId) && !operation.attempts.get(evidence.attemptId)?.settled;
+    const admittedProviderSettlement = event === 'provider-settled' && operation.invocations.has(evidence.invocationId) && !operation.invocations.get(evidence.invocationId).settled;
+    const admittedCommandFailure = event === 'command-result' && evidence?.success === false && operation.released && !!operation.armedSender
+      && !operation.reports.some(report => report.event === 'command-result');
+    if (!operation.armedSender || (operation.terminal && !admittedSettlement && !admittedProviderSettlement && !admittedCommandFailure)) return false;
+    if (operation.stopped && !admittedSettlement && !admittedProviderSettlement && !admittedCommandFailure) return false;
+    if (event === 'provider-invoked') {
+      const priorCommand = operation.reports.find(report => report.event === 'command-result')?.evidence;
+      return operation.released && operation.invocations.size < 12 && !operation.invocations.has(evidence.invocationId) && exact(evidence, ['invocationId', 'sessionId', 'messageId', 'provider', 'itemCount', 'sourceIndexes'])
+        && boundedString(evidence.invocationId) && boundedString(evidence.sessionId) && (evidence.messageId === null || boundedString(evidence.messageId))
+        && evidence.provider === 'edge' && evidence.itemCount === evidence.sourceIndexes?.length && validIndexes(evidence.sourceIndexes)
+        && (!operation.invocations.size || [...operation.invocations.values()][0].sessionId === evidence.sessionId)
+        && (!priorCommand || (priorCommand.success === true && priorCommand.sessionId === evidence.sessionId));
+    }
+    if (event === 'physical-start') {
+      const invocation = operation.invocations.get(evidence.invocationId);
+      if (!invocation || !exact(evidence, ['attemptId', 'invocationId', 'sessionId', 'messageId', 'provider', 'method', 'url', 'bodyBytes', 'bodyHash', 'sourceIndexes'])) return false;
+       return operation.attempts.size < 36 && !operation.attempts.has(evidence.attemptId) && boundedString(evidence.attemptId) && evidence.invocationId === invocation.invocationId
+        && evidence.sessionId === invocation.sessionId && evidence.messageId === invocation.messageId && evidence.provider === 'edge'
+        && evidence.method === 'POST' && validEdgeUrl(evidence.url) && Number.isSafeInteger(evidence.bodyBytes) && evidence.bodyBytes > 0
+         && /^[a-f\d]{64}$/i.test(evidence.bodyHash) && validIndexes(evidence.sourceIndexes) && sameIndexes(evidence.sourceIndexes, invocation.sourceIndexes);
+    }
+    if (event === 'physical-settled') {
+      const attempt = operation.attempts.get(evidence.attemptId);
+      return exact(evidence, ['attemptId', 'sessionId', 'outcome', 'status', 'code']) && !!attempt && !attempt.settled
+        && evidence.sessionId === attempt.sessionId && ['fulfilled', 'rejected', 'cancelled'].includes(evidence.outcome)
+        && (evidence.status === null || Number.isInteger(evidence.status))
+        && (evidence.code === null || ['ABORTED', 'NETWORK_ERROR', 'HTTP_ERROR', 'FETCH_ERROR'].includes(evidence.code));
+    }
+    if (event === 'parser-success') {
+      const invocation = operation.invocations.get(evidence.invocationId);
+      const attempts = [...(invocation?.attempts ?? [])].map(id => operation.attempts.get(id));
+      return exact(evidence, ['invocationId', 'sessionId', 'sourceIndexes', 'resultsMatch']) && !!invocation
+        && attempts.length > 0 && attempts.every(attempt => attempt?.settled) && attempts.some(attempt => attempt.outcome === 'fulfilled')
+        && invocation.sessionId === evidence.sessionId && sameIndexes(evidence.sourceIndexes, invocation.sourceIndexes) && evidence.resultsMatch === true
+        && evidence.sourceIndexes.every(index => !operation.coverage.has(index));
+    }
+    if (event === 'provider-settled') {
+      const invocation = operation.invocations.get(evidence.invocationId);
+      const attempts = [...(invocation?.attempts ?? [])].map(id => operation.attempts.get(id));
+      return exact(evidence, ['invocationId', 'sessionId', 'outcome', 'code']) && !!invocation
+        && invocation.sessionId === evidence.sessionId && ['fulfilled', 'rejected', 'cancelled'].includes(evidence.outcome)
+        && attempts.every(attempt => attempt?.settled) && (evidence.code === null || providerStopCodes.has(evidence.code)) && !invocation.settled
+        && (evidence.outcome !== 'fulfilled' || operation.reports.some(report => report.event === 'parser-success' && report.evidence.invocationId === evidence.invocationId));
+    }
+    if (event === 'command-result') {
+      return exact(evidence, ['success', 'sessionId', 'code']) && typeof evidence.success === 'boolean'
+        && (evidence.sessionId === null || boundedString(evidence.sessionId))
+        && (!operation.invocations.size || evidence.sessionId === null || evidence.sessionId === [...operation.invocations.values()][0].sessionId)
+        && (evidence.code === null || providerStopCodes.has(evidence.code))
+        && (!evidence.success || (operation.released && evidence.sessionId !== null && evidence.code === null
+          && (!operation.invocations.size || evidence.sessionId === [...operation.invocations.values()][0].sessionId)))
+        && !operation.reports.some(report => report.event === 'command-result');
+    }
+    if (event === 'translated') {
+      return exact(evidence, ['sessionId', 'acceptedTargetIds', 'acceptedCount', 'duplicateAcceptances', 'staleWrites', 'domMatches', 'sessionOwned', 'quiescent'])
+        && operation.invocations.size > 0 && evidence.sessionId === [...operation.invocations.values()][0].sessionId && isTargetIds(evidence.acceptedTargetIds) && evidence.acceptedCount === 12
+        && operation.coverage.size === 12 && [...operation.invocations.values()].every(invocation => invocation.settled)
+        && evidence.duplicateAcceptances === 0 && evidence.staleWrites === 0 && evidence.domMatches === true && evidence.sessionOwned === true && evidence.quiescent === true
+        && operation.reports.some(report => report.event === 'command-result' && report.evidence.success === true && report.evidence.sessionId === evidence.sessionId)
+        && !operation.reports.some(report => report.event === 'translated');
+    }
+    if (event === 'restored') {
+      return exact(evidence, ['sessionId', 'commandSuccess', 'domMatchesOriginal', 'metadataRestored', 'restoreObserved'])
+        && operation.invocations.size > 0 && evidence.sessionId === [...operation.invocations.values()][0].sessionId && evidence.commandSuccess === true && evidence.domMatchesOriginal === true
+        && operation.coverage.size === 12 && evidence.metadataRestored === true && evidence.restoreObserved === true && operation.restoreDecision === 'restore'
+        && operation.reports.some(report => report.event === 'translated') && !operation.reports.some(report => report.event === 'restored');
+    }
+    return false;
+  }
+
+  function notifyOperation(event, report) {
+    for (const waiter of [...operation.waiters]) {
+      if (waiter.event === event) {
+        operation.waiters.delete(waiter);
+        waiter.resolve(report);
+      }
+    }
+  }
+  function failOperationWaiters(error) { for (const waiter of operation.waiters) waiter.reject(error); }
+  function failOperation(code) {
+    if (operation.failure) return;
+    operation.failure = { code };
+    operation.terminal = true;
+    operation.stopped = true;
+    operation.stopCode ??= code;
+    decideOperation('start', 'stop');
+    decideOperation('restore', 'stop');
+    failOperationWaiters(new Error('Firefox provider operation reached terminal failure'));
+    notifyOperationChange();
+  }
+
+  function decideOperation(gate, decision) {
+    if (gate === 'start') operation.startDecision = decision;
+    else operation.restoreDecision = decision;
+    for (const waiter of [...operation.decisionWaiters]) {
+      if (waiter.gate !== gate) continue;
+      operation.decisionWaiters.delete(waiter);
+      clearTimeout(waiter.timer);
+      waiter.resolve(decision);
+    }
+    notifyOperationChange();
+  }
+
+  function waitForDecision(gate, timeoutMs, fallback) {
+    const existing = gate === 'start' ? operation.startDecision : operation.restoreDecision;
+    if (existing) return Promise.resolve(existing);
+    return new Promise(resolve => {
+      const waiter = { gate, resolve, timer: null };
+      waiter.timer = setTimeout(() => {
+        operation.decisionWaiters.delete(waiter);
+        operation.stopped = true; operation.stopCode ??= 'TIMEOUT';
+        decideOperation(gate, fallback);
+      }, timeoutMs);
+      operation.decisionWaiters.add(waiter);
+    });
+  }
+
+  function providerOperationSnapshot() {
+    return structuredClone({
+      op: 'edge-fr-page-once', released: operation.released, restoreDecision: operation.restoreDecision,
+      stopped: operation.stopped, stopCode: operation.stopCode, reports: operation.reports,
+      rejections: { ...operation.rejections }, failure: operation.failure,
+      lastRejection: operation.lastRejection ?? null,
+    });
+  }
+
   const bridge = {
     get bindingUrl() { return `${fixtureUrl}__benchmark/bind/${encodeURIComponent(runId)}`; },
     get reportUrl() { return `${fixtureUrl}__benchmark/runtime`; },
-    snapshot() { return Object.freeze({ reports: structuredClone(reports), failure: failed ? { code: failureCode } : null, rejections: { ...rejectionCounts }, background: [...stages.background], content: [...stages.content], accepted }); },
+    snapshot() { return Object.freeze({ reports: structuredClone(reports), failure: failed ? { code: failureCode } : null, rejections: { ...rejectionCounts }, background: [...stages.background], content: [...stages.content], accepted, operation: providerOperationSnapshot() }); },
+    operationSnapshot() { return providerOperationSnapshot(); },
+    releaseProviderProbe() {
+      if (operation.released) throw new Error('Provider operation release is one-use.');
+      if (accepted !== 5
+          || !['bootstrap', 'loaded', 'ready'].every((phase, index) => stages.background[index] === phase)
+          || !['loaded', 'ready'].every((phase, index) => stages.content[index] === phase)) throw new Error('Provider operation is not releasable until the five startup reports are accepted.');
+      if (failed || !admissionOpen || operation.failure || operation.stopped) {
+        operation.released = true;
+        operation.stopped = true;
+        operation.stopCode ??= operation.failure?.code ?? 'TEARDOWN';
+        decideOperation('start', 'stop');
+        notifyOperationChange();
+        return { decision: 'stop' };
+      }
+      operation.released = true;
+      decideOperation('start', 'start');
+      notifyOperationChange();
+      return { decision: 'start' };
+    },
+    async waitForOperation(event, { timeoutMs = 3000 } = {}) {
+      if (!providerEventNames.has(event)) throw new TypeError('Unknown provider operation event.');
+      const current = operation.reports.find(report => report.event === event);
+      if (current) return structuredClone(current);
+      if (operation.failure) throw new Error('Firefox provider operation reached terminal failure');
+      if (!admissionOpen) throw new Error('Firefox runtime collector admission is closed');
+      return await new Promise((resolve, rejectPromise) => {
+        const waiter = {
+          event,
+          resolve: report => { clearTimeout(timer); operation.waiters.delete(waiter); resolve(structuredClone(report)); },
+          reject: error => { clearTimeout(timer); operation.waiters.delete(waiter); rejectPromise(error); },
+        };
+        const timer = setTimeout(() => waiter.reject(new Error(`Timed out waiting for provider operation ${event}`)), timeoutMs);
+        operation.waiters.add(waiter);
+      });
+    },
+    decideRestore(decision) {
+      if (!admissionOpen || failed || operation.failure || operation.stopped || !['restore', 'stop'].includes(decision)
+          || operation.restoreDecision !== null || !operation.reports.some(report => report.event === 'translated')) throw new Error('Provider operation restore decision is invalid or already settled.');
+      decideOperation('restore', decision);
+      if (decision === 'stop') { operation.stopped = true; operation.stopCode = 'COMPLETED'; }
+      notifyOperationChange();
+      return decision;
+    },
+    stopProviderProbe(reasonCode) {
+      if (!providerStopCodes.has(reasonCode)) throw new TypeError('Unknown provider operation stop code.');
+      if (operation.stopped) return false;
+      operation.stopped = true;
+      operation.stopCode = reasonCode;
+      if (!operation.startDecision) decideOperation('start', 'stop');
+      if (!operation.restoreDecision) decideOperation('restore', 'stop');
+      notifyOperationChange();
+      return true;
+    },
     closeAdmission() {
       admissionOpen = false; bindingOpen = false;
+      operation.stopped = true;
+      operation.stopCode ??= 'TEARDOWN';
+      if (!operation.startDecision) decideOperation('start', 'stop');
+      if (!operation.restoreDecision) decideOperation('restore', 'stop');
+      notifyOperationChange();
       for (const cancel of pending) cancel();
       failWaiters(new Error('Firefox runtime collector admission is closed'));
+      failOperationWaiters(new Error('Firefox runtime collector admission is closed'));
     },
     async waitFor(realm, phase, { timeoutMs = 3000 } = {}) {
       if (!stages[realm] || !phases.includes(phase)) throw new TypeError('Unknown runtime stage');
@@ -158,3 +465,19 @@ function createCollector(options, fixtureUrl) {
 
 export function createRuntimeCollector(options, fixtureUrl) { return createCollector(options, fixtureUrl); }
 export function validateRuntimeBridgeConfig(options) { validateConfig(options); }
+
+function boundedString(value) { return typeof value === 'string' && value.length > 0 && value.length <= 128; }
+function validIndexes(value) { return Array.isArray(value) && value.length > 0 && value.length <= 12 && value.every(item => Number.isInteger(item) && item >= 0 && item < 12) && new Set(value).size === value.length; }
+function sameIndexes(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => item === right[index]); }
+function isTargetIds(value) { return Array.isArray(value) && value.length === 12 && value.every((id, index) => id === `target-${index}`); }
+function validEdgeUrl(value) {
+  try {
+    const url = new URL(value);
+    const keys = [...url.searchParams.keys()];
+    return url.protocol === 'https:' && url.hostname === 'edge.microsoft.com' && url.port === ''
+      && url.pathname === '/translate/translatetext' && url.searchParams.get('isEnterpriseClient') === 'false'
+      && url.searchParams.get('to') === 'fr' && keys.every(key => ['isEnterpriseClient', 'to', 'from'].includes(key))
+      && keys.filter(key => key === 'isEnterpriseClient').length === 1 && keys.filter(key => key === 'to').length === 1
+      && keys.filter(key => key === 'from').length <= 1 && !url.username && !url.password && !url.hash;
+  } catch { return false; }
+}

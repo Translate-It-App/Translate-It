@@ -179,4 +179,12 @@ const marker = {
   },
   snapshot: () => trace.snapshot(),
 };
+if (globalThis.__firefoxProviderProbeEnabled === true) {
+  const providerProbeRuntime = globalThis.__firefoxProviderProbeRuntime;
+  if (providerProbeRuntime) {
+    const providerProbe = providerProbeRuntime.createEdgeProviderProbe(providerProbeRuntime.report);
+    marker.providerProbe = providerProbe;
+    marker.providerProbeInstalled = providerProbe.install({ MicrosoftEdgeProvider, unifiedTranslationService, ProviderRequestEngine, proxyManager: providerProbeRuntime.proxyManager });
+  }
+}
 globalThis.__pageTranslationBenchmark = marker;
