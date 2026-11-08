@@ -11,9 +11,49 @@ const flags = {
   viewport: [true, true],
 };
 
-export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge, onBuildEnvironment }) {
+export function createSuccessfulReplyBoundaryPlugin() {
+  const schedulerSuffix = '/src/features/page-translation/PageTranslationScheduler.js';
+  const importLine = "import { sendRegularMessage, safeSendMessage } from '@/shared/messaging/core/UnifiedMessaging.js';";
+  const callLine = "const result = await safeSendMessage(batchMessage, 'page-translation-batch');";
+  const transformedModules = new Set();
+  return {
+    name: 'benchmark-successful-page-reply-boundary',
+    enforce: 'pre',
+    transform(source, id) {
+      const normalizedId = id.split('?')[0].replaceAll('\\', '/');
+      if (!normalizedId.endsWith(schedulerSuffix)) return null;
+      if (source.split(importLine).length !== 2 || source.split(callLine).length !== 2) {
+        throw new Error(`Successful-reply safeSendMessage boundary drifted in ${normalizedId}`);
+      }
+      if (transformedModules.has(normalizedId)) throw new Error(`Duplicate successful-reply transform for ${normalizedId}`);
+      transformedModules.add(normalizedId);
+      const interceptedImport = `${importLine.replace('safeSendMessage }', 'safeSendMessage as benchmarkProductionSafeSendMessage }')}
+const safeSendMessage = (...args) => {
+  const sourcePromise = benchmarkProductionSafeSendMessage(...args);
+  const intercept = globalThis.__pageTranslationBenchmark?.interceptSchedulerBatchReply;
+  return typeof intercept === 'function'
+    ? intercept.call(globalThis.__pageTranslationBenchmark, args[0], sourcePromise)
+    : sourcePromise;
+};`;
+      let transformed = source.replace(importLine, interceptedImport);
+      // The call-site token is asserted above to keep this transform pinned to the production await boundary.
+      if (!transformed.includes(callLine)) throw new Error(`Safe-send await site was not preserved in ${normalizedId}`);
+      return { code: transformed, map: null };
+    },
+    assertApplied() {
+      if (transformedModules.size !== 1) throw new Error(`Expected exactly one PageTranslationScheduler safeSendMessage boundary transform; found ${transformedModules.size}`);
+      return [...transformedModules];
+    },
+  };
+}
+
+export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge, onBuildEnvironment, successfulReplyGate = false }) {
   if (!flags[mode]) throw new TypeError(`Unknown discovery mode: ${mode}`);
   if (browser !== 'chrome' && browser !== 'firefox') throw new TypeError(`Unknown browser: ${browser}`);
+  if (typeof successfulReplyGate !== 'boolean') throw new TypeError('successfulReplyGate must be boolean.');
+  if (successfulReplyGate && (browser !== 'chrome' || mode !== 'sliced' || !contentEntry)) {
+    throw new TypeError('successfulReplyGate requires the opt-in sliced Chrome content-entry harness build.');
+  }
   if (runtimeBridge !== undefined && (browser !== 'firefox' || mode !== 'sliced' || !validBridgeConfig(runtimeBridge))) {
     throw new TypeError('runtimeBridge requires a sliced Firefox build and absolute fixtureUrl, bindingUrl, and reportUrl plus runId and authToken.');
   }
@@ -43,6 +83,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   try {
   const environmentProfiles = { worker: [], content: [] };
   const bridgePlugins = runtimeBridge ? createRuntimeBridgePlugins({ runtimeBridge, workerEntry, contentEntry }) : [];
+  const successfulReplyBoundaryPlugin = successfulReplyGate ? createSuccessfulReplyBoundaryPlugin() : null;
   const environmentPlugin = role => ({
     name: `benchmark-build-environment-${role}`,
     configResolved(config) { environmentProfiles[role].push(captureBuildEnvironment(config)); },
@@ -87,7 +128,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     ...base,
     mode: 'production',
     base: './',
-    plugins: [...base.plugins, environmentPlugin(role)],
+    plugins: [...base.plugins, environmentPlugin(role), ...(role === 'content' && successfulReplyBoundaryPlugin ? [successfulReplyBoundaryPlugin] : [])],
     configFile: false,
     publicDir: false,
     logLevel: runtimeBridge ? 'silent' : 'error',
@@ -106,6 +147,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   try {
     await buildEntry('worker', { worker: runtimeBridge ? 'virtual:page-translation-probe-worker' : workerEntry ?? resolve('src/core/background/index.js') }, workerOut, false);
     await buildEntry('content', { 'content-entry': runtimeBridge ? 'virtual:page-translation-probe-content' : contentEntry ?? resolve('src/core/content-scripts/index-main.js') }, contentOut, true);
+    successfulReplyBoundaryPlugin?.assertApplied();
     const environment = { worker: environmentProfiles.worker[0], content: environmentProfiles.content[0] };
     const parity = validateBuildParity([{ mode, status: 'passed', environment }], [mode]);
     if (environmentProfiles.worker.length !== 1 || environmentProfiles.content.length !== 1 || !parity.ok) {

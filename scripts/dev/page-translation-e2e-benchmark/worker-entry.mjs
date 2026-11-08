@@ -1,7 +1,8 @@
 import '../../../src/core/background/index.js';
 import { unifiedTranslationService } from '../../../src/core/services/translation/UnifiedTranslationService.js';
-import { QueueManager } from '../../../src/features/translation/core/QueueManager.js';
-import { RateLimitManager } from '../../../src/features/translation/core/RateLimitManager.js';
+import { backgroundOperationLease } from '../../../src/core/services/translation/BackgroundOperationLease.js';
+import { QueueManager, queueManager } from '../../../src/features/translation/core/QueueManager.js';
+import { RateLimitManager, rateLimitManager } from '../../../src/features/translation/core/RateLimitManager.js';
 import { ProviderRequestEngine } from '../../../src/features/translation/providers/utils/ProviderRequestEngine.js';
 import { BaseProvider } from '../../../src/features/translation/providers/BaseProvider.js';
 import { MicrosoftEdgeProvider } from '../../../src/features/translation/providers/MicrosoftEdgeProvider.js';
@@ -175,6 +176,63 @@ const marker = {
         messageId, context: entry.context, aborted: entry.controller.signal.aborted,
         sessionId: providerRoots.find(root => root.messageId === messageId)?.sessionId ?? null,
       })).filter(entry => sessionId === undefined || entry.sessionId === sessionId),
+    };
+  },
+  resourceSnapshot(messageIds = [], sessionIds = []) {
+    const engine = unifiedTranslationService.translationEngine;
+    const registry = engine?.lifecycleRegistry;
+    const tracker = unifiedTranslationService.requestTracker;
+    const queueAvailable = queueManager?.queues instanceof Map && queueManager?.processing instanceof Map
+      && queueManager?.retryTimeouts instanceof Map;
+    const rateAvailable = rateLimitManager?.providerStates instanceof Map;
+    const resolvers = unifiedTranslationService.modeCoordinator?.pageSourceResolvers;
+    const leaseStatus = backgroundOperationLease.getStatus();
+    const lease = leaseStatus ? {
+      activeOperationIds: leaseStatus.activeOperationIds,
+      activeOperationCount: leaseStatus.activeOperationCount,
+      timerActive: leaseStatus.timerActive,
+    } : null;
+    return {
+      available: !!registry && registry.activeTranslations instanceof Map && tracker?.requests instanceof Map
+        && queueAvailable && rateAvailable && resolvers instanceof Map && !!lease,
+      lifecycle: {
+        activeIds: registry?.activeTranslations instanceof Map ? [...registry.activeTranslations.keys()] : null,
+      },
+      service: {
+        activeRequestIds: tracker?.requests instanceof Map
+          ? [...tracker.requests.values()].filter(request => ['pending', 'processing', 'streaming'].includes(request.status)).map(request => request.messageId)
+          : null,
+        requests: tracker?.requests instanceof Map
+          ? messageIds.map(messageId => {
+            const request = tracker.requests.get(messageId);
+            return { messageId, status: request?.status ?? null, operationOwned: !!request && unifiedTranslationService._getOperation(request) !== null };
+          }) : null,
+      },
+      sourceResolvers: resolvers instanceof Map
+        ? Object.fromEntries(sessionIds.map(sessionId => {
+          const state = resolvers.get(sessionId);
+          return [sessionId, state ? {
+            present: true,
+            effectiveSourceLanguage: state.effectiveSourceLanguage ?? null,
+            effectiveTargetLanguage: state.effectiveTargetLanguage ?? null,
+            status: state.status ?? null,
+          } : { present: false }];
+        })) : null,
+      queue: queueAvailable ? {
+        depths: Object.fromEntries([...queueManager.queues].map(([provider, queue]) => [provider, Array.isArray(queue) ? queue.length : null])),
+        processing: Object.fromEntries([...queueManager.processing]),
+        retryTimeoutCount: queueManager.retryTimeouts.size,
+      } : null,
+      rateLimit: rateAvailable
+        ? Object.fromEntries([...rateLimitManager.providerStates].map(([provider, state]) => [provider, {
+          activeRequests: state.activeRequests ?? null,
+          queuedRequests: state.queues && typeof state.queues === 'object'
+            ? Object.values(state.queues).reduce((count, queue) => count + (Array.isArray(queue) ? queue.length : 0), 0)
+            : null,
+          isProcessingQueue: state.isProcessingQueue ?? null,
+        }]))
+        : null,
+      lease,
     };
   },
   snapshot: () => trace.snapshot(),

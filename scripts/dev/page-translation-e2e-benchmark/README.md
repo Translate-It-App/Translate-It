@@ -31,6 +31,18 @@ Artifacts default to a unique `/tmp/opencode/page-translation-e2e-<timestamp>-<p
 
 The main report is atomically streamed once after normal completion or a handled failure, retaining all raw trials without quadratic full-report rewrites. Progress is otherwise memory-only; abnormal process termination is not guaranteed to leave a current main report. The separate negative-probe artifact is still written when that probe runs.
 
+## Opt-in successful stale Page-reply probes
+
+Run deterministic stale-reply cases independently from performance and cancellation-Fetch probes:
+
+```sh
+BENCH_STALE_SUCCESS_PROBES=replacement,stop,restore \
+  BENCH_MODES=sliced BENCH_SCENARIOS=early-visible \
+  pnpm exec node scripts/dev/page-translation-e2e-benchmark/run.mjs
+```
+
+Each requested case gets a fresh Chrome trial plus the normal network-guard negative probe. Before A starts, a stale-lane-only content bundle transform wraps the real Page scheduler's `safeSendMessage` result. It binds the first current-owner scheduler batch to its exact `PAGE_TRANSLATE_BATCH` message ID, session ID, and serialized item IDs/text, then holds only a genuine successful result after production send, timeout, and cancellation checks have completed, but before the Scheduler's `await` resumes. The real Edge HTTP response and `ProviderRequestEngine.executeApiCall` / provider-root promises must already have fulfilled. Stop or Restore invalidates A through the normal command. The `stop` and `restore` cases release A's held reply without starting B and verify the original DOM remains unchanged (including exact original attributes for Restore); A has accepted zero targets. Only `replacement` starts a distinct trusted auto/preserve B and holds its first real provider Fetch response while releasing A's exact result. It requires B's first batch to overlap targets A never accepted, positive call-through `_ownsFlushSession(false)` evidence after release, fulfilled A scheduler-batch settlement, no post-invalidation A acceptance or unattributed DOM write, and unchanged B counters/queue/context/controller/resources across that boundary. B must accept all 1,000 fixture IDs exactly once with B-prefixed output; the full DOM and original text/attributes after real Restore are checked. A separate raw mutation observer retains per-target old/new text values (including transient same-delivery changes) from invalidation through final drain; any A-prefixed or unknown value fails. Artifacts retain the gate state/events, exact batch message and members, network/provider evidence, scheduler ownership checks, lifecycle/settlement attribution, raw mutation values, full DOM snapshots, runtime resource snapshots and cleanup/drain status. Gate timeout/close always opens the held result unchanged; cleanup first requires actual inactive/discovery-cancelled lifecycle evidence. If Stop/Restore cannot establish it, Chrome is disposed without opening the gate. These probes make no performance comparison and do not replace the separate cancellation tests.
+
 ## Historical small-fixture Chrome result
 
 Artifacts:

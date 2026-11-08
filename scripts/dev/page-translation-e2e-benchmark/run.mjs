@@ -14,18 +14,22 @@ import { createFixture, startFixture, startupVoicesResponse } from './fixture.mj
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
 import { modeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
+import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
 
 const root = process.cwd();
 const cancellationProbes = parseCancellationProbeSelection(process.env.BENCH_CANCELLATION_PROBES);
-const requestedModes = [...new Set((process.env.BENCH_MODES ?? (cancellationProbes.length ? 'sliced' : 'legacy,sliced,viewport')).split(',').map(value => value.trim()).filter(Boolean))];
-if (cancellationProbes.length && (requestedModes.length !== 1 || requestedModes[0] !== 'sliced')) {
-  throw new TypeError('Cancellation probes require BENCH_MODES=sliced only.');
+const staleSuccessProbes = parseSuccessfulReplyProbeSelection(process.env.BENCH_STALE_SUCCESS_PROBES);
+if (cancellationProbes.length && staleSuccessProbes.length) throw new TypeError('Cancellation and stale-success probes must run separately.');
+const isolatedProbes = cancellationProbes.length ? cancellationProbes : staleSuccessProbes;
+const requestedModes = [...new Set((process.env.BENCH_MODES ?? (isolatedProbes.length ? 'sliced' : 'legacy,sliced,viewport')).split(',').map(value => value.trim()).filter(Boolean))];
+if (isolatedProbes.length && (requestedModes.length !== 1 || requestedModes[0] !== 'sliced')) {
+  throw new TypeError('Cancellation and stale-success probes require BENCH_MODES=sliced only.');
 }
-if (cancellationProbes.length && process.env.BENCH_SCENARIOS && process.env.BENCH_SCENARIOS !== 'early-visible') {
-  throw new TypeError('Cancellation probes require BENCH_SCENARIOS=early-visible.');
+if (isolatedProbes.length && process.env.BENCH_SCENARIOS && process.env.BENCH_SCENARIOS !== 'early-visible') {
+  throw new TypeError('Cancellation and stale-success probes require BENCH_SCENARIOS=early-visible.');
 }
-const modes = cancellationProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
-const scenarios = cancellationProbes.length ? ['early-visible'] : parseScenarioSelection(process.env.BENCH_SCENARIOS ?? 'small');
+const modes = isolatedProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
+const scenarios = isolatedProbes.length ? ['early-visible'] : parseScenarioSelection(process.env.BENCH_SCENARIOS ?? 'small');
 const samples = Number(process.env.BENCH_SAMPLES ?? 5);
 const warmups = Number(process.env.BENCH_WARMUPS ?? 1);
 const defaultArtifact = `/tmp/opencode/page-translation-e2e-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}.json`;
@@ -52,11 +56,16 @@ const sourcePaths = [
   'scripts/dev/page-translation-e2e-benchmark/artifact-writer.mjs',
   'scripts/dev/page-translation-e2e-benchmark/scenario-plan.mjs',
   'scripts/dev/page-translation-e2e-benchmark/cancellation-probes.mjs',
+  'scripts/dev/page-translation-e2e-benchmark/successful-reply-probes.mjs',
+  'scripts/dev/page-translation-e2e-benchmark/successful-reply-gate.mjs',
   'scripts/dev/page-translation-e2e-runtime.test.js',
   'scripts/dev/page-translation-e2e-measurement.test.js',
   'scripts/dev/page-translation-e2e-large-page.test.js',
   'scripts/dev/page-translation-e2e-artifact-writer.test.js',
   'scripts/dev/page-translation-e2e-cancellation.test.js',
+  'scripts/dev/page-translation-e2e-stale-success.test.js',
+  'scripts/dev/page-translation-e2e-scheduler-stale-success.test.js',
+  'scripts/dev/page-translation-e2e-successful-reply-gate.test.js',
 ];
 const settings = Object.freeze({
   WHOLE_PAGE_LAZY_LOADING: false,
@@ -205,6 +214,14 @@ function sameProviderTexts(left, right) {
   const b = normalizeProviderTexts(right);
   return a.length > 0 && a.length === b.length && a.every((text, index) => text === b[index]);
 }
+function mapStaleSuccessResponse(body, sessionId, sessionA, sessionB) {
+  const owner = sessionId === sessionA ? 'A' : sessionId === sessionB ? 'B' : null;
+  if (!owner) throw new Error(`Stale-success fixture received an unknown Page session: ${sessionId ?? 'missing'}`);
+  return mapEdgeResponse(body).map(item => ({ translations: item.translations.map(translation => ({
+    ...translation,
+    text: `fixture translation ${owner}: ${translation.text.slice('fixture translation: '.length)}`,
+  })) }));
+}
 
 const harness = {
   command: 'node scripts/dev/page-translation-e2e-benchmark/run.mjs',
@@ -230,6 +247,7 @@ const harness = {
       reason: 'Not implemented in this bounded pass; it needs a separate held-Fetch cancellation trial. No cancellation stale-write claim is made.',
     },
     ...(cancellationProbes.length ? { cancellation: { requested: cancellationProbes, cases: [] } } : {}),
+    ...(staleSuccessProbes.length ? { successfulStaleReply: { requested: staleSuccessProbes, cases: [] } } : {}),
   },
   networkGuardScope: 'Fetch request-stage guard is installed before the test extension service worker resumes and before the top-level fixture page navigates. It covers that worker and the page target, including its isolated content world; iframe targets and Chrome process/component-extension telemetry are outside the measured scope.',
   limitations: {
@@ -247,16 +265,17 @@ async function writeArtifact() {
   await writeBenchmarkArtifact(artifactPath, harness);
 }
 
-async function compileMode(mode) {
+async function compileMode(mode, { successfulReplyGate = false } = {}) {
   const outputDir = await mkdtemp(resolve(tmpdir(), `page-translation-${mode}-`));
   buildDirs.push(outputDir);
-  const built = { mode, outputDir, startedAt: now() };
+  const built = { mode, outputDir, startedAt: now(), successfulReplyGate };
   try {
     const result = await buildBenchmarkExtension({
       outputDir,
       mode,
       workerEntry: resolve(root, 'scripts/dev/page-translation-e2e-benchmark/worker-entry.mjs'),
       contentEntry: resolve(root, 'scripts/dev/page-translation-e2e-benchmark/content-entry.mjs'),
+      successfulReplyGate,
       onBuildEnvironment: environment => { built.environment = environment; },
     });
     built.outputDir = result;
@@ -279,7 +298,7 @@ function validateHarnessBuildParity() {
   return parity;
 }
 
-async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false, cancellationProbe = null }) {
+async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null }) {
   const trial = {
     mode, scenario: fixtureConfig.scenario, ordinal, globalRunOrder, phase, status: 'running',
     timestamps: { trialStart: now() },
@@ -309,13 +328,15 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
   let requestUnsubscribe;
   let eventUnsubscribe;
   let pageEventUnsubscribe;
-  let networkEventUnsubscribe;
+  const networkEventUnsubscribes = new Map();
   const requestHandlerJobs = new Set();
-  const cancellationControl = cancellationProbe ? {
-    probe: cancellationProbe,
+  let staleContextDisposed = false;
+  const cancellationControl = cancellationProbe || staleSuccessProbe ? {
+    probe: cancellationProbe ?? 'stale-success',
     requestCountsBySession: new Map(),
     firstBatchBySession: new Map(),
     sessionIds: new Set(),
+    initialSessionId: null,
     releaseAllA: false,
     replacementSessionId: null,
     releaseReplacement: false,
@@ -356,9 +377,22 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     cancellationClassification: null,
     cleanup: { heldFetches: [] },
   };
+  if (staleSuccessProbe) trial.staleSuccess = {
+    probe: staleSuccessProbe, commands: [], barriers: [], domSnapshots: {},
+    replyGate: null, ownershipProof: null, observationErrors: [], cleanup: { heldFetches: [] },
+  };
+  const networkEventRouter = cancellationProbe || staleSuccessProbe
+    ? createWorkerNetworkEventRouter(event => {
+      const evidence = trial.cancellation ?? trial.staleSuccess;
+      evidence.networkEvents ??= [];
+      evidence.networkEvents.push({ sequence: evidence.networkEvents.length + 1, ...event });
+    }) : null;
 
   const processRequestPaused = async (event, requestRecord, reservation) => {
     const { request, requestId } = event.params;
+    const networkTarget = networkEventRouter?.targetForSession(event.sessionId) ?? null;
+    requestRecord.targetSessionId = event.sessionId;
+    requestRecord.targetId = networkTarget?.targetId ?? null;
     const classification = classifyTransportRequest(request, {
       fixtureOrigin: new URL(trial.fixture.url).origin,
       extensionOrigin: extensionOriginBySession.get(event.sessionId),
@@ -368,13 +402,13 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     try {
       if (classification.kind === 'provider-translation') {
         const body = JSON.parse(request.postData ?? 'null');
-        const responseBody = mapEdgeResponse(body);
+        let responseBody = mapEdgeResponse(body);
         requestRecord.bodyLength = request.postData?.length ?? 0;
         requestRecord.bodyBytes = Buffer.byteLength(request.postData ?? '', 'utf8');
         requestRecord.batchSize = body.length;
         requestRecord.batchTexts = body;
         requestRecord.fixtureDelayMs = fixtureConfig.responseDelayMs;
-        if (cancellationProbe) {
+        if (cancellationProbe || staleSuccessProbe) {
           const workerState = await evaluate(chrome, event.sessionId,
             'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
           const matchingRoots = workerState?.providerRoots?.filter(candidate => sameProviderTexts(candidate.texts, body)) ?? [];
@@ -383,9 +417,13 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           const physical = workerState?.ledger?.operations?.filter(operation => operation.kind === 'provider.physical'
             && sameProviderTexts(JSON.parse(operation.requestBody ?? 'null'), body)) ?? [];
           const root = roots.length === 1 ? roots[0] : null;
+          if (staleSuccessProbe && !root) throw new Error(`Cannot map provider response to exactly one real Page root (matches=${roots.length}).`);
           const physicalCall = root && physical.find(operation => operation.messageId === root.messageId && operation.sessionId === root.sessionId);
           const controller = root && workerState.controllers?.find(candidate => candidate.messageId === root.messageId && candidate.sessionId === root.sessionId);
           const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
+          if (staleSuccessProbe && (!physicalCall || !controller || targetIds.some(id => id === null))) {
+            throw new Error('Cannot fulfill provider response without exact body/root/physical/controller fixture correlation.');
+          }
           requestRecord.networkId = event.params.networkId ?? null;
           requestRecord.cancellationCorrelation = root && physicalCall && controller ? {
             pageSessionId: root.sessionId,
@@ -396,14 +434,78 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
             targetIds,
             requestId,
             networkId: requestRecord.networkId,
+            targetSessionId: requestRecord.targetSessionId,
+            targetId: requestRecord.targetId,
           } : null;
+          if (staleSuccessProbe) {
+            if (!pageSession || !contentContext) throw new Error('Cannot prove Page scheduler owner before fulfilling provider response.');
+            const ownerEvidence = await evaluate(chrome, pageSession,
+              `(()=>({scheduler:window.__pageTranslationBenchmark.pageSessionSnapshot(),content:window.__pageTranslationBenchmark.cancellationSnapshot()}))()`, contentContext, false);
+            const acceptedStart = ownerEvidence.content?.operations?.find(operation => operation.kind === 'lifecycle.delivery'
+              && operation.sessionId === root.sessionId && operation.action === 'page-translate-start' && operation.accepted === true);
+            const currentOwnerMatches = ownerEvidence.scheduler?.translationSessionId === root.sessionId
+              && ownerEvidence.scheduler?.sessionContextOwned === true;
+            const invalidatedA = cancellationControl.initialSessionId !== null
+              && ownerEvidence.content?.operations?.some(operation => operation.kind === 'session.invalidation'
+                && operation.sessionId === cancellationControl.initialSessionId && operation.capturedSessionActive === false
+                && operation.discoveryCancelled === true) === true;
+            const ownerDecision = classifyStaleSuccessProviderOwner({
+              sessionId: root.sessionId,
+              initialSessionId: cancellationControl.initialSessionId,
+              replacementSessionId: cancellationControl.replacementSessionId,
+              trustedStartAccepted: acceptedStart !== undefined,
+              currentOwnerSessionId: ownerEvidence.scheduler?.translationSessionId ?? null,
+              currentOwnerContextOwned: ownerEvidence.scheduler?.sessionContextOwned === true,
+              initialSessionInvalidated: invalidatedA,
+            });
+            requestRecord.providerOwnerEvidence = {
+              pageSessionId: root.sessionId,
+              batchMessageId: root.messageId,
+              providerRootStatus: root.status,
+              controllerAborted: controller.aborted,
+              trustedStartAccepted: acceptedStart !== undefined,
+              currentSchedulerSessionId: ownerEvidence.scheduler?.translationSessionId ?? null,
+              currentSchedulerContextOwned: ownerEvidence.scheduler?.sessionContextOwned === true,
+              aInvalidationObserved: invalidatedA,
+              decision: ownerDecision,
+            };
+            if (!ownerDecision.ok) {
+              (trial.cancellation ?? trial.staleSuccess).observationErrors.push({ requestId, issues: [ownerDecision.reason] });
+              throw new Error(`Unrecognized provider owner ${root.sessionId}: ${ownerDecision.reason}`);
+            }
+            if (ownerDecision.lockInitialSessionId) cancellationControl.initialSessionId = ownerDecision.lockInitialSessionId;
+            if (ownerDecision.lockReplacementSessionId) cancellationControl.replacementSessionId = ownerDecision.lockReplacementSessionId;
+            if (ownerDecision.role === 'cancelled-A-sibling') {
+              requestRecord.lateCancelledA = true;
+              let abortedEvidence = { aborted: controller.aborted, rootSessionId: root.sessionId, messageId: root.messageId };
+              if (!controller.aborted) {
+                abortedEvidence = await until(async () => {
+                  const current = await evaluate(chrome, event.sessionId,
+                    'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
+                  const currentController = current?.controllers?.find(item => item.messageId === root.messageId
+                    && item.sessionId === root.sessionId);
+                  return currentController?.aborted === true
+                    ? { aborted: true, rootSessionId: root.sessionId, messageId: root.messageId } : null;
+                }, 5_000);
+              }
+              requestRecord.lateCancelledAController = abortedEvidence;
+              if (!abortedEvidence?.aborted) throw new Error(`Late A provider request is not yet controller-aborted: ${root.messageId}`);
+              const cancellation = reservation
+                ? await reservation.release('fail', { errorReason: 'Aborted', reason: 'A session invalidated before this sibling Fetch fulfilled' })
+                : await send('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, event.sessionId);
+              requestRecord.lateCancelledARelease = cancellation;
+              requestRecord.response = { failed: true, reason: 'late-A-session-cancelled', endedAt: now() };
+              return;
+            }
+            responseBody = mapStaleSuccessResponse(body, root.sessionId, cancellationControl.initialSessionId, cancellationControl.replacementSessionId);
+          }
           const issues = [];
           if (roots.length !== 1) issues.push(`provider root match count ${roots.length}`);
           if (!physicalCall) issues.push('physical provider operation not correlated to request body/controller');
           if (!controller) issues.push('lifecycle controller not correlated to provider root');
           if (targetIds.some(id => id === null)) issues.push('provider request body includes unknown fixture source');
           requestRecord.cancellationCorrelationIssues = issues;
-          if (issues.length) trial.cancellation.observationErrors.push({ requestId, issues });
+          if (issues.length) (trial.cancellation ?? trial.staleSuccess).observationErrors.push({ requestId, issues });
 
           if (root && cancellationControl) {
             const sessionId = root.sessionId;
@@ -413,15 +515,17 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
             if (ordinal === 0) cancellationControl.firstBatchBySession.set(sessionId, { messageId: root.messageId, targetIds, texts: body });
             const isInitialSession = sessionId === cancellationControl.initialSessionId
               || (!cancellationControl.initialSessionId && !cancellationControl.replacementSessionId);
-            const shouldHold = isInitialSession
-              ? ordinal > 0 && !cancellationControl.releaseAllA
-              : cancellationControl.probe === 'replacement' && sessionId !== cancellationControl.initialSessionId
+            const shouldHold = cancellationControl.probe === 'stale-success'
+              ? sessionId === cancellationControl.replacementSessionId && !cancellationControl.releaseReplacement
+              : isInitialSession
+                ? ordinal > 0 && !cancellationControl.releaseAllA
+                : cancellationControl.probe === 'replacement' && sessionId !== cancellationControl.initialSessionId
                 && ordinal === 0 && !cancellationControl.releaseReplacement;
             if (shouldHold && (!firstBatch || targetIds.some(id => !firstBatch.targetIds.includes(id)))
                 && reservation?.hold()) {
               if (!reservation) throw new Error('Cancellation Fetch reservation was not created at request-handler entry.');
               const held = {
-                requestId, networkId: requestRecord.networkId, sessionId: event.sessionId,
+                requestId, networkId: requestRecord.networkId, sessionId: event.sessionId, targetId: requestRecord.targetId,
                 pageSessionId: sessionId, batchMessageId: root.messageId, targetIds,
                 providerRootStatusAtPause: root.status, controllerAbortedAtPause: controller?.aborted ?? null,
                 released: false, handlerSettled: false,
@@ -430,7 +534,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
               requestRecord.paused = true;
               requestRecord.heldFetch = held;
               cancellationControl.heldRequests.push(heldControl);
-              trial.cancellation.pausedRequests.push(held);
+              (trial.cancellation ?? trial.staleSuccess).pausedRequests ??= [];
+              (trial.cancellation ?? trial.staleSuccess).pausedRequests.push(held);
               const releaseRequest = await reservation.waitForRelease();
               held.released = true;
               held.releaseAction = releaseRequest.action;
@@ -575,13 +680,14 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         extensionOriginBySession.set(sessionId, extensionOrigin);
         if (!eventUnsubscribe) eventUnsubscribe = onEvent(event => recordEvent(event, trial));
         if (!requestUnsubscribe) requestUnsubscribe = onEvent(requestListener);
-        if (cancellationProbe) {
-          if (!networkEventUnsubscribe) networkEventUnsubscribe = onEvent(event => {
-            if (event.sessionId !== sessionId || !event.method?.startsWith('Network.')) return;
-            if (event.method === 'Network.requestWillBeSent' || event.method === 'Network.loadingFailed' || event.method === 'Network.loadingFinished') {
-              trial.cancellation.networkEvents.push({ sequence: trial.cancellation.networkEvents.length + 1, method: event.method, params: event.params });
-            }
-          });
+        if (cancellationProbe || staleSuccessProbe) {
+          if (!networkEventRouter?.register(sessionId, targetInfo)) throw new Error(`Could not register Network observer target for CDP session ${sessionId}.`);
+          trial.networkObserverTargets ??= {};
+          trial.networkObserverTargets[sessionId] = networkEventRouter.targetForSession(sessionId);
+          if (!networkEventUnsubscribes.has(sessionId)) {
+            const unsubscribe = onEvent(networkEventRouter.observerForSession(sessionId));
+            networkEventUnsubscribes.set(sessionId, unsubscribe);
+          }
           await send('Network.enable', {}, sessionId);
         }
         await send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId);
@@ -605,13 +711,12 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     });
     await evaluate(chrome, workerSession,
       `Promise.all([browser.storage.local.set(${JSON.stringify(settings)}),browser.storage.sync.set(${JSON.stringify(settings)}).catch(()=>{})])`);
-    if (cancellationProbe) {
-      trial.cancellation.workerInstrumentation = await evaluate(chrome, workerSession,
+    if (cancellationProbe || staleSuccessProbe) {
+      const workerInstrumentation = await evaluate(chrome, workerSession,
         'globalThis.__pageTranslationBenchmark.enableCancellationProbe()');
-      if (!trial.cancellation.workerInstrumentation?.enabled || !trial.cancellation.workerInstrumentation?.lifecycleRegistryObserved
-          || trial.cancellation.workerInstrumentation.instrumentationErrors?.length) {
-        throw new Error('Worker cancellation/provider/controller instrumentation was not fully installed.');
-      }
+      (trial.cancellation ?? trial.staleSuccess).workerInstrumentation = workerInstrumentation;
+      if (!workerInstrumentation?.enabled || !workerInstrumentation?.lifecycleRegistryObserved
+          || workerInstrumentation.instrumentationErrors?.length) throw new Error('Worker cancellation/provider/controller instrumentation was not fully installed.');
     }
 
     const { targetId } = await chrome.send('Target.createTarget', { url: 'about:blank' });
@@ -670,13 +775,19 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       return state.marker && state.initialized && state.baseInitialized && state.listener
         && state.features?.active && state.features?.handlerActive;
     });
-    if (cancellationProbe) {
-      trial.cancellation.contentInstrumentation = await evaluate(chrome, pageSession,
+    if (cancellationProbe || staleSuccessProbe) {
+      const contentInstrumentation = await evaluate(chrome, pageSession,
         'window.__pageTranslationBenchmark.enableCancellationProbe()', contentContext);
-      if (!trial.cancellation.contentInstrumentation?.enabled || !trial.cancellation.contentInstrumentation?.sendMessageWrapped
-          || trial.cancellation.contentInstrumentation.instrumentationErrors?.length) {
-        throw new Error(`Content cancellation instrumentation incomplete: ${JSON.stringify(trial.cancellation.contentInstrumentation)}`);
+      (trial.cancellation ?? trial.staleSuccess).contentInstrumentation = contentInstrumentation;
+      if (!contentInstrumentation?.enabled || !contentInstrumentation?.sendMessageWrapped
+          || contentInstrumentation.instrumentationErrors?.length) {
+        throw new Error(`Content cancellation instrumentation incomplete: ${JSON.stringify(contentInstrumentation)}`);
       }
+    }
+    if (staleSuccessProbe) {
+      trial.staleSuccess.contentInstrumentation = await evaluate(chrome, pageSession,
+        'window.__pageTranslationBenchmark.enableSuccessfulReplyProbe(60000)', contentContext);
+      if (!trial.staleSuccess.contentInstrumentation?.enabled) throw new Error(`Successful-reply instrumentation incomplete: ${JSON.stringify(trial.staleSuccess.contentInstrumentation)}`);
     }
 
     trial.discoveryFlagsObserved = await evaluate(chrome, pageSession,
@@ -718,6 +829,11 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       trial.cancellation.initialDOMMetadata = await evaluate(chrome, pageSession,
         `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,tagName:el.tagName,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`, contentContext, false);
     }
+    if (staleSuccessProbe) {
+      trial.staleSuccess.initialDOMMetadata = await evaluate(chrome, pageSession,
+        `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,tagName:el.tagName,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`, contentContext, false);
+      await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.armSuccessfulReplyProbe()', contentContext);
+    }
     trial.timestamps.translationCommand = now();
     const started = await evaluate(chrome, pageSession,
       `chrome.runtime.sendMessage(${JSON.stringify({ action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' } })})`, contentContext);
@@ -736,6 +852,601 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: false,
     });
     if (!trial.effectiveSettingsValidation.ok) throw new Error(trial.effectiveSettingsValidation.issues.join('; '));
+
+    if (staleSuccessProbe) {
+      const expectedIds = fixtureConfig.targets.map(target => target.id);
+      const sourceToId = new Map(fixtureConfig.targets.map(target => [target.source, target.id]));
+      const snapshotContent = async owner => {
+        const snapshot = await evaluate(chrome, pageSession,
+          `window.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(owner)})`, contentContext, false);
+        if (snapshot?.instrumentationErrors?.length) throw new Error(`Content ownership instrumentation failed: ${snapshot.instrumentationErrors.join('; ')}`);
+        return snapshot;
+      };
+      const snapshotWorker = async (owner, messageIds = [], sessionIds = []) => {
+        const snapshot = await evaluate(chrome, workerSession,
+          `(()=>({probe:globalThis.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(owner)}),resources:globalThis.__pageTranslationBenchmark.resourceSnapshot(${JSON.stringify(messageIds)},${JSON.stringify(sessionIds)})}))()`, undefined, false);
+        if (snapshot?.probe?.instrumentationErrors?.length) throw new Error(`Worker ownership instrumentation failed: ${snapshot.probe.instrumentationErrors.join('; ')}`);
+        return snapshot;
+      };
+      const snapshotDom = async label => {
+        const dom = await evaluate(chrome, pageSession,
+          `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
+        const metadata = await evaluate(chrome, pageSession,
+          `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`, contentContext, false);
+        const value = { at: now(), dom, metadata };
+        trial.staleSuccess.domSnapshots[label] = value;
+        return value;
+      };
+      const captureReplyProbeSnapshot = async label => {
+        const snapshot = await evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false);
+        trial.staleSuccess.replyGate.probeSnapshots ??= [];
+        trial.staleSuccess.replyGate.probeSnapshots.push({ label, at: now(), snapshot });
+        return snapshot;
+      };
+      const sendCommand = async (action, data) => {
+        const command = { action, ...(data === undefined ? {} : { data }) };
+        const sentAt = now();
+        const response = await evaluate(chrome, pageSession,
+          `chrome.runtime.sendMessage(${JSON.stringify(command)})`, contentContext);
+        const value = { action, sentAt, respondedAt: now(), response };
+        trial.staleSuccess.commands.push(value);
+        trial.commands.push(value);
+        return response;
+      };
+      const eventForSession = async (actions, owner) => until(async () => {
+        const events = await evaluate(chrome, pageSession, 'window.__benchEvents??[]', contentContext, false);
+        trial.lifecycle = events;
+        const event = events.find(item => actions.some(action => isSessionEvent(item, action, owner)));
+        return event ?? null;
+      }, 45_000);
+      const acceptedLifecycle = async (action, owner) => until(async () => {
+        const content = await snapshotContent(owner);
+        return content.operations.find(operation => operation.kind === 'lifecycle.delivery'
+          && operation.sessionId === owner && operation.action === action && operation.accepted === true) ?? null;
+      }, 15_000);
+      const pollGate = async () => until(async () => {
+        const snapshot = await evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false);
+        if (['failed', 'timed-out', 'closed'].includes(snapshot?.gate?.status)) {
+          throw new Error(`Successful reply gate failed before capture: ${snapshot.gate.error ?? snapshot.gate.status}`);
+        }
+        return snapshot?.gate?.captured ? snapshot : null;
+      }, 45_000);
+
+      const sessionIdA = sessionId;
+      trial.staleSuccess.sessionA = sessionIdA;
+      const startA = await acceptedLifecycle('page-translate-start', sessionIdA);
+      let causalOrder = 0;
+      const captured = await pollGate();
+      if (cancellationControl.initialSessionId !== sessionIdA) throw new Error('A provider request owner did not match the trusted PAGE_TRANSLATE session ID.');
+      const selected = captured.selectedBatch;
+      const capturedMessage = captured.capturedMessage;
+      if (selected?.members?.some(member => !sourceToId.has(member.text))) throw new Error('Selected A batch contains unknown fixture text.');
+      const captureValidation = validateSuccessfulReplyCapture({
+        expectedSessionId: sessionIdA,
+        selectedBatch: selected,
+        capturedMessage,
+        gateSnapshot: captured.gate,
+      });
+      trial.staleSuccess.replyGate = { snapshot: captured, validation: captureValidation, startLifecycle: startA };
+      if (!captureValidation.ok) throw new Error(`Successful reply capture gate failed: ${captureValidation.issues.join('; ')}`);
+
+      const firstBatchIds = selected.members.map(member => sourceToId.get(member.text));
+      if (new Set(firstBatchIds).size !== firstBatchIds.length || firstBatchIds.length !== 25) {
+        throw new Error(`First captured A batch must contain 25 unique fixture IDs; observed ${firstBatchIds.length}.`);
+      }
+      const workerAtCapture = await snapshotWorker(sessionIdA, [capturedMessage.messageId], [sessionIdA]);
+      const rootA = workerAtCapture.probe.providerRoots.find(root => root.messageId === capturedMessage.messageId && root.sessionId === sessionIdA);
+      const physicalA = workerAtCapture.probe.ledger.operations.find(operation => operation.kind === 'provider.physical'
+        && operation.messageId === capturedMessage.messageId && operation.sessionId === sessionIdA);
+      const requestA = trial.requests.find(request => request.category === 'provider-translation'
+        && JSON.stringify(request.batchTexts) === JSON.stringify(selected.members.map(member => member.text)));
+      if (!requestA || requestA.response?.status !== 200 || rootA?.status !== 'fulfilled' || physicalA?.status !== 'fulfilled') {
+        throw new Error('A source transport/provider root/physical request did not positively fulfill before its successful runtime reply was gated.');
+      }
+      if (!requestA.targetSessionId || !requestA.targetId || !requestA.networkId) {
+        throw new Error('A Fetch request lacks exact Network CDP session/target/networkId correlation.');
+      }
+      const networkCompletion = await until(() => {
+        const matching = (trial.staleSuccess.networkEvents ?? []).filter(event => event.sessionId === requestA.targetSessionId
+          && event.targetId === requestA.targetId && event.params?.requestId === requestA.networkId);
+        if (!matching.some(event => ['Network.loadingFinished', 'Network.loadingFailed'].includes(event.method))) return null;
+        return validateWorkerNetworkCompletion({
+          events: trial.staleSuccess.networkEvents,
+          networkId: requestA.networkId,
+          sessionId: requestA.targetSessionId,
+          targetId: requestA.targetId,
+        });
+      }, 15_000);
+      if (!networkCompletion.ok) throw new Error(`A Fetch Network completion proof failed: ${networkCompletion.issues.join('; ')}`);
+      trial.staleSuccess.sourceSuccess = {
+        request: requestA, providerRoot: rootA, physical: physicalA,
+        networkSessionId: requestA.targetSessionId, networkTargetId: requestA.targetId,
+        networkEvents: networkCompletion.matchedEvents, networkValidation: networkCompletion,
+        worker: workerAtCapture,
+      };
+
+      const domBeforeInvalidation = await snapshotDom('before-invalidation');
+      const acceptedBeforeInvalidation = (await snapshotContent(sessionIdA)).operations.filter(operation => operation.kind === 'scheduler.settlement'
+        && operation.sessionId === sessionIdA && operation.outcome === 'accepted' && operation.changed === true);
+      if (acceptedBeforeInvalidation.length || domBeforeInvalidation.dom.some(([id, text]) => text !== originalById.get(id))) {
+        throw new Error('A acquired accepted translations before its first successful reply was invalidated; B cannot be required to translate all fixture targets.');
+      }
+      await evaluate(chrome, pageSession,
+        'window.__pageTranslationBenchmark.beginSuccessfulReplyMutationCapture()', contentContext);
+      trial.staleSuccess.rawMutationCaptureStarted = true;
+      const invalidationCommand = staleSuccessProbe === 'restore'
+        ? await sendCommand('page-restore')
+        : await sendCommand('page-translate-stop-auto');
+      const expectedTerminalAction = staleSuccessProbe === 'restore' ? 'page-restore-complete' : 'page-auto-restore-complete';
+      if (!invalidationCommand?.success) throw new Error(formatCommandFailure(expectedTerminalAction, invalidationCommand));
+      const terminalEvent = await eventForSession([expectedTerminalAction], sessionIdA);
+      const invalidated = await until(async () => {
+        const state = await snapshotContent(sessionIdA);
+        const event = state.operations.find(operation => operation.kind === 'session.invalidation'
+          && operation.sessionId === sessionIdA && operation.capturedSessionActive === false && operation.discoveryCancelled === true);
+        return event ? { event, state } : null;
+      }, 20_000);
+      const invalidationSequence = invalidated.event.sequence;
+      const invalidationOrder = ++causalOrder;
+      const expectedDomAfterInvalidation = staleSuccessProbe === 'restore'
+        ? fixtureConfig.targets.map(target => [target.id, target.source])
+        : domBeforeInvalidation.dom;
+      const afterInvalidation = await snapshotDom('after-invalidation-before-A-release');
+      if (JSON.stringify(afterInvalidation.dom) !== JSON.stringify(expectedDomAfterInvalidation)) {
+        throw new Error(`${staleSuccessProbe} changed DOM before the late A reply was released.`);
+      }
+      trial.staleSuccess.invalidation = { command: invalidationCommand, terminalEvent, event: invalidated.event, sequence: invalidationSequence, order: invalidationOrder, dom: afterInvalidation };
+
+      const validateSourceDom = (snapshot, label) => {
+        const issues = [];
+        if (snapshot.dom.length !== fixtureConfig.targetCount) issues.push(`${label}: target count differs`);
+        for (const [id, text] of snapshot.dom) if (originalById.get(id) !== text) issues.push(`${label}: ${id} is not original source text`);
+        const initialAttributes = new Map(trial.staleSuccess.initialDOMMetadata.map(item => [item.id, item.attributes]));
+        for (const target of snapshot.metadata) {
+          const original = initialAttributes.get(target.id);
+          if (!original || JSON.stringify([...target.attributes].sort(([a], [b]) => a.localeCompare(b)))
+              !== JSON.stringify([...original].sort(([a], [b]) => a.localeCompare(b)))) issues.push(`${label}: ${target.id} attributes differ from source`);
+        }
+        return { ok: issues.length === 0, issues };
+      };
+      const schedulerStateEquals = (left, right) => left && right
+        && ['translationSessionId', 'isTranslated', 'translatedCount', 'failedCount', 'totalTasks', 'activeFlushes',
+          'sessionContextOwned', 'pendingSettlementCount', 'batchTimerActive', 'completionTimerActive', 'discoveryPending',
+          'bridgeSessionOwned', 'bridgeSessionActive', 'bridgeDiscoveryPending', 'bridgeDiscoveryRunning', 'bridgeDiscoveryStarting',
+          'bridgeDiscoveryQueueDepth', 'bridgeDiscoveryCancelled', 'bridgeDiscoveryFailed'].every(key => left[key] === right[key])
+        && JSON.stringify(left.queueIds) === JSON.stringify(right.queueIds)
+        && JSON.stringify(left.activeBatchIds) === JSON.stringify(right.activeBatchIds);
+      const releaseAndProveA = async ({ replacement = null } = {}) => {
+        const releaseOrder = ++causalOrder;
+        const didRelease = await evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.releaseSuccessfulReplyProbe()', contentContext);
+        if (didRelease !== true) throw new Error('Successful reply gate refused explicit release.');
+        const aAfterRelease = await until(async () => {
+          const probe = await evaluate(chrome, pageSession,
+            'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false);
+          const attempt = {
+            observedAt: now(),
+            replyProbeSnapshot: probe ?? null,
+            gate: probe?.gate ?? null,
+            selectedBatch: probe?.selectedBatch ?? null,
+            capturedMessage: probe?.capturedMessage ?? null,
+            staleGuard: probe?.staleGuard ?? null,
+            guards: probe?.guards ?? [],
+            guardDiagnostics: probe?.guardDiagnostics ?? [],
+            guardInstallations: probe?.guardInstallations ?? [],
+            instrumentationErrors: probe?.instrumentationErrors ?? [],
+          };
+          trial.staleSuccess.replyGate.afterReleaseAttempt = attempt;
+          const content = await snapshotContent(sessionIdA);
+          const allContent = await snapshotContent(undefined);
+          const targetBatchSettled = allContent.operations.some(operation => operation.kind === 'scheduler.batch'
+            && operation.sessionId === sessionIdA && operation.status === 'fulfilled'
+            && JSON.stringify(operation.targetIds) === JSON.stringify(firstBatchIds));
+          attempt.events = probe?.events ?? [];
+          attempt.schedulerBatchSettled = targetBatchSettled;
+          attempt.contentPendingOperations = content.pendingOperations ?? null;
+          return probe?.gate?.settled && probe.gate.deliveryIdentity?.responseIdentityPreserved === true
+            && content.pendingOperations === 0 && targetBatchSettled
+            ? { probe, content, allContent } : null;
+        }, 30_000);
+        const gate = aAfterRelease.probe.gate;
+        const gateWithOrder = { ...gate, releaseOrder };
+        const guard = aAfterRelease.probe.staleGuard;
+        const allOperations = aAfterRelease.allContent.operations;
+        const aAccepted = allOperations.filter(operation => operation.kind === 'scheduler.settlement'
+          && operation.sessionId === sessionIdA && operation.outcome === 'accepted' && operation.changed === true
+          && operation.sequence > invalidationSequence).map(operation => operation.id);
+        const postInvalidation = validatePostInvalidationEvidence({
+          sessionId: sessionIdA, invalidationSequence, operations: allOperations,
+          duplicateAcceptedIds: aAfterRelease.content.mutationSnapshot?.duplicateAcceptedIds ?? [],
+          allowedMutationOwners: replacement ? [replacement.sessionId] : [],
+        });
+        const domAfterAReply = await snapshotDom('after-A-reply-while-B-pending');
+        const unexpectedTexts = domAfterAReply.dom.filter(([id, text]) => text !== originalById.get(id)
+          && !(replacement && text.startsWith('\u200efixture translation B: ')));
+        const lateLifecycle = allOperations.filter(operation => operation.sessionId === sessionIdA
+          && operation.sequence > invalidationSequence
+          && ['lifecycle.emission', 'lifecycle.delivery'].includes(operation.kind)
+          && ['page-translate-progress', 'page-translate-complete', 'page-translate-idle'].includes(operation.action));
+        const acceptedLateLifecycle = lateLifecycle.filter(operation => operation.kind !== 'lifecycle.delivery' || operation.accepted !== false);
+        const batchSettlements = allOperations.filter(operation => operation.kind === 'scheduler.batch'
+          && operation.sessionId === sessionIdA && operation.status === 'fulfilled'
+          && JSON.stringify(operation.targetIds) === JSON.stringify(firstBatchIds));
+        const issues = [];
+        if (!batchSettlements.length) issues.push('A scheduler batch did not fulfill after its stale ownership guard');
+        if (!postInvalidation.ok) issues.push(...postInvalidation.issues);
+        if (unexpectedTexts.length) issues.push(`A/non-B translated values appeared after reply release: ${unexpectedTexts.map(([id]) => id).join(',')}`);
+        if (acceptedLateLifecycle.length) issues.push('A emitted or delivered progress/completion lifecycle after invalidation');
+        if (aAccepted.length) issues.push(`A accepted IDs after invalidation: ${aAccepted.join(',')}`);
+
+        let bEvidence = null;
+        let bStillPending = false;
+        let bStable = true;
+        if (replacement) {
+          const [schedulerAfter, workerAfter] = await Promise.all([
+            evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+            snapshotWorker(replacement.sessionId, [capturedMessage.messageId, replacement.messageId], [sessionIdA, replacement.sessionId]),
+          ]);
+          const rootAfter = workerAfter.probe.providerRoots.find(root => root.messageId === replacement.messageId && root.sessionId === replacement.sessionId);
+          const controllerAfter = workerAfter.probe.controllers.find(controller => controller.messageId === replacement.messageId && controller.sessionId === replacement.sessionId);
+          const stability = validateReplacementStability({
+            schedulerBefore: replacement.scheduler, schedulerAfter: schedulerAfter,
+            resourcesBefore: replacement.worker.resources, resourcesAfter: workerAfter.resources,
+            providerRootAfter: rootAfter, controllerAfter, heldRequest: replacement.held,
+            sessionId: replacement.sessionId, messageId: replacement.messageId,
+            terminalMessageIds: [capturedMessage.messageId], sessionIds: [sessionIdA, replacement.sessionId],
+          });
+          bStable = stability.ok;
+          bStillPending = stability.ok;
+          if (!stability.ok) issues.push(...stability.issues);
+          if (!bStable) issues.push('B scheduler counters/queues/context/controller or runtime resources drifted during A reply release');
+          bEvidence = { scheduler: schedulerAfter, worker: workerAfter, root: rootAfter, controller: controllerAfter, stability };
+        }
+        const gateReleasedAt = aAfterRelease.probe.events.find(event => event.name === 'gate' && event.event?.type === 'released')?.at ?? null;
+        const gateForValidation = { ...gateWithOrder, releasedAt: gateReleasedAt };
+        const proof = validateStaleSuccessEvidence({
+          gate: gateForValidation,
+          invalidation: { confirmed: invalidationSequence > 0, order: invalidationOrder },
+          guard, batch: { ...capturedMessage, sessionId: sessionIdA },
+          acceptedAIds: aAccepted, acceptedBIds: [], expectedIds: [], domValues: [], lateLifecycle: acceptedLateLifecycle,
+          bStillPending, schedulerBatchSettled: batchSettlements.length > 0,
+          postInvalidationOk: postInvalidation.ok, domNoUnexpectedWrites: unexpectedTexts.length === 0,
+          bStateStable: bStable, requireBPending: !!replacement,
+        });
+        issues.push(...proof.issues);
+        proof.issues = [...new Set(issues)];
+        proof.ok = proof.issues.length === 0;
+        return {
+          probe: aAfterRelease.probe, gate: gateForValidation, guard, operations: allOperations,
+          acceptedAIds: aAccepted, postInvalidation, lateLifecycle, batchSettlements,
+          domAfterAReply, bEvidence, bStillPending, bStable, validation: proof,
+        };
+      };
+
+      if (staleSuccessProbe !== 'replacement') {
+        const schedulerBeforeRelease = await evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+        const beforeDrain = await until(async () => {
+          const worker = await snapshotWorker(sessionIdA, [capturedMessage.messageId], [sessionIdA]);
+          const validation = validateRuntimeResources(worker.resources, {
+            terminalMessageIds: [capturedMessage.messageId], sessionIds: [sessionIdA], final: true,
+          });
+          return worker.probe.ledger.pending === 0 && !worker.probe.providerRoots.some(root => root.status === 'pending') && validation.ok
+            ? { worker, validation } : null;
+        }, 15_000);
+        const workerBeforeRelease = beforeDrain.worker;
+        const resourceValidation = beforeDrain.validation;
+        const aProof = await releaseAndProveA();
+        const schedulerAfterRelease = await evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+        const afterDrain = await until(async () => {
+          const worker = await snapshotWorker(sessionIdA, [capturedMessage.messageId], [sessionIdA]);
+          const validation = validateRuntimeResources(worker.resources, {
+            terminalMessageIds: [capturedMessage.messageId], sessionIds: [sessionIdA], final: true,
+          });
+          return worker.probe.ledger.pending === 0 && !worker.probe.providerRoots.some(root => root.status === 'pending') && validation.ok
+            ? { worker, validation } : null;
+        }, 15_000);
+        const workerAfterRelease = afterDrain.worker;
+        const afterResources = afterDrain.validation;
+        const sourceDomValidation = validateSourceDom(aProof.domAfterAReply, `${staleSuccessProbe}-after-A-reply`);
+        if (!schedulerStateEquals(schedulerBeforeRelease, schedulerAfterRelease)) aProof.validation.issues.push('Stop/Restore scheduler state changed when stale A reply settled');
+        aProof.validation.issues.push(...resourceValidation.issues, ...afterResources.issues, ...sourceDomValidation.issues);
+        aProof.validation.ok = aProof.validation.issues.length === 0;
+        trial.staleSuccess.replyGate = { ...trial.staleSuccess.replyGate, afterRelease: aProof.probe, releaseOrder: aProof.gate.releaseOrder };
+        trial.staleSuccess.ownershipProof = {
+          ...aProof, guardDiagnostics: aProof.probe.guardDiagnostics,
+          bridgeGuard: { observed: false, reason: 'No direct Bridge guard instrumentation is installed; only the exact scheduler ownership guard is claimed.' },
+          schedulerBeforeRelease, schedulerAfterRelease,
+          workerBeforeRelease, workerAfterRelease,
+          resourceValidationBefore: resourceValidation, resourceValidationAfter: afterResources,
+          sourceDOMValidation: sourceDomValidation,
+        };
+        if (!aProof.validation.ok) throw new Error(`${staleSuccessProbe} stale-reply proof failed: ${aProof.validation.issues.join('; ')}`);
+        if (staleSuccessProbe === 'stop') {
+          const cleanupRestore = await sendCommand('page-restore');
+          if (!cleanupRestore?.success) throw new Error(formatCommandFailure('PAGE_RESTORE after stop-only stale-success proof', cleanupRestore));
+          trial.staleSuccess.restoreTerminal = await eventForSession(['page-restore-complete'], sessionIdA);
+        }
+        const noBFinalDrain = await until(async () => {
+          const [content, worker] = await Promise.all([
+            snapshotContent(undefined),
+            snapshotWorker(sessionIdA, [capturedMessage.messageId], [sessionIdA]),
+          ]);
+          const validation = validateRuntimeResources(worker.resources, {
+            terminalMessageIds: [capturedMessage.messageId], sessionIds: [sessionIdA], final: true,
+          });
+          return content.pendingOperations === 0 && worker.probe.ledger.pending === 0
+            && !worker.probe.providerRoots.some(root => root.status === 'pending')
+            && requestHandlerJobs.size === 0 && validation.ok
+            ? { content, worker, validation } : null;
+        }, 15_000);
+        const restored = await snapshotDom(`${staleSuccessProbe}-final-source`);
+        const finalSourceValidation = validateSourceDom(restored, `${staleSuccessProbe}-final-source`);
+        if (!finalSourceValidation.ok) throw new Error(finalSourceValidation.issues.join('; '));
+        if (staleSuccessProbe === 'restore') trial.staleSuccess.restoreTerminal = terminalEvent;
+        trial.staleSuccess.finalOwnership = { acceptedAIds: aProof.acceptedAIds, acceptedBIds: [], finalDOM: restored, validation: finalSourceValidation };
+        trial.rawDOM.original = originals;
+        trial.rawDOM.translated = domBeforeInvalidation.dom;
+        trial.rawDOM.restored = restored.dom;
+        trial.staleSuccess.finalResources = { before: workerBeforeRelease.resources, after: noBFinalDrain.worker.resources, validation: noBFinalDrain.validation };
+        trial.staleSuccess.networkProof = trial.requests.filter(request => request.category === 'provider-translation').map(request => ({
+          batchSize: request.batchSize, batchTexts: request.batchTexts, response: request.response,
+          correlation: request.cancellationCorrelation, correlationIssues: request.cancellationCorrelationIssues,
+        }));
+        trial.status = 'passed';
+        return trial;
+      }
+
+      cancellationControl.replacementSessionId = null;
+      await evaluate(chrome, pageSession, "window.__pageTranslationBenchmark.translationPrefix='fixture translation B:'", contentContext);
+      const startBResponse = await sendCommand('page-translate', {
+        provider: 'edge', targetLanguage: 'fr', isAuto: true, preserveAcceptedTranslations: true,
+      });
+      if (!startBResponse?.success) throw new Error(formatCommandFailure('PAGE_TRANSLATE replacement B', startBResponse));
+      const sessionIdB = sessionIdFromStart(startBResponse);
+      if (!sessionIdB || sessionIdB === sessionIdA) throw new Error('Replacement B must have a trusted distinct session ID.');
+      trial.staleSuccess.sessionB = sessionIdB;
+      const startB = await acceptedLifecycle('page-translate-start', sessionIdB);
+      await captureReplyProbeSnapshot('trusted-B-start');
+      const managerEvents = await evaluate(chrome, pageSession,
+        'window.__pageTranslationBenchmark.events.filter(event=>event.name==="manager.translatePage.entry")', contentContext, false);
+      if (managerEvents.at(-1)?.isAuto !== true) throw new Error('Replacement B did not use the normal auto/preserve start path.');
+      const heldBLock = await until(() => {
+        const held = cancellationControl.heldRequests
+          .filter(item => item.pageSessionId === sessionIdB && !item.record.released).map(item => item.record)[0] ?? null;
+        return held && cancellationControl.replacementSessionId === sessionIdB
+          ? { held, lockedSessionId: cancellationControl.replacementSessionId, lockedAt: now() }
+          : null;
+      }, 45_000);
+      const heldB = heldBLock.held;
+      if (cancellationControl.replacementSessionId !== sessionIdB || heldB.pageSessionId !== sessionIdB) {
+        throw new Error('B held Fetch did not match the exact trusted replacement session ID.');
+      }
+      trial.staleSuccess.replacementOwnerLock = {
+        sessionId: heldBLock.lockedSessionId,
+        observedAt: heldBLock.lockedAt,
+        assignmentEvidence: 'first matching provider root was correlated to accepted B lifecycle and current B scheduler before Fetch was held',
+        heldFetch: { requestId: heldB.requestId, networkId: heldB.networkId, targetSessionId: heldB.sessionId, targetId: heldB.targetId },
+      };
+      await captureReplyProbeSnapshot('B-first-provider-fetch-held');
+      const workerAtB = await snapshotWorker(sessionIdB, [capturedMessage.messageId, heldB.batchMessageId], [sessionIdA, sessionIdB]);
+      const rootB = workerAtB.probe.providerRoots.find(root => root.messageId === heldB.batchMessageId && root.sessionId === sessionIdB);
+      const controllerB = workerAtB.probe.controllers.find(controller => controller.messageId === heldB.batchMessageId && controller.sessionId === sessionIdB);
+      const trustedBStart = await acceptedLifecycle('page-translate-start', sessionIdB);
+      if (!heldB || heldB.controllerAbortedAtPause !== false || heldB.providerRootStatusAtPause !== 'pending'
+          || rootB?.status !== 'pending' || controllerB?.aborted !== false || !trustedBStart) {
+        throw new Error('B was not a distinct trusted active owner with its first real physical provider request held.');
+      }
+      const bFirstBatchIds = heldB.targetIds;
+      if (!Array.isArray(bFirstBatchIds) || bFirstBatchIds.length !== 25 || new Set(bFirstBatchIds).size !== 25
+          || bFirstBatchIds.some(id => !expectedIds.includes(id))) {
+        throw new Error('B first physical request is not 25 distinct known fixture IDs.');
+      }
+      const overlapAIds = bFirstBatchIds.filter(id => firstBatchIds.includes(id));
+      if (!overlapAIds.length) throw new Error('B first batch did not overlap any unaccepted A target, so it cannot challenge stale-write interference.');
+      trial.staleSuccess.replacementOverlap = { aFirstBatchIds: firstBatchIds, bFirstBatchIds, overlapIds: overlapAIds };
+      const bDiscoveryWait = trial.staleSuccess.bDiscoveryWait = { observations: [] };
+      const bDiscoveryCheckpoint = await until(async () => {
+        const [scheduler, content] = await Promise.all([
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+          snapshotContent(sessionIdB),
+        ]);
+        const validation = validateReplacementDiscoverySnapshot({
+          snapshot: scheduler,
+          sessionId: sessionIdB,
+          targetCount: fixtureConfig.targetCount,
+          firstBatchSize: bFirstBatchIds.length,
+          settlementOperations: content.operations,
+        });
+        const observation = { at: now(), scheduler, validation };
+        if (bDiscoveryWait.observations.length < 64) bDiscoveryWait.observations.push(observation);
+        else bDiscoveryWait.observations[bDiscoveryWait.observations.length - 1] = observation;
+        return validation.ok ? { scheduler, content, validation } : null;
+      }, 20_000);
+      trial.staleSuccess.bDiscoveryCheckpoint = bDiscoveryCheckpoint;
+      const bContentBeforeRelease = await snapshotContent(sessionIdB);
+      const bSchedulerBeforeRelease = await evaluate(chrome, pageSession,
+        'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+      const bResourcesBeforeRelease = workerAtB.resources;
+      const bResourceValidation = validateRuntimeResources(bResourcesBeforeRelease, {
+        activeMessageId: heldB.batchMessageId, terminalMessageIds: [capturedMessage.messageId], sessionIds: [sessionIdA, sessionIdB],
+      });
+      const bLeaseHeld = bResourcesBeforeRelease.lease?.activeOperationIds?.includes(heldB.batchMessageId) === true;
+      const bTrackedRequest = bResourcesBeforeRelease.service?.requests?.find(request => request.messageId === heldB.batchMessageId) ?? null;
+      trial.staleSuccess.bLeaseDiagnostic = {
+        fetchSessionId: heldB.sessionId,
+        pageSessionId: heldB.pageSessionId,
+        fetchTargetId: heldB.targetId,
+        fetchNetworkId: heldB.networkId,
+        providerMessageId: heldB.batchMessageId,
+        serviceRequest: bTrackedRequest,
+        leaseSnapshot: bResourcesBeforeRelease.lease ?? null,
+        exactMessageIdHeld: bLeaseHeld,
+      };
+      const aGateBeforeRelease = await evaluate(chrome, pageSession,
+        'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false);
+      if (aGateBeforeRelease?.gate?.status !== 'captured' || aGateBeforeRelease.gate.settled || !aGateBeforeRelease.gate.pending) {
+        throw new Error('A genuine successful reply was not still held before B ownership was established.');
+      }
+      if (!bLeaseHeld || !bResourceValidation.ok) {
+        throw new Error(`B runtime resource proof failed for exact provider message ${heldB.batchMessageId}: ${bResourceValidation.issues.join('; ') || `active lease IDs=${JSON.stringify(bResourcesBeforeRelease.lease?.activeOperationIds ?? null)}`}`);
+      }
+      await captureReplyProbeSnapshot('B-lease-validated-before-A-release');
+      const workerImmediatelyBeforeRelease = await snapshotWorker(sessionIdB,
+        [capturedMessage.messageId, heldB.batchMessageId], [sessionIdA, sessionIdB]);
+      const rootImmediatelyBeforeRelease = workerImmediatelyBeforeRelease.probe.providerRoots.find(root => root.messageId === heldB.batchMessageId && root.sessionId === sessionIdB);
+      const controllerImmediatelyBeforeRelease = workerImmediatelyBeforeRelease.probe.controllers.find(controller => controller.messageId === heldB.batchMessageId && controller.sessionId === sessionIdB);
+      const schedulerImmediatelyBeforeRelease = await evaluate(chrome, pageSession,
+        'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+      const resourcesImmediatelyBeforeRelease = validateRuntimeResources(workerImmediatelyBeforeRelease.resources, {
+        activeMessageId: heldB.batchMessageId, terminalMessageIds: [capturedMessage.messageId], sessionIds: [sessionIdA, sessionIdB],
+      });
+      const bSchedulerCurrentAtRelease = schedulerImmediatelyBeforeRelease?.translationSessionId === sessionIdB
+        && schedulerImmediatelyBeforeRelease?.isTranslated === true
+        && schedulerImmediatelyBeforeRelease?.sessionContextOwned === true
+        && Number.isFinite(schedulerImmediatelyBeforeRelease?.translatedCount)
+        && Number.isFinite(schedulerImmediatelyBeforeRelease?.failedCount)
+        && Number.isFinite(schedulerImmediatelyBeforeRelease?.totalTasks)
+        && Number.isFinite(schedulerImmediatelyBeforeRelease?.activeFlushes)
+        && Number.isInteger(schedulerImmediatelyBeforeRelease?.pendingSettlementCount)
+        && typeof schedulerImmediatelyBeforeRelease?.batchTimerActive === 'boolean'
+        && typeof schedulerImmediatelyBeforeRelease?.completionTimerActive === 'boolean'
+        && Array.isArray(schedulerImmediatelyBeforeRelease?.queueIds)
+        && Array.isArray(schedulerImmediatelyBeforeRelease?.activeBatchIds);
+      await captureReplyProbeSnapshot('immediately-before-A-release');
+      trial.staleSuccess.bImmediatelyBeforeARelease = {
+        root: rootImmediatelyBeforeRelease,
+        controller: controllerImmediatelyBeforeRelease,
+        schedulerAtFirstSnapshot: bSchedulerBeforeRelease,
+        schedulerImmediatelyBeforeRelease,
+        resourcesImmediatelyBeforeRelease: workerImmediatelyBeforeRelease.resources,
+        resourcesValidation: resourcesImmediatelyBeforeRelease,
+        schedulerOwnedAndInspectable: bSchedulerCurrentAtRelease,
+      };
+      if (rootImmediatelyBeforeRelease?.status !== 'pending' || controllerImmediatelyBeforeRelease?.aborted !== false
+          || !bSchedulerCurrentAtRelease || !resourcesImmediatelyBeforeRelease.ok) {
+        throw new Error(`B owner/resource snapshot invalid immediately before A release: ${JSON.stringify({ rootStatus: rootImmediatelyBeforeRelease?.status ?? null, controllerAborted: controllerImmediatelyBeforeRelease?.aborted ?? null, schedulerOwnedAndInspectable: bSchedulerCurrentAtRelease, issues: resourcesImmediatelyBeforeRelease.issues })}`);
+      }
+      trial.staleSuccess.bActiveAtARelease = {
+        start: startB,
+        heldRequest: heldB,
+        root: rootB,
+        controller: controllerB,
+        trustedStart: trustedBStart,
+        schedulerAtFirstSnapshot: bSchedulerBeforeRelease,
+        scheduler: schedulerImmediatelyBeforeRelease,
+        content: bContentBeforeRelease,
+        resourcesAtFirstSnapshot: bResourcesBeforeRelease,
+        resourceValidationAtFirstSnapshot: bResourceValidation,
+        immediatelyBeforeRelease: {
+          root: rootImmediatelyBeforeRelease,
+          controller: controllerImmediatelyBeforeRelease,
+          scheduler: schedulerImmediatelyBeforeRelease,
+          resources: workerImmediatelyBeforeRelease.resources,
+          resourceValidation: resourcesImmediatelyBeforeRelease,
+        },
+      };
+      const aProof = await releaseAndProveA({
+        replacement: { sessionId: sessionIdB, held: heldB, messageId: heldB.batchMessageId, worker: workerImmediatelyBeforeRelease, scheduler: schedulerImmediatelyBeforeRelease },
+      });
+      trial.staleSuccess.replyGate = { ...trial.staleSuccess.replyGate, afterRelease: aProof.probe, releaseOrder: aProof.gate.releaseOrder };
+      trial.staleSuccess.ownershipProof = {
+        ...aProof,
+        guardDiagnostics: aProof.probe.guardDiagnostics,
+        bridgeGuard: { observed: false, reason: 'No direct Bridge guard instrumentation is installed; only the exact scheduler ownership guard is claimed.' },
+        sourceRootA: rootA, physicalA,
+      };
+      if (!aProof.validation.ok) throw new Error(`Stale successful reply ownership gate failed: ${aProof.validation.issues.join('; ')}`);
+
+      const heldControl = cancellationControl.heldRequests.find(item => item.record === heldB);
+      if (!heldControl) throw new Error('B held Fetch is not owned by trial cleanup lifecycle.');
+      cancellationControl.releaseReplacement = true;
+      for (const control of cancellationControl.heldRequests.filter(item => item.pageSessionId === sessionIdB && !item.record.released)) {
+        const request = trial.requests.find(item => item.heldFetch === control.record);
+        await control.reservation.release('fulfill', {
+          body: mapStaleSuccessResponse(request.batchTexts, sessionIdB, sessionIdA, sessionIdB),
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+        });
+        control.record.released = true;
+      }
+      await eventForSession(['page-translate-complete', 'page-translate-idle'], sessionIdB);
+      const bTerminal = await until(async () => {
+        const content = await snapshotContent(sessionIdB);
+        const accepted = content.operations.filter(operation => operation.kind === 'scheduler.settlement'
+          && operation.sessionId === sessionIdB && operation.outcome === 'accepted' && operation.changed === true).map(operation => operation.id);
+        return accepted.length === expectedIds.length ? { content, accepted } : null;
+      }, 60_000);
+      const finalDom = await snapshotDom('after-B-complete');
+      const expectedTranslated = new Map(fixtureConfig.targets.map(target => [target.id, `\u200efixture translation B: ${target.source}`]));
+      const domIssues = finalDom.dom.flatMap(([id, text]) => expectedTranslated.get(id) === text ? [] : [`${id} did not contain B-prefixed text`]);
+      const acceptedCounts = new Map();
+      for (const id of bTerminal.accepted) acceptedCounts.set(id, (acceptedCounts.get(id) ?? 0) + 1);
+      const bIssues = expectedIds.filter(id => acceptedCounts.get(id) !== 1).map(id => `${id} accepted ${acceptedCounts.get(id) ?? 0} times by B`);
+      const aAfterB = bTerminal.content.operations.filter(operation => operation.kind === 'scheduler.settlement'
+        && operation.sessionId === sessionIdA && operation.outcome === 'accepted' && operation.changed === true).map(operation => operation.id);
+      if (domIssues.length || bIssues.length || aAfterB.length || finalDom.dom.length !== fixtureConfig.targetCount) {
+        throw new Error(`Final A/B ownership invalid: ${[...domIssues, ...bIssues, ...aAfterB.map(id => `A accepted ${id}`)].join('; ')}`);
+      }
+      trial.staleSuccess.finalOwnership = {
+        acceptedAIds: aAfterB,
+        acceptedBIds: bTerminal.accepted,
+        finalDOM: finalDom,
+        validation: { ok: true, issues: [] },
+      };
+      const restoreResponse = await sendCommand('page-restore');
+      if (!restoreResponse?.success) throw new Error(formatCommandFailure('PAGE_RESTORE after stale-success B', restoreResponse));
+      trial.staleSuccess.restoreTerminal = await eventForSession(['page-restore-complete'], sessionIdB);
+      const restored = await snapshotDom('after-B-restore');
+      const restoreIssues = restored.dom.flatMap(([id, text]) => originalById.get(id) === text ? [] : [`${id} was not restored to its source`]);
+      const initialAttributes = new Map(trial.staleSuccess.initialDOMMetadata.map(target => [target.id, target.attributes]));
+      for (const target of restored.metadata) {
+        if (JSON.stringify([...target.attributes].sort(([a], [b]) => a.localeCompare(b)))
+            !== JSON.stringify([...(initialAttributes.get(target.id) ?? [])].sort(([a], [b]) => a.localeCompare(b)))) {
+          restoreIssues.push(`${target.id} attributes were not restored exactly`);
+        }
+      }
+      const finalDrain = await until(async () => {
+        const [worker, content] = await Promise.all([
+          snapshotWorker(sessionIdB, [capturedMessage.messageId, heldB.batchMessageId], [sessionIdA, sessionIdB]),
+          snapshotContent(undefined),
+        ]);
+        const validation = validateRuntimeResources(worker.resources, {
+          terminalMessageIds: [capturedMessage.messageId, heldB.batchMessageId], sessionIds: [sessionIdA, sessionIdB], final: true,
+        });
+        return worker.probe.ledger.pending === 0 && content.pendingOperations === 0
+          && !worker.probe.providerRoots.some(root => root.status === 'pending')
+          && requestHandlerJobs.size === 0 && validation.ok
+          ? { worker, content, validation } : null;
+      }, 15_000);
+      const workerFinal = finalDrain.worker;
+      const runtimeResources = finalDrain.validation;
+      const resourceIssues = runtimeResources.issues;
+      if (restored.dom.length !== fixtureConfig.targetCount || restoreIssues.length) {
+        throw new Error(`Final Restore failed: ${restoreIssues.join('; ')}`);
+      }
+      trial.staleSuccess.finalResources = { worker: workerFinal, validation: { ok: resourceIssues.length === 0, issues: resourceIssues } };
+      if (resourceIssues.length) throw new Error(`Runtime resources did not drain: ${resourceIssues.join('; ')}`);
+      trial.rawDOM.original = originals;
+      trial.rawDOM.translated = finalDom.dom;
+      trial.rawDOM.restored = restored.dom;
+      trial.staleSuccess.networkProof = trial.requests.filter(request => request.category === 'provider-translation').map(request => ({
+        batchSize: request.batchSize, batchTexts: request.batchTexts, response: request.response,
+        correlation: request.cancellationCorrelation, correlationIssues: request.cancellationCorrelationIssues,
+      }));
+      const failedProviderResponse = trial.requests.find(request => request.category === 'provider-translation'
+        && !request.lateCancelledA && request.response?.status !== 200);
+      if (failedProviderResponse) throw new Error('A or B provider request did not receive a fixture HTTP 200 response.');
+      if (trial.staleSuccess.observationErrors.length) throw new Error(`Stale-success instrumentation had errors: ${JSON.stringify(trial.staleSuccess.observationErrors)}`);
+      if (trial.requests.some(request => request.category === 'blocked')) throw new Error('Unexpected external request blocked during stale-success probe.');
+      trial.staleSuccess.cleanup.pendingFetches = cancellationControl.heldRequests.filter(item => !item.record.handlerSettled).length;
+      if (trial.staleSuccess.cleanup.pendingFetches) throw new Error('Stale-success probe ended with pending held Fetch handlers.');
+      trial.status = 'passed';
+      return trial;
+    }
 
     if (cancellationProbe) {
       const sourceToId = new Map(fixtureConfig.targets.map(target => [target.source, target.id]));
@@ -796,6 +1507,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         await control.reservation.release(action, detail);
         await until(() => held.handlerSettled && held.releaseOutcome ? held : null, 10_000);
         held.networkCanceled = trial.cancellation.networkEvents.some(event => event.method === 'Network.loadingFailed'
+          && event.sessionId === held.sessionId && event.targetId === held.targetId
           && event.params?.requestId === held.networkId && event.params?.canceled === true);
         return held;
       };
@@ -1139,7 +1851,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       trial.cancellation.networkProof = heldARequests.map(request => ({
         requestId: request.requestId, networkId: request.networkId,
         releaseOutcome: request.releaseOutcome,
-        events: trial.cancellation.networkEvents.filter(event => event.params?.requestId === request.networkId),
+        events: trial.cancellation.networkEvents.filter(event => event.sessionId === request.sessionId
+          && event.targetId === request.targetId && event.params?.requestId === request.networkId),
       }));
       if (!quiescenceValidation.ok) throw new Error(`Cancellation quiescence gate failed: ${quiescenceValidation.issues.join('; ')}`);
 
@@ -1414,6 +2127,98 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     trial.error = { name: error.name, message: error.message, stack: error.stack };
   } finally {
     trial.stage ??= 'cleanup';
+    if (staleSuccessProbe && chrome && pageSession && contentContext) {
+      const sendCleanupCommand = async (action, reason) => {
+        const sentAt = now();
+        const message = { action };
+        const response = await evaluate(chrome, pageSession,
+          `chrome.runtime.sendMessage(${JSON.stringify(message)})`, contentContext);
+        const command = { action, reason: reason ?? null, sentAt, respondedAt: now(), response };
+        trial.staleSuccess.cleanup.commands ??= [];
+        trial.staleSuccess.cleanup.commands.push(command);
+        return response;
+      };
+      const readReplyProbeSnapshot = async () => {
+        try {
+          const snapshot = await evaluate(chrome, pageSession,
+            'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false);
+          return snapshot && typeof snapshot === 'object' && Object.prototype.hasOwnProperty.call(snapshot, 'gate')
+            ? { available: true, snapshot }
+            : { available: false, snapshot: null, error: 'probe returned no snapshot object' };
+        } catch (error) { return { available: false, snapshot: null, error: error.message }; }
+      };
+      const capturedAId = async () => {
+        const probe = trial.staleSuccess.sessionA || trial.sessionId
+          ? null : await readReplyProbeSnapshot();
+        const evidence = resolveCleanupSessionEvidence({
+          knownSessionId: trial.staleSuccess.sessionA ?? trial.sessionId ?? null,
+          snapshotAvailable: probe?.available,
+          replySnapshot: probe?.snapshot,
+          pageStartAttempted: !!trial.timestamps.translationCommand,
+        });
+        if (!evidence.ok) throw new Error(`${evidence.issues.join('; ')}${probe?.error ? ` (${probe.error})` : ''}`);
+        return evidence.sessionId;
+      };
+      const confirmedAInvalidation = async () => {
+        let sessionIdA;
+        try { sessionIdA = await capturedAId(); }
+        catch (error) { return { ok: false, event: null, issues: [error.message] }; }
+        if (!sessionIdA) return { ok: true, event: null, issues: [], noGatePendingProof: true };
+        const read = async () => {
+          const state = await evaluate(chrome, pageSession,
+            `window.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(sessionIdA)})`, contentContext, false);
+          return validateCleanupInvalidation({ sessionId: sessionIdA, operations: state?.operations });
+        };
+        try { return await until(async () => { const result = await read(); return result.ok ? result : null; }, 3_000); }
+        catch { return read().catch(error => ({ ok: false, event: null, issues: [error.message] })); }
+      };
+
+      const cleanupAId = await capturedAId().catch(error => {
+        trial.cleanupErrors.push(`Stale-success cleanup session evidence unavailable: ${error.message}`);
+        return null;
+      });
+      const owner = trial.staleSuccess.sessionB ?? cleanupAId;
+      const teardown = await teardownSuccessfulReplyGate({
+        preferStopFirst: trial.status !== 'passed' && !!cleanupAId,
+        restoreNeeded: !!cleanupAId && !trial.staleSuccess.restoreTerminal,
+        stop: () => sendCleanupCommand('page-translate-stop-auto', 'harness-invalidation-cleanup'),
+        restore: async () => {
+          if (!owner) return { success: false, terminalObserved: false };
+          const response = await sendCleanupCommand('page-restore', 'harness-cleanup');
+          trial.staleSuccess.cleanup.restoreAttempt = { response, sessionId: owner };
+          if (!response?.success) return { success: false, terminalObserved: false };
+          const terminal = await until(async () => {
+            const events = await evaluate(chrome, pageSession, 'window.__benchEvents??[]', contentContext, false);
+            return events.find(event => isSessionEvent(event, 'page-restore-complete', owner)) ?? null;
+          }, 5_000);
+          trial.staleSuccess.restoreTerminal = terminal;
+          return { success: true, terminalObserved: !!terminal };
+        },
+        confirmInvalidation: confirmedAInvalidation,
+        openGate: async () => {
+          trial.staleSuccess.cleanup.replyProbeSnapshotBeforeClose = await evaluate(chrome, pageSession,
+            'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false);
+          trial.staleSuccess.cleanup.gateClosed = await evaluate(chrome, pageSession,
+            `window.__pageTranslationBenchmark.closeSuccessfulReplyProbe('harness-cleanup')`, contentContext);
+          trial.staleSuccess.cleanup.contentProbeClosed = trial.staleSuccess.cleanup.gateClosed;
+        },
+        disposeContext: async () => {
+          if (!chrome) throw new Error('Chrome context is unavailable for fail-closed disposal');
+          await chrome.close();
+          trial.chromeStderr = chrome.metadata.stderr ?? null;
+          staleContextDisposed = true;
+          trial.staleSuccess.cleanup.contextDisposedBeforeGateOpen = true;
+        },
+      });
+      trial.staleSuccess.cleanup.gateDisposition = teardown;
+      trial.cleanupErrors.push(...teardown.errors.map(error => `Stale-success cleanup: ${error}`));
+      if (!teardown.safeToOpen) {
+        trial.cleanupErrors.push('Reply gate was not opened: Chrome context was disposed because A invalidation could not be confirmed.');
+        if (trial.staleSuccess.rawMutationCaptureStarted && !trial.staleSuccess.rawMutationEvidence) {
+          trial.cleanupErrors.push('Raw DOM mutation evidence could not be drained before unsafe-context disposal.');
+        }
+      }
+    }
     if (cancellationControl) {
       try {
         const requestCleanup = await cancellationControl.requestLifecycle.closeAndDrain({
@@ -1426,19 +2231,76 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           if (failures.length) throw new AggregateError(failures.map(message => new Error(message)), `Fetch.disable failed for ${failures.length} target(s).`);
         },
         });
-        trial.cancellation.cleanup.requestLifecycle = requestCleanup;
-        trial.cancellation.cleanup.heldFetches = requestCleanup.reservations;
+        const evidence = trial.cancellation ?? trial.staleSuccess;
+        evidence.cleanup.requestLifecycle = requestCleanup;
+        evidence.cleanup.heldFetches = requestCleanup.reservations;
         trial.cleanupErrors.push(...requestCleanup.errors.map(error => `Cancellation request cleanup: ${error}`));
         try { await until(() => requestHandlerJobs.size === 0 ? true : null, 8_000); }
         catch (error) { trial.cleanupErrors.push(`Tracked Fetch request callbacks did not drain before Chrome close: ${error.message}`); }
-        const diagnostics = promoteRequestDiagnostics(trial);
-        trial.cancellation.cleanup.diagnosticGate = diagnostics;
+        if (staleSuccessProbe && !staleContextDisposed && chrome && workerSession && pageSession && contentContext) {
+          try {
+            const messageIdA = trial.staleSuccess.replyGate?.snapshot?.capturedMessage?.messageId ?? null;
+            const messageIdB = trial.staleSuccess.bActiveAtARelease?.heldRequest?.batchMessageId ?? null;
+            const terminalMessageIds = [messageIdA, messageIdB].filter(Boolean);
+            const sessionIds = [trial.staleSuccess.sessionA, trial.staleSuccess.sessionB].filter(Boolean);
+            if (trial.staleSuccess.rawMutationCaptureStarted && !messageIdA) throw new Error('A request ID is unavailable for final runtime resource drain.');
+            const [contentDrain, workerDrain, replyProbeSnapshot, runtimeDrain] = await until(async () => {
+              const [content, worker, probe, resources] = await Promise.all([
+                evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.cancellationSnapshot()', contentContext, false),
+                evaluate(chrome, workerSession, 'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false),
+                evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false),
+                evaluate(chrome, workerSession,
+                  `globalThis.__pageTranslationBenchmark.resourceSnapshot(${JSON.stringify(terminalMessageIds)},${JSON.stringify(sessionIds)})`, undefined, false),
+              ]);
+              const runtimeValidation = trial.staleSuccess.rawMutationCaptureStarted
+                ? validateRuntimeResources(resources, { terminalMessageIds, sessionIds, final: true })
+                : { ok: true, issues: [] };
+              return content?.pendingOperations === 0 && worker?.ledger?.pending === 0
+                && !worker?.providerRoots?.some(root => root.status === 'pending')
+                && (!probe || (probe.wrappersRestored === true && (!probe.gate || probe.gate.pending === false)))
+                && (!trial.staleSuccess.rawMutationCaptureStarted || runtimeValidation.ok)
+                && requestHandlerJobs.size === 0
+                ? [content, worker, probe, { resources, validation: runtimeValidation }] : null;
+            }, 8_000);
+            trial.staleSuccess.cleanup.promiseDrain = {
+              content: contentDrain, worker: workerDrain, replyProbeSnapshot,
+              gate: replyProbeSnapshot?.gate ?? null, runtime: runtimeDrain, ok: true,
+            };
+            if (replyProbeSnapshot?.gate && ['timed-out', 'failed'].includes(replyProbeSnapshot.gate.status)) {
+              trial.cleanupErrors.push(`Successful reply gate ended in ${replyProbeSnapshot.gate.status}: ${replyProbeSnapshot.gate.error ?? 'no error detail'}`);
+            }
+            if (trial.staleSuccess.rawMutationCaptureStarted && !trial.staleSuccess.rawMutationEvidence) {
+              const evidence = await evaluate(chrome, pageSession,
+                'window.__pageTranslationBenchmark.finishSuccessfulReplyMutationCapture()', contentContext);
+              const validation = validateRawDOMMutationEvidence({ evidence, targets: trial.fixture.targets, mode: staleSuccessProbe });
+              trial.staleSuccess.rawMutationEvidence = evidence;
+              trial.staleSuccess.rawMutationValidation = validation;
+              trial.staleSuccess.rawMutationCaptureComplete = true;
+              trial.staleSuccess.finalResourceDrain = runtimeDrain;
+              if (!validation.ok) trial.cleanupErrors.push(`Stale-success teardown raw DOM evidence failed: ${validation.issues.join('; ')}`);
+            } else {
+              await evaluate(chrome, pageSession,
+                'window.__pageTranslationBenchmark.closeSuccessfulReplyMutationObserver()', contentContext);
+            }
+          } catch (error) {
+            trial.staleSuccess.cleanup.promiseDrain = { ok: false, error: error.message };
+            trial.cleanupErrors.push(`Stale-success content/worker promises did not drain: ${error.message}`);
+          }
+        } else if (staleSuccessProbe && staleContextDisposed) {
+          trial.cleanupErrors.push('Raw DOM/gate drain unavailable because the unsafe live context was disposed before gate release.');
+        }
+        const diagnostics = cancellationProbe
+          ? promoteRequestDiagnostics(trial)
+          : { ok: evidence.observationErrors.length === 0 && (trial.transportErrors?.length ?? 0) === 0,
+            observationErrors: evidence.observationErrors, transportErrors: trial.transportErrors ?? [] };
+        evidence.cleanup.diagnosticGate = diagnostics;
+        if (!diagnostics.ok) trial.cleanupErrors.push('Stale-success request/transport diagnostics were incomplete.');
       } catch (error) {
         const message = `Cancellation request cleanup helper failed: ${error?.message ?? String(error)}`;
-        trial.cancellation.cleanup.requestLifecycle = { ok: false, errors: [message], closing: cancellationControl.requestLifecycle.closing };
+        (trial.cancellation ?? trial.staleSuccess).cleanup.requestLifecycle = { ok: false, errors: [message], closing: cancellationControl.requestLifecycle.closing };
         trial.cleanupErrors.push(message);
       }
-      if (!trial.cancellation.restoreTerminal && trial.cancellation.sessionA && chrome && pageSession && contentContext) {
+      if (cancellationProbe && !trial.cancellation.restoreTerminal && trial.cancellation.sessionA && chrome && pageSession && contentContext) {
         try {
           const owner = trial.cancellation.sessionB ?? trial.cancellation.sessionA;
           const response = await evaluate(chrome, pageSession,
@@ -1456,11 +2318,23 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         }
       }
     }
+    if (staleSuccessProbe && !staleContextDisposed && chrome && pageSession && contentContext
+        && trial.staleSuccess.rawMutationCaptureStarted && !trial.staleSuccess.rawMutationEvidence) {
+      try {
+        const evidence = await evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.finishSuccessfulReplyMutationCapture()', contentContext);
+        const validation = validateRawDOMMutationEvidence({ evidence, targets: trial.fixture.targets, mode: staleSuccessProbe });
+        trial.staleSuccess.rawMutationEvidence = evidence;
+        trial.staleSuccess.rawMutationValidation = validation;
+        trial.cleanupErrors.push('Raw DOM observer stopped without proof that all content/worker continuations drained.');
+        if (!validation.ok) trial.cleanupErrors.push(`Stale-success teardown raw DOM evidence failed: ${validation.issues.join('; ')}`);
+      } catch (error) { trial.cleanupErrors.push(`Stale-success raw DOM evidence could not drain: ${error.message}`); }
+    }
     const cleanups = [
       async () => requestUnsubscribe?.(),
       async () => eventUnsubscribe?.(),
       async () => pageEventUnsubscribe?.(),
-      async () => networkEventUnsubscribe?.(),
+      async () => { await Promise.all([...networkEventUnsubscribes.values()].map(unsubscribe => unsubscribe())); },
       async () => { if (chrome) { const instance = chrome; await instance.close(); trial.chromeStderr = instance.metadata.stderr ?? null; } },
       async () => { if (fixture?.server.listening) await new Promise((resolveClose, reject) => fixture.server.close(error => error ? reject(error) : resolveClose())); },
     ];
@@ -1511,7 +2385,7 @@ async function runRecordedTrial(options) {
 
 try {
   if (!requestedModes.length || requestedModes.some(mode => !['legacy', 'sliced', 'viewport'].includes(mode))) throw new TypeError(`Unsupported BENCH_MODES: ${requestedModes.join(',')}`);
-  if (!cancellationProbes.length) {
+  if (!isolatedProbes.length) {
     validateSampleCount(samples);
     if (!Number.isInteger(warmups) || warmups < 1 || warmups > 3) throw new TypeError('BENCH_WARMUPS must be 1, 2, or 3.');
   }
@@ -1556,6 +2430,43 @@ try {
       reason: 'The probes use real controller cancellation and held Fetch requests, but do not fabricate a successful late provider response. Per-case Fetch release outcome and provider-root/physical-promise settlement classify whether the stale-success guard was exercised.',
     };
     harness.status = harness.cancellationGate.passed ? 'passed' : 'failed';
+  } else if (staleSuccessProbes.length) {
+    harness.command = `BENCH_STALE_SUCCESS_PROBES=${staleSuccessProbes.join(',')} BENCH_MODES=sliced BENCH_SCENARIOS=early-visible node scripts/dev/page-translation-e2e-benchmark/run.mjs`;
+    harness.warmups = 0;
+    harness.measuredSamples = 0;
+    harness.successfulReplyExecutionPlan = {
+      mode: 'sliced', scenario: 'early-visible', cases: staleSuccessProbes.length,
+      warmups: 0, performanceSamples: 0, performanceAggregation: false,
+      perCase: 'A genuine successful safeSendMessage result is gated after production send/timeout/cancellation checks; B first HTTP request remains held while A reply is released.',
+    };
+    harness.comparisonOrdering = 'Dedicated Sliced-only successful stale-reply correctness probes; no performance aggregation or mode comparison is performed.';
+    const slicedOutput = await compileMode('sliced');
+    await runNetworkGuardNegativeProbe(slicedOutput, 'sliced');
+    const staleSuccessOutput = await compileMode('sliced', { successfulReplyGate: true });
+    for (const [index, probe] of staleSuccessProbes.entries()) {
+      const caseRecord = { probe, ordinal: index + 1, status: 'running', resultIndex: harness.results.length };
+      harness.nonPerformanceProbes.successfulStaleReply.cases.push(caseRecord);
+      try {
+        const trial = await runRecordedTrial({
+          mode: 'sliced', scenario: 'early-visible', ordinal: index + 1,
+          phase: 'successful-stale-reply-probe', extensionPath: staleSuccessOutput,
+          fixtureConfig: createFixture('early-visible'), staleSuccessProbe: probe,
+        });
+        caseRecord.status = trial.status;
+        caseRecord.sessionA = trial.staleSuccess?.sessionA ?? null;
+        caseRecord.sessionB = trial.staleSuccess?.sessionB ?? null;
+      } catch (error) {
+        caseRecord.status = 'failed';
+        caseRecord.error = error.message;
+        throw error;
+      }
+    }
+    harness.successfulStaleReplyGate = {
+      passed: harness.nonPerformanceProbes.successfulStaleReply.cases.every(item => item.status === 'passed'),
+      cases: harness.nonPerformanceProbes.successfulStaleReply.cases,
+    };
+    harness.comparisonGate = { comparisonsAllowed: false, reason: 'Not run for successful stale-reply probes.' };
+    harness.status = harness.successfulStaleReplyGate.passed ? 'passed' : 'failed';
   } else {
     harness.comparisonOrdering = 'Legacy warmups qualify first. Every selected mode then receives complete discarded warmups before measured rounds; measured mode order is a deterministic cyclic rotation of all selected modes by scenario index plus zero-based measured ordinal.';
     const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario) }));
@@ -1643,7 +2554,7 @@ try {
   }));
   if (harness.cleanupErrors.length) harness.status = 'failed';
   harness.primaryError = primaryError?.message ?? null;
-  if (!cancellationProbes.length) {
+  if (!isolatedProbes.length) {
     let finalBuildParity = harness.buildParity;
     try { finalBuildParity = validateBuildParity(harness.builds, modes); }
     catch (error) { finalBuildParity = { ok: false, issues: [error.message] }; }

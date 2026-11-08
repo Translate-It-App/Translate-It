@@ -7,6 +7,10 @@ import { PAGE_TRANSLATION_SLICED_DISCOVERY, PAGE_TRANSLATION_VIEWPORT_FIRST_DISC
 import { captureViewportWindow, installCallThrough, installPrimitiveAdmissionObserver } from './trace.mjs';
 import { drainAndDisconnectMeasurementObservers, groupMutationRecords, isDuplicateAcceptedMutation, trackAcceptedTarget } from './measurement-lifecycle.mjs';
 import { createCancellationLedger, installCancellationRuntimeMessageObserver, installTrustedLifecycleObserver, sessionIdForTranslationContext } from './cancellation-probes.mjs';
+import { createRawDOMMutationEvidence, installSuccessfulReplyProbe } from './successful-reply-probes.mjs';
+
+let successfulReplyMutationObserver = null;
+let successfulReplyMutationEvidence = null;
 
 const trace = {
   entry: 'src/core/content-scripts/index-main.js',
@@ -23,12 +27,94 @@ const trace = {
     slicedDiscoveryEnabled: PAGE_TRANSLATION_SLICED_DISCOVERY,
     viewportFirstDiscoveryEnabled: PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY,
   },
+  translationPrefix: 'fixture translation:',
   cancellationLedger: null,
   cancellationSessions: new Map(),
   cancellationSessionOwners: new WeakMap(),
   cancellationContextOwners: new Map(),
   cancellationAcceptedTransitions: new Map(),
   cancellationInstrumentationErrors: [],
+  successfulReplyProbe: null,
+  enableSuccessfulReplyProbe(timeoutMs = 10_000) {
+    if (this.successfulReplyProbe) return { enabled: true, reused: true };
+    if (typeof PageTranslationScheduler.prototype?._executeBatchRequest !== 'function'
+        || typeof PageTranslationScheduler.prototype?._ownsFlushSession !== 'function') {
+      return { enabled: false, reason: 'Production PageTranslationScheduler prototype methods are unavailable' };
+    }
+    try {
+      this.successfulReplyProbe = installSuccessfulReplyProbe({ scheduler: PageTranslationScheduler.prototype, timeoutMs });
+      successfulReplyMutationEvidence = createRawDOMMutationEvidence();
+      successfulReplyMutationObserver = new MutationObserver(records => successfulReplyMutationEvidence.capture(records, {
+        targetIdForNode: benchmarkTargetId,
+      }));
+      if (!document.body) throw new Error('Fixture body is unavailable for raw DOM observation');
+      successfulReplyMutationObserver.observe(document.body, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
+      return { enabled: true };
+    } catch (error) {
+      successfulReplyMutationObserver?.disconnect();
+      successfulReplyMutationObserver = null;
+      this.successfulReplyProbe?.close('mutation-observer-install-failed');
+      this.successfulReplyProbe = null;
+      return { enabled: false, reason: error.message };
+    }
+  },
+  interceptSchedulerBatchReply(message, originalPromise) {
+    return this.successfulReplyProbe?.interceptSchedulerBatchReply(message, originalPromise) ?? originalPromise;
+  },
+  beginSuccessfulReplyMutationCapture() {
+    if (!successfulReplyMutationObserver || !successfulReplyMutationEvidence) throw new Error('Raw fixture mutation observer is unavailable');
+    successfulReplyMutationObserver.takeRecords();
+    successfulReplyMutationEvidence.begin();
+  },
+  finishSuccessfulReplyMutationCapture() {
+    if (!successfulReplyMutationObserver || !successfulReplyMutationEvidence) return { available: false, active: false, transitions: [], errors: ['Raw fixture mutation observer is unavailable'] };
+    const evidence = successfulReplyMutationEvidence.finish(successfulReplyMutationObserver.takeRecords(), { targetIdForNode: benchmarkTargetId });
+    successfulReplyMutationObserver.disconnect();
+    successfulReplyMutationObserver = null;
+    return evidence;
+  },
+  closeSuccessfulReplyMutationObserver() {
+    successfulReplyMutationObserver?.disconnect();
+    successfulReplyMutationObserver = null;
+  },
+  armSuccessfulReplyProbe() { this.successfulReplyProbe?.arm(); },
+  releaseSuccessfulReplyProbe() { return this.successfulReplyProbe?.release() ?? false; },
+  closeSuccessfulReplyProbe(reason) {
+    return this.successfulReplyProbe?.close(reason) ?? false;
+  },
+  successfulReplySnapshot() { return this.successfulReplyProbe?.snapshot() ?? null; },
+  pageSessionSnapshot() {
+    const manager = FeatureManager.getInstance().getFeatureHandler('pageTranslation');
+    const scheduler = manager?.scheduler;
+    if (!scheduler) return null;
+    const bridgeSession = manager.bridge?.session ?? null;
+    const discovery = bridgeSession?.discovery ?? null;
+    return {
+      translationSessionId: scheduler.translationSessionId ?? null,
+      isTranslated: scheduler.isTranslated === true,
+      translatedCount: scheduler.translatedCount ?? null,
+      failedCount: scheduler.failedCount ?? null,
+      totalTasks: scheduler.totalTasks ?? null,
+      activeFlushes: scheduler.activeFlushes ?? null,
+      discoveryPending: typeof scheduler.discoveryPending === 'boolean' ? scheduler.discoveryPending : null,
+      queueIds: Array.isArray(scheduler.queue) ? scheduler.queue.map(item => item?.id ?? null) : null,
+      activeBatchIds: scheduler.activeBatches instanceof Set
+        ? [...scheduler.activeBatches].flatMap(batch => batch.items?.map(item => item?.id ?? null) ?? []) : null,
+      pendingSettlementCount: scheduler.pendingSettlements instanceof Set ? scheduler.pendingSettlements.size : null,
+      batchTimerActive: scheduler.batchTimer !== undefined ? scheduler.batchTimer !== null : null,
+      completionTimerActive: scheduler._completionTimer !== undefined ? scheduler._completionTimer !== null : null,
+      sessionContextOwned: !!scheduler.sessionContext && scheduler.sessionContext === bridgeSession?.context,
+      bridgeSessionOwned: !!bridgeSession && scheduler.sessionContext === bridgeSession.context,
+      bridgeSessionActive: typeof bridgeSession?.active === 'boolean' ? bridgeSession.active : null,
+      bridgeDiscoveryPending: typeof discovery?.pending === 'boolean' ? discovery.pending : null,
+      bridgeDiscoveryRunning: typeof discovery?.running === 'boolean' ? discovery.running : null,
+      bridgeDiscoveryStarting: typeof discovery?.starting === 'boolean' ? discovery.starting : null,
+      bridgeDiscoveryQueueDepth: Array.isArray(discovery?.queue) && Number.isInteger(discovery.head)
+        ? Math.max(0, discovery.queue.length - discovery.head) : null,
+      bridgeDiscoveryCancelled: typeof discovery?.cancelled === 'boolean' ? discovery.cancelled : null,
+      bridgeDiscoveryFailed: typeof discovery?.failed === 'boolean' ? discovery.failed : null,
+    };
+  },
   enableCancellationProbe() {
     if (this.cancellationLedger) return { enabled: true, reused: true };
     const ledger = this.cancellationLedger = createCancellationLedger();
@@ -337,7 +423,7 @@ trace.startMeasurement = () => {
     });
     for (const group of groups) {
       const target = targetById.get(group.key);
-      const expectedText = `\u200efixture translation: ${target.source}`;
+      const expectedText = `\u200e${trace.translationPrefix} ${target.source}`;
       const acceptedWrite = target.element.textContent === expectedText;
       const duplicateAcceptedWrite = isDuplicateAcceptedMutation({
         wasAlreadyAccepted: acceptedIds.has(target.id), expectedText,
