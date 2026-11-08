@@ -146,10 +146,76 @@ export function classifyTransportRequest({ method, url }, { fixtureOrigin, exten
   return { kind: 'blocked', reason: `unexpected external URL: ${url}` };
 }
 
-export function validateRunGate({ legacyResults, measuredSamples }) {
-  const failedLegacy = legacyResults.some(run => run.status !== 'passed');
-  const failedMeasured = measuredSamples.some(run => run.status !== 'passed');
-  return { comparisonsAllowed: !failedLegacy && !failedMeasured, failedLegacy, failedMeasured };
+export function validateRunGate(options = {}) {
+  const input = options && typeof options === 'object' ? options : {};
+  const { legacyResults, measuredSamples, allResults, expectedModes, expectedScenarios, expectedSamples, expectedWarmups, buildParity } = input;
+  const issues = [];
+  const legacyRuns = Array.isArray(legacyResults) ? legacyResults : [];
+  const measuredRuns = Array.isArray(measuredSamples) ? measuredSamples : [];
+  const allRuns = Array.isArray(allResults) ? allResults : [];
+  const failedLegacy = legacyRuns.some(run => run?.status !== 'passed');
+  const failedMeasured = measuredRuns.some(run => run?.status !== 'passed');
+  const failedWarmups = Array.isArray(allResults) && allResults.some(run => run?.phase === 'warmup' && run?.status !== 'passed');
+  if (!Array.isArray(legacyResults) || !legacyRuns.length) issues.push('Legacy qualification evidence is missing or invalid');
+  if (!Array.isArray(measuredSamples) || (expectedSamples !== 0 && !measuredRuns.length)) issues.push('measured evidence is missing or invalid');
+  const validUniqueStrings = values => Array.isArray(values) && values.length > 0
+    && values.every(value => typeof value === 'string' && value.trim().length > 0 && value === value.trim())
+    && new Set(values).size === values.length;
+  const validModes = validUniqueStrings(expectedModes)
+    && expectedModes.includes('legacy')
+    && expectedModes.every(mode => ['legacy', 'sliced', 'viewport'].includes(mode));
+  const validScenarios = validUniqueStrings(expectedScenarios);
+  const validSamples = Number.isSafeInteger(expectedSamples) && expectedSamples >= 0 && expectedSamples <= 40;
+  const validWarmups = Number.isSafeInteger(expectedWarmups) && expectedWarmups >= 1 && expectedWarmups <= 3;
+  if (!validModes) issues.push('Expected modes are missing or invalid');
+  if (!validScenarios) issues.push('Expected scenarios are missing or invalid');
+  if (!validSamples) issues.push('Expected measured sample count is missing or invalid');
+  if (!validWarmups) issues.push('Expected warmup count is missing or invalid');
+  if (validModes && validScenarios && validSamples && validWarmups) {
+    if (!Array.isArray(allResults)) issues.push('complete warmup evidence is missing');
+    const expectedLegacy = expectedScenarios.length * (expectedWarmups + expectedSamples);
+    const expectedMeasured = expectedScenarios.length * expectedSamples * expectedModes.length;
+    if (legacyRuns.length !== expectedLegacy) issues.push(`Legacy qualification count mismatch: expected ${expectedLegacy}, got ${legacyRuns.length}`);
+    if (measuredRuns.length !== expectedMeasured) issues.push(`measured trial count mismatch: expected ${expectedMeasured}, got ${measuredRuns.length}`);
+    for (const scenario of expectedScenarios) {
+      const warmups = legacyRuns.filter(run => run?.scenario === scenario && run?.phase === 'warmup');
+      const measuredLegacy = legacyRuns.filter(run => run?.scenario === scenario && run?.phase === 'measured');
+      if (warmups.length !== expectedWarmups || measuredLegacy.length !== expectedSamples) {
+        issues.push(`${scenario}: incomplete Legacy warmup or measured qualification evidence`);
+      }
+      for (const [phase, expectedCount, runs] of [['warmup', expectedWarmups, warmups], ['measured', expectedSamples, measuredLegacy]]) {
+        const ordinals = runs.map(run => run?.ordinal);
+        if (new Set(ordinals).size !== ordinals.length || ordinals.some(ordinal => !Number.isInteger(ordinal) || ordinal < 1 || ordinal > expectedCount)) {
+          issues.push(`${scenario}/legacy/${phase}: duplicate or invalid ordinal evidence`);
+        }
+        for (let ordinal = 1; ordinal <= expectedCount; ordinal++) {
+          if (!ordinals.includes(ordinal)) issues.push(`${scenario}/legacy/${phase}: missing ordinal ${ordinal}`);
+        }
+      }
+      for (const mode of expectedModes) {
+        const modeWarmups = allRuns.filter(run => run?.scenario === scenario && run?.mode === mode && run?.phase === 'warmup');
+        const warmupOrdinals = modeWarmups.map(run => run?.ordinal);
+        if (modeWarmups.length !== expectedWarmups) issues.push(`${scenario}/${mode}: expected ${expectedWarmups} warmups, got ${modeWarmups.length}`);
+        if (new Set(warmupOrdinals).size !== warmupOrdinals.length || warmupOrdinals.some(ordinal => !Number.isInteger(ordinal) || ordinal < 1 || ordinal > expectedWarmups)) {
+          issues.push(`${scenario}/${mode}: duplicate or invalid warmup ordinal evidence`);
+        }
+        for (let ordinal = 1; ordinal <= expectedWarmups; ordinal++) {
+          if (!warmupOrdinals.includes(ordinal)) issues.push(`${scenario}/${mode}: missing warmup ordinal ${ordinal}`);
+        }
+        const runs = measuredRuns.filter(run => run?.scenario === scenario && run?.mode === mode && run?.phase === 'measured');
+        const ordinals = runs.map(run => run?.ordinal);
+        if (runs.length !== expectedSamples) issues.push(`${scenario}/${mode}: expected ${expectedSamples} measured trials, got ${runs.length}`);
+        if (new Set(ordinals).size !== ordinals.length || ordinals.some(ordinal => !Number.isInteger(ordinal) || ordinal < 1 || ordinal > expectedSamples)) {
+          issues.push(`${scenario}/${mode}: duplicate or invalid measured ordinal evidence`);
+        }
+        for (let ordinal = 1; ordinal <= expectedSamples; ordinal++) {
+          if (!ordinals.includes(ordinal)) issues.push(`${scenario}/${mode}: missing measured ordinal ${ordinal}`);
+        }
+      }
+    }
+  }
+  if (buildParity?.ok !== true) issues.push(...(buildParity?.issues?.length ? buildParity.issues : ['build parity evidence is missing or invalid']));
+  return { comparisonsAllowed: issues.length === 0 && !failedLegacy && !failedMeasured && !failedWarmups, failedLegacy, failedMeasured, failedWarmups, complete: issues.length === 0, issues };
 }
 
 export function validatedLongTaskObservation(calibration, entries) {

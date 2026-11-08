@@ -5,19 +5,27 @@ import { join } from 'node:path';
 import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import { serializeBenchmarkArtifact, writeBenchmarkArtifact } from './page-translation-e2e-benchmark/artifact-writer.mjs';
+import { validateBuildParity } from './page-translation-e2e-benchmark/build-environment.mjs';
 import { createCancellationRequestLifecycle, promoteRequestDiagnostics } from './page-translation-e2e-benchmark/cancellation-probes.mjs';
+import { validateRunGate } from './page-translation-e2e-benchmark/metrics.mjs';
 
-async function runActualFinalization({ failAt = null, cleanupFailure = false, trialCleanupErrors = [], trialCleanupReport = null, trialDiagnostics = null } = {}) {
+async function runActualFinalization({ failAt = null, cleanupFailure = false, measureFailureAfter = null, trialCleanupErrors = [], trialCleanupReport = null, trialDiagnostics = null } = {}) {
   const runner = await readFile(new URL('./page-translation-e2e-benchmark/run.mjs', import.meta.url), 'utf8');
   const start = runner.indexOf('let globalRunOrder = 0;');
   expect(start).toBeGreaterThanOrEqual(0);
   const source = `(async () => {\nlet primaryError;\n${runner.slice(start)}\n})()`;
   const directory = await mkdtemp(join(tmpdir(), 'benchmark-finalization-'));
   const path = join(directory, 'artifact.json');
-  const harness = { artifactPath: path, results: [], provenance: {}, cleanupErrors: [], status: 'running' };
+  const harness = { artifactPath: path, results: [], builds: [], plannedMeasuredOrder: [], provenance: {}, cleanupErrors: [], status: 'running' };
   const writes = [];
   const compiles = [];
+  let measuredSummaryCalls = 0;
   const fixture = scenario => ({ scenario });
+  const buildProfile = {
+    mode: 'production', nodeEnv: 'production', browser: 'chrome',
+    defines: { browser: 'chrome', isProduction: true, isDevelopment: false, nodeEnv: 'production' },
+    build: { minify: 'terser', dropConsole: true, dropDebugger: true, sourcemap: false, cssMinify: true, esbuildDrop: ['console', 'debugger'], target: 'esnext' },
+  };
   const context = {
     harness,
     artifactPath: path,
@@ -34,13 +42,28 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, tr
     hashFile: async () => 'fake-hash',
     createFixture: fixture,
     validateSampleCount: () => 4,
-    validateRunGate: ({ legacyResults, measuredSamples }) => {
-      const failed = [...legacyResults, ...measuredSamples].some(run => run.status !== 'passed');
-      return { comparisonsAllowed: !failed, failedLegacy: legacyResults.some(run => run.status !== 'passed'), failedMeasured: measuredSamples.some(run => run.status !== 'passed') };
+    validateRunGate,
+    validateBuildParity,
+    validateHarnessBuildParity: () => {
+      harness.buildParity = context.validateBuildParity(harness.builds, context.modes);
+      if (!harness.buildParity.ok) throw new Error('Build parity failed');
+      return harness.buildParity;
     },
-    candidateModeOrder: () => ['sliced', 'viewport'],
-    measureMode: runs => ({ n: runs.length, times: {} }),
-    compileMode: async mode => { compiles.push(mode); context.buildDirs.push(`${mode}-build`); return `${mode}-bundle`; },
+    modeOrder: (selectedModes, scenarioIndex, ordinalIndex) => {
+      const offset = (scenarioIndex + ordinalIndex) % selectedModes.length;
+      return [...selectedModes.slice(offset), ...selectedModes.slice(0, offset)];
+    },
+    measureMode: runs => {
+      measuredSummaryCalls++;
+      if (measureFailureAfter === measuredSummaryCalls) throw new Error('synthetic summary failure');
+      return { n: runs.length, times: {} };
+    },
+    compileMode: async mode => {
+      compiles.push(mode);
+      context.buildDirs.push(`${mode}-build`);
+      context.harness.builds.push({ mode, status: 'passed', environment: { worker: buildProfile, content: buildProfile } });
+      return `${mode}-bundle`;
+    },
     runNetworkGuardNegativeProbe: async () => {},
     runTrial: async options => {
       const failed = failAt && options.mode === failAt.mode && options.phase === failAt.phase && options.ordinal === failAt.ordinal;
@@ -134,27 +157,62 @@ describe('streamed benchmark artifact serialization', () => {
 
   it('writes the successful runner report once after all 4+-trial mode work and finalization', async () => {
     const { artifact, writes, compiles } = await runActualFinalization();
+    expect(artifact.error).toBeUndefined();
     expect(artifact.results).toHaveLength(15);
     expect(writes).toEqual([{ count: 15, status: 'passed' }]);
     expect(compiles).toEqual(['legacy', 'sliced', 'viewport']);
     expect(artifact.status).toBe('passed');
     expect(artifact.finishedAt).toBe(123);
+    expect(artifact.plannedMeasuredOrder.slice(0, 2)).toEqual([
+      { scenario: 'small', ordinal: 1, modes: ['legacy', 'sliced', 'viewport'] },
+      { scenario: 'small', ordinal: 2, modes: ['sliced', 'viewport', 'legacy'] },
+    ]);
+    expect(artifact.results.filter(run => run.phase === 'measured').slice(0, 6).map(run => run.mode)).toEqual([
+      'legacy', 'sliced', 'viewport', 'sliced', 'viewport', 'legacy',
+    ]);
   });
 
-  it('persists prior and failed Legacy trials once after catch/finally and starts no candidate work', async () => {
-    const { artifact, writes, compiles } = await runActualFinalization({ failAt: { mode: 'legacy', phase: 'measured', ordinal: 1 } });
-    expect(artifact.results).toHaveLength(2);
-    expect(artifact.results[0].status).toBe('passed');
-    expect(artifact.results[1]).toMatchObject({
+  it('persists a failed rotated Legacy measured trial after its candidate trials and gates comparisons', async () => {
+    const { artifact, writes, compiles } = await runActualFinalization({ failAt: { mode: 'legacy', phase: 'measured', ordinal: 2 } });
+    expect(artifact.results).toHaveLength(9);
+    expect(artifact.results.slice(-1)[0]).toMatchObject({
       status: 'failed', error: { message: 'fixture trial failure' },
       cleanupErrors: ['fixture cleanup error'], rawDOM: { translated: [['target-1', 'raw failed DOM']] },
     });
-    expect(writes).toEqual([{ count: 2, status: 'failed' }]);
-    expect(compiles).toEqual(['legacy']);
-    expect(artifact.error.message).toContain('legacy/small measured 1 failed');
+    expect(artifact.results.slice(6, 8).map(run => run.mode)).toEqual(['sliced', 'viewport']);
+    expect(writes).toEqual([{ count: 9, status: 'failed' }]);
+    expect(compiles).toEqual(['legacy', 'sliced', 'viewport']);
+    expect(artifact.comparisonGate.comparisonsAllowed).toBe(false);
+    expect(artifact.comparisons).toBeUndefined();
+    expect(artifact.scenarioSummaries).toBeUndefined();
+    expect(artifact.error.message).toContain('legacy/small measured 2 failed');
     expect(artifact.primaryError).toBe(artifact.error.message);
     expect(artifact.finishedAt).toBe(123);
     expect(artifact.cleanupErrors).toEqual([]);
+  });
+
+  it('retains a complete raw matrix but closes the gate after summary generation fails', async () => {
+    const { artifact, writes } = await runActualFinalization({ measureFailureAfter: 2 });
+    expect(artifact.results).toHaveLength(15);
+    expect(artifact.results.every(run => run.status === 'passed')).toBe(true);
+    expect(writes).toEqual([{ count: 15, status: 'failed' }]);
+    expect(artifact.status).toBe('failed');
+    expect(artifact.error.message).toBe('synthetic summary failure');
+    expect(artifact.primaryError).toBe('synthetic summary failure');
+    expect(artifact.comparisonGate.comparisonsAllowed).toBe(false);
+    expect(artifact.comparisonGate.issues).toContain('benchmark execution failed: synthetic summary failure');
+    expect(artifact.scenarioSummaries).toBeUndefined();
+    expect(artifact.comparisons).toBeUndefined();
+  });
+
+  it('stops at failed Legacy warmup qualification without candidate trials or summaries', async () => {
+    const { artifact, writes, compiles } = await runActualFinalization({ failAt: { mode: 'legacy', phase: 'warmup', ordinal: 1 } });
+    expect(artifact.results).toHaveLength(1);
+    expect(compiles).toEqual(['legacy']);
+    expect(artifact.legacyQualificationGate.comparisonsAllowed).toBe(false);
+    expect(artifact.comparisons).toBeUndefined();
+    expect(artifact.scenarioSummaries).toBeUndefined();
+    expect(writes).toEqual([{ count: 1, status: 'failed' }]);
   });
 
   it('includes final build-cleanup failures in the single completed report', async () => {

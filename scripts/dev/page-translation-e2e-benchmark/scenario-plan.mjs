@@ -29,9 +29,10 @@ export function parseScenarioSelection(value = 'small') {
   return scenarios;
 }
 
-export function candidateModeOrder(scenarioIndex, blockIndex) {
-  const first = (scenarioIndex + blockIndex) % COMPARISON_MODES.length;
-  return [COMPARISON_MODES[first], COMPARISON_MODES[1 - first]];
+export function modeOrder(selectedModes, scenarioIndex, measuredOrdinalIndex) {
+  if (!Array.isArray(selectedModes) || selectedModes.length === 0) return [];
+  const offset = (scenarioIndex + measuredOrdinalIndex) % selectedModes.length;
+  return [...selectedModes.slice(offset), ...selectedModes.slice(0, offset)];
 }
 
 export function validateFixtureGeometry(fixture, observed) {

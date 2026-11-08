@@ -6,12 +6,13 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import process from 'node:process';
 import { buildBenchmarkExtension } from './build.mjs';
+import { validateBuildParity } from './build-environment.mjs';
 import { launchChrome } from './chrome.mjs';
 import { writeBenchmarkArtifact } from './artifact-writer.mjs';
 import { classifyTransportRequest, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
-import { candidateModeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './scenario-plan.mjs';
+import { modeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 
 const root = process.cwd();
@@ -42,6 +43,7 @@ const sourcePaths = [
   'scripts/dev/page-translation-e2e-benchmark/fixture.mjs',
   'scripts/dev/page-translation-e2e-benchmark/metrics.mjs',
   'scripts/dev/page-translation-e2e-benchmark/build.mjs',
+  'scripts/dev/page-translation-e2e-benchmark/build-environment.mjs',
   'scripts/dev/page-translation-e2e-benchmark/chrome.mjs',
   'scripts/dev/page-translation-e2e-benchmark/worker-entry.mjs',
   'scripts/dev/page-translation-e2e-benchmark/content-entry.mjs',
@@ -220,6 +222,7 @@ const harness = {
   startedAt: now(),
   builds: [],
   results: [],
+  plannedMeasuredOrder: [],
   cleanupErrors: [],
   nonPerformanceProbes: {
     cancellationStaleResponse: {
@@ -254,6 +257,7 @@ async function compileMode(mode) {
       mode,
       workerEntry: resolve(root, 'scripts/dev/page-translation-e2e-benchmark/worker-entry.mjs'),
       contentEntry: resolve(root, 'scripts/dev/page-translation-e2e-benchmark/content-entry.mjs'),
+      onBuildEnvironment: environment => { built.environment = environment; },
     });
     built.outputDir = result;
     built.status = 'passed';
@@ -266,6 +270,13 @@ async function compileMode(mode) {
     harness.builds.push(built);
   }
   return built.outputDir;
+}
+
+function validateHarnessBuildParity() {
+  const parity = validateBuildParity(harness.builds, modes);
+  harness.buildParity = parity;
+  if (!parity.ok) throw new Error(`Build parity gate failed: ${parity.issues.join('; ')}`);
+  return parity;
 }
 
 async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false, cancellationProbe = null }) {
@@ -1546,54 +1557,70 @@ try {
     };
     harness.status = harness.cancellationGate.passed ? 'passed' : 'failed';
   } else {
-    harness.comparisonOrdering = 'All per-scenario Legacy qualification runs complete before candidates. Candidate warmups and each measured ordinal rotate sliced/viewport order by scenario index plus ordinal; this retains a Legacy-first ordering bias.';
+    harness.comparisonOrdering = 'Legacy warmups qualify first. Every selected mode then receives complete discarded warmups before measured rounds; measured mode order is a deterministic cyclic rotation of all selected modes by scenario index plus zero-based measured ordinal.';
     const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario) }));
     const legacyOutput = await compileMode('legacy');
     const legacyRuns = [];
     harness.scenarioSummaries = {};
     for (const plan of scenarioPlans) {
-      const measuredRuns = [];
       for (let ordinal = 1; ordinal <= warmups; ordinal++) {
         const run = await runRecordedTrial({ mode: 'legacy', scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: legacyOutput, fixtureConfig: plan.fixture });
         legacyRuns.push(run);
       }
-      for (let ordinal = 1; ordinal <= samples; ordinal++) {
-        const run = await runRecordedTrial({ mode: 'legacy', scenario: plan.scenario, ordinal, phase: 'measured', extensionPath: legacyOutput, fixtureConfig: plan.fixture });
-        legacyRuns.push(run);
-        measuredRuns.push(run);
-      }
-      harness.scenarioSummaries[plan.scenario] = { legacy: measureMode(measuredRuns) };
     }
-    harness.comparisonGate = validateRunGate({ legacyResults: legacyRuns, measuredSamples: legacyRuns.filter(run => run.phase === 'measured') });
-    if (!harness.comparisonGate.comparisonsAllowed) throw new Error('Candidate comparisons gated: a Legacy scenario did not pass every warmup and measured run.');
+    const qualificationParity = validateBuildParity(harness.builds, ['legacy']);
+    harness.legacyQualificationGate = validateRunGate({
+      legacyResults: legacyRuns,
+      measuredSamples: [],
+      allResults: harness.results,
+      expectedModes: ['legacy'], expectedScenarios: scenarios, expectedSamples: 0, expectedWarmups: warmups,
+      buildParity: qualificationParity,
+    });
+    if (!harness.legacyQualificationGate.comparisonsAllowed) throw new Error(`Legacy qualification failed: ${harness.legacyQualificationGate.issues.join('; ')}`);
+
+    const modeOutputs = new Map([['legacy', legacyOutput]]);
+    for (const mode of modes) if (mode !== 'legacy') modeOutputs.set(mode, await compileMode(mode));
+    validateHarnessBuildParity();
     await runNetworkGuardNegativeProbe(legacyOutput);
 
     const candidateModes = modes.filter(mode => mode !== 'legacy');
-    const candidateOutputs = new Map();
-    for (const mode of candidateModes) {
-      candidateOutputs.set(mode, await compileMode(mode));
-    }
     for (const plan of scenarioPlans) {
-      for (const mode of candidateModeOrder(plan.index, 0).filter(candidate => candidateModes.includes(candidate))) {
+      for (const mode of modes) {
+        if (mode === 'legacy') continue;
         for (let ordinal = 1; ordinal <= warmups; ordinal++) {
-          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: candidateOutputs.get(mode), fixtureConfig: plan.fixture });
+          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture });
         }
       }
     }
     for (const plan of scenarioPlans) {
       for (let ordinal = 1; ordinal <= samples; ordinal++) {
-        for (const mode of candidateModeOrder(plan.index, ordinal - 1).filter(candidate => candidateModes.includes(candidate))) {
-          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'measured', extensionPath: candidateOutputs.get(mode), fixtureConfig: plan.fixture });
+        const order = modeOrder(modes, plan.index, ordinal - 1);
+        harness.plannedMeasuredOrder.push({ scenario: plan.scenario, ordinal, modes: order });
+        for (const mode of order) {
+          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'measured', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture });
         }
       }
     }
 
+    const legacy = harness.results.filter(run => run.mode === 'legacy');
+    const measured = harness.results.filter(run => run.phase === 'measured');
+    harness.comparisonGate = validateRunGate({
+      legacyResults: legacy, measuredSamples: measured,
+      allResults: harness.results,
+      expectedModes: modes, expectedScenarios: scenarios, expectedSamples: samples, expectedWarmups: warmups,
+      buildParity: harness.buildParity,
+    });
+    if (!harness.comparisonGate.comparisonsAllowed) throw new Error(`Comparisons gated: ${harness.comparisonGate.issues.join('; ')}`);
+    harness.scenarioSummaries = {};
     harness.comparisons = {};
     for (const plan of scenarioPlans) {
-      for (const mode of candidateModes) {
+      harness.scenarioSummaries[plan.scenario] = {};
+      for (const mode of modes) {
         const measuredRuns = harness.results.filter(run => run.scenario === plan.scenario && run.mode === mode && run.phase === 'measured');
-        const summary = measureMode(measuredRuns);
-        harness.scenarioSummaries[plan.scenario][mode] = summary;
+        harness.scenarioSummaries[plan.scenario][mode] = measureMode(measuredRuns);
+      }
+      for (const mode of candidateModes) {
+        const summary = harness.scenarioSummaries[plan.scenario][mode];
         const baseline = harness.scenarioSummaries[plan.scenario].legacy.times;
         harness.comparisons[plan.scenario] ??= {};
         harness.comparisons[plan.scenario][mode] = Object.fromEntries(Object.keys(summary.times).map(metric => {
@@ -1603,9 +1630,6 @@ try {
         }));
       }
     }
-    const legacy = harness.results.filter(run => run.mode === 'legacy');
-    const measured = harness.results.filter(run => run.phase === 'measured');
-    harness.comparisonGate = validateRunGate({ legacyResults: legacy, measuredSamples: measured });
     harness.status = harness.results.every(run => run.status === 'passed') ? 'passed' : 'failed';
   }
 } catch (error) {
@@ -1619,10 +1643,40 @@ try {
   }));
   if (harness.cleanupErrors.length) harness.status = 'failed';
   harness.primaryError = primaryError?.message ?? null;
-  harness.comparisonGate ??= validateRunGate({
-    legacyResults: harness.results.filter(run => run.mode === 'legacy'),
-    measuredSamples: harness.results.filter(run => run.phase === 'measured'),
-  });
+  if (!cancellationProbes.length) {
+    let finalBuildParity = harness.buildParity;
+    try { finalBuildParity = validateBuildParity(harness.builds, modes); }
+    catch (error) { finalBuildParity = { ok: false, issues: [error.message] }; }
+    harness.buildParity = finalBuildParity;
+    if (!harness.legacyQualificationGate) {
+      const qualificationParity = validateBuildParity(harness.builds, ['legacy']);
+      harness.legacyQualificationGate = validateRunGate({
+        legacyResults: harness.results.filter(run => run.mode === 'legacy'), measuredSamples: [],
+        allResults: harness.results,
+        expectedModes: ['legacy'], expectedScenarios: scenarios, expectedSamples: 0, expectedWarmups: warmups,
+        buildParity: qualificationParity,
+      });
+    }
+    harness.comparisonGate = validateRunGate({
+      legacyResults: harness.results.filter(run => run.mode === 'legacy'),
+      measuredSamples: harness.results.filter(run => run.phase === 'measured'),
+      allResults: harness.results,
+      expectedModes: modes, expectedScenarios: scenarios, expectedSamples: samples, expectedWarmups: warmups,
+      buildParity: finalBuildParity,
+    });
+    if (harness.cleanupErrors.length) {
+      harness.comparisonGate.comparisonsAllowed = false;
+      harness.comparisonGate.issues.push('build cleanup failed');
+    }
+    if (primaryError) {
+      harness.comparisonGate.comparisonsAllowed = false;
+      harness.comparisonGate.issues.push(`benchmark execution failed: ${primaryError.message}`);
+    }
+    if (!harness.comparisonGate.comparisonsAllowed) {
+      delete harness.comparisons;
+      delete harness.scenarioSummaries;
+    }
+  }
   harness.finishedAt = now();
   await writeArtifact();
 }

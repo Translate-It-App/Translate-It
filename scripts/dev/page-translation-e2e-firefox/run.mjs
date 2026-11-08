@@ -78,6 +78,7 @@ async function provenance() {
   const candidates = [
     'scripts/dev/page-translation-e2e-firefox/capabilities.mjs', 'scripts/dev/page-translation-e2e-firefox/driver.mjs',
     'scripts/dev/page-translation-e2e-firefox/run.mjs', 'scripts/dev/page-translation-e2e-firefox/launcher.mjs', 'scripts/dev/page-translation-e2e-firefox.test.js', 'scripts/dev/page-translation-e2e-benchmark/build.mjs',
+    'scripts/dev/page-translation-e2e-benchmark/build-environment.mjs',
     'scripts/dev/page-translation-e2e-firefox/runtime-background.mjs', 'scripts/dev/page-translation-e2e-firefox/runtime-content.mjs', 'scripts/dev/page-translation-e2e-firefox/runtime-collector.mjs',
     'scripts/dev/page-translation-e2e-benchmark/provider-probe.mjs', 'scripts/dev/page-translation-e2e-benchmark/provider-probe-content.mjs',
     'scripts/dev/page-translation-e2e-benchmark/worker-entry.mjs', 'scripts/dev/page-translation-e2e-benchmark/content-entry.mjs',

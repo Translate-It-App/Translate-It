@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { candidateModeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './page-translation-e2e-benchmark/scenario-plan.mjs';
+import { modeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './page-translation-e2e-benchmark/scenario-plan.mjs';
 import { createFixture } from './page-translation-e2e-benchmark/fixture.mjs';
 import { summarizeAcceptanceTimes, isDuplicateAcceptedMutation, trackAcceptedTarget } from './page-translation-e2e-benchmark/measurement-lifecycle.mjs';
 import { captureViewportWindow, installPrimitiveAdmissionObserver } from './page-translation-e2e-benchmark/trace.mjs';
@@ -15,11 +15,29 @@ describe('large-page benchmark plan and geometry checks', () => {
     expect(() => parseScenarioSelection('not-a-fixture')).toThrow('Unsupported');
   });
 
-  it('alternates sliced and viewport candidate order across ordinal blocks and scenarios', () => {
-    expect(candidateModeOrder(0, 0)).toEqual(['sliced', 'viewport']);
-    expect(candidateModeOrder(0, 1)).toEqual(['viewport', 'sliced']);
-    expect(candidateModeOrder(1, 0)).toEqual(['viewport', 'sliced']);
-    expect(candidateModeOrder(1, 1)).toEqual(['sliced', 'viewport']);
+  it('cyclically rotates every selected mode with balanced complete and partial cycles', () => {
+    expect(modeOrder(['legacy', 'sliced'], 0, 0)).toEqual(['legacy', 'sliced']);
+    expect(modeOrder(['legacy', 'sliced'], 0, 1)).toEqual(['sliced', 'legacy']);
+    expect(modeOrder(['legacy', 'sliced'], 1, 0)).toEqual(['sliced', 'legacy']);
+    expect(modeOrder(['legacy', 'sliced', 'viewport'], 0, 0)).toEqual(['legacy', 'sliced', 'viewport']);
+    expect(modeOrder(['legacy', 'sliced', 'viewport'], 0, 1)).toEqual(['sliced', 'viewport', 'legacy']);
+    expect(modeOrder(['legacy', 'sliced', 'viewport'], 1, 0)).toEqual(['sliced', 'viewport', 'legacy']);
+    expect(modeOrder(['legacy', 'viewport'], 0, 0)).toEqual(['legacy', 'viewport']);
+    expect(modeOrder(['legacy', 'viewport'], 0, 1)).toEqual(['viewport', 'legacy']);
+    for (const modes of [['legacy', 'sliced'], ['legacy', 'sliced', 'viewport']]) {
+      const cycle = Array.from({ length: modes.length }, (_, ordinal) => modeOrder(modes, 0, ordinal));
+      for (let position = 0; position < modes.length; position++) {
+        expect(cycle.map(order => order[position]).sort()).toEqual([...modes].sort());
+      }
+      const tenRounds = Array.from({ length: 10 }, (_, ordinal) => modeOrder(modes, 0, ordinal));
+      expect(tenRounds).toEqual(Array.from({ length: 10 }, (_, ordinal) => modeOrder(modes, 0, ordinal)));
+      for (let position = 0; position < modes.length; position++) {
+        const positionCounts = modes.map(mode => tenRounds.filter(order => order[position] === mode).length);
+        expect(Math.max(...positionCounts) - Math.min(...positionCounts)).toBeLessThanOrEqual(1);
+      }
+    }
+    expect(modeOrder(['legacy', 'sliced', 'viewport'], 0, 4).slice(0, 2)).toEqual(['sliced', 'viewport']);
+    expect(modeOrder(['legacy'], 0, 0)).toEqual(['legacy']);
   });
 
   it.each([3, 5, 40])('accepts %s measured samples', count => {

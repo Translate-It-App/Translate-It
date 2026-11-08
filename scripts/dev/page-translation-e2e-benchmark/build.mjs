@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { build } from 'vite';
 import { createBaseConfig } from '../../../config/vite/vite.config.base.js';
+import { validateBuildParity } from './build-environment.mjs';
 
 const flags = {
   legacy: [false, false],
@@ -10,7 +11,7 @@ const flags = {
   viewport: [true, true],
 };
 
-export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge }) {
+export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge, onBuildEnvironment }) {
   if (!flags[mode]) throw new TypeError(`Unknown discovery mode: ${mode}`);
   if (browser !== 'chrome' && browser !== 'firefox') throw new TypeError(`Unknown browser: ${browser}`);
   if (runtimeBridge !== undefined && (browser !== 'firefox' || mode !== 'sliced' || !validBridgeConfig(runtimeBridge))) {
@@ -35,7 +36,17 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
       throw new TypeError(`${name} must be an absolute file path.`);
     }
   }
+  if (onBuildEnvironment !== undefined && typeof onBuildEnvironment !== 'function') throw new TypeError('onBuildEnvironment must be a function when provided.');
+
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+  const environmentProfiles = { worker: [], content: [] };
   const bridgePlugins = runtimeBridge ? createRuntimeBridgePlugins({ runtimeBridge, workerEntry, contentEntry }) : [];
+  const environmentPlugin = role => ({
+    name: `benchmark-build-environment-${role}`,
+    configResolved(config) { environmentProfiles[role].push(captureBuildEnvironment(config)); },
+  });
   const base = createBaseConfig(browser, { outDir, extraPlugins: [
     {
       name: 'benchmark-discovery-flags',
@@ -72,9 +83,11 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
 
   const workerOut = resolve(outDir, '.worker-build');
   const contentOut = resolve(outDir, '.content-build');
-  const buildEntry = async (input, entryOut, codeSplitting) => build({
+  const buildEntry = async (role, input, entryOut, codeSplitting) => build({
     ...base,
+    mode: 'production',
     base: './',
+    plugins: [...base.plugins, environmentPlugin(role)],
     configFile: false,
     publicDir: false,
     logLevel: runtimeBridge ? 'silent' : 'error',
@@ -91,8 +104,13 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     },
   });
   try {
-    await buildEntry({ worker: runtimeBridge ? 'virtual:page-translation-probe-worker' : workerEntry ?? resolve('src/core/background/index.js') }, workerOut, false);
-    await buildEntry({ 'content-entry': runtimeBridge ? 'virtual:page-translation-probe-content' : contentEntry ?? resolve('src/core/content-scripts/index-main.js') }, contentOut, true);
+    await buildEntry('worker', { worker: runtimeBridge ? 'virtual:page-translation-probe-worker' : workerEntry ?? resolve('src/core/background/index.js') }, workerOut, false);
+    await buildEntry('content', { 'content-entry': runtimeBridge ? 'virtual:page-translation-probe-content' : contentEntry ?? resolve('src/core/content-scripts/index-main.js') }, contentOut, true);
+    const environment = { worker: environmentProfiles.worker[0], content: environmentProfiles.content[0] };
+    const parity = validateBuildParity([{ mode, status: 'passed', environment }], [mode]);
+    if (environmentProfiles.worker.length !== 1 || environmentProfiles.content.length !== 1 || !parity.ok) {
+      throw new Error(`Benchmark build environment verification failed: ${parity.issues.join('; ') || 'Missing or repeated resolved configuration evidence.'}`);
+    }
     await cp(workerOut, outDir, { recursive: true, force: true });
     await cp(contentOut, outDir, { recursive: true, force: true });
   } catch (error) {
@@ -102,6 +120,14 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     await Promise.all([rm(workerOut, { recursive: true, force: true }), rm(contentOut, { recursive: true, force: true })]);
   }
   if (runtimeBridge) await assertBridgeTokenIsolation(outDir, runtimeBridge.authToken);
+  if (onBuildEnvironment) {
+    const environment = { worker: environmentProfiles.worker[0], content: environmentProfiles.content[0] };
+    try { await onBuildEnvironment(structuredClone(environment)); }
+    catch (error) {
+      if (runtimeBridge) throw new Error('Firefox runtime bridge build failed; generated configuration details were suppressed.');
+      throw error;
+    }
+  }
   const manifest = {
     manifest_version: 3,
     name: 'Translate-It page translation benchmark',
@@ -134,6 +160,41 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   await writeFile(resolve(outDir, 'content-loader.js'), `import(${runtime}.runtime.getURL('content-entry.js')).catch(error => console.error('Benchmark content entry failed', error));\n`);
   if (runtimeBridge) await assertBridgeTokenIsolation(outDir, runtimeBridge.authToken);
   return outDir;
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+  }
+}
+
+function captureBuildEnvironment(config) {
+  const define = config.define ?? {};
+  const compress = config.build?.terserOptions?.compress ?? {};
+  return {
+    mode: config.mode,
+    nodeEnv: process.env.NODE_ENV ?? null,
+    browser: parseDefineString(define.__BROWSER__),
+    defines: {
+      browser: parseDefineString(define.__BROWSER__),
+      isProduction: define.__IS_PRODUCTION__,
+      isDevelopment: define.__IS_DEVELOPMENT__,
+      nodeEnv: parseDefineString(define['process.env.NODE_ENV']),
+    },
+    build: {
+      minify: config.build?.minify ?? null,
+      dropConsole: compress.drop_console === true,
+      dropDebugger: compress.drop_debugger === true,
+      sourcemap: config.build?.sourcemap ?? null,
+      cssMinify: config.build?.cssMinify ?? null,
+      esbuildDrop: Array.isArray(config.esbuild?.drop) ? [...config.esbuild.drop].sort() : [],
+      target: config.build?.target ?? null,
+    },
+  };
+}
+
+function parseDefineString(value) {
+  if (typeof value !== 'string') return null;
+  try { const parsed = JSON.parse(value); return typeof parsed === 'string' ? parsed : null; }
+  catch { return null; }
 }
 
 function validBridgeConfig(config) {

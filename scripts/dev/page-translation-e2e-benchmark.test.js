@@ -126,9 +126,54 @@ describe('page translation benchmark measurements', () => {
   });
 
   it('gates comparisons on every Legacy and measured correctness run', () => {
-    expect(validateRunGate({ legacyResults: [{ status: 'passed' }], measuredSamples: [{ status: 'passed' }] }).comparisonsAllowed).toBe(true);
-    expect(validateRunGate({ legacyResults: [{ status: 'failed' }], measuredSamples: [{ status: 'passed' }] }).comparisonsAllowed).toBe(false);
-    expect(validateRunGate({ legacyResults: [{ status: 'passed' }], measuredSamples: [{ status: 'failed' }] }).comparisonsAllowed).toBe(false);
+    const expected = { expectedModes: ['legacy', 'sliced'], expectedScenarios: ['small'], expectedSamples: 1, expectedWarmups: 1, buildParity: { ok: true, issues: [] } };
+    const legacyResults = [
+      { status: 'passed', scenario: 'small', mode: 'legacy', phase: 'warmup', ordinal: 1 },
+      { status: 'passed', scenario: 'small', mode: 'legacy', phase: 'measured', ordinal: 1 },
+    ];
+    const measuredSamples = [
+      { status: 'passed', scenario: 'small', mode: 'legacy', phase: 'measured', ordinal: 1 },
+      { status: 'passed', scenario: 'small', mode: 'sliced', phase: 'measured', ordinal: 1 },
+    ];
+    const allResults = [...legacyResults, { status: 'passed', scenario: 'small', mode: 'sliced', phase: 'warmup', ordinal: 1 }];
+    expect(validateRunGate({ ...expected, legacyResults, measuredSamples, allResults }).comparisonsAllowed).toBe(true);
+    expect(validateRunGate({ ...expected, legacyResults: [{ ...legacyResults[0], status: 'failed' }, legacyResults[1]], measuredSamples, allResults }).comparisonsAllowed).toBe(false);
+    expect(validateRunGate({ ...expected, legacyResults, measuredSamples: [{ ...measuredSamples[1], status: 'failed' }, measuredSamples[0]], allResults }).comparisonsAllowed).toBe(false);
+    expect(validateRunGate({ ...expected, legacyResults, measuredSamples: measuredSamples.slice(0, 1), allResults }).issues).toContain('measured trial count mismatch: expected 2, got 1');
+    expect(validateRunGate({ ...expected, legacyResults: [], measuredSamples, allResults }).comparisonsAllowed).toBe(false);
+    expect(validateRunGate({ ...expected, legacyResults, measuredSamples, allResults, buildParity: { ok: false, issues: ['content profile mismatch'] } }).comparisonsAllowed).toBe(false);
+    expect(validateRunGate({ ...expected, legacyResults, measuredSamples, allResults, buildParity: undefined }).comparisonsAllowed).toBe(false);
+    expect(validateRunGate({ ...expected, legacyResults, measuredSamples, allResults: allResults.slice(0, 2) }).comparisonsAllowed).toBe(false);
+  });
+
+  it('fails closed when any expected run-plan field is missing or malformed', () => {
+    const expected = { expectedModes: ['legacy'], expectedScenarios: ['small'], expectedSamples: 1, expectedWarmups: 1 };
+    const evidence = {
+      legacyResults: [
+        { status: 'passed', scenario: 'small', mode: 'legacy', phase: 'warmup', ordinal: 1 },
+        { status: 'passed', scenario: 'small', mode: 'legacy', phase: 'measured', ordinal: 1 },
+      ],
+      measuredSamples: [{ status: 'passed', scenario: 'small', mode: 'legacy', phase: 'measured', ordinal: 1 }],
+      allResults: [
+        { status: 'passed', scenario: 'small', mode: 'legacy', phase: 'warmup', ordinal: 1 },
+        { status: 'passed', scenario: 'small', mode: 'legacy', phase: 'measured', ordinal: 1 },
+      ],
+      buildParity: { ok: true, issues: [] },
+    };
+    for (const field of Object.keys(expected)) {
+      const incomplete = { ...expected };
+      delete incomplete[field];
+      expect(validateRunGate({ ...evidence, ...incomplete })).toMatchObject({ comparisonsAllowed: false, complete: false });
+    }
+    for (const malformed of [
+      { expectedModes: [] }, { expectedModes: ['legacy', 'legacy'] }, { expectedModes: 'legacy' },
+      { expectedScenarios: [] }, { expectedScenarios: ['small', 'small'] }, { expectedScenarios: 12 },
+      { expectedSamples: -1 }, { expectedSamples: 1.5 }, { expectedSamples: Number.MAX_SAFE_INTEGER },
+      { expectedWarmups: 0 }, { expectedWarmups: 1.5 }, { expectedWarmups: null },
+    ]) {
+      expect(validateRunGate({ ...evidence, ...expected, ...malformed })).toMatchObject({ comparisonsAllowed: false, complete: false });
+    }
+    expect(validateRunGate(null)).toMatchObject({ comparisonsAllowed: false, complete: false });
   });
 
   it('rejects a vacuous fixture target set', () => {

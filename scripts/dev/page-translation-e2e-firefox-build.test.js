@@ -1,14 +1,26 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
+import process from 'node:process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { buildConfigs, baseConfigs, buildFailure } = vi.hoisted(() => ({ buildConfigs: [], baseConfigs: [], buildFailure: { value: null } }));
+const { buildConfigs, baseConfigs, buildFailure, baseConfigFailure, resolvedConfigOverride } = vi.hoisted(() => ({
+  buildConfigs: [], baseConfigs: [], buildFailure: { value: null }, baseConfigFailure: { value: null }, resolvedConfigOverride: { value: null },
+}));
 
 vi.mock('vite', () => ({
   build: vi.fn(async config => {
     if (buildFailure.value) throw new Error(buildFailure.value);
     buildConfigs.push(config);
+    const role = Object.hasOwn(config.build.rollupOptions.input, 'worker') ? 'worker' : 'content';
+    const resolved = { mode: config.mode, define: { ...config.define }, build: { ...config.build }, esbuild: { ...config.esbuild } };
+    resolvedConfigOverride.value?.mutate?.[role]?.(resolved);
+    for (const plugin of config.plugins ?? []) {
+      if (plugin.name?.startsWith('benchmark-build-environment-') && resolvedConfigOverride.value?.skipEnvironmentFor === role) continue;
+      const hook = plugin.configResolved;
+      if (typeof hook === 'function') await hook(resolved);
+      else if (typeof hook?.handler === 'function') await hook.handler.call(plugin, resolved);
+    }
     await mkdir(config.build.outDir, { recursive: true });
     const [name] = Object.keys(config.build.rollupOptions.input);
     const virtualEntry = config.build.rollupOptions.input[name];
@@ -24,13 +36,29 @@ vi.mock('vite', () => ({
 vi.mock('../../config/vite/vite.config.base.js', () => ({
   createBaseConfig: vi.fn((browser, options) => {
     baseConfigs.push({ browser, options });
-    return { build: { rollupOptions: {} }, plugins: options.extraPlugins };
+    if (baseConfigFailure.value) throw new Error(baseConfigFailure.value);
+    const production = process.env.NODE_ENV === 'production';
+    return {
+      define: {
+        __BROWSER__: JSON.stringify(browser), __IS_PRODUCTION__: production, __IS_DEVELOPMENT__: !production,
+        'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
+      },
+      build: {
+        rollupOptions: {}, minify: production ? 'terser' : false, sourcemap: !production,
+        cssMinify: production, target: 'esnext',
+        terserOptions: production ? { compress: { drop_console: true, drop_debugger: true } } : undefined,
+      },
+      esbuild: { drop: production ? ['console', 'debugger'] : [] },
+      plugins: options.extraPlugins,
+    };
   }),
 }));
 
 import { buildBenchmarkExtension } from './page-translation-e2e-benchmark/build.mjs';
+import { validateBuildParity } from './page-translation-e2e-benchmark/build-environment.mjs';
 
 const directories = [];
+const originalNodeEnv = process.env.NODE_ENV;
 async function freshOutputDir() {
   const path = await mkdtemp(resolve(tmpdir(), 'page-translation-build-'));
   directories.push(path);
@@ -42,6 +70,10 @@ afterEach(async () => {
   buildConfigs.length = 0;
   baseConfigs.length = 0;
   buildFailure.value = null;
+  baseConfigFailure.value = null;
+  resolvedConfigOverride.value = null;
+  if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = originalNodeEnv;
 });
 
 describe('page translation benchmark build browser support', () => {
@@ -60,6 +92,76 @@ describe('page translation benchmark build browser support', () => {
       .toEqual({ service_worker: 'worker.js', type: 'module' });
     expect(await readFile(resolve(outputDir, 'content-loader.js'), 'utf8'))
       .toContain("chrome.runtime.getURL('content-entry.js')");
+    expect(buildConfigs.map(config => config.mode)).toEqual(['production', 'production']);
+  });
+
+  it('builds every discovery mode from verified production configuration and restores caller NODE_ENV', async () => {
+    const cases = [
+      { mode: 'legacy', browser: 'chrome', priorNodeEnv: undefined },
+      { mode: 'sliced', browser: 'chrome', priorNodeEnv: 'development' },
+      { mode: 'viewport', browser: 'chrome', priorNodeEnv: undefined },
+      { mode: 'sliced', browser: 'firefox', priorNodeEnv: 'development' },
+    ];
+    const chromeProfiles = [];
+    for (const { mode, browser, priorNodeEnv } of cases) {
+      if (priorNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = priorNodeEnv;
+      const outputDir = await freshOutputDir();
+      const callbacks = [];
+      const returned = await buildBenchmarkExtension({ outputDir, mode, browser, onBuildEnvironment: value => callbacks.push(value) });
+      expect(returned).toBe(outputDir);
+      expect(process.env.NODE_ENV).toBe(priorNodeEnv);
+      expect(buildConfigs.slice(-2).map(config => config.mode)).toEqual(['production', 'production']);
+      expect(callbacks).toHaveLength(1);
+      expect(validateBuildParity([{ mode, status: 'passed', environment: callbacks[0] }], [mode])).toEqual({ ok: true, issues: [] });
+      if (browser === 'chrome') chromeProfiles.push({ mode, status: 'passed', environment: callbacks[0] });
+      for (const profile of [callbacks[0].worker, callbacks[0].content]) {
+        expect(profile).toMatchObject({ mode: 'production', nodeEnv: 'production', browser });
+        expect(profile.defines).toEqual({ browser, isProduction: true, isDevelopment: false, nodeEnv: 'production' });
+        expect(profile.build).toMatchObject({ minify: 'terser', dropConsole: true, dropDebugger: true, sourcemap: false, cssMinify: true, esbuildDrop: ['console', 'debugger'], target: 'esnext' });
+      }
+      expect(validateBuildParity([{ mode, status: 'failed', environment: callbacks[0] }], [mode]).ok).toBe(false);
+      expect(validateBuildParity([{ mode, status: 'passed', environment: callbacks[0] }], [mode, 'missing']).ok).toBe(false);
+      expect(validateBuildParity([{ mode, status: 'passed', environment: callbacks[0] }, { mode, status: 'passed', environment: callbacks[0] }], [mode]).ok).toBe(false);
+      const changed = structuredClone(callbacks[0]);
+      changed.content.build.minify = false;
+      expect(validateBuildParity([{ mode, status: 'passed', environment: changed }], [mode]).ok).toBe(false);
+    }
+    expect(validateBuildParity(chromeProfiles, ['legacy', 'sliced', 'viewport'])).toEqual({ ok: true, issues: [] });
+    const mismatchedModes = structuredClone(chromeProfiles);
+    mismatchedModes[1].environment.content.build.minify = false;
+    expect(validateBuildParity(mismatchedModes, ['legacy', 'sliced', 'viewport']).ok).toBe(false);
+  });
+
+  it('rejects missing or mismatched resolved worker/content environment evidence before callback', async () => {
+    for (const override of [
+      { skipEnvironmentFor: 'content' },
+      { mutate: { content: resolved => { resolved.mode = 'development'; } } },
+      { mutate: { worker: resolved => { resolved.define.__IS_PRODUCTION__ = false; } } },
+      { mutate: { content: resolved => { resolved.build.minify = false; } } },
+    ]) {
+      process.env.NODE_ENV = 'development';
+      resolvedConfigOverride.value = override;
+      const outputDir = await freshOutputDir();
+      const callback = vi.fn();
+      await expect(buildBenchmarkExtension({ outputDir, mode: 'sliced', onBuildEnvironment: callback }))
+        .rejects.toThrow('Benchmark build environment verification failed');
+      expect(callback).not.toHaveBeenCalled();
+      expect(process.env.NODE_ENV).toBe('development');
+      expect(await readdir(outputDir)).toEqual([]);
+    }
+  });
+
+  it('restores NODE_ENV after base configuration and bundler failures', async () => {
+    process.env.NODE_ENV = 'development';
+    baseConfigFailure.value = 'synthetic base config failure';
+    await expect(buildBenchmarkExtension({ outputDir: await freshOutputDir() })).rejects.toThrow('synthetic base config failure');
+    expect(process.env.NODE_ENV).toBe('development');
+
+    baseConfigFailure.value = null;
+    buildFailure.value = 'synthetic bundler failure';
+    await expect(buildBenchmarkExtension({ outputDir: await freshOutputDir() })).rejects.toThrow('synthetic bundler failure');
+    expect(process.env.NODE_ENV).toBe('development');
   });
 
   it('builds Firefox MV3 background, capability metadata, and browser runtime loader', async () => {
