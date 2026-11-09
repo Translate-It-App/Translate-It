@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { exactKeys, getBackgroundReadinessChecks, installBackgroundProbe, validateProbeEnvelope, validateSender } from './page-translation-e2e-firefox/runtime-background.mjs';
-import { installContentProbe, send as sendRuntimeMessage } from './page-translation-e2e-firefox/runtime-content.mjs';
-import { PROVIDER_ONLY_DEADLINE_MS } from './page-translation-e2e-firefox/runtime-constants.mjs';
+import { installContentProbe, observeProductionStop, send as sendRuntimeMessage } from './page-translation-e2e-firefox/runtime-content.mjs';
+import { PAGE_TRANSLATION_STOP_DEADLINE_MS, PROVIDER_ONLY_DEADLINE_MS } from './page-translation-e2e-firefox/runtime-constants.mjs';
 import { installContentProviderProbe, validateAcceptedMutationAccounting } from './page-translation-e2e-benchmark/provider-probe-content.mjs';
 import { wrapPageTranslationStart } from './page-translation-e2e-benchmark/page-translation-start-probe.mjs';
 import { createPageTranslationFixture, targetTexts } from './page-translation-e2e-benchmark/fixture.mjs';
@@ -30,6 +31,7 @@ afterEach(() => {
   delete globalThis.unifiedTranslationService;
   delete globalThis.__pageTranslationBenchmark;
   delete globalThis.__firefoxProbeStartup;
+  delete globalThis.__firefoxPageTranslationStopMode;
 });
 
 function setup({ permission = true, edgePermission = true, proxyEnabled = false, importFails = false, bindingTabCount = 1, holdReadyReport = false, fixtureUrl = config.fixtureUrl, providerOnly = false, pageTranslationE2E = false, invokeProviderOnly = vi.fn(async () => []) } = {}) {
@@ -39,6 +41,9 @@ function setup({ permission = true, edgePermission = true, proxyEnabled = false,
   let currentUrl = bridgeConfig.bindingUrl;
   const reports = [];
   let releaseReadyReport;
+  const stopControls = [];
+  const stopControlRequests = [];
+  const stopControlEvents = new EventEmitter();
   const browser = {
     runtime: {
       id: 'extension-id', getURL: () => 'moz-extension://extension-id/',
@@ -49,6 +54,7 @@ function setup({ permission = true, edgePermission = true, proxyEnabled = false,
     tabs: {
       query: vi.fn(async () => Array.from({ length: bindingTabCount }, (_, index) => ({ id: 7 + index, url: bridgeConfig.bindingUrl }))),
       get: vi.fn(async () => ({ id: 7, url: currentUrl })),
+      sendMessage: vi.fn(async (tabId, message) => { stopControls.push({ tabId, message }); stopControlEvents.emit('message', message); return { accepted: true, sessionId: message.sessionId }; }),
       onRemoved: { addListener: vi.fn() },
     },
     webNavigation: {
@@ -63,6 +69,13 @@ function setup({ permission = true, edgePermission = true, proxyEnabled = false,
   vi.stubGlobal('__firefoxProbeStartup', { complete: true, success: true });
   const providerProbe = { arm: vi.fn(), stop: vi.fn(), proxyDisabled: () => !proxyEnabled };
   vi.stubGlobal('fetch', vi.fn(async (_url, options) => {
+    if (String(_url).includes('/__benchmark/control/')) {
+      const phase = String(_url).endsWith('/stop-auto') ? 'stop' : 'capture';
+      stopControlRequests.push(phase);
+      stopControlEvents.emit('poll', phase);
+      return { ok: true, json: async () => ({ v: 1, runId: config.runId, decision: phase === 'stop' ? 'stop' : 'capture',
+        sessionId: 'session-stop', firstBatchMessageId: 'batch-first', secondBatchMessageId: 'batch-second' }) };
+    }
     const payload = JSON.parse(options.body);
     reports.push({ payload, headers: options.headers });
     if (holdReadyReport && payload.realm === 'background' && payload.phase === 'ready') {
@@ -75,11 +88,16 @@ function setup({ permission = true, edgePermission = true, proxyEnabled = false,
   }));
   const importEntry = vi.fn(async () => {
     if (importFails) throw new Error('do not expose raw error');
-    globalThis.__pageTranslationBenchmark = { ...globalThis.__pageTranslationBenchmark, providerProbe, providerProbeInstalled: true, invokeProviderOnly };
+    globalThis.__pageTranslationBenchmark = { ...globalThis.__pageTranslationBenchmark, providerProbe, providerProbeInstalled: true, invokeProviderOnly,
+      enableCancellationProbe: vi.fn(() => ({ enabled: true, instrumentationErrors: [] })),
+      cancellationSnapshot: vi.fn(() => ({ ledger: { operations: [] }, providerRoots: [] })),
+      resourceSnapshot: vi.fn(() => null) };
   });
   const sender = { id: browser.runtime.id, tab: { id: 7 }, frameId: 0, url: bridgeConfig.fixtureUrl, origin: new URL(bridgeConfig.fixtureUrl).origin, documentId: 'doc-1' };
   return {
-    browser, reports, sender, importEntry, bridgeConfig, providerProbe, invokeProviderOnly,
+    browser, reports, sender, importEntry, bridgeConfig, providerProbe, invokeProviderOnly, stopControls, stopControlRequests,
+    waitForStopControl: type => waitForHarnessEvent(stopControlEvents, 'message', value => value.type === type, stopControls.map(item => item.message)),
+    waitForStopPoll: phase => waitForHarnessEvent(stopControlEvents, 'poll', value => value === phase, stopControlRequests),
     async start() {
       await installBackgroundProbe(bridgeConfig, importEntry);
       await vi.waitFor(() => expect(reports.some(item => ['ready', 'error'].includes(item.payload.phase))).toBe(true), { timeout: 1000 });
@@ -95,6 +113,19 @@ function setup({ permission = true, edgePermission = true, proxyEnabled = false,
   };
 }
 
+function waitForHarnessEvent(emitter, name, predicate, prior = []) {
+  const found = prior.find(predicate);
+  if (found !== undefined) return Promise.resolve(found);
+  return new Promise(resolve => {
+    const listener = value => {
+      if (!predicate(value)) return;
+      emitter.removeListener(name, listener);
+      resolve(value);
+    };
+    emitter.on(name, listener);
+  });
+}
+
 async function completeProviderOnlyHandshake(bridge) {
   await bridge.start();
   const hello = await bridge.message({ action: '__PAGE_TRANSLATION_RUNTIME_PROBE_V1', v: 1, runId: config.runId, type: 'hello' }, bridge.sender);
@@ -108,6 +139,35 @@ async function completeProviderOnlyHandshake(bridge) {
 }
 
 describe('Firefox runtime bridge protocol', () => {
+  it('disposes the scenario Stop observation promptly when production Stop rejects', async () => {
+    const originalSendMessage = vi.fn();
+    const originalBegin = vi.fn();
+    const originalSettle = vi.fn();
+    const ledger = { begin: originalBegin, settle: originalSettle };
+    vi.stubGlobal('browser', { runtime: { sendMessage: originalSendMessage } });
+    await expect(observeProductionStop(ledger, 'session', Date.now() + 10_000, () => Promise.reject(new Error('stop rejected'))))
+      .rejects.toThrow('stop rejected');
+    expect(ledger.begin).toBe(originalBegin);
+    expect(ledger.settle).toBe(originalSettle);
+    expect(globalThis.browser.runtime.sendMessage).toBe(originalSendMessage);
+  });
+
+  it('restores scenario Stop observation wrappers on production Stop timeout before observation timeout', async () => {
+    vi.useFakeTimers();
+    const originalSendMessage = vi.fn();
+    const ledger = { begin: vi.fn(), settle: vi.fn() };
+    vi.stubGlobal('browser', { runtime: { sendMessage: originalSendMessage } });
+    const originalBegin = ledger.begin;
+    const originalSettle = ledger.settle;
+    const stop = observeProductionStop(ledger, 'session', Date.now() + 25, () => new Promise(() => {}));
+    const result = expect(stop).rejects.toMatchObject({ code: 'TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(25);
+    await result;
+    expect(ledger.begin).toBe(originalBegin);
+    expect(ledger.settle).toBe(originalSettle);
+    expect(globalThis.browser.runtime.sendMessage).toBe(originalSendMessage);
+  });
+
   it('reports the actual PageTranslationManager start result once and waits for its authenticated receipt', async () => {
     const result = { success: true, messageId: 'page-translate-session-1' };
     const original = vi.fn(async () => result);
@@ -254,6 +314,38 @@ describe('Firefox runtime bridge protocol', () => {
     expect(bridge.reports.some(report => report.payload.phase === 'error')).toBe(false);
   });
 
+  it('authenticates Stop Auto batch and command gates against the pinned sender, nonce, and owned session', async () => {
+    vi.stubGlobal('__firefoxPageTranslationStopMode', true);
+    const bridge = setup({ pageTranslationE2E: true });
+    const nonce = await completeProviderOnlyHandshake(bridge);
+    const action = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
+    const sendEvent = (event, evidence, sender = bridge.sender, eventNonce = nonce) => bridge.message({
+      action, v: 1, runId: config.runId, type: 'event', nonce: eventNonce, event, evidence,
+    }, sender);
+    const first = { messageId: 'batch-first', sessionId: 'session-stop', targetIds: Array.from({ length: 6 }, (_, index) => `target-${index}`) };
+    const second = { messageId: 'batch-second', sessionId: 'session-stop', targetIds: Array.from({ length: 6 }, (_, index) => `target-${index + 6}`) };
+    await bridge.message({ action, v: 1, runId: config.runId, type: 'arm', nonce, observersInstalled: true }, bridge.sender);
+    expect(await sendEvent('scheduler-batch', first)).toMatchObject({ type: 'accepted', nonce });
+    expect(await sendEvent('scheduler-batch', second)).toMatchObject({ type: 'accepted', nonce });
+    const acceptedBatch = { ...first, acceptedTargetIds: [...first.targetIds] };
+    expect((await sendEvent('scheduler-batch-accepted', acceptedBatch, bridge.sender, 'wrong-nonce')).code).toBe('PROTOCOL_ERROR');
+    expect((await sendEvent('scheduler-batch-accepted', acceptedBatch, { ...bridge.sender, tab: { id: 99 } })).code).toBe('SENDER_REJECTED');
+    expect((await sendEvent('scheduler-batch-accepted', { ...acceptedBatch, sessionId: 'other-session' })).code).toBe('PROTOCOL_ERROR');
+    expect(await sendEvent('scheduler-batch-accepted', acceptedBatch)).toMatchObject({ type: 'accepted', nonce });
+
+    const stopCommand = {
+      sessionId: 'session-stop', firstBatchMessageId: first.messageId, firstBatchTargetIds: first.targetIds,
+      acceptedTargetIds: first.targetIds, pendingTargetIds: second.targetIds, stopSuccess: true, stopSessionId: 'session-stop',
+      translatedCount: 6, isTranslated: true, isAutoTranslating: false, acceptedDOMRetained: true, pendingDOMUnchanged: true,
+      acceptedStateHash: 'ab'.repeat(32), pendingStateHash: 'cd'.repeat(32),
+    };
+    expect((await sendEvent('stop-auto-command', { ...stopCommand, stopSuccess: false })).code).toBe('PROTOCOL_ERROR');
+    expect(await sendEvent('stop-auto-command', stopCommand)).toMatchObject({ type: 'accepted', nonce });
+    const operationEvents = bridge.reports.filter(report => report.payload.op).map(report => report.payload.event);
+    expect(operationEvents).toEqual(['armed', 'scheduler-batch', 'scheduler-batch', 'scheduler-batch-accepted', 'stop-auto-command']);
+    expect(bridge.reports.some(report => report.payload.phase === 'error')).toBe(false);
+  });
+
   it('reports provider-only invocation failures through the provider operation lane, not the ready handshake', async () => {
     const invokeProviderOnly = vi.fn(async () => { throw Object.assign(new Error('private provider detail'), { code: 'TIMEOUT' }); });
     const bridge = setup({ providerOnly: true, invokeProviderOnly });
@@ -266,6 +358,88 @@ describe('Firefox runtime bridge protocol', () => {
     expect(bridge.reports.at(-1).payload).toMatchObject({ op: 'edge-fr-page-once', event: 'error', evidence: { code: 'TIMEOUT' } });
     expect(bridge.reports.some(report => report.payload.phase === 'error')).toBe(false);
     expect(JSON.stringify(bridge.reports)).not.toContain('private provider detail');
+  });
+
+  it('keeps provider settlement telemetry live while Stop Auto waits on a separate authenticated control channel', async () => {
+    const bridge = setup({ pageTranslationE2E: true });
+    vi.stubGlobal('__firefoxPageTranslationStopMode', true);
+    const nonce = await completeProviderOnlyHandshake(bridge);
+    globalThis.__pageTranslationBenchmark.cancellationSnapshot.mockReturnValue({
+      ledger: { operations: [{ kind: 'provider.root', messageId: 'batch-second', sessionId: 'session-stop', status: 'rejected',
+        operationAborted: true, controllerAbortedAtEnd: true, resultSuccess: null, settledSequence: 4 }] },
+      providerRoots: [
+        { messageId: 'batch-first', sessionId: 'session-stop', status: 'fulfilled', controllerAborted: false, settledSequence: 1 },
+        { messageId: 'batch-second', sessionId: 'session-stop', status: 'rejected', controllerAborted: true, settledSequence: 3 },
+      ],
+    });
+    const action = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
+    const send = (event, evidence, sender = bridge.sender, eventNonce = nonce) => bridge.message({
+      action, v: 1, runId: config.runId, type: 'event', nonce: eventNonce, event, evidence,
+    }, sender);
+    const reportOperation = (event, evidence) => globalThis.__firefoxProviderProbeRuntime.report(event, evidence);
+    const first = { messageId: 'batch-first', sessionId: 'session-stop', targetIds: Array.from({ length: 6 }, (_, i) => `target-${i}`) };
+    const second = { messageId: 'batch-second', sessionId: 'session-stop', targetIds: Array.from({ length: 6 }, (_, i) => `target-${i + 6}`) };
+    await bridge.message({ action, v: 1, runId: config.runId, type: 'arm', nonce, observersInstalled: true }, bridge.sender);
+    await send('scheduler-batch', first);
+    await send('scheduler-batch', second);
+    const accepted = { ...first, acceptedTargetIds: [...first.targetIds] };
+    const stopControlMessage = bridge.waitForStopControl('stop-auto');
+    const stopPoll = bridge.waitForStopPoll('stop');
+    expect((await send('scheduler-batch-accepted', accepted, bridge.sender, 'wrong')).code).toBe('PROTOCOL_ERROR');
+    expect((await send('scheduler-batch-accepted', accepted, { ...bridge.sender, tab: { id: 99 } })).code).toBe('SENDER_REJECTED');
+    expect((await send('scheduler-batch-accepted', { ...accepted, sessionId: 'wrong-session' })).code).toBe('PROTOCOL_ERROR');
+    expect(await send('scheduler-batch-accepted', accepted)).toMatchObject({ type: 'accepted', nonce });
+    expect(await stopPoll).toBe('stop');
+    expect(await stopControlMessage).toMatchObject({ type: 'stop-auto', sessionId: 'session-stop' });
+
+    const firstInvocation = { invocationId: 'invocation-first', sessionId: 'session-stop', messageId: first.messageId,
+      provider: 'edge', itemCount: 6, sourceIndexes: [0, 1, 2, 3, 4, 5] };
+    const secondInvocation = { invocationId: 'invocation-second', sessionId: 'session-stop', messageId: second.messageId,
+      provider: 'edge', itemCount: 6, sourceIndexes: [6, 7, 8, 9, 10, 11] };
+    await reportOperation('provider-invoked', firstInvocation); await reportOperation('provider-invoked', secondInvocation);
+    const physical = (attemptId, invocation) => ({ attemptId, invocationId: invocation.invocationId, sessionId: invocation.sessionId,
+      messageId: invocation.messageId, provider: 'edge', method: 'POST', url: 'https://edge.microsoft.com/translate/translatetext?to=fr&isEnterpriseClient=false',
+      bodyBytes: 100, bodyHash: 'ab'.repeat(32), sourceIndexes: invocation.sourceIndexes });
+    const firstPhysical = physical('attempt-first', firstInvocation); const secondPhysical = physical('attempt-second', secondInvocation);
+    await reportOperation('physical-start', firstPhysical); await reportOperation('physical-start', secondPhysical);
+    await reportOperation('physical-settled', { attemptId: firstPhysical.attemptId, sessionId: 'session-stop', outcome: 'fulfilled', status: 200, code: null });
+    await reportOperation('parser-success', { invocationId: firstInvocation.invocationId, sessionId: 'session-stop', sourceIndexes: firstInvocation.sourceIndexes, resultsMatch: true });
+    await reportOperation('provider-settled', { invocationId: firstInvocation.invocationId, sessionId: 'session-stop', outcome: 'fulfilled', code: null });
+    await reportOperation('physical-settled', { attemptId: secondPhysical.attemptId, sessionId: 'session-stop', outcome: 'cancelled', status: null, code: 'ABORTED' });
+    await reportOperation('provider-settled', { invocationId: secondInvocation.invocationId, sessionId: 'session-stop', outcome: 'rejected', code: 'PROTOCOL_ERROR' });
+
+    const command = {
+      sessionId: 'session-stop', firstBatchMessageId: first.messageId, firstBatchTargetIds: first.targetIds,
+      acceptedTargetIds: first.targetIds, pendingTargetIds: second.targetIds, stopSuccess: true,
+      stopSessionId: 'session-stop', translatedCount: 6, isTranslated: true, isAutoTranslating: false,
+      acceptedDOMRetained: true, pendingDOMUnchanged: true, acceptedStateHash: 'ab'.repeat(32), pendingStateHash: 'cd'.repeat(32),
+    };
+    expect((await send('stop-auto-command', { ...command, sessionId: 'wrong-session' })).code).toBe('PROTOCOL_ERROR');
+    const captureControlMessage = bridge.waitForStopControl('capture');
+    const capturePoll = bridge.waitForStopPoll('capture');
+    expect(await send('stop-auto-command', command)).toMatchObject({ type: 'accepted', nonce });
+    expect(await capturePoll).toBe('capture');
+    expect(await captureControlMessage).toMatchObject({ type: 'capture', sessionId: 'session-stop' });
+
+    const contentState = { capturedSessionActive: false, discoveryCancelled: true, currentBridgeOwnsSession: true,
+      schedulerSessionContextOwned: false, pendingOperations: 0, translationSessionId: 'session-stop', activeFlushes: 0,
+      queueIds: [], activeBatchIds: [], pendingSettlementCount: 0, bridgeSessionActive: false, bridgeDiscoveryPending: false,
+      bridgeDiscoveryRunning: false, bridgeDiscoveryStarting: false, bridgeDiscoveryQueueDepth: 0,
+      bridgeDiscoveryCancelled: true, bridgeDiscoveryFailed: false };
+    const final = { sessionId: 'session-stop', firstBatchMessageId: first.messageId, firstBatchTargetIds: first.targetIds,
+      secondBatchMessageId: second.messageId, secondBatchTargetIds: second.targetIds, acceptedTargetIds: first.targetIds,
+      pendingTargetIds: second.targetIds, acceptedDOMRetained: true, pendingDOMUnchanged: true,
+      acceptedStateHash: command.acceptedStateHash, pendingStateHash: command.pendingStateHash,
+      postStopMutationTargetIds: [], cancellationRequests: [
+        { action: 'CANCEL_TRANSLATION', sessionId: 'session-stop', status: 'fulfilled', responseSuccess: true, cancelAll: true, context: 'page-translation-batch' },
+        { action: 'CANCEL_SESSION', sessionId: 'session-stop', status: 'fulfilled', responseSuccess: true, cancelAll: null, context: null },
+      ], contentState };
+    expect(await send('stop-auto-final', final)).toMatchObject({ type: 'accepted', nonce });
+    const events = bridge.reports.filter(report => report.payload.op).map(report => report.payload.event);
+    expect(events).toContain('physical-settled');
+    expect(events).toContain('provider-settled');
+    expect(events.at(-1)).toBe('stop-auto-final');
+    expect(bridge.reports.some(report => report.payload.phase === 'error')).toBe(false);
   });
 
   it('keeps ordinary runtime messaging at three seconds and uses the shared ten-second provider-only deadline', async () => {

@@ -6,9 +6,10 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { classifyTransportRequest, mapEdgeResponse } from './page-translation-e2e-benchmark/metrics.mjs';
-import { BiDi, applyRuntimeBridgeFailure, applyRuntimeBridgeReportedError, classifyProtocolFailure, createRequestDispatcher, decodeEdgeRequestBody, latestRealmObservations, providerProbeArtifact, providerProbeRequiresImmediateTeardown, reconcileFinalProviderOperation, reconcileFinalRuntimeBridge, recordUnattemptedRuntimeBridge, removeProviderNetworkControls, runEdgeFrenchProviderProbe, runFirefoxProbe, runRuntimeBridgeSequence, setupProviderDataCollector, validateEdgeBodyAgainstNative, validateEdgeProviderCorrelation, validateProviderOperationSnapshot, validateProviderReleaseReceipt, validateRuntimeBridgeErrorReport, validateRuntimeBridgeReport, validateRuntimeBridgeSnapshot, validEdgePageTranslateUrl } from './page-translation-e2e-firefox/driver.mjs';
+import { BiDi, applyRuntimeBridgeFailure, applyRuntimeBridgeReportedError, classifyProtocolFailure, createRequestDispatcher, decodeEdgeRequestBody, latestRealmObservations, providerProbeArtifact, providerProbeRequiresImmediateTeardown, reconcileFinalPageTranslationStop, reconcileFinalProviderOperation, reconcileFinalRuntimeBridge, recordUnattemptedRuntimeBridge, removeProviderNetworkControls, runEdgeFrenchProviderProbe, runFirefoxProbe, runRuntimeBridgeSequence, setupProviderDataCollector, validateEdgeBodyAgainstNative, validateEdgeProviderCorrelation, validatePageTranslationStopOperation, validateProviderOperationReport, validateProviderOperationSnapshot, validateProviderReleaseReceipt, validateRuntimeBridgeErrorReport, validateRuntimeBridgeReport, validateRuntimeBridgeSnapshot, validEdgePageTranslateUrl } from './page-translation-e2e-firefox/driver.mjs';
 import { launchIsolatedWorker } from './page-translation-e2e-firefox/launcher.mjs';
 import { compareRestoreDOMSnapshots } from './page-translation-e2e-firefox/restore-dom-diagnostics.mjs';
+import { observeControllerAbort } from './page-translation-e2e-firefox/controller-abort-observer.mjs';
 import { writeBenchmarkArtifact } from './page-translation-e2e-benchmark/artifact-writer.mjs';
 import {
   blockRuntimeBridgePrerequisite, capability, classifyObservedRealm, classifyRequestAction, isolationSnapshot, notTested,
@@ -132,6 +133,69 @@ function providerHarness(options = {}) {
   return { ...fixture, dispatcher, fakeBidi, bridge, calls, capabilities, queueOperationReports,
     async queueProviderRequests(events) { await Promise.all(events.map(event => dispatcher.onEvent(event))); },
     get observedReports() { return observedReports; }, get stopCode() { return stopCode; }, get restoreDecision() { return restoreDecision; } };
+}
+
+function stopAutoOperationFixture(mutator = () => {}) {
+  const sessionId = 'real-page-session'; const firstMessageId = 'scheduler-first'; const secondMessageId = 'scheduler-second';
+  const firstIds = Array.from({ length: 6 }, (_, index) => `target-${index}`);
+  const secondIds = Array.from({ length: 6 }, (_, index) => `target-${index + 6}`);
+  const invocation = (invocationId, messageId, indexes) => ({ invocationId, sessionId, messageId, provider: 'edge', itemCount: 6, sourceIndexes: indexes });
+  const first = invocation('invocation-first', firstMessageId, Array.from({ length: 6 }, (_, i) => i));
+  const second = invocation('invocation-second', secondMessageId, Array.from({ length: 6 }, (_, i) => i + 6));
+  const physical = (attemptId, item, indexes) => ({ attemptId, invocationId: item.invocationId, sessionId, messageId: item.messageId, provider: 'edge', method: 'POST',
+    url: 'https://edge.microsoft.com/translate/translatetext?isEnterpriseClient=false&from=en&to=fr', bodyBytes: 120,
+    bodyHash: 'ab'.repeat(32), sourceIndexes: indexes });
+  const firstPhysical = physical('attempt-first', first, first.sourceIndexes);
+  const secondPhysical = physical('attempt-second', second, second.sourceIndexes);
+  const stopCommand = {
+    sessionId, firstBatchMessageId: firstMessageId, firstBatchTargetIds: firstIds, acceptedTargetIds: firstIds, pendingTargetIds: secondIds,
+    stopSuccess: true, stopSessionId: sessionId, translatedCount: 6, isTranslated: true, isAutoTranslating: false,
+    acceptedDOMRetained: true, pendingDOMUnchanged: true, acceptedStateHash: 'cd'.repeat(32), pendingStateHash: 'ef'.repeat(32),
+  };
+  const worker = {
+    providerRoots: [
+      { messageId: firstMessageId, sessionId, status: 'fulfilled', resultSuccess: true, operationAborted: false, controllerAborted: false, controllerAbortedAtEnd: false, settledSequence: 7 },
+      { messageId: secondMessageId, sessionId, status: 'rejected', resultSuccess: null, operationAborted: false, controllerAborted: true, controllerAbortedAtEnd: true, settledSequence: 10 },
+    ],
+    cancelRequest: { messageId: secondMessageId, sessionId, status: 'fulfilled', controllerMatched: true, controllerAbortedBefore: false, controllerAbortedAfter: true, responseSuccess: true },
+    controllerAbort: { messageId: secondMessageId, sessionId, sequence: 8, cancelRequestSequence: 5, abortedBefore: false,
+      abortedAfter: true, context: 'page-translation-batch' },
+    physical: { messageId: secondMessageId, sessionId, status: 'rejected', operationAborted: true, controllerAbortedAtEnd: true, settledSequence: 9 },
+    resources: { available: true, activeLifecycleIds: [], activeRequestIds: [], requests: [
+      { messageId: firstMessageId, status: 'completed', operationOwned: false }, { messageId: secondMessageId, status: 'cancelled', operationOwned: false },
+    ], sourceResolverPresent: false, queueEmpty: true, rateLimitIdle: true, leaseActiveCount: 0, leaseTimerActive: false },
+  };
+  const final = {
+    sessionId, firstBatchMessageId: firstMessageId, firstBatchTargetIds: firstIds, secondBatchMessageId: secondMessageId, secondBatchTargetIds: secondIds,
+    acceptedTargetIds: firstIds, pendingTargetIds: secondIds, acceptedDOMRetained: true, pendingDOMUnchanged: true,
+    acceptedStateHash: stopCommand.acceptedStateHash, pendingStateHash: stopCommand.pendingStateHash, postStopMutationTargetIds: [],
+    cancellationRequests: [
+      { action: 'CANCEL_TRANSLATION', sessionId, status: 'fulfilled', responseSuccess: true, cancelAll: true, context: 'page-translation-batch' },
+      { action: 'CANCEL_SESSION', sessionId, status: 'fulfilled', responseSuccess: true, cancelAll: null, context: null },
+    ], contentState: {
+      capturedSessionActive: false, discoveryCancelled: true, currentBridgeOwnsSession: true, schedulerSessionContextOwned: false,
+      pendingOperations: 0, translationSessionId: sessionId, activeFlushes: 0, queueIds: [], activeBatchIds: [], pendingSettlementCount: 0,
+      bridgeSessionActive: false, bridgeDiscoveryPending: false, bridgeDiscoveryRunning: false, bridgeDiscoveryStarting: false,
+      bridgeDiscoveryQueueDepth: 0, bridgeDiscoveryCancelled: true, bridgeDiscoveryFailed: false,
+    }, worker,
+  };
+  const reports = [
+    { event: 'scheduler-batch', evidence: { messageId: firstMessageId, sessionId, targetIds: firstIds } },
+    { event: 'scheduler-batch', evidence: { messageId: secondMessageId, sessionId, targetIds: secondIds } },
+    { event: 'provider-invoked', evidence: first }, { event: 'provider-invoked', evidence: second },
+    { event: 'physical-start', evidence: firstPhysical }, { event: 'physical-start', evidence: secondPhysical },
+    { event: 'physical-settled', evidence: { attemptId: firstPhysical.attemptId, sessionId, outcome: 'fulfilled', status: 200, code: null } },
+    { event: 'parser-success', evidence: { invocationId: first.invocationId, sessionId, sourceIndexes: first.sourceIndexes, resultsMatch: true } },
+    { event: 'provider-settled', evidence: { invocationId: first.invocationId, sessionId, outcome: 'fulfilled', code: null } },
+    { event: 'scheduler-batch-accepted', evidence: { messageId: firstMessageId, sessionId, targetIds: firstIds, acceptedTargetIds: firstIds } },
+    { event: 'physical-settled', evidence: { attemptId: secondPhysical.attemptId, sessionId, outcome: 'cancelled', status: null, code: 'ABORTED' } },
+    { event: 'provider-settled', evidence: { invocationId: second.invocationId, sessionId, outcome: 'rejected', code: 'PROTOCOL_ERROR' } },
+    { event: 'stop-auto-command', evidence: stopCommand }, { event: 'stop-auto-final', evidence: final },
+  ].map((item, index) => ({ v: 1, runId: 'stop-run', op: 'edge-fr-page-once', opSeq: index + 1, ...item }));
+  const snapshot = { op: 'edge-fr-page-once', released: true, restoreDecision: null, stopAutoDecision: 'stop', stopAutoSnapshotDecision: 'capture',
+    stopped: true, stopCode: 'COMPLETED', reports, rejections: { originOrType: 0, protocol: 0 }, failure: null };
+  mutator(snapshot, { first, second, firstPhysical, secondPhysical, stopCommand, final, worker });
+  return snapshot;
 }
 
 function providerReports({ runId = 'provider-run', extensionId = 'probe@test', tabId = 17, fixtureUrl = 'http://127.0.0.1:4567/', texts } = {}) {
@@ -569,6 +633,165 @@ describe('Firefox capability gates', () => {
     expect(built).toBe(false);
     expect(result.runtimeBridge.status).toBe('FAILED');
     expect(JSON.stringify({ artifact, result })).not.toContain(token);
+  });
+});
+
+describe('Firefox Phase 2A production Stop Auto evidence', () => {
+  it('accepts bounded real Provider settlement diagnostics but rejects arbitrary codes and null rejected codes', () => {
+    const report = { v: 1, runId: 'stop-run', op: 'edge-fr-page-once', opSeq: 7, event: 'provider-settled',
+      evidence: { invocationId: 'held-invocation', sessionId: 'real-page-session', outcome: 'rejected', code: 'FETCH_ERROR' } };
+    expect(validateProviderOperationReport(report, { runId: 'stop-run', event: 'provider-settled', opSeq: 7 })).toMatchObject({ evidence: { outcome: 'rejected', code: 'FETCH_ERROR' } });
+    for (const code of ['UNRELATED_ERROR', null]) {
+      expect(() => validateProviderOperationReport({ ...report, evidence: { ...report.evidence, code } },
+        { runId: 'stop-run', event: 'provider-settled', opSeq: 7 })).toThrow();
+    }
+    expect(() => validateProviderOperationReport({ ...report, evidence: { ...report.evidence, outcome: 'fulfilled' } },
+      { runId: 'stop-run', event: 'provider-settled', opSeq: 7 })).toThrow();
+    expect(() => validateProviderOperationReport({ ...report, event: 'error', evidence: { code: 'FETCH_ERROR' } },
+      { runId: 'stop-run', event: 'error', opSeq: 7 })).toThrow();
+    expect(() => validateProviderOperationReport({ ...report, event: 'command-result', evidence: { success: false, sessionId: null, code: 'FETCH_ERROR' } },
+      { runId: 'stop-run', event: 'command-result', opSeq: 7 })).toThrow();
+  });
+
+  it('accepts only correlated first-batch retention and real held-batch abort/root/resource settlement', () => {
+    const snapshot = stopAutoOperationFixture();
+    const proof = validatePageTranslationStopOperation(snapshot);
+    expect(proof).toMatchObject({
+      sessionId: 'real-page-session',
+      firstBatch: { messageId: 'scheduler-first' },
+      secondBatch: { messageId: 'scheduler-second' },
+      heldPhysical: { outcome: 'cancelled', code: 'ABORTED', status: null },
+      final: { acceptedDOMRetained: true, pendingDOMUnchanged: true, postStopMutationTargetIds: [] },
+    });
+  });
+
+  it('accepts a fulfilled-but-unsuccessful Provider root only with the correlated aborted controller', () => {
+    const snapshot = stopAutoOperationFixture((_snapshot, { worker }) => {
+      worker.providerRoots[1].status = 'fulfilled';
+      worker.providerRoots[1].resultSuccess = false;
+      worker.providerRoots[1].controllerAbortedAtEnd = true;
+    });
+    expect(validatePageTranslationStopOperation(snapshot).heldPhysical).toMatchObject({ outcome: 'cancelled', code: 'ABORTED' });
+    const falseSuccess = stopAutoOperationFixture((_snapshot, { worker }) => {
+      worker.providerRoots[1].status = 'fulfilled';
+      worker.providerRoots[1].resultSuccess = true;
+      worker.providerRoots[1].controllerAbortedAtEnd = true;
+    });
+    expect(() => validatePageTranslationStopOperation(falseSuccess)).toThrow();
+  });
+
+  it('requires physical settlement after the observed controller abort without depending on Firefox error normalization', () => {
+    const snapshot = stopAutoOperationFixture((_snapshot, { worker }) => {
+      worker.physical.operationAborted = false;
+      worker.physical.controllerAbortedAtEnd = false;
+    });
+    expect(validatePageTranslationStopOperation(snapshot).final.worker.physical).toMatchObject({
+      status: 'rejected', settledSequence: expect.any(Number),
+    });
+    const earlySettlement = stopAutoOperationFixture((_snapshot, { worker }) => {
+      worker.physical.settledSequence = worker.controllerAbort.sequence;
+    });
+    expect(() => validatePageTranslationStopOperation(earlySettlement)).toThrow();
+  });
+
+  it('records the matching controller abort as a single false-to-true transition without changing AbortController behavior', () => {
+    const controller = new AbortController(); const transitions = [];
+    const observer = observeControllerAbort(controller, { messageId: 'batch-2', sessionId: 'session-stop', context: null }, evidence => {
+      transitions.push({ ...evidence, sequence: 11 });
+    });
+    expect(observer).not.toBeNull();
+    observer.setOwner({ messageId: 'batch-2', sessionId: 'session-stop', context: 'page-translation-batch', cancelRequestSequence: 7 });
+    expect(controller.abort('production-cancel')).toBeUndefined();
+    expect(controller.signal.aborted).toBe(true);
+    expect(controller.signal.reason).toBe('production-cancel');
+    controller.abort('repeat');
+    expect(transitions).toEqual([{ messageId: 'batch-2', sessionId: 'session-stop', context: 'page-translation-batch',
+      cancelRequestSequence: 7, abortedBefore: false, abortedAfter: true, sequence: 11 }]);
+    expect(observer.transitioned).toBe(true);
+  });
+
+  it('uses the AbortSignal fallback when Firefox does not allow an own abort-method wrapper', () => {
+    const controller = new AbortController(); const originalAbort = controller.abort; const transitions = [];
+    Object.defineProperty(controller, 'abort', { value: originalAbort, writable: false, configurable: false });
+    const observer = observeControllerAbort(controller, { messageId: 'batch-2', sessionId: 'session-stop', context: null }, evidence => transitions.push(evidence));
+    expect(observer).toMatchObject({ signalListenerInstalled: true, abortWrapperInstalled: false });
+    observer.setOwner({ messageId: 'batch-2', sessionId: 'session-stop', context: 'page-translation-batch', cancelRequestSequence: 4 });
+    expect(controller.abort('native-fallback')).toBeUndefined();
+    expect(controller.abort).toBe(originalAbort);
+    expect(controller.signal.reason).toBe('native-fallback');
+    controller.abort('repeat');
+    expect(transitions).toEqual([{ messageId: 'batch-2', sessionId: 'session-stop', context: 'page-translation-batch',
+      cancelRequestSequence: 4, abortedBefore: false, abortedAfter: true }]);
+  });
+
+  it('fails closed when neither AbortController abort wrapping nor AbortSignal observation is installable', () => {
+    const signal = { aborted: false, addEventListener() { throw new Error('not observable'); } };
+    const controller = { signal };
+    Object.defineProperty(controller, 'abort', { value() {}, writable: false, configurable: false });
+    expect(observeControllerAbort(controller, { messageId: 'm', sessionId: 's' }, () => {})).toBeNull();
+  });
+
+  it('records the matched AbortController false-to-true transition once and preserves abort behavior', () => {
+    const controller = new AbortController(); const transitions = [];
+    const observer = observeControllerAbort(controller, { messageId: 'batch-2', sessionId: 'session-stop', context: 'page-translation-batch' }, evidence => {
+      transitions.push({ ...evidence, sequence: 9 });
+    });
+    expect(observer).not.toBeNull();
+    observer.setOwner({ messageId: 'batch-2', sessionId: 'session-stop', context: 'page-translation-batch', cancelRequestSequence: 7 });
+    expect(controller.abort('cancelled-by-test')).toBeUndefined();
+    expect(controller.signal.aborted).toBe(true);
+    expect(controller.signal.reason).toBe('cancelled-by-test');
+    controller.abort('duplicate');
+    expect(transitions).toEqual([{ messageId: 'batch-2', sessionId: 'session-stop', context: 'page-translation-batch',
+      cancelRequestSequence: 7, abortedBefore: false, abortedAfter: true, sequence: 9 }]);
+    expect(observer.transitioned).toBe(true);
+  });
+
+  it.each([
+    ['Stop Auto false success', (_snapshot, { stopCommand }) => { stopCommand.stopSuccess = false; }],
+    ['accepted DOM loss', (_snapshot, { stopCommand }) => { stopCommand.acceptedDOMRetained = false; }],
+    ['pending DOM write', (snapshot, { final }) => { final.postStopMutationTargetIds = ['target-8']; }],
+    ['held request false success', snapshot => { snapshot.reports.find(report => report.event === 'physical-settled' && report.evidence.attemptId === 'attempt-second').evidence.outcome = 'fulfilled'; }],
+    ['unrelated held physical error code', snapshot => { snapshot.reports.find(report => report.event === 'physical-settled' && report.evidence.attemptId === 'attempt-second').evidence.code = 'UNRELATED_ERROR'; }],
+    ['provider root still pending', (_snapshot, { worker }) => { worker.providerRoots[1].status = 'pending'; }],
+    ['missing controller abort sequence', (_snapshot, { worker }) => { worker.controllerAbort.sequence = null; }],
+    ['controller abort assigned to another batch', (_snapshot, { worker }) => { worker.controllerAbort.messageId = 'other-batch'; }],
+    ['controller abort without a false-to-true edge', (_snapshot, { worker }) => { worker.controllerAbort.abortedBefore = true; }],
+    ['controller abort without matching cancellation sequence', (_snapshot, { worker }) => { worker.controllerAbort.cancelRequestSequence = 9; }],
+    ['held controller not aborted', (_snapshot, { worker }) => { worker.cancelRequest.controllerAbortedAfter = false; }],
+    ['background cancellation not acknowledged', (_snapshot, { worker }) => { worker.cancelRequest.responseSuccess = false; }],
+    ['active matching resource remains', (_snapshot, { worker }) => { worker.resources.activeRequestIds = ['scheduler-second']; }],
+  ])('rejects %s', (_name, mutate) => {
+    const snapshot = stopAutoOperationFixture((_snapshot, evidence) => mutate(_snapshot, evidence));
+    expect(() => validatePageTranslationStopOperation(snapshot)).toThrow();
+  });
+
+  it('does not reconcile acknowledgement-only or incomplete teardown as supported', async () => {
+    const capabilities = { providerOperation: capability('SUPPORTED') };
+    const artifact = {};
+    const result = await reconcileFinalPageTranslationStop({
+      bridge: { operationSnapshot: () => ({ op: 'edge-fr-page-once', released: true, restoreDecision: null,
+        stopAutoDecision: 'stop', stopAutoSnapshotDecision: 'capture', stopped: true, stopCode: 'COMPLETED', reports: [],
+        rejections: { originOrType: 0, protocol: 0 }, failure: null }) },
+      state: { attempted: true, stopAutoComplete: true, stopAutoProof: { sessionId: 'real-page-session' } },
+      contract: { runId: 'stop-run' }, capabilities, artifact,
+    });
+    expect(result.ok).toBe(false);
+    expect(capabilities.providerOperation.status).toBe('FAILED');
+    expect(artifact.providerOperation.status).toBe('FAILED');
+  });
+
+  it('fails a bounded final Stop Auto snapshot timeout instead of accepting an incomplete drain', async () => {
+    const capabilities = { providerOperation: capability('SUPPORTED'), pageTranslationStopProof: capability('SUPPORTED') };
+    const artifact = {};
+    const result = await reconcileFinalPageTranslationStop({
+      bridge: { operationSnapshot: () => new Promise(() => {}) },
+      state: { attempted: true, stopAutoComplete: true }, contract: {}, capabilities, artifact, timeoutMs: 1,
+    });
+    expect(result.ok).toBe(false);
+    expect(capabilities.providerOperation.status).toBe('FAILED');
+    expect(capabilities.pageTranslationStopProof.status).toBe('FAILED');
+    expect(artifact.providerOperation.status).toBe('FAILED');
   });
 });
 

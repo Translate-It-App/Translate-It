@@ -7,12 +7,14 @@ import { ProviderRequestEngine } from '../../../src/features/translation/provide
 import { BaseProvider } from '../../../src/features/translation/providers/BaseProvider.js';
 import { MicrosoftEdgeProvider } from '../../../src/features/translation/providers/MicrosoftEdgeProvider.js';
 import { makeTrace, installCallThrough, installTimedCallThrough } from './trace.mjs';
-import { createCancellationLedger } from './cancellation-probes.mjs';
+import { createCancellationLedger, matchProviderPhysicalRoot } from './cancellation-probes.mjs';
+import { observeControllerAbort } from '../page-translation-e2e-firefox/controller-abort-observer.mjs';
 
 const trace = makeTrace('worker');
 const cancellationLedger = createCancellationLedger();
 const providerRoots = [];
 const lifecycleControllers = new Map();
+const controllerAbortObservers = new Map();
 const cancellationInstrumentationErrors = [];
 let cancellationProbeEnabled = false;
 let cancellationInstrumentationReady = false;
@@ -44,11 +46,18 @@ installTimedCallThrough(ProviderRequestEngine, 'executeApiCall', ([provider, opt
     ...(cancellationProbeEnabled ? { sessionId: options?.sessionId ?? null } : {}),
   });
   const controllerMatch = options?.abortController
-    ? [...lifecycleControllers.entries()].find(([, entry]) => entry.controller === options.abortController)
+    ? [...lifecycleControllers.entries()].find(([, entry]) => entry.controller === options.abortController
+      || entry.controller?.signal === options.abortController.signal)
     : null;
+  const rootMessageId = controllerMatch?.[0] ?? matchProviderPhysicalRoot({
+    url: options?.url,
+    body: options?.fetchOptions?.body,
+    sessionId: options?.sessionId,
+    roots: providerRoots,
+  });
   const operation = cancellationProbeEnabled
     ? cancellationLedger.begin('provider.physical', options?.sessionId ?? null, {
-      messageId: controllerMatch?.[0] ?? null,
+      messageId: rootMessageId,
       url: options?.url ?? null,
       method: options?.fetchOptions?.method ?? null,
       requestBody: typeof options?.fetchOptions?.body === 'string' ? options.fetchOptions.body : null,
@@ -120,12 +129,15 @@ const marker = {
           if (controller) {
             const context = args[1] ?? null;
             lifecycleControllers.set(messageId, { controller, context });
+            const owner = providerRoots.find(root => root.messageId === messageId);
+            const abortObserver = observeControllerAbort(controller, { messageId, sessionId: owner?.sessionId ?? null, context: null }, evidence => {
+              cancellationLedger.record('controller.abort', evidence.sessionId, evidence);
+            });
+            if (abortObserver) controllerAbortObservers.set(messageId, abortObserver);
+            else cancellationInstrumentationErrors.push(`Could not instrument AbortController.abort for ${messageId}.`);
             cancellationLedger.record('controller.register', providerRoots.find(root => root.messageId === messageId)?.sessionId ?? null, {
               messageId, context, alreadyAborted: controller.signal.aborted,
             });
-            controller.signal.addEventListener('abort', () => cancellationLedger.record('controller.abort',
-              providerRoots.find(root => root.messageId === messageId)?.sessionId ?? null,
-              { messageId, reason: controller.signal.reason ?? null }), { once: true });
           }
           return controller;
         };
@@ -140,6 +152,16 @@ const marker = {
           const operation = cancellationLedger.begin('service.cancelRequest', root?.sessionId ?? null, {
             messageId, controllerMatched: !!controller, controllerAbortedBefore: controller?.signal?.aborted ?? null,
           });
+          let abortObserver = controllerAbortObservers.get(messageId);
+          if (!abortObserver && controller) {
+            abortObserver = observeControllerAbort(controller, { messageId, sessionId: root?.sessionId ?? null }, evidence => {
+              cancellationLedger.record('controller.abort', evidence.sessionId, evidence);
+            });
+            if (abortObserver) controllerAbortObservers.set(messageId, abortObserver);
+          }
+          abortObserver?.setOwner({ messageId, sessionId: root?.sessionId ?? null,
+            context: globalThis.__firefoxPageTranslationStopMode === true ? 'page-translation-batch' : null,
+            cancelRequestSequence: operation.sequence });
           let result;
           try { result = originalCancelRequest.call(this, messageId, ...args); }
           catch (error) {

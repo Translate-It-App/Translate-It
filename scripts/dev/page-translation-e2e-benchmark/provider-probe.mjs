@@ -21,7 +21,9 @@ const isEdgeEndpoint = value => {
   } catch { return false; }
 };
 const sha256 = async value => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
-const fetchFailure = error => error?.name === 'AbortError' ? ['cancelled', 'ABORTED'] : error instanceof TypeError ? ['rejected', 'NETWORK_ERROR'] : ['rejected', 'FETCH_ERROR'];
+const fetchFailure = error => error?.name === 'AbortError' || error?.operationAborted === true || error?.code === 'ABORTED'
+  ? ['cancelled', 'ABORTED']
+  : error instanceof TypeError || error?.name === 'TypeError' ? ['rejected', 'NETWORK_ERROR'] : ['rejected', 'FETCH_ERROR'];
 
 export function createEdgeProviderProbe(report) {
   let enabled = false;
@@ -106,7 +108,11 @@ export function createEdgeProviderProbe(report) {
         const previousInvocation = activeInvocation;
         activeInvocation = invocation;
         try { result = original.apply(this, args); }
-        catch (error) { void emit('provider-settled', { invocationId: invocation.invocationId, sessionId, outcome: 'rejected', code: 'PROTOCOL_ERROR' }); throw error; }
+        catch (error) {
+          const [outcome, code] = fetchFailure(error);
+          void emit('provider-settled', { invocationId: invocation.invocationId, sessionId, outcome, code });
+          throw error;
+        }
         finally { activeInvocation = previousInvocation; }
         if (result && typeof result.then === 'function') result.then(value => {
           void (async () => {
@@ -122,10 +128,11 @@ export function createEdgeProviderProbe(report) {
             await emit('provider-settled', { invocationId: invocation.invocationId, sessionId: invocation.sessionId, outcome: 'fulfilled', code: null });
             invocation.complete();
           })().catch(() => { void emit('error', { code: 'PROTOCOL_ERROR' }); }).finally(() => invocation.complete());
-        }, () => {
+        }, error => {
           invocation.settled = true;
+          const [outcome, code] = fetchFailure(error);
           void Promise.all(invocation.attempts.map(attempt => attempt.settledReport))
-            .then(() => emit('provider-settled', { invocationId: invocation.invocationId, sessionId: invocation.sessionId, outcome: 'rejected', code: 'PROTOCOL_ERROR' }))
+            .then(() => emit('provider-settled', { invocationId: invocation.invocationId, sessionId: invocation.sessionId, outcome, code }))
             .catch(() => {}).finally(() => invocation.complete());
         });
         return result;

@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { classifyTransportRequest, mapEdgeResponse } from '../page-translation-e2e-benchmark/metrics.mjs';
+import { PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES } from './runtime-constants.mjs';
 import { compareRestoreDOMSnapshots } from './restore-dom-diagnostics.mjs';
 import { createEdgeLoopbackCertificates, edgeProxyFirefoxPrefs, importEdgeLoopbackCa, startEdgeLoopbackProxy } from './loopback-edge-proxy.mjs';
 import { blockRuntimeBridgePrerequisite, capability, classifyObservedRealm, classifyRequestAction, isolationSnapshot, notTested, requiredCapabilities, retainExecutedCapability, runtimeProbeGate } from './capabilities.mjs';
@@ -397,7 +398,7 @@ export function classifyProtocolFailure(error) {
 
 const providerStopCodes = new Set(['INTERCEPTION_UNSUPPORTED', 'BODY_UNSUPPORTED', 'INVALID_BODY', 'PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN', 'COMPLETED']);
 const providerDiagnosticCodes = new Set([...providerStopCodes, 'ABORTED', 'NETWORK_ERROR', 'HTTP_ERROR', 'FETCH_ERROR']);
-const operationEvents = new Set(['armed', 'scheduler-batch', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
+const operationEvents = new Set(['armed', 'scheduler-batch', 'scheduler-batch-accepted', 'stop-auto-command', 'stop-auto-final', 'stop-auto-diagnostic', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
 const operationName = 'edge-fr-page-once';
 const operationExact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
@@ -461,6 +462,40 @@ export function validateProviderOperationReport(report, { runId, event, opSeq, e
         || evidence.targetIds.some(id => !/^target-(?:[0-9]|1[01])$/.test(id)) || new Set(evidence.targetIds).size !== evidence.targetIds.length) {
       throw new Error('Authenticated Scheduler batch evidence is invalid.');
     }
+  } else if (event === 'scheduler-batch-accepted') {
+    if (!operationExact(evidence, ['messageId', 'sessionId', 'targetIds', 'acceptedTargetIds']) || !safeId(evidence.messageId)
+        || !safeId(evidence.sessionId) || !targetIdsSubset(evidence.targetIds) || !sameStrings(evidence.targetIds, evidence.acceptedTargetIds)) {
+      throw new Error('Accepted Scheduler batch evidence is invalid.');
+    }
+  } else if (event === 'stop-auto-command') {
+    if (!operationExact(evidence, ['sessionId', 'firstBatchMessageId', 'firstBatchTargetIds', 'acceptedTargetIds', 'pendingTargetIds',
+      'stopSuccess', 'stopSessionId', 'translatedCount', 'isTranslated', 'isAutoTranslating', 'acceptedDOMRetained', 'pendingDOMUnchanged', 'acceptedStateHash', 'pendingStateHash'])
+        || !safeId(evidence.sessionId) || !safeId(evidence.firstBatchMessageId) || evidence.stopSuccess !== true
+        || evidence.stopSessionId !== evidence.sessionId || !Number.isInteger(evidence.translatedCount)
+        || !targetIdsSubset(evidence.firstBatchTargetIds) || !sameStrings(evidence.firstBatchTargetIds, evidence.acceptedTargetIds)
+        || !targetIdsSubset(evidence.pendingTargetIds) || !disjointStrings(evidence.acceptedTargetIds, evidence.pendingTargetIds)
+        || !allTargetIds(evidence.acceptedTargetIds, evidence.pendingTargetIds) || evidence.translatedCount !== evidence.acceptedTargetIds.length
+        || evidence.isTranslated !== true || evidence.isAutoTranslating !== false || evidence.acceptedDOMRetained !== true
+        || evidence.pendingDOMUnchanged !== true || !isSha256(evidence.acceptedStateHash) || !isSha256(evidence.pendingStateHash)) {
+      throw new Error('Production Stop Auto acknowledgment or retained DOM evidence is invalid.');
+    }
+  } else if (event === 'stop-auto-final') {
+    if (!operationExact(evidence, ['sessionId', 'firstBatchMessageId', 'firstBatchTargetIds', 'secondBatchMessageId', 'secondBatchTargetIds',
+      'acceptedTargetIds', 'pendingTargetIds', 'acceptedDOMRetained', 'pendingDOMUnchanged', 'acceptedStateHash', 'pendingStateHash', 'postStopMutationTargetIds', 'cancellationRequests', 'contentState', 'worker'])
+        || !safeId(evidence.sessionId) || !safeId(evidence.firstBatchMessageId) || !safeId(evidence.secondBatchMessageId)
+        || evidence.firstBatchMessageId === evidence.secondBatchMessageId || !targetIdsSubset(evidence.firstBatchTargetIds)
+        || !sameStrings(evidence.firstBatchTargetIds, evidence.acceptedTargetIds) || !sameStrings(evidence.secondBatchTargetIds, evidence.pendingTargetIds)
+        || !disjointStrings(evidence.acceptedTargetIds, evidence.pendingTargetIds) || !allTargetIds(evidence.acceptedTargetIds, evidence.pendingTargetIds)
+        || evidence.acceptedDOMRetained !== true || evidence.pendingDOMUnchanged !== true || !isSha256(evidence.acceptedStateHash)
+        || !isSha256(evidence.pendingStateHash) || !Array.isArray(evidence.postStopMutationTargetIds) || evidence.postStopMutationTargetIds.length !== 0
+        || !validateStopContentState(evidence.contentState, evidence.sessionId)
+        || !validateStopCancellationRequests(evidence.cancellationRequests, evidence.sessionId)
+        || !validateStopWorkerEvidence(evidence.worker, evidence.sessionId, evidence.firstBatchMessageId, evidence.secondBatchMessageId)) {
+      throw new Error('Final Stop Auto cancellation, settlement, DOM, or resource evidence is invalid.');
+    }
+  } else if (event === 'stop-auto-diagnostic') {
+    if (!operationExact(evidence, ['stage', 'code']) || !PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES.includes(evidence.stage)
+        || !['PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN'].includes(evidence.code)) throw new Error('Stop Auto phase diagnostic is invalid.');
   } else if (event === 'physical-start') {
     if (!operationExact(evidence, ['attemptId', 'invocationId', 'sessionId', 'messageId', 'provider', 'method', 'url', 'bodyBytes', 'bodyHash', 'sourceIndexes'])
         || !safeId(evidence.attemptId) || !safeId(evidence.invocationId) || !safeId(evidence.sessionId) || (evidence.messageId !== null && !safeId(evidence.messageId))
@@ -476,7 +511,8 @@ export function validateProviderOperationReport(report, { runId, event, opSeq, e
         || !indexesSubset012(evidence.sourceIndexes) || evidence.resultsMatch !== true) throw new Error('Edge parser-success evidence is invalid.');
   } else if (event === 'provider-settled') {
     if (!operationExact(evidence, ['invocationId', 'sessionId', 'outcome', 'code']) || !safeId(evidence.invocationId) || !safeId(evidence.sessionId)
-        || !['fulfilled', 'rejected', 'cancelled'].includes(evidence.outcome) || (evidence.code !== null && !providerStopCodes.has(evidence.code))) throw new Error('Provider settlement evidence is invalid.');
+        || !['fulfilled', 'rejected', 'cancelled'].includes(evidence.outcome)
+        || (evidence.outcome === 'fulfilled' ? evidence.code !== null : !providerDiagnosticCodes.has(evidence.code))) throw new Error('Provider settlement evidence is invalid.');
   } else if (event === 'command-result') {
     if (!operationExact(evidence, ['success', 'sessionId', 'code']) || typeof evidence.success !== 'boolean'
         || (evidence.sessionId !== null && !safeId(evidence.sessionId)) || (evidence.code !== null && !providerStopCodes.has(evidence.code))
@@ -500,6 +536,59 @@ export function validateProviderOperationReport(report, { runId, event, opSeq, e
   return { v: 1, runId, op: operationName, opSeq: report.opSeq, event, evidence: { ...evidence } };
 }
 
+function targetIdsSubset(value) {
+  return Array.isArray(value) && value.length > 0 && value.length <= 12
+    && value.every(id => typeof id === 'string' && /^target-(?:[0-9]|1[01])$/.test(id)) && new Set(value).size === value.length;
+}
+function sameStrings(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => value === right[index]); }
+function disjointStrings(left, right) { return Array.isArray(left) && Array.isArray(right) && left.every(value => !right.includes(value)); }
+function allTargetIds(left, right) { return [...(left ?? []), ...(right ?? [])].length === 12 && new Set([...(left ?? []), ...(right ?? [])]).size === 12 && Array.from({ length: 12 }, (_, index) => `target-${index}`).every(id => [...left, ...right].includes(id)); }
+function isSha256(value) { return typeof value === 'string' && /^[a-f\d]{64}$/i.test(value); }
+function validateStopCancellationRequests(value, sessionId) {
+  if (!Array.isArray(value) || value.length !== 2) return false;
+  const cancel = value.find(item => item.action === 'CANCEL_TRANSLATION'); const session = value.find(item => item.action === 'CANCEL_SESSION');
+  return !!cancel && !!session && [cancel, session].every(item => operationExact(item, ['action', 'sessionId', 'status', 'responseSuccess', 'cancelAll', 'context'])
+    && item.sessionId === sessionId && item.status === 'fulfilled' && item.responseSuccess === true)
+    && cancel.cancelAll === true && cancel.context === 'page-translation-batch' && session.cancelAll === null && session.context === null;
+}
+function validateStopContentState(value, sessionId) {
+  return operationExact(value, ['capturedSessionActive', 'discoveryCancelled', 'currentBridgeOwnsSession', 'schedulerSessionContextOwned', 'pendingOperations',
+    'translationSessionId', 'activeFlushes', 'queueIds', 'activeBatchIds', 'pendingSettlementCount', 'bridgeSessionActive',
+    'bridgeDiscoveryPending', 'bridgeDiscoveryRunning', 'bridgeDiscoveryStarting', 'bridgeDiscoveryQueueDepth', 'bridgeDiscoveryCancelled', 'bridgeDiscoveryFailed'])
+    && value.capturedSessionActive === false && value.discoveryCancelled === true && value.schedulerSessionContextOwned === false
+    && value.pendingOperations === 0 && value.translationSessionId === sessionId && value.activeFlushes === 0
+    && Array.isArray(value.queueIds) && value.queueIds.length === 0 && Array.isArray(value.activeBatchIds) && value.activeBatchIds.length === 0
+    && value.pendingSettlementCount === 0 && value.bridgeSessionActive === false
+    && value.bridgeDiscoveryPending === false && value.bridgeDiscoveryRunning === false && value.bridgeDiscoveryStarting === false
+    && value.bridgeDiscoveryQueueDepth === 0 && value.bridgeDiscoveryCancelled === true && value.bridgeDiscoveryFailed === false;
+}
+function validateStopWorkerEvidence(value, sessionId, firstMessageId, secondMessageId) {
+  if (!operationExact(value, ['providerRoots', 'cancelRequest', 'controllerAbort', 'physical', 'resources']) || !Array.isArray(value.providerRoots) || value.providerRoots.length !== 2) return false;
+  const first = value.providerRoots.find(item => item.messageId === firstMessageId); const second = value.providerRoots.find(item => item.messageId === secondMessageId);
+  const cancel = value.cancelRequest; const abort = value.controllerAbort; const physical = value.physical; const resources = value.resources;
+  return !!first && !!second && [first, second].every(item => operationExact(item, ['messageId', 'sessionId', 'status', 'resultSuccess', 'operationAborted', 'controllerAborted', 'controllerAbortedAtEnd', 'settledSequence']) && item.sessionId === sessionId && Number.isSafeInteger(item.settledSequence))
+    && first.status === 'fulfilled' && first.resultSuccess === true
+    && ((second.status === 'rejected' && (second.operationAborted === true || second.controllerAbortedAtEnd === true))
+      || (second.status === 'fulfilled' && second.resultSuccess === false && second.controllerAbortedAtEnd === true))
+    && second.controllerAborted === true
+    && operationExact(cancel, ['messageId', 'sessionId', 'status', 'controllerMatched', 'controllerAbortedBefore', 'controllerAbortedAfter', 'responseSuccess'])
+    && cancel.messageId === secondMessageId && cancel.sessionId === sessionId && cancel.status === 'fulfilled' && cancel.controllerMatched === true
+    && cancel.controllerAbortedBefore === false && cancel.controllerAbortedAfter === true && cancel.responseSuccess === true
+    && operationExact(abort, ['messageId', 'sessionId', 'sequence', 'cancelRequestSequence', 'abortedBefore', 'abortedAfter', 'context'])
+    && abort.messageId === secondMessageId && abort.sessionId === sessionId && Number.isSafeInteger(abort.sequence)
+    && Number.isSafeInteger(abort.cancelRequestSequence) && abort.sequence > abort.cancelRequestSequence
+     && abort.context === 'page-translation-batch' && abort.abortedBefore === false && abort.abortedAfter === true && second.settledSequence > abort.sequence
+     && operationExact(physical, ['messageId', 'sessionId', 'status', 'operationAborted', 'controllerAbortedAtEnd', 'settledSequence'])
+     && physical.messageId === secondMessageId && physical.sessionId === sessionId && physical.status === 'rejected'
+     && Number.isSafeInteger(physical.settledSequence) && physical.settledSequence > abort.sequence
+    && operationExact(resources, ['available', 'activeLifecycleIds', 'activeRequestIds', 'requests', 'sourceResolverPresent', 'queueEmpty', 'rateLimitIdle', 'leaseActiveCount', 'leaseTimerActive'])
+    && resources.available === true && Array.isArray(resources.activeLifecycleIds) && resources.activeLifecycleIds.every(id => id !== firstMessageId && id !== secondMessageId)
+    && Array.isArray(resources.activeRequestIds) && resources.activeRequestIds.every(id => id !== firstMessageId && id !== secondMessageId)
+    && Array.isArray(resources.requests) && resources.requests.length === 2
+    && resources.requests.every(item => operationExact(item, ['messageId', 'status', 'operationOwned']) && [firstMessageId, secondMessageId].includes(item.messageId) && item.operationOwned === false && !['pending', 'processing', 'streaming'].includes(item.status))
+    && resources.sourceResolverPresent === false && resources.queueEmpty === true && resources.rateLimitIdle === true && resources.leaseActiveCount === 0 && resources.leaseTimerActive === false;
+}
+
 export function validateProviderReleaseReceipt(receipt) {
   if (!operationExact(receipt, ['decision']) || !['start', 'stop'].includes(receipt.decision)) throw new Error('Provider release receipt must explicitly decide start or stop.');
   return receipt.decision;
@@ -507,13 +596,19 @@ export function validateProviderReleaseReceipt(receipt) {
 
 export function validateProviderOperationSnapshot(snapshot, { runId, extensionId, fixtureUrl, tabId, sender = null }) {
   const baseSnapshotKeys = ['op', 'released', 'restoreDecision', 'stopped', 'stopCode', 'reports', 'rejections', 'failure'];
+  const phase2Keys = [...baseSnapshotKeys, 'stopAutoDecision', 'stopAutoSnapshotDecision'];
   const snapshotEnvelope = operationExact(snapshot, baseSnapshotKeys)
     || operationExact(snapshot, [...baseSnapshotKeys, 'lastRejection'])
+      && (snapshot.lastRejection === null || sanitizeProviderLastRejection(snapshot.lastRejection, []) !== null)
+    || operationExact(snapshot, phase2Keys)
+    || operationExact(snapshot, [...phase2Keys, 'lastRejection'])
       && (snapshot.lastRejection === null || sanitizeProviderLastRejection(snapshot.lastRejection, []) !== null);
   if (!snapshotEnvelope
       || snapshot.op !== operationName || typeof snapshot.released !== 'boolean' || typeof snapshot.stopped !== 'boolean'
       || !Array.isArray(snapshot.reports) || snapshot.reports.length > 64
       || (snapshot.restoreDecision !== null && !['restore', 'stop'].includes(snapshot.restoreDecision))
+      || (Object.hasOwn(snapshot, 'stopAutoDecision') && snapshot.stopAutoDecision !== null && !['stop', 'deny'].includes(snapshot.stopAutoDecision))
+      || (Object.hasOwn(snapshot, 'stopAutoSnapshotDecision') && snapshot.stopAutoSnapshotDecision !== null && !['capture', 'deny'].includes(snapshot.stopAutoSnapshotDecision))
       || (snapshot.stopCode !== null && !providerStopCodes.has(snapshot.stopCode))) throw new Error('Provider operation snapshot envelope invalid.');
   if (snapshot.failure !== null && (!operationExact(snapshot.failure, ['code']) || !providerStopCodes.has(snapshot.failure.code))) throw new Error('Provider operation snapshot failure is invalid.');
   if (!operationExact(snapshot.rejections, ['originOrType', 'protocol']) || Object.values(snapshot.rejections).some(count => !Number.isSafeInteger(count) || count < 0 || count > 0)) throw new Error('Provider operation collector recorded rejected telemetry.');
@@ -523,7 +618,7 @@ export function validateProviderOperationSnapshot(snapshot, { runId, extensionId
   }));
   const seenEvents = new Set();
   for (const report of reports) {
-    if (seenEvents.has(report.event) && !['scheduler-batch', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled'].includes(report.event)) throw new Error(`Provider operation duplicated ${report.event}.`);
+    if (seenEvents.has(report.event) && !['scheduler-batch', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'stop-auto-diagnostic'].includes(report.event)) throw new Error(`Provider operation duplicated ${report.event}.`);
     seenEvents.add(report.event);
   }
   const evidence = event => reports.find(report => report.event === event)?.evidence;
@@ -574,7 +669,78 @@ export function validateProviderOperationSnapshot(snapshot, { runId, extensionId
   if (translated && (invocations.length === 0 || parserByInvocation.size !== invocations.length || !command?.success
       || !indexes012([...globalCoverage.keys()].sort((a, b) => a - b)) || translated.sessionId !== invocations[0].sessionId)) throw new Error('Translated DOM acceptance lacks complete parser and command success evidence.');
   if (restored && (!translated || restored.sessionId !== translated.sessionId)) throw new Error('Restore report does not match the translated session.');
-  return { op: snapshot.op, released: snapshot.released, restoreDecision: snapshot.restoreDecision, stopped: snapshot.stopped, stopCode: snapshot.stopCode, reports, failure: snapshot.failure };
+  return { op: snapshot.op, released: snapshot.released, restoreDecision: snapshot.restoreDecision,
+    stopAutoDecision: snapshot.stopAutoDecision ?? null, stopAutoSnapshotDecision: snapshot.stopAutoSnapshotDecision ?? null,
+    stopped: snapshot.stopped, stopCode: snapshot.stopCode, reports, failure: snapshot.failure };
+}
+
+export function validatePageTranslationStopOperation(snapshot) {
+  if (!snapshot?.stopped || snapshot.stopCode !== 'COMPLETED' || snapshot.failure
+      || snapshot.stopAutoDecision !== 'stop' || snapshot.stopAutoSnapshotDecision !== 'capture') throw new Error('Stop Auto operation did not complete both authenticated gates.');
+  const reports = snapshot.reports;
+  const events = name => reports.filter(report => report.event === name);
+  const batches = events('scheduler-batch'); const accepted = events('scheduler-batch-accepted');
+  const invocations = events('provider-invoked'); const starts = events('physical-start'); const settlements = events('physical-settled');
+  const parsers = events('parser-success'); const providerSettlements = events('provider-settled');
+  const commands = events('stop-auto-command'); const finals = events('stop-auto-final');
+  if (batches.length !== 2 || accepted.length !== 1 || invocations.length !== 2 || starts.length !== 2 || settlements.length !== 2
+      || parsers.length !== 1 || providerSettlements.length !== 2 || commands.length !== 1 || finals.length !== 1) {
+    throw new Error('Stop Auto operation omitted exact two-batch provider, physical, acceptance, or cancellation evidence.');
+  }
+  const final = finals[0].evidence; const command = commands[0].evidence; const acceptedBatch = accepted[0].evidence;
+  const byMessage = new Map(invocations.map(report => [report.evidence.messageId, report.evidence]));
+  const first = byMessage.get(final.firstBatchMessageId); const second = byMessage.get(final.secondBatchMessageId);
+  if (!first || !second || first.sessionId !== final.sessionId || second.sessionId !== final.sessionId
+      || !sameStrings(first.sourceIndexes.map(index => `target-${index}`), final.firstBatchTargetIds)
+      || !sameStrings(second.sourceIndexes.map(index => `target-${index}`), final.secondBatchTargetIds)) throw new Error('Stop Auto scheduler batches do not match the actual provider invocation identities.');
+  if (acceptedBatch.messageId !== first.messageId || acceptedBatch.sessionId !== final.sessionId
+      || !sameStrings(acceptedBatch.targetIds, acceptedBatch.acceptedTargetIds)
+      || !sameStrings(acceptedBatch.targetIds, final.acceptedTargetIds)) throw new Error('Stop Auto did not preserve the exact accepted first Scheduler batch.');
+  const firstStart = starts.find(report => report.evidence.invocationId === first.invocationId)?.evidence;
+  const secondStart = starts.find(report => report.evidence.invocationId === second.invocationId)?.evidence;
+  const firstSettlement = firstStart && settlements.find(report => report.evidence.attemptId === firstStart.attemptId)?.evidence;
+  const secondSettlement = secondStart && settlements.find(report => report.evidence.attemptId === secondStart.attemptId)?.evidence;
+  if (!firstStart || !secondStart || firstSettlement?.outcome !== 'fulfilled' || firstSettlement.status !== 200 || firstSettlement.code !== null
+      || !['rejected', 'cancelled'].includes(secondSettlement?.outcome) || !['ABORTED', 'NETWORK_ERROR', 'FETCH_ERROR'].includes(secondSettlement.code) || secondSettlement.status !== null) {
+    throw new Error('Stop Auto did not correlate one fulfilled first physical batch and one actually aborted held batch.');
+  }
+  const firstRoot = providerSettlements.find(report => report.evidence.invocationId === first.invocationId)?.evidence;
+  const secondRoot = providerSettlements.find(report => report.evidence.invocationId === second.invocationId)?.evidence;
+  if (firstRoot?.outcome !== 'fulfilled' || firstRoot.code !== null || !['rejected', 'cancelled'].includes(secondRoot?.outcome)
+      || !providerDiagnosticCodes.has(secondRoot?.code)) throw new Error('Provider roots did not settle as first fulfilled and held second cancelled.');
+  if (parsers[0].evidence.invocationId !== first.invocationId || parsers[0].evidence.resultsMatch !== true
+      || JSON.stringify(parsers[0].evidence.sourceIndexes) !== JSON.stringify(first.sourceIndexes)) throw new Error('Only the fulfilled first batch may have parser-success evidence.');
+  if (command.stopSuccess !== true || command.stopSessionId !== final.sessionId || command.translatedCount !== final.acceptedTargetIds.length
+      || command.isTranslated !== true || command.isAutoTranslating !== false || !command.acceptedDOMRetained || !command.pendingDOMUnchanged
+      || final.acceptedDOMRetained !== true || final.pendingDOMUnchanged !== true || final.postStopMutationTargetIds.length !== 0
+      || !validateStopCancellationRequests(final.cancellationRequests, final.sessionId)
+      || !validateStopContentState(final.contentState, final.sessionId)
+      || !validateStopWorkerEvidence(final.worker, final.sessionId, final.firstBatchMessageId, final.secondBatchMessageId)) {
+    throw new Error('Production Stop Auto did not retain accepted DOM without pending writes.');
+  }
+  return { sessionId: final.sessionId, firstBatch: first, secondBatch: second, firstPhysical: firstSettlement, heldPhysical: secondSettlement, final };
+}
+
+export async function reconcileFinalPageTranslationStop({ bridge, state, contract, capabilities, artifact, secrets = [], timeoutMs = 3000 }) {
+  let rawSnapshot = null;
+  try {
+    rawSnapshot = await withTimeout(Promise.resolve(bridge.operationSnapshot()), timeoutMs, 'final Stop Auto operation snapshot');
+    const snapshot = validateProviderOperationSnapshot(rawSnapshot, contract);
+    const proof = validatePageTranslationStopOperation(snapshot);
+    if (!state?.stopAutoComplete || state.stopAutoProof?.sessionId !== proof.sessionId
+        || state.stopAutoProof.firstBatchMessageId !== proof.firstBatch.messageId
+        || state.stopAutoProof.secondBatchMessageId !== proof.secondBatch.messageId) throw new Error('Driver and authenticated collector Stop Auto proofs differ.');
+    artifact.providerOperation = { attempted: true, stopAuto: true, snapshot };
+    capabilities.providerOperation = capability('SUPPORTED', { source: 'authenticated-production-stop-auto-loopback-cancellation', sessionId: proof.sessionId, reportCount: snapshot.reports.length });
+    return { ok: true, proof, snapshot };
+  } catch (error) {
+    const reason = sanitizePrivate(`Final Stop Auto reconciliation failed: ${error.message}`, secrets);
+    capabilities.pageTranslationStopProof = capability('FAILED', { reason });
+    capabilities.providerOperation = capability('FAILED', { reason });
+    artifact.providerOperation = { attempted: true, stopAuto: true, status: 'FAILED', reason,
+      finalSnapshot: boundedProviderSnapshotDiagnostic(rawSnapshot, secrets, contract) };
+    return { ok: false, reason };
+  }
 }
 
 export async function reconcileFinalProviderOperation({ bridge, state, contract, capabilities, artifact, secrets = [], timeoutMs = 3000 }) {
@@ -704,17 +870,19 @@ function boundedProviderSnapshotDiagnostic(snapshot, secrets, contract) {
 }
 
 function sanitizeProviderLastRejection(value, secrets) {
-  if (value === null) return null;
+  if (value == null) return null;
   const keys = ['event', 'opSeq', 'reason', 'released', 'armed', 'stopped', 'sessionMatchesAdmitted', 'invocationKnown', 'attemptKnown', 'codeKnown', 'code', 'success', 'outcome'];
-  if (!operationExact(value, keys) || (!operationEvents.has(value.event) && value.event !== 'unknown')
+  const hasStopStage = Object.hasOwn(value, 'stopStage');
+  if (!(operationExact(value, keys) || hasStopStage && operationExact(value, [...keys, 'stopStage'])) || (!operationEvents.has(value.event) && value.event !== 'unknown')
       || (value.opSeq !== null && (!Number.isSafeInteger(value.opSeq) || value.opSeq < 0 || value.opSeq > 65))
       || !['ENVELOPE_INVALID', 'SEQUENCE_INVALID', 'LIMIT_EXCEEDED', 'OPERATION_FAILED', 'EVENT_INVALID'].includes(value.reason)
       || ['released', 'armed', 'stopped', 'sessionMatchesAdmitted', 'codeKnown'].some(key => typeof value[key] !== 'boolean')
       || ['invocationKnown', 'attemptKnown'].some(key => value[key] !== null && typeof value[key] !== 'boolean')
       || (value.code !== null && !providerDiagnosticCodes.has(value.code))
+      || (hasStopStage && value.stopStage !== null && !PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES.includes(value.stopStage))
       || (value.success !== null && typeof value.success !== 'boolean')
       || (value.outcome !== null && !['fulfilled', 'rejected', 'cancelled'].includes(value.outcome))) return null;
-  return sanitizePrivate(Object.fromEntries(keys.map(key => [key, value[key]])), secrets);
+  return sanitizePrivate(Object.fromEntries([...keys, ...(hasStopStage ? ['stopStage'] : [])].map(key => [key, value[key]])), secrets);
 }
 
 function applyProviderOperationError(capabilities, code) {
@@ -777,9 +945,9 @@ export async function removeProviderNetworkControls({ bidi, collectorId, interce
   return { ok: errors.length === 0, errors };
 }
 
-export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, collectorId, fixtureTexts, runId, extensionId, fixtureUrl, tabId, startupSender = null, capabilities, timeoutMs = 12000, loopbackProxy = null, providerOnly = false }) {
+export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, collectorId, fixtureTexts, runId, extensionId, fixtureUrl, tabId, startupSender = null, capabilities, timeoutMs = 12000, loopbackProxy = null, providerOnly = false, stopAutoMode = false }) {
   if (!Array.isArray(fixtureTexts) || fixtureTexts.length !== 12 || new Set(fixtureTexts).size !== 12 || fixtureTexts.some(text => typeof text !== 'string' || !text.trim())) throw new TypeError('Provider fixture source oracle must contain twelve unique target texts.');
-  const state = { attempted: false, released: false, receiptDecision: null, stopped: false, stopCode: null, providerOnly, proxyCorrelation: null, providerInvocation: null, reports: [], cursor: 0, pendingReports: [], invocations: new Map(), schedulerBatches: new Map(), attempts: new Map(), parsers: new Map(), providerSettlements: new Map(), successfulCoverage: new Map(), invocation: null, armed: null, physical: null, physicalStarts: [], requests: [], bodyProofs: [], settlements: [], request: null, bodyProof: null, physicalSettlement: null, parser: null, command: null, translated: null, restored: null, error: null, contract: { runId, extensionId, fixtureUrl, tabId } };
+  const state = { attempted: false, released: false, receiptDecision: null, stopped: false, stopCode: null, providerOnly, stopAutoMode, proxyCorrelation: null, providerInvocation: null, stopAutoProof: null, stopAutoComplete: false, stopAutoDiagnostics: [], schedulerBatchAccepted: null, stopAutoCommand: null, reports: [], cursor: 0, pendingReports: [], invocations: new Map(), schedulerBatches: new Map(), attempts: new Map(), parsers: new Map(), providerSettlements: new Map(), successfulCoverage: new Map(), invocation: null, armed: null, physical: null, physicalStarts: [], requests: [], bodyProofs: [], settlements: [], request: null, bodyProof: null, physicalSettlement: null, parser: null, command: null, translated: null, restored: null, error: null, contract: { runId, extensionId, fixtureUrl, tabId } };
   let operationDeadline = 0;
   const candidateBuffer = [];
   const seenRequestIds = new Set();
@@ -800,7 +968,7 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
     if (!snapshot || !Array.isArray(snapshot.reports) || snapshot.reports.length > 64) throw new Error('Provider operation snapshot is invalid while collecting reports.');
     return snapshot;
   };
-  const wait = async expected => {
+  const wait = async (expected, predicate = () => true) => {
     const events = Array.isArray(expected) ? expected : [expected];
     const server = bridge.server;
     while (Date.now() < operationDeadline) {
@@ -829,9 +997,12 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
               && state.reports.some(item => item.event === 'armed') && !state.reports.some(item => item.event === 'provider-invoked')) {
             state.providerInvocation = { stage: 'provider-only-invoke', code: providerStopCodes.has(report.evidence.code) ? report.evidence.code : 'PROTOCOL_ERROR' };
           }
+          if (stopAutoMode && report.event === 'stop-auto-command') state.stopAutoCommand = report.evidence;
+          if (stopAutoMode && report.event === 'stop-auto-final') state.stopAutoProof = report.evidence;
+          if (stopAutoMode && report.event === 'stop-auto-diagnostic') state.stopAutoDiagnostics.push(report.evidence);
           state.pendingReports.push(report);
         }
-        const index = state.pendingReports.findIndex(report => events.includes(report.event));
+        const index = state.pendingReports.findIndex(report => events.includes(report.event) && predicate(report));
         if (index >= 0) return state.pendingReports.splice(index, 1)[0];
         if (raw) continue;
         if (snapshot.reports.some(item => item?.opSeq > state.cursor)) throw new Error(`Provider operation opSeq gap after ${state.cursor}.`);
@@ -1004,6 +1175,75 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
       : capability('SUPPORTED', { requestId: request.requestId, attemptId: physical.attemptId, url: request.url, method: request.method });
     if (!candidateMatches(candidate, physical)) throw new Error('Transport candidate does not match authenticated native request bytes/hash/source indexes.');
     capabilities.providerRequestBody = capability('SUPPORTED', { bodyBytes: bodyProof.bodyBytes, bodyHash: bodyProof.bodyHash, sourceIndexes: bodyProof.sourceIndexes });
+    if (stopAutoMode && state.attempts.size > 0) {
+      const firstAttempt = [...state.attempts.values()].find(item => item.successful === true);
+      const firstInvocation = firstAttempt && state.invocations.get(firstAttempt.physical.invocationId);
+      if (!firstAttempt || !firstInvocation || firstAttempt.physical.sessionId !== owner.sessionId
+          || firstInvocation.messageId === owner.messageId) throw new Error('Held request is not a subsequent batch in the first live session.');
+      if (!state.parsers.has(firstInvocation.invocationId)) {
+        const firstParser = await wait('parser-success', report => report.evidence.invocationId === firstInvocation.invocationId);
+        if (firstParser.evidence.resultsMatch !== true || firstParser.evidence.sessionId !== owner.sessionId
+            || JSON.stringify(firstParser.evidence.sourceIndexes) !== JSON.stringify(firstInvocation.sourceIndexes)) throw new Error('First provider batch parser result did not match its session and scheduler membership.');
+        state.parsers.set(firstInvocation.invocationId, firstParser);
+        for (const index of firstInvocation.sourceIndexes) state.successfulCoverage.set(index, firstInvocation.invocationId);
+      }
+      if (!state.providerSettlements.has(firstInvocation.invocationId)) {
+        const firstSettlement = await wait('provider-settled', report => report.evidence.invocationId === firstInvocation.invocationId);
+        if (firstSettlement.evidence.outcome !== 'fulfilled' || firstSettlement.evidence.sessionId !== owner.sessionId) throw new Error('First provider root batch did not fulfill before Stop Auto.');
+        state.providerSettlements.set(firstInvocation.invocationId, firstSettlement);
+      }
+       let acceptedBatch = state.schedulerBatchAccepted;
+       if (!acceptedBatch) acceptedBatch = await wait('scheduler-batch-accepted');
+       state.schedulerBatchAccepted = acceptedBatch;
+      const acceptedBatchReport = state.reports.find(report => report.event === 'scheduler-batch-accepted');
+      const heldPhysicalReport = state.reports.find(report => report.event === 'physical-start' && report.evidence.attemptId === physical.attemptId);
+      const firstBatch = state.schedulerBatches.get(firstInvocation.messageId);
+      const expectedFirstIds = firstAttempt.physical.sourceIndexes.map(index => `target-${index}`);
+      if (!acceptedBatchReport || !heldPhysicalReport || acceptedBatchReport.opSeq >= heldPhysicalReport.opSeq
+          || !firstBatch || acceptedBatch.messageId !== firstInvocation.messageId || acceptedBatch.sessionId !== owner.sessionId
+          || JSON.stringify(acceptedBatch.targetIds) !== JSON.stringify(expectedFirstIds)
+          || JSON.stringify(acceptedBatch.acceptedTargetIds) !== JSON.stringify(expectedFirstIds)) throw new Error('Stop Auto gate did not follow the fully accepted first actual Scheduler batch.');
+
+      const secondBatch = state.schedulerBatches.get(owner.messageId);
+      if (!secondBatch || secondBatch.sessionId !== owner.sessionId
+          || JSON.stringify(secondBatch.targetIds.map(id => Number(id.slice(7)))) !== JSON.stringify(physical.sourceIndexes)) throw new Error('Held physical request did not match the second actual Scheduler batch.');
+      const decision = bridge.decideStopAuto('stop');
+      if (decision !== 'stop') throw new Error('Authenticated Stop Auto gate did not release the real production stop command.');
+      const stopCommand = await wait('stop-auto-command');
+      state.stopAutoCommand = stopCommand.evidence;
+      const stoppedSocket = await loopbackProxy.waitForStatus(request.requestId, 'aborted', { timeoutMs: Math.max(1, operationDeadline - Date.now()) });
+      if (stoppedSocket.status !== 'aborted' || stoppedSocket.requestId !== request.requestId) throw new Error('Held loopback TLS socket did not abort after production Stop Auto.');
+
+      const physicalSettlement = await wait('physical-settled', report => report.evidence.attemptId === physical.attemptId);
+      const settlementEvidence = physicalSettlement.evidence;
+      if (!['rejected', 'cancelled'].includes(settlementEvidence.outcome) || !['ABORTED', 'NETWORK_ERROR', 'FETCH_ERROR'].includes(settlementEvidence.code)
+          || settlementEvidence.status !== null || settlementEvidence.sessionId !== owner.sessionId) throw new Error('Held Edge physical attempt did not settle as the real abort.');
+      recordAttemptOutcome(physical, { request, bodyProof, settlement: settlementEvidence, successful: false, cancelledByStop: true });
+      const providerSettlement = await wait('provider-settled', report => report.evidence.invocationId === owner.invocationId);
+      if (!['rejected', 'cancelled'].includes(providerSettlement.evidence.outcome) || providerSettlement.evidence.sessionId !== owner.sessionId) throw new Error('Held provider root promise did not settle after Stop Auto.');
+      state.providerSettlements.set(owner.invocationId, providerSettlement);
+
+      const captureDecision = bridge.decideStopAutoSnapshot('capture');
+      if (captureDecision !== 'capture') throw new Error('Authenticated final Stop Auto capture gate was not released.');
+      const final = await wait('stop-auto-final');
+      state.stopAutoProof = { ...final.evidence, stopCommand: state.stopAutoCommand };
+      const expectedPending = targetIds012(Array.from({ length: 12 }, (_, index) => `target-${index}`))
+        ? Array.from({ length: 12 }, (_, index) => `target-${index}`).filter(id => !expectedFirstIds.includes(id)) : [];
+      if (final.evidence.sessionId !== owner.sessionId || final.evidence.secondBatchMessageId !== owner.messageId
+          || JSON.stringify(final.evidence.firstBatchTargetIds) !== JSON.stringify(expectedFirstIds)
+          || JSON.stringify(final.evidence.secondBatchTargetIds) !== JSON.stringify(physical.sourceIndexes.map(index => `target-${index}`))
+          || JSON.stringify(final.evidence.pendingTargetIds) !== JSON.stringify(expectedPending)) throw new Error('Authenticated final Stop Auto proof did not preserve exact batch/session ownership.');
+      state.stopAutoComplete = true;
+      state.stopCode = 'COMPLETED';
+      capabilities.heldRequestAbort = capability('SUPPORTED', { requestId: request.requestId, physicalAttemptId: physical.attemptId, status: 'aborted' });
+      capabilities.physicalSettlement = capability('SUPPORTED', { attemptId: physical.attemptId, outcome: settlementEvidence.outcome, code: settlementEvidence.code, status: settlementEvidence.status });
+      capabilities.rootSettlement = capability('SUPPORTED', { sessionId: owner.sessionId, messageId: owner.messageId, outcome: providerSettlement.evidence.outcome });
+      capabilities.nostaleDOM = capability('SUPPORTED', { acceptedTargetIds: final.evidence.acceptedTargetIds, pendingTargetIds: final.evidence.pendingTargetIds, postStopMutationCount: 0 });
+      capabilities.pageTranslationStopProof = capability('SUPPORTED', { sessionId: owner.sessionId, firstBatchMessageId: firstInvocation.messageId, heldBatchMessageId: owner.messageId, cancellationAcknowledged: true });
+      capabilities.providerOperation = capability('SUPPORTED', { source: 'real-page-stop-auto-loopback-provider-cancellation', sessionId: owner.sessionId, batches: 2 });
+      await stop('COMPLETED');
+      return { failed: false, cancelled: true };
+    }
     if (loopbackProxy) {
       const responseBody = JSON.stringify(mapEdgeResponse(bodyProof.sourceIndexes.map(index => fixtureTexts[index])));
       await request.held.release(responseBody);
@@ -1073,9 +1313,10 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
       && state.successfulCoverage.size === 12 && indexes012([...state.successfulCoverage.keys()].sort((a, b) => a - b));
     const providerProofComplete = () => providerWorkComplete() && (providerOnly || (state.command?.evidence.success === true
       && state.invocation?.evidence.sessionId === state.command.evidence.sessionId));
-    while (!providerProofComplete() && !terminalFailure) {
+    const stopAutoProofComplete = () => stopAutoMode && state.stopAutoComplete;
+    while (!(stopAutoMode ? stopAutoProofComplete() : providerProofComplete()) && !terminalFailure) {
       let report;
-      try { report = await wait(['scheduler-batch', 'provider-invoked', 'physical-start', 'parser-success', 'provider-settled', 'command-result', 'error']); }
+      try { report = await wait(['scheduler-batch', 'scheduler-batch-accepted', 'provider-invoked', 'physical-start', 'parser-success', 'provider-settled', 'command-result', 'error']); }
       catch (error) {
         if (!nativeStarted) markFailure('providerPhysicalRequest', `No authenticated native physical POST was observed during the production command: ${error.message}`);
         else capabilities.providerConsumption = capability('FAILED', { reason: `Native provider operation did not reach exact source coverage: ${error.message}` });
@@ -1101,6 +1342,15 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
             || JSON.stringify(invocation.sourceIndexes) !== JSON.stringify(evidence.targetIds.map(id => Number(id.slice(7)))))) {
           throw new Error('Scheduler batch did not match its Background provider invocation.');
         }
+      } else if (report.event === 'scheduler-batch-accepted') {
+        if (!stopAutoMode || state.schedulerBatchAccepted) throw new Error('Unexpected or duplicate accepted Scheduler batch in Stop Auto mode.');
+        state.schedulerBatchAccepted = report.evidence;
+      } else if (report.event === 'stop-auto-command') {
+        if (!stopAutoMode || state.stopAutoCommand) throw new Error('Unexpected or duplicate production Stop Auto command evidence.');
+        state.stopAutoCommand = report.evidence;
+      } else if (report.event === 'stop-auto-final') {
+        if (!stopAutoMode || state.stopAutoProof) throw new Error('Unexpected or duplicate final Stop Auto evidence.');
+        state.stopAutoProof = report.evidence;
       } else if (report.event === 'provider-invoked') {
         const invocation = report.evidence;
         if (state.invocations.size >= 12 || state.invocations.has(invocation.invocationId)
@@ -1159,6 +1409,10 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
       }
     }
     if (terminalFailure) return state;
+    if (stopAutoMode) {
+      if (!state.stopAutoComplete || !state.stopAutoProof) throw new Error('Authenticated Stop Auto cancellation proof did not complete.');
+      return state;
+    }
     if (!providerProofComplete()) throw new Error('Provider acknowledgment did not complete independent parser, settlement, and exact-once source proof.');
     if (candidateBuffer.length || dispatcher.requests?.some(event => event.classification?.kind === 'provider-translation' && event.isBlocked && !event.requestResolved)) {
       await failCachedCandidates('unmatched-provider-request-at-provider-completion');
@@ -1398,7 +1652,7 @@ async function snapshotFixtureDOM(bidi, context, fixtureTargets) {
   return JSON.parse(remote.value);
 }
 
-export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride, loopbackTlsProxy = false, pageTranslationE2E = false }) {
+export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride, loopbackTlsProxy = false, pageTranslationE2E = false, pageTranslationStopE2E = false }) {
   const root = await mkdtemp(resolve(tmpdir(), 'translate-it-firefox-cap-'));
   const profile = resolve(root, 'profile'); const bundle = resolve(root, 'extension');
   const records = []; const errors = []; const cleanupErrors = []; const capabilities = Object.fromEntries(requiredCapabilities.map(name => [name, notTested('Blocked by an earlier capability gate.')]));
@@ -1420,7 +1674,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     records.push({ kind: 'network-isolation', ...network });
     capabilities.isolation = network.ok ? capability('SUPPORTED', { evidence: network }) : capability('FAILED', { evidence: network, reason: 'Loopback-only namespace verification failed.' });
     if (!network.ok) throw new Error('Network isolation verification failed; Firefox was not started.');
-    if (loopbackTlsProxy) artifact.loopbackTlsProxy = { mode: pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'SETTING_UP', isolationVerified: true, deniedRequests: [] };
+    if (loopbackTlsProxy) artifact.loopbackTlsProxy = { mode: pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'SETTING_UP', isolationVerified: true, deniedRequests: [] };
     const { startFixture: defaultStartFixture, createFixture: defaultCreateFixture } = await import('../page-translation-e2e-benchmark/fixture.mjs');
     const fixtureData = pageTranslationE2E
       ? (await import('../page-translation-e2e-benchmark/fixture.mjs')).createPageTranslationFixture()
@@ -1459,7 +1713,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       const caFingerprint = createHash('sha256').update(await readFile(cert.caCert)).digest('hex');
       edgeProxy = await startEdgeLoopbackProxy({ tlsCert: cert.leafCert, tlsKey: cert.leafKey, fixtureTexts: fixtureData.targetTexts, responseFor: texts => mapEdgeResponse(texts) });
       await writeFile(resolve(profile, 'user.js'), edgeProxyFirefoxPrefs(edgeProxy.port), { mode: 0o600 });
-      artifact.loopbackTlsProxy = { mode: pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'READY', bindAddress: '127.0.0.1', proxyPort: edgeProxy.port, tlsPort: edgeProxy.tlsPort,
+      artifact.loopbackTlsProxy = { mode: pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'READY', bindAddress: '127.0.0.1', proxyPort: edgeProxy.port, tlsPort: edgeProxy.tlsPort,
         certificateVerification: cert.verification, caConstraints: cert.caConstraints, leafConstraints: cert.leafConstraints, caFingerprint, trust: nss.trust, nssListing: nss.listing,
         profilePrefs: 'manual HTTPS proxy; explicit localhost bypass; localhost hijacking disabled', deniedRequests: [] };
     }
@@ -1546,7 +1800,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     }
     capabilities.runtimeBridge = capability('SUPPORTED', { reportCount: runtimeBridgeProof.reports.length, snapshot: runtimeBridgeProof.snapshot, source: 'authenticated-runtime-bridge' });
     artifact.runtimeBridge = sanitizePrivate({ runId, tabId: runtimeBridgeProof.tabId, extensionOrigin: runtimeBridgeProof.extensionOrigin, reports: runtimeBridgeProof.reports, snapshot: runtimeBridgeProof.snapshot }, privateSecrets);
-    if (pageTranslationE2E) {
+    if (pageTranslationE2E && !pageTranslationStopE2E) {
       try { restoreDOMBaseline = await snapshotFixtureDOM(bidi, created.context, fixtureData.targets); }
       catch { /* Keep the primary translation/restore outcome; record diagnostic unavailability without the script or page data. */ }
     }
@@ -1554,16 +1808,56 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       bridge, bidi, dispatcher, collectorId: requestDataCollectorId, fixtureTexts: fixtureData.targetTexts,
       runId, extensionId: expectedExtensionId, fixtureUrl: fixture.url, tabId: runtimeBridgeProof.tabId,
       startupSender: runtimeBridgeProof.contentReady.sender, loopbackProxy: edgeProxy, providerOnly: loopbackTlsProxy && !pageTranslationE2E,
-      capabilities, timeoutMs: 12000,
+      stopAutoMode: pageTranslationStopE2E,
+      capabilities, timeoutMs: pageTranslationStopE2E ? 30_000 : 12_000,
     });
     artifact.providerProbe = sanitizePrivate(providerProbeArtifact(providerOperationState), privateSecrets);
-    if (pageTranslationE2E) {
+    if (pageTranslationE2E && !pageTranslationStopE2E) {
       let restoreDOMFinal = null;
       try { restoreDOMFinal = await snapshotFixtureDOM(bidi, created.context, fixtureData.targets); }
       catch { /* The safe diagnostic record below notes unavailable final evidence. */ }
       artifact.restoreDOMDiagnostics = restoreDOMBaseline && restoreDOMFinal
         ? compareRestoreDOMSnapshots(restoreDOMBaseline, restoreDOMFinal)
         : { available: false, reason: 'DOM_DIAGNOSTIC_UNAVAILABLE', baselineCaptured: !!restoreDOMBaseline, finalCaptured: !!restoreDOMFinal };
+    }
+    if (pageTranslationStopE2E) {
+      const batches = [...providerOperationState.schedulerBatches.values()];
+      const correlated = providerOperationState.stopAutoProof;
+      const proxyRequests = edgeProxy.requests ?? [];
+      const physicalByMessage = new Map(providerOperationState.physicalStarts.map(item => [item.messageId, item]));
+      const requestMembershipValid = proxyRequests.length === 2 && batches.length === 2
+        && proxyRequests.every(request => request.method === 'POST' && request.host === 'edge.microsoft.com'
+          && request.sni === 'edge.microsoft.com' && /^[a-f\d]{64}$/i.test(request.bodyHash)
+          && Array.isArray(request.sourceIndexes) && request.sourceIndexes.length > 0
+          && providerOperationState.physicalStarts.some(physical => physical.method === request.method && physical.bodyBytes === request.bodyBytes
+            && physical.bodyHash.toLowerCase() === request.bodyHash.toLowerCase()
+            && JSON.stringify(physical.sourceIndexes) === JSON.stringify(request.sourceIndexes)
+            && new URL(physical.url).pathname === new URL(request.url, 'https://edge.microsoft.com').pathname))
+        && new Set(proxyRequests.flatMap(request => request.sourceIndexes)).size === 12
+        && correlated?.worker != null && !!physicalByMessage.get(correlated.firstBatchMessageId) && !!physicalByMessage.get(correlated.secondBatchMessageId)
+        && proxyRequests.some(request => request.status === 'released') && proxyRequests.some(request => request.status === 'aborted');
+      capabilities.loopbackTlsProxy = capability(requestMembershipValid ? 'SUPPORTED' : 'FAILED', {
+        requestCount: proxyRequests.length, statuses: proxyRequests.map(request => request.status),
+        sourceIndexes: [...new Set(proxyRequests.flatMap(request => request.sourceIndexes ?? []))].sort((a, b) => a - b),
+      });
+      capabilities.schedulerBatchCorrelation = capability(requestMembershipValid ? 'SUPPORTED' : 'FAILED', {
+        batchCount: batches.length, acceptedBatchMessageId: correlated?.firstBatchMessageId ?? null,
+        cancelledBatchMessageId: correlated?.secondBatchMessageId ?? null,
+      });
+      artifact.loopbackTlsProxy = { ...artifact.loopbackTlsProxy, mode: 'page-translation-stop-auto', status: requestMembershipValid ? 'STOPPED_AFTER_SECOND_REQUEST_ABORT' : 'STOP_PROOF_INVALID',
+        requests: proxyRequests.map(request => ({ requestId: request.requestId, method: request.method, url: request.url, sni: request.sni, host: request.host,
+          bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: request.sourceIndexes, status: request.status, responseStatus: request.responseStatus })),
+        deniedRequests: edgeProxy.deniedRequests ?? [] };
+      artifact.pageTranslationStopAuto = correlated ? {
+        scenario: 'two-real-edge-batches-stop-auto-aborts-held-second', sessionId: correlated.sessionId,
+        firstBatchMessageId: correlated.firstBatchMessageId, secondBatchMessageId: correlated.secondBatchMessageId,
+        acceptedTargetIds: correlated.acceptedTargetIds, pendingTargetIds: correlated.pendingTargetIds,
+        stopCommand: correlated.stopCommand, finalEvidence: correlated,
+        diagnostics: providerOperationState.stopAutoDiagnostics,
+        status: requestMembershipValid && capabilities.pageTranslationStopProof?.status === 'SUPPORTED' ? 'SUPPORTED' : 'FAILED',
+        limitations: ['No Replacement or Stale-Success scenario is implemented or tested.'],
+      } : { status: 'FAILED', reason: 'Authenticated Stop Auto final evidence unavailable.', diagnostics: providerOperationState.stopAutoDiagnostics };
+      return capabilities;
     }
     if (loopbackTlsProxy && !pageTranslationE2E) {
       const invocationDiagnostic = providerOperationState?.providerInvocation;
@@ -1814,8 +2108,11 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       if (!snapshot.clean) errors.push(sanitizePrivate(snapshot.reason, privateSecrets));
     }
     if (bridge && providerOperationState) {
-      const operationResult = await reconcileFinalProviderOperation({ bridge, state: providerOperationState, contract: { runId, extensionId: expectedExtensionId, fixtureUrl: fixture?.url, tabId: runtimeBridgeProof?.tabId ?? bridgeContract?.tabId }, capabilities, artifact, secrets: privateSecrets, timeoutMs: 3000 });
+      const operationResult = pageTranslationStopE2E
+        ? await reconcileFinalPageTranslationStop({ bridge, state: providerOperationState, contract: { runId, extensionId: expectedExtensionId, fixtureUrl: fixture?.url, tabId: runtimeBridgeProof?.tabId ?? bridgeContract?.tabId }, capabilities, artifact, secrets: privateSecrets, timeoutMs: 3000 })
+        : await reconcileFinalProviderOperation({ bridge, state: providerOperationState, contract: { runId, extensionId: expectedExtensionId, fixtureUrl: fixture?.url, tabId: runtimeBridgeProof?.tabId ?? bridgeContract?.tabId }, capabilities, artifact, secrets: privateSecrets, timeoutMs: 3000 });
       if (!operationResult.ok) errors.push(sanitizePrivate(`Final provider operation reconciliation failed: ${operationResult.reason ?? 'operation evidence mismatch'}`, privateSecrets));
+      if (pageTranslationStopE2E && artifact.pageTranslationStopAuto) artifact.pageTranslationStopAuto.status = operationResult.ok ? 'SUPPORTED' : 'FAILED';
     }
     try { bidi?.close(); } catch (error) { cleanupErrors.push(`BiDi close: ${error.message}`); }
     try { if (dispatcher && !(await dispatcher.drain(1000))) cleanupErrors.push('Request handlers remained after BiDi disconnect.'); }
@@ -1832,7 +2129,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     await rm(root, { recursive: true, force: true }).catch(error => cleanupErrors.push(`Temporary cleanup: ${error.message}`));
     process.off('SIGTERM', onSigterm); process.off('SIGINT', onSigint);
     capabilities.cleanup = cleanupErrors.length ? capability('FAILED', { errors: [...cleanupErrors] }) : capability('SUPPORTED', { browserExited: !browser || browser.exitCode !== null || browser.signalCode !== null, exitCode: browser?.exitCode ?? null, signalCode: browser?.signalCode ?? null, fixtureClosed: !fixture || !fixture.server.listening, tempRemoved: true });
-    if (pageTranslationE2E) {
+    if (pageTranslationE2E && !pageTranslationStopE2E) {
       const gates = ['loopbackTlsProxy', 'schedulerBatchCorrelation', 'providerPhysicalRequest', 'providerRequestBody', 'providerResponse', 'providerOperation', 'providerConsumption', 'domAcceptance', 'providerRestore', 'cleanup'];
       const passed = gates.every(name => capabilities[name]?.status === 'SUPPORTED');
       capabilities.pageTranslationProof = capability(passed ? 'SUPPORTED' : 'FAILED', {
@@ -1843,6 +2140,15 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       });
       if (artifact.pageTranslationE2E) artifact.pageTranslationE2E.status = passed ? 'SUPPORTED' : 'FAILED';
     }
+    if (pageTranslationStopE2E) {
+      const gates = ['loopbackTlsProxy', 'schedulerBatchCorrelation', 'providerPhysicalRequest', 'providerRequestBody', 'providerResponse',
+        'providerOperation', 'heldRequestAbort', 'physicalSettlement', 'rootSettlement', 'nostaleDOM', 'cleanup'];
+      const passed = gates.every(name => capabilities[name]?.status === 'SUPPORTED');
+      capabilities.pageTranslationStopProof = capability(passed ? 'SUPPORTED' : 'FAILED', {
+        gates: Object.fromEntries(gates.map(name => [name, capabilities[name]?.status ?? 'NOT_TESTED'])),
+      });
+      if (artifact.pageTranslationStopAuto) artifact.pageTranslationStopAuto.status = passed ? 'SUPPORTED' : 'FAILED';
+    }
     const safeCapabilities = sanitizePrivate(capabilities, privateSecrets);
     Object.assign(capabilities, safeCapabilities);
     artifact.capabilities = safeCapabilities; artifact.events = sanitizePrivate(records, privateSecrets); artifact.errors = sanitizePrivate(errors, privateSecrets);
@@ -1851,7 +2157,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     artifact.protocolEvents = bidi?.events ?? [];
     artifact.networkRequests = artifact.requests;
     artifact.protocolJournal = bidi?.journal ?? [];
-    artifact.limitations = ['Provider cancellation and stale-delivery lifecycle scenarios remain NOT_TESTED.', 'Background/content negative fetches only run when both actual realms, readiness, and exact sliced-discovery flags pass.', 'When a runtime gate is inaccessible, dependent checks remain NOT_TESTED.', 'No mock provider, fetch substitute, URL rewrite, or fabricated runtime result was used.', 'This is a small capability probe, not the full 1000-target E2E matrix.'];
+    artifact.limitations = [pageTranslationStopE2E ? 'Only production Stop Auto cancellation of one held subsequent provider batch is exercised; Replacement and Stale-Success scenarios remain NOT_TESTED.' : 'Provider cancellation and stale-delivery lifecycle scenarios remain NOT_TESTED.', 'Background/content negative fetches only run when both actual realms, readiness, and exact discovery flags pass.', 'When a runtime gate is inaccessible, dependent checks remain NOT_TESTED.', 'No mock provider, fetch substitute, URL rewrite, forced abort, or fabricated runtime result was used.', 'This is a bounded capability probe, not the full 1000-target E2E matrix.'];
     for (const key of Object.keys(artifact)) artifact[key] = sanitizePrivate(artifact[key], privateSecrets);
   }
   return capabilities;

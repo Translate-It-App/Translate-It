@@ -1,6 +1,7 @@
 import { proxyManager } from '../../../src/shared/proxy/ProxyManager.js';
+import { BaseProvider } from '../../../src/features/translation/providers/BaseProvider.js';
 import { createEdgeProviderProbe } from '../page-translation-e2e-benchmark/provider-probe.mjs';
-import { PROVIDER_ONLY_DEADLINE_MS } from './runtime-constants.mjs';
+import { PAGE_TRANSLATION_STOP_DEADLINE_MS, PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES, PROVIDER_ONLY_DEADLINE_MS } from './runtime-constants.mjs';
 
 const ACTION = '__PAGE_TRANSLATION_RUNTIME_PROBE_V1';
 const PROVIDER_ACTION = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
@@ -35,6 +36,7 @@ export async function installBackgroundProbe(config, importEntry) {
   const state = {
     phase: 'bootstrap', tabId: null, generation: 0, nonce: randomToken(), seq: 0, reporting: Promise.resolve(), startupEntryImported: false,
       provider: { seq: 0, reporting: Promise.resolve(), armed: false, terminal: false, errorReported: false, stopping: false, invocations: new Set(), attempts: new Map() },
+      pageTranslationStop: { batches: new Map(), firstBatch: null, stopCommand: null, commandGate: deferred(), finalGate: deferred(), controlTask: null, rootSettlements: new Map(), rootWaiters: new Map() },
   };
   const extensionUrl = new URL(browser.runtime.getURL(''));
   if (extensionUrl.protocol !== 'moz-extension:' || !extensionUrl.host) return;
@@ -55,7 +57,8 @@ export async function installBackgroundProbe(config, importEntry) {
   const listener = (message, sender) => {
     if (message?.action === PROVIDER_ACTION) {
       const isInvoke = message.type === 'invoke';
-      return withDeadline(onProviderProbeMessage(message, sender, config, browser, state), isInvoke ? PROVIDER_ONLY_DEADLINE_MS : REPORT_TIMEOUT_MS, isInvoke ? 'TIMEOUT' : 'PROTOCOL_ERROR')
+      const isStopGate = message.type === 'event' && ['scheduler-batch-accepted', 'stop-auto-command'].includes(message.event);
+      return withDeadline(onProviderProbeMessage(message, sender, config, browser, state), isInvoke ? PROVIDER_ONLY_DEADLINE_MS : isStopGate ? PAGE_TRANSLATION_STOP_DEADLINE_MS : REPORT_TIMEOUT_MS, isInvoke || isStopGate ? 'TIMEOUT' : 'PROTOCOL_ERROR')
         .catch(async error => {
           const code = isInvoke && state.provider.armed && error?.message === 'TIMEOUT' ? 'TIMEOUT' : 'PROTOCOL_ERROR';
           if (isInvoke && state.provider.armed && !state.provider.errorReported) {
@@ -105,6 +108,12 @@ async function beginBackground(config, browser, state, extensionOrigin, importEn
     }
     try { await withDeadline(importEntry(), Math.max(1, deadline - Date.now()), 'READINESS_TIMEOUT'); state.startupEntryImported = true; }
     catch (error) { throw error?.message === 'READINESS_TIMEOUT' ? error : codeError('IMPORT_FAILED'); }
+    if (globalThis.__firefoxPageTranslationStopMode === true) {
+      if (!installPageStopRootObserver(state)) throw codeError('STARTUP_FAILED');
+      const setup = globalThis.__pageTranslationBenchmark?.enableCancellationProbe?.();
+      if (setup?.enabled !== true || setup.instrumentationErrors?.length) throw codeError('STARTUP_FAILED');
+      state.pageTranslationStopEnabled = true;
+    }
     await report(config, state, 'background', 'loaded', { entry: 'src/core/background/index.js' });
     let checks;
     while (Date.now() < deadline) {
@@ -143,14 +152,16 @@ async function reportProviderOperation(config, state, event, evidence) {
   const payload = { v: VERSION, runId: config.runId, op: 'edge-fr-page-once', opSeq, event, evidence };
   let acceptedReceipt;
   provider.reporting = provider.reporting.then(async () => {
+    const timeout = ['scheduler-batch-accepted', 'stop-auto-command'].includes(event) ? PAGE_TRANSLATION_STOP_DEADLINE_MS : REPORT_TIMEOUT_MS;
     const response = await fetch(config.reportUrl, {
       method: 'POST', headers: { Authorization: `Bearer ${config.authToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify(payload), redirect: 'error', signal: AbortSignal.timeout(REPORT_TIMEOUT_MS),
+      body: JSON.stringify(payload), redirect: 'error', signal: AbortSignal.timeout(timeout),
     });
     const receipt = await response.json();
     const gated = event === 'armed' || event === 'translated';
     const keys = gated ? ['v', 'runId', 'op', 'opSeq', 'accepted', 'decision'] : ['v', 'runId', 'op', 'opSeq', 'accepted'];
-    const decisions = event === 'armed' ? ['start', 'stop'] : ['restore', 'stop'];
+    const decisions = event === 'armed' ? ['start', 'stop']
+      : ['restore', 'stop'];
     if (!response.ok || !exactKeys(receipt, keys) || receipt.v !== VERSION || receipt.runId !== config.runId
         || receipt.op !== 'edge-fr-page-once' || receipt.opSeq !== opSeq || receipt.accepted !== true
         || (gated && !decisions.includes(receipt.decision))) throw codeError('REPORT_FAILED');
@@ -247,8 +258,96 @@ async function onProviderProbeMessage(message, sender, config, browser, state) {
     state.provider.terminal = true;
     return accepted ? providerResponse(config, state, 'accepted', { nonce: state.nonce }) : providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
   }
+  if (event && message.event === 'stop-auto-diagnostic') {
+    if (state.pageTranslationStopEnabled !== true || !exactKeys(message.evidence, ['stage', 'code'])
+        || !PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES.includes(message.evidence.stage)
+        || !['PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN'].includes(message.evidence.code)) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    const accepted = await reportProviderOperation(config, state, 'stop-auto-diagnostic', message.evidence);
+    return accepted ? providerResponse(config, state, 'accepted', { nonce: state.nonce }) : providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+  }
+  if (event && message.event === 'scheduler-batch-accepted') {
+    if (state.pageTranslationStopEnabled !== true || !state.provider.armed || state.provider.terminal
+        || !exactKeys(message.evidence, ['messageId', 'sessionId', 'targetIds', 'acceptedTargetIds'])
+        || state.pageTranslationStop.firstBatch || !sameSchedulerEvidence(state.pageTranslationStop.batches.get(message.evidence.messageId), message.evidence)
+        || JSON.stringify(message.evidence.targetIds) !== JSON.stringify(message.evidence.acceptedTargetIds)) {
+      return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    }
+    const accepted = await reportProviderOperation(config, state, message.event, message.evidence);
+    if (!accepted) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    state.pageTranslationStop.firstBatch = structuredClone(message.evidence);
+    state.pageTranslationStop.controlTask ??= runPageTranslationStopControl(config, browser, state).catch(async error => {
+      const code = ['TIMEOUT', 'TEARDOWN'].includes(error?.code ?? error?.message) ? (error?.code ?? error.message) : 'PROTOCOL_ERROR';
+      const stage = PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES.includes(state.pageTranslationStop.stage) ? state.pageTranslationStop.stage : 'stop-control';
+      await reportProviderOperation(config, state, 'stop-auto-diagnostic', { stage, code });
+      if (!state.provider.errorReported) await reportProviderOperation(config, state, 'error', { code });
+      state.provider.terminal = true;
+    });
+    return providerResponse(config, state, 'accepted', { nonce: state.nonce });
+  }
+  if (event && message.event === 'stop-auto-command') {
+    const keys = ['sessionId', 'firstBatchMessageId', 'firstBatchTargetIds', 'acceptedTargetIds', 'pendingTargetIds',
+      'stopSuccess', 'stopSessionId', 'translatedCount', 'isTranslated', 'isAutoTranslating', 'acceptedDOMRetained',
+      'pendingDOMUnchanged', 'acceptedStateHash', 'pendingStateHash'];
+    const firstBatch = state.pageTranslationStop.firstBatch;
+    const expectedPending = firstBatch?.targetIds ? Array.from({ length: 12 }, (_, index) => `target-${index}`).filter(id => !firstBatch.targetIds.includes(id)) : [];
+    if (state.pageTranslationStopEnabled !== true || !firstBatch || state.pageTranslationStop.stopCommand
+        || !exactKeys(message.evidence, keys) || message.evidence.sessionId !== state.pageTranslationStop.firstBatch.sessionId
+        || message.evidence.firstBatchMessageId !== firstBatch.messageId
+        || JSON.stringify(message.evidence.firstBatchTargetIds) !== JSON.stringify(firstBatch.targetIds)
+        || JSON.stringify(message.evidence.acceptedTargetIds) !== JSON.stringify(firstBatch.targetIds)
+        || JSON.stringify(message.evidence.pendingTargetIds) !== JSON.stringify(expectedPending)
+        || message.evidence.stopSuccess !== true || message.evidence.stopSessionId !== message.evidence.sessionId
+        || message.evidence.translatedCount !== message.evidence.acceptedTargetIds.length || message.evidence.isTranslated !== true
+        || message.evidence.isAutoTranslating !== false || message.evidence.acceptedDOMRetained !== true
+        || message.evidence.pendingDOMUnchanged !== true || !/^[a-f\d]{64}$/i.test(message.evidence.acceptedStateHash)
+        || !/^[a-f\d]{64}$/i.test(message.evidence.pendingStateHash)) {
+      return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    }
+    const accepted = await reportProviderOperation(config, state, message.event, message.evidence);
+    if (!accepted) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    state.pageTranslationStop.stopCommand = structuredClone(message.evidence);
+    state.pageTranslationStop.commandGate.resolve(message.evidence);
+    return providerResponse(config, state, 'accepted', { nonce: state.nonce });
+  }
+  if (event && message.event === 'stop-auto-final') {
+    const keys = ['sessionId', 'firstBatchMessageId', 'firstBatchTargetIds', 'secondBatchMessageId', 'secondBatchTargetIds',
+      'acceptedTargetIds', 'pendingTargetIds', 'acceptedDOMRetained', 'pendingDOMUnchanged', 'acceptedStateHash',
+      'pendingStateHash', 'postStopMutationTargetIds', 'cancellationRequests', 'contentState'];
+    const firstBatch = state.pageTranslationStop.firstBatch; const stopCommand = state.pageTranslationStop.stopCommand;
+    const secondBatch = state.pageTranslationStop.batches.get(message.evidence.secondBatchMessageId);
+    if (state.pageTranslationStopEnabled !== true || !stopCommand || state.pageTranslationStop.finalized
+        || !exactKeys(message.evidence, keys) || message.evidence.sessionId !== state.pageTranslationStop.firstBatch.sessionId
+        || message.evidence.firstBatchMessageId !== firstBatch.messageId || message.evidence.secondBatchMessageId === firstBatch.messageId
+        || !sameSchedulerEvidence(secondBatch, { ...message.evidence, messageId: message.evidence.secondBatchMessageId, targetIds: message.evidence.secondBatchTargetIds })
+        || JSON.stringify(message.evidence.acceptedTargetIds) !== JSON.stringify(firstBatch.targetIds)
+        || JSON.stringify(message.evidence.pendingTargetIds) !== JSON.stringify(secondBatch?.targetIds)
+        || message.evidence.acceptedStateHash !== stopCommand.acceptedStateHash || message.evidence.pendingStateHash !== stopCommand.pendingStateHash) {
+      return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    }
+    const worker = collectPageStopWorkerEvidence(message.evidence.sessionId, message.evidence.firstBatchMessageId, message.evidence.secondBatchMessageId);
+    const accepted = await reportProviderOperation(config, state, message.event, { ...message.evidence, worker });
+    if (!accepted) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    state.pageTranslationStop.finalized = true;
+    state.provider.terminal = true; state.provider.stopping = true;
+    globalThis.__pageTranslationBenchmark?.providerProbe?.stop?.();
+    state.pageTranslationStop.finalGate.resolve(message.evidence);
+    return providerResponse(config, state, 'accepted', { nonce: state.nonce });
+  }
   if (event && message.event === 'scheduler-batch') {
     if (config.pageTranslationE2E !== true || !state.provider.armed || state.provider.terminal) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    if (state.pageTranslationStopEnabled === true) {
+      const evidence = message.evidence;
+      if (!exactKeys(evidence, ['messageId', 'sessionId', 'targetIds']) || !safeId(evidence.messageId) || !safeId(evidence.sessionId)
+          || !targetIdsSubset(evidence.targetIds) || state.pageTranslationStop.batches.size >= 2 || state.pageTranslationStop.batches.has(evidence.messageId)
+          || [...state.pageTranslationStop.batches.values()].some(batch => batch.targetIds.some(id => evidence.targetIds.includes(id)))
+          || (state.pageTranslationStop.batches.size && [...state.pageTranslationStop.batches.values()][0].sessionId !== evidence.sessionId)) {
+        return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+      }
+      const accepted = await reportProviderOperation(config, state, 'scheduler-batch', evidence);
+      if (!accepted) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+      state.pageTranslationStop.batches.set(evidence.messageId, structuredClone(evidence));
+      return providerResponse(config, state, 'accepted', { nonce: state.nonce });
+    }
     const accepted = await reportProviderOperation(config, state, 'scheduler-batch', message.evidence);
     return accepted ? providerResponse(config, state, 'accepted', { nonce: state.nonce }) : providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
   }
@@ -278,6 +377,174 @@ async function onProviderProbeMessage(message, sender, config, browser, state) {
    }
    if (message.event === 'restored') state.provider.terminal = true;
   return providerResponse(config, state, 'accepted', { nonce: state.nonce });
+}
+
+function collectPageStopWorkerEvidence(sessionId, firstMessageId, secondMessageId) {
+  const benchmark = globalThis.__pageTranslationBenchmark;
+  if (typeof benchmark?.cancellationSnapshot !== 'function' || typeof benchmark?.resourceSnapshot !== 'function') return null;
+  const snapshot = benchmark.cancellationSnapshot(sessionId);
+  const operations = snapshot?.ledger?.operations ?? [];
+  const root = messageId => (snapshot?.providerRoots ?? []).find(item => item.messageId === messageId && item.sessionId === sessionId);
+  const rootOperation = messageId => operations.find(item => item.kind === 'provider.root' && item.messageId === messageId && item.sessionId === sessionId);
+  const cancel = operations.find(item => item.kind === 'service.cancelRequest' && item.messageId === secondMessageId && item.sessionId === sessionId);
+  const abort = operations.find(item => item.kind === 'controller.abort' && item.messageId === secondMessageId && item.sessionId === sessionId);
+  const physical = operations.find(item => item.kind === 'provider.physical' && item.messageId === secondMessageId && item.sessionId === sessionId);
+  const resources = benchmark.resourceSnapshot([firstMessageId, secondMessageId], [sessionId]);
+  const queueDepths = resources?.queue?.depths;
+  const processing = resources?.queue?.processing;
+  const rateLimit = resources?.rateLimit;
+  const service = resources?.service;
+  const resolver = resources?.sourceResolvers?.[sessionId];
+  return {
+    providerRoots: [firstMessageId, secondMessageId].map(messageId => {
+      const item = root(messageId); const operation = rootOperation(messageId);
+      return { messageId, sessionId, status: item?.status ?? null, resultSuccess: typeof operation?.resultSuccess === 'boolean' ? operation.resultSuccess : null,
+        operationAborted: operation?.operationAborted === true, controllerAborted: item?.controllerAborted ?? null,
+        controllerAbortedAtEnd: operation?.controllerAbortedAtEnd ?? null, settledSequence: item?.settledSequence ?? null };
+    }),
+    cancelRequest: cancel ? {
+      messageId: cancel.messageId, sessionId: cancel.sessionId, status: cancel.status,
+      controllerMatched: cancel.controllerMatched, controllerAbortedBefore: cancel.controllerAbortedBefore,
+      controllerAbortedAfter: cancel.controllerAbortedAfter,
+      responseSuccess: cancel.response?.handled === true && cancel.response?.success === true,
+    } : null,
+    controllerAbort: abort ? { messageId: abort.messageId, sessionId: abort.sessionId, sequence: abort.sequence,
+      cancelRequestSequence: abort.cancelRequestSequence ?? null, abortedBefore: abort.abortedBefore ?? null,
+      abortedAfter: abort.abortedAfter ?? null, context: typeof abort.context === 'string' ? abort.context : null } : null,
+    physical: physical ? {
+      messageId: physical.messageId, sessionId: physical.sessionId, status: physical.status,
+      operationAborted: physical.operationAborted === true, controllerAbortedAtEnd: physical.controllerAbortedAtEnd === true,
+      settledSequence: physical.settledSequence ?? null,
+    } : null,
+    resources: {
+      available: resources?.available === true,
+      activeLifecycleIds: resources?.lifecycle?.activeIds ?? null,
+      activeRequestIds: service?.activeRequestIds ?? null,
+      requests: service?.requests ?? null,
+      sourceResolverPresent: resolver?.present ?? null,
+      queueEmpty: !!queueDepths && Object.values(queueDepths).every(depth => depth === 0)
+        && !!processing && Object.values(processing).every(active => active === false || active === 0 || active === null)
+        && resources?.queue?.retryTimeoutCount === 0,
+      rateLimitIdle: !!rateLimit && Object.values(rateLimit).every(item => item?.activeRequests === 0 && item?.queuedRequests === 0),
+      leaseActiveCount: resources?.lease?.activeOperationCount ?? null,
+      leaseTimerActive: resources?.lease?.timerActive ?? null,
+    },
+  };
+}
+
+function installPageStopRootObserver(state) {
+  if (state.pageTranslationStop.rootObserverInstalled) return true;
+  const prototype = BaseProvider?.prototype; const original = prototype?.translate;
+  if (typeof original !== 'function') return false;
+  const settle = (sessionId, messageId, outcome, resultSuccess = null, operationAborted = false, controllerAbortedAtEnd = null) => {
+    if (typeof sessionId !== 'string' || typeof messageId !== 'string') return;
+    const result = { sessionId, messageId, outcome, resultSuccess, operationAborted, controllerAbortedAtEnd };
+    const key = `${sessionId}:${messageId}`;
+    state.pageTranslationStop.rootSettlements.set(key, result);
+    const waiter = state.pageTranslationStop.rootWaiters.get(key);
+    if (waiter) { clearTimeout(waiter.timer); state.pageTranslationStop.rootWaiters.delete(key); waiter.resolve(result); }
+  };
+  const wrapped = function (...args) {
+    const options = args[3] ?? {}; const sessionId = options.sessionId ?? null; const messageId = options.messageId ?? null;
+    let result;
+    try { result = original.apply(this, args); }
+    catch (error) { settle(sessionId, messageId, 'rejected', null, error?.operationAborted === true, options?.abortController?.signal?.aborted ?? null); throw error; }
+    Promise.resolve(result).then(
+      value => settle(sessionId, messageId, 'fulfilled', value?.success !== false, false, options?.abortController?.signal?.aborted ?? null),
+      error => settle(sessionId, messageId, 'rejected', null, error?.operationAborted === true, options?.abortController?.signal?.aborted ?? null),
+    );
+    return result;
+  };
+  wrapped.__firefoxPageStopRootObserver = true;
+  prototype.translate = wrapped;
+  state.pageTranslationStop.rootObserverInstalled = prototype.translate === wrapped;
+  return state.pageTranslationStop.rootObserverInstalled;
+}
+
+function waitForPageStopRoot(state, sessionId, messageId, timeoutMs = PAGE_TRANSLATION_STOP_DEADLINE_MS) {
+  const key = `${sessionId}:${messageId}`;
+  const existing = state.pageTranslationStop.rootSettlements.get(key);
+  if (existing) return Promise.resolve(existing);
+  const rootSnapshot = globalThis.__pageTranslationBenchmark?.cancellationSnapshot?.(sessionId);
+  const observedRoot = rootSnapshot?.providerRoots?.find(item => item.sessionId === sessionId && item.messageId === messageId && item.status !== 'pending');
+  const rootOperation = rootSnapshot?.ledger?.operations?.find(item => item.kind === 'provider.root' && item.sessionId === sessionId && item.messageId === messageId);
+  if (observedRoot && rootOperation) {
+    const settlement = { sessionId, messageId, outcome: observedRoot.status,
+      resultSuccess: typeof rootOperation.resultSuccess === 'boolean' ? rootOperation.resultSuccess : null,
+      operationAborted: rootOperation.operationAborted === true, controllerAbortedAtEnd: rootOperation.controllerAbortedAtEnd ?? null };
+    state.pageTranslationStop.rootSettlements.set(key, settlement);
+    return Promise.resolve(settlement);
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = { resolve, timer: null };
+    waiter.timer = setTimeout(() => { state.pageTranslationStop.rootWaiters.delete(key); reject(codeError('TIMEOUT')); }, timeoutMs);
+    waiter.timer.unref?.();
+    state.pageTranslationStop.rootWaiters.set(key, waiter);
+  });
+}
+
+async function runPageTranslationStopControl(config, browser, state) {
+  state.pageTranslationStop.stage = 'stop-control';
+  const target = await fetchPageStopControl(config, 'stop-auto');
+  const firstBatch = state.pageTranslationStop.firstBatch;
+  const second = [...state.pageTranslationStop.batches.values()].find(batch => batch.messageId === target.secondBatchMessageId);
+  if (target.decision !== 'stop' || target.sessionId !== firstBatch?.sessionId || target.firstBatchMessageId !== firstBatch?.messageId
+      || !second || second.sessionId !== target.sessionId) throw codeError('PROTOCOL_ERROR');
+  const control = { action: '__PAGE_TRANSLATION_STOP_CONTROL_V1', v: VERSION, runId: config.runId, nonce: state.nonce,
+    sessionId: target.sessionId, firstBatchMessageId: target.firstBatchMessageId, secondBatchMessageId: target.secondBatchMessageId };
+  state.pageTranslationStop.stage = 'control-delivery';
+  const stopDelivery = withDeadline(browser.tabs.sendMessage(state.tabId, { ...control, type: 'stop-auto' }, { frameId: 0 }),
+    PAGE_TRANSLATION_STOP_DEADLINE_MS, 'TIMEOUT');
+  void stopDelivery.catch(() => {});
+  state.pageTranslationStop.stage = 'stop-command';
+  const commandEvidence = await withDeadline(state.pageTranslationStop.commandGate.promise, PAGE_TRANSLATION_STOP_DEADLINE_MS, 'TIMEOUT');
+  if (commandEvidence.sessionId !== target.sessionId || commandEvidence.firstBatchMessageId !== target.firstBatchMessageId) throw codeError('PROTOCOL_ERROR');
+  state.pageTranslationStop.stage = 'snapshot-control';
+  const capture = await fetchPageStopControl(config, 'stop-auto-snapshot');
+  if (capture.decision !== 'capture' || capture.sessionId !== target.sessionId
+      || capture.firstBatchMessageId !== target.firstBatchMessageId || capture.secondBatchMessageId !== target.secondBatchMessageId) throw codeError('PROTOCOL_ERROR');
+  state.pageTranslationStop.stage = 'worker-root-settlement';
+  const root = await waitForPageStopRoot(state, target.sessionId, target.secondBatchMessageId);
+  if (root.outcome === 'rejected' ? (!root.operationAborted && root.controllerAbortedAtEnd !== true)
+      : root.outcome !== 'fulfilled' || root.resultSuccess !== false || root.controllerAbortedAtEnd !== true) throw codeError('PROTOCOL_ERROR');
+  state.pageTranslationStop.stage = 'final-content-delivery';
+  const finalResult = await withDeadline(browser.tabs.sendMessage(state.tabId, { ...control, type: 'capture' }, { frameId: 0 }),
+    PAGE_TRANSLATION_STOP_DEADLINE_MS, 'TIMEOUT');
+  if (!exactKeys(finalResult, ['accepted', 'sessionId']) || finalResult.accepted !== true || finalResult.sessionId !== target.sessionId) throw codeError('PROTOCOL_ERROR');
+  await withDeadline(state.pageTranslationStop.finalGate.promise, PAGE_TRANSLATION_STOP_DEADLINE_MS, 'TIMEOUT');
+  await stopDelivery;
+}
+
+async function fetchPageStopControl(config, phase) {
+  const url = new URL(config.reportUrl);
+  url.pathname = `/__benchmark/control/${encodeURIComponent(config.runId)}/${phase}`;
+  url.search = ''; url.hash = '';
+  const deadline = Date.now() + PAGE_TRANSLATION_STOP_DEADLINE_MS;
+  while (Date.now() < deadline) {
+    const response = await fetch(url.toString(), { method: 'GET', headers: { Authorization: `Bearer ${config.authToken}` }, redirect: 'error', signal: AbortSignal.timeout(2800) });
+    if (response.status === 204) continue;
+    const value = await response.json();
+    if (!response.ok || !exactKeys(value, ['v', 'runId', 'decision', 'sessionId', 'firstBatchMessageId', 'secondBatchMessageId'])
+        || value.v !== VERSION || value.runId !== config.runId) throw codeError('PROTOCOL_ERROR');
+    return value;
+  }
+  throw codeError('TIMEOUT');
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+function safeId(value) { return typeof value === 'string' && value.length > 0 && value.length <= 128; }
+function targetIdsSubset(value) {
+  return Array.isArray(value) && value.length > 0 && value.length <= 12
+    && value.every(id => typeof id === 'string' && /^target-(?:[0-9]|1[01])$/.test(id)) && new Set(value).size === value.length;
+}
+function sameSchedulerEvidence(batch, evidence) {
+  return !!batch && batch.messageId === evidence?.messageId && batch.sessionId === evidence?.sessionId
+    && JSON.stringify(batch.targetIds) === JSON.stringify(evidence?.targetIds);
 }
 
 async function providerContextIsCurrent(sender, browser, config, state) {

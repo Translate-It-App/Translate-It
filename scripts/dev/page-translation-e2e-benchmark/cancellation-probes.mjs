@@ -1,5 +1,27 @@
 export const cancellationProbeNames = Object.freeze(['stop', 'restore', 'replacement']);
 
+export function matchProviderPhysicalRoot({ url, body, sessionId, roots }) {
+  if (typeof sessionId !== 'string' || !sessionId || typeof body !== 'string'
+      || new TextEncoder().encode(body).byteLength > 64 * 1024 || !Array.isArray(roots)) return null;
+  try {
+    const endpoint = new URL(url);
+    if (endpoint.protocol !== 'https:' || endpoint.hostname !== 'edge.microsoft.com'
+        || endpoint.pathname !== '/translate/translatetext') return null;
+  } catch { return null; }
+  let parsed;
+  try { parsed = JSON.parse(body); } catch { return null; }
+  if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > 100) return null;
+  const texts = parsed.map(item => typeof item === 'string' ? item : item && typeof item.text === 'string' ? item.text : null);
+  if (texts.some(text => text === null)) return null;
+  const matches = roots.filter(root => {
+    const rootTexts = root?.texts ?? root?.operation?.texts;
+    return root?.sessionId === sessionId && typeof root.messageId === 'string'
+      && Array.isArray(rootTexts) && rootTexts.length === texts.length
+      && rootTexts.every((text, index) => text === texts[index]);
+  });
+  return matches.length === 1 ? matches[0].messageId : null;
+}
+
 export function sessionIdForTranslationContext(contextOwners, context) {
   return contextOwners?.get(context) ?? null;
 }

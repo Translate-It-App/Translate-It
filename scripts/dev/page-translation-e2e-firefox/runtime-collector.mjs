@@ -1,12 +1,13 @@
 import { timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES } from './runtime-constants.mjs';
 
 const LIMIT = 16 * 1024;
 const phases = ['bootstrap', 'loaded', 'ready'];
 const errorCodes = new Set(['IMPORT_FAILED', 'STARTUP_FAILED', 'READINESS_TIMEOUT', 'HANDSHAKE_FAILED', 'SENDER_REJECTED', 'PROTOCOL_REJECTED', 'NAVIGATION_INVALID', 'REPORT_FAILED', 'PERMISSION_DENIED', 'BINDING_FAILED', 'DISCOVERY_FLAGS_MISMATCH']);
 const providerStopCodes = new Set(['INTERCEPTION_UNSUPPORTED', 'BODY_UNSUPPORTED', 'INVALID_BODY', 'PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN', 'COMPLETED']);
 const providerDiagnosticCodes = new Set([...providerStopCodes, 'ABORTED', 'NETWORK_ERROR', 'HTTP_ERROR', 'FETCH_ERROR']);
-const providerEventNames = new Set(['armed', 'scheduler-batch', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
+const providerEventNames = new Set(['armed', 'scheduler-batch', 'scheduler-batch-accepted', 'stop-auto-command', 'stop-auto-final', 'stop-auto-diagnostic', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
 const exact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const checks = value => exact(value, ['lifecycleInitialized', 'translationEngineInitialized', 'enginePresent', 'unifiedEngineMatches', 'unifiedServiceMatches', 'messageListenerActive', 'startupComplete']) && Object.values(value).every(item => item === true);
 const nonnegative = value => Number.isSafeInteger(value) && value >= 0;
@@ -31,7 +32,7 @@ function createCollector(options, fixtureUrl) {
   const reports = [], rejectionCounts = { unauthorized: 0, originOrType: 0, route: 0, malformed: 0, protocol: 0, bodyLimit: 0 };
   const reject = code => { rejectionCounts[code] = Math.min(1000, rejectionCounts[code] + 1); };
   const stages = { background: [], content: [] };
-  const operation = { released: false, startDecision: null, restoreDecision: null, stopped: false, stopCode: null, failure: null, seq: 0, reports: [], rejections: { originOrType: 0, protocol: 0 }, waiters: new Set(), decisionWaiters: new Set(), invocations: new Map(), schedulerBatches: new Map(), attempts: new Map(), coverage: new Set(), terminal: false };
+  const operation = { released: false, startDecision: null, restoreDecision: null, stopAutoDecision: null, stopAutoSnapshotDecision: null, stopped: false, stopCode: null, failure: null, seq: 0, reports: [], rejections: { originOrType: 0, protocol: 0 }, waiters: new Set(), decisionWaiters: new Set(), invocations: new Map(), schedulerBatches: new Map(), attempts: new Map(), coverage: new Set(), terminal: false };
   const pending = new Set(), waiters = new Set();
   const failWaiters = error => { for (const waiter of waiters) waiter.reject(error); };
   const notifyOperationChange = () => { bridge.server?.emit?.('runtime-provider-operation'); };
@@ -73,6 +74,38 @@ function createCollector(options, fixtureUrl) {
     if (request.headers.host !== new URL(fixtureUrl).host) { reject('route'); response.writeHead(404).end(); return true; }
     if (path === `/__benchmark/bind/${encodeURIComponent(runId)}` && request.method === 'GET' && !requestUrl.search && bindingOpen) {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end('<!doctype html><meta charset="utf-8"><title>Benchmark runtime binding</title>'); return true;
+    }
+    const controlPrefix = `/__benchmark/control/${encodeURIComponent(runId)}/`;
+    if (path.startsWith(controlPrefix)) {
+      const gate = path.slice(controlPrefix.length);
+      if (!['stop-auto', 'stop-auto-snapshot'].includes(gate) || request.method !== 'GET' || requestUrl.search) {
+        reject('route'); response.writeHead(404).end(); return true;
+      }
+      if (!admissionOpen || failed || request.headers.host !== new URL(fixtureUrl).host) {
+        reject('route'); response.writeHead(503).end(); return true;
+      }
+      const auth = request.headers.authorization ?? '';
+      const supplied = Buffer.from(auth.startsWith('Bearer ') ? auth.slice(7) : '');
+      if (supplied.length !== token.length || !timingSafeEqual(supplied, token)) {
+        reject('unauthorized'); response.writeHead(401).end(); return true;
+      }
+      const accepted = gate === 'stop-auto' ? operation.schedulerBatchAccepted : operation.stopAutoCommand;
+      if (!operation.released || !accepted || operation.failure || operation.stopped) {
+        response.writeHead(503).end(); return true;
+      }
+      const outcome = await waitForDecision(gate === 'stop-auto' ? 'stopAuto' : 'stopAutoSnapshot', 2200, null, true);
+      if (outcome === null) { response.writeHead(204, { 'cache-control': 'no-store', connection: 'close' }).end(); return true; }
+      const currentDecision = gate === 'stop-auto' ? operation.stopAutoDecision : operation.stopAutoSnapshotDecision;
+      if (outcome !== (gate === 'stop-auto' ? 'stop' : 'capture') || currentDecision !== outcome
+          || !operation.stopControlTarget || !admissionOpen || operation.failure || operation.stopped) {
+        response.writeHead(503).end(); return true;
+      }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', connection: 'close' }).end(JSON.stringify({
+        v: 1, runId, decision: outcome, sessionId: operation.stopControlTarget.sessionId,
+        firstBatchMessageId: operation.stopControlTarget.firstBatchMessageId,
+        secondBatchMessageId: operation.stopControlTarget.secondBatchMessageId,
+      }));
+      return true;
     }
     if (path !== '/__benchmark/runtime') return false;
     if (!admissionOpen || failed || request.method !== 'POST' || requestUrl.search || requestUrl.username || requestUrl.password) { reject('route'); response.writeHead(failed || !admissionOpen ? 503 : 404).end(); return true; }
@@ -136,8 +169,13 @@ function createCollector(options, fixtureUrl) {
         failOperation('PROTOCOL_ERROR');
         response.writeHead(503).end(); return true;
       }
-      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-        .end(JSON.stringify({ v: 1, runId, op: 'edge-fr-page-once', opSeq: report.opSeq, accepted: true, ...(decision ? { decision } : {}) }));
+      const gated = report.event === 'armed' || report.event === 'translated';
+      const receipt = { v: 1, runId, op: 'edge-fr-page-once', opSeq: report.opSeq, accepted: true, ...(decision ? { decision } : {}) };
+      if (gated && !decision) {
+        failOperation('PROTOCOL_ERROR'); response.writeHead(503).end(); return true;
+      }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(receipt));
+      if (report.event === 'stop-auto-final') { operation.stopped = true; operation.stopCode = 'COMPLETED'; notifyOperationChange(); }
       return true;
     }
     const firstBootstrap = report?.realm === 'background' && report?.phase === 'bootstrap' && pinnedOrigin === undefined;
@@ -173,13 +211,17 @@ function createCollector(options, fixtureUrl) {
     operation.reports.push(copied);
     if (report.event === 'armed') operation.armedSender = structuredClone(report.evidence.sender);
     if (report.event === 'scheduler-batch') operation.schedulerBatches.set(report.evidence.messageId, structuredClone(report.evidence));
+    if (report.event === 'scheduler-batch-accepted') operation.schedulerBatchAccepted = structuredClone(report.evidence);
+    if (report.event === 'stop-auto-command') operation.stopAutoCommand = structuredClone(report.evidence);
     if (report.event === 'provider-invoked') operation.invocations.set(report.evidence.invocationId, { ...structuredClone(report.evidence), attempts: new Set() });
     if (report.event === 'physical-start') {
       const attempt = { settled: false, invocationId: report.evidence.invocationId, sessionId: report.evidence.sessionId, sourceIndexes: [...report.evidence.sourceIndexes] };
       operation.attempts.set(report.evidence.attemptId, attempt);
       operation.invocations.get(report.evidence.invocationId)?.attempts.add(report.evidence.attemptId);
     }
-    if (report.event === 'physical-settled') Object.assign(operation.attempts.get(report.evidence.attemptId), { settled: true, outcome: report.evidence.outcome });
+    if (report.event === 'physical-settled') Object.assign(operation.attempts.get(report.evidence.attemptId), {
+      settled: true, outcome: report.evidence.outcome, status: report.evidence.status, code: report.evidence.code,
+    });
     if (report.event === 'parser-success') for (const index of report.evidence.sourceIndexes) operation.coverage.add(index);
     if (report.event === 'provider-settled') operation.invocations.get(report.evidence.invocationId).settled = true;
     if (report.event === 'error') failOperation(report.evidence.code);
@@ -217,7 +259,38 @@ function createCollector(options, fixtureUrl) {
       code: knownCode,
       success: typeof evidence.success === 'boolean' ? evidence.success : null,
       outcome: knownOutcome,
+      stopStage: report?.event === 'stop-auto-final' ? stopFinalFailureStage(evidence) : null,
     };
+  }
+
+  function stopFinalFailureStage(evidence) {
+    const keys = ['sessionId', 'firstBatchMessageId', 'firstBatchTargetIds', 'secondBatchMessageId', 'secondBatchTargetIds',
+      'acceptedTargetIds', 'pendingTargetIds', 'acceptedDOMRetained', 'pendingDOMUnchanged', 'acceptedStateHash', 'pendingStateHash',
+      'postStopMutationTargetIds', 'cancellationRequests', 'contentState', 'worker'];
+    if (!exact(evidence, keys)) return 'final-content-evidence';
+    const command = operation.stopAutoCommand;
+    if (!command || evidence.sessionId !== command.sessionId || evidence.firstBatchMessageId !== command.firstBatchMessageId
+        || !sameTargetIds(evidence.firstBatchTargetIds, command.firstBatchTargetIds)
+        || !sameTargetIds(evidence.acceptedTargetIds, command.acceptedTargetIds)
+        || !sameTargetIds(evidence.secondBatchTargetIds, evidence.pendingTargetIds)) return 'final-batch-correlation';
+    if (evidence.acceptedDOMRetained !== true || evidence.pendingDOMUnchanged !== true
+        || evidence.acceptedStateHash !== command.acceptedStateHash || evidence.pendingStateHash !== command.pendingStateHash
+        || !Array.isArray(evidence.postStopMutationTargetIds) || evidence.postStopMutationTargetIds.length) return 'final-content-evidence';
+    if (!validStopCancellationRequests(evidence.cancellationRequests, evidence.sessionId)) return 'final-cancellation-ack';
+    if (!validStopContentState(evidence.contentState, evidence.sessionId)) return 'content-drain';
+    const worker = evidence.worker;
+    if (!exact(worker, ['providerRoots', 'cancelRequest', 'controllerAbort', 'physical', 'resources']) || !Array.isArray(worker.providerRoots)
+        || worker.providerRoots.length !== 2 || !worker.providerRoots.every(root => ['fulfilled', 'rejected'].includes(root?.status)
+          && Number.isSafeInteger(root?.settledSequence))) return 'worker-root-settlement';
+    if (!worker.cancelRequest || worker.cancelRequest.status !== 'fulfilled' || worker.cancelRequest.responseSuccess !== true) return 'worker-cancel-request';
+    if (!worker.controllerAbort || !Number.isSafeInteger(worker.controllerAbort.sequence)) return 'worker-controller-abort';
+    if (!worker.physical) return 'worker-physical-missing';
+    if (worker.physical.status !== 'rejected') return 'worker-physical-status';
+    if (!Number.isSafeInteger(worker.physical.settledSequence)) return 'worker-physical-sequence';
+    if (worker.physical.settledSequence <= worker.controllerAbort.sequence) return 'worker-physical-order';
+    if (!worker.resources || worker.resources.available !== true || worker.resources.queueEmpty !== true
+        || worker.resources.rateLimitIdle !== true || worker.resources.leaseActiveCount !== 0) return 'worker-resource-drain';
+    return 'final-worker-evidence';
   }
 
   function isAdmittedPostStopEvent(report) {
@@ -238,6 +311,9 @@ function createCollector(options, fixtureUrl) {
         && evidence.proxyDisabled === true && evidence.observersInstalled === true;
     }
     if (event === 'error') return !operation.terminal && !operation.stopped && exact(evidence, ['code']) && providerStopCodes.has(evidence.code);
+    if (event === 'stop-auto-diagnostic') return operation.reports.filter(report => report.event === event).length < 8
+      && exact(evidence, ['stage', 'code'])
+      && PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES.includes(evidence.stage) && ['PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN'].includes(evidence.code);
     const admittedSettlement = event === 'physical-settled' && operation.attempts.has(evidence.attemptId) && !operation.attempts.get(evidence.attemptId)?.settled;
     const admittedProviderSettlement = event === 'provider-settled' && operation.invocations.has(evidence.invocationId) && !operation.invocations.get(evidence.invocationId).settled;
     const admittedCommandFailure = event === 'command-result' && evidence?.success === false && operation.released && !!operation.armedSender
@@ -263,6 +339,48 @@ function createCollector(options, fixtureUrl) {
       if (indexes.some(index => claimed.includes(index))) return false;
       const invocation = [...operation.invocations.values()].find(item => item.messageId === evidence.messageId);
       return !invocation || sameSchedulerBatch(evidence, invocation);
+    }
+    if (event === 'scheduler-batch-accepted') {
+      const batch = operation.schedulerBatches.get(evidence?.messageId);
+      return schedulerBatchRequired && operation.released && !operation.schedulerBatchAccepted
+        && exact(evidence, ['messageId', 'sessionId', 'targetIds', 'acceptedTargetIds'])
+        && boundedString(evidence.messageId) && boundedString(evidence.sessionId) && isTargetIdsSubset(evidence.targetIds)
+        && sameTargetIds(evidence.targetIds, evidence.acceptedTargetIds) && !!batch && batch.sessionId === evidence.sessionId
+        && sameTargetIds(batch.targetIds, evidence.targetIds);
+    }
+    if (event === 'stop-auto-command') {
+      const acceptedBatch = operation.schedulerBatchAccepted;
+      return schedulerBatchRequired && operation.stopAutoDecision === 'stop' && !operation.stopAutoCommand
+        && exact(evidence, ['sessionId', 'firstBatchMessageId', 'firstBatchTargetIds', 'acceptedTargetIds', 'pendingTargetIds',
+          'stopSuccess', 'stopSessionId', 'translatedCount', 'isTranslated', 'isAutoTranslating', 'acceptedDOMRetained', 'pendingDOMUnchanged', 'acceptedStateHash', 'pendingStateHash'])
+        && boundedString(evidence.sessionId) && evidence.sessionId === acceptedBatch?.sessionId
+        && evidence.firstBatchMessageId === acceptedBatch?.messageId && sameTargetIds(evidence.firstBatchTargetIds, acceptedBatch?.targetIds)
+        && sameTargetIds(evidence.acceptedTargetIds, acceptedBatch?.targetIds)
+        && isTargetIdsSubset(evidence.pendingTargetIds) && disjointTargets(evidence.acceptedTargetIds, evidence.pendingTargetIds)
+        && allTargets(evidence.acceptedTargetIds, evidence.pendingTargetIds)
+        && evidence.stopSuccess === true && evidence.stopSessionId === evidence.sessionId
+        && evidence.translatedCount === evidence.acceptedTargetIds.length && evidence.isTranslated === true && evidence.isAutoTranslating === false
+        && evidence.acceptedDOMRetained === true && evidence.pendingDOMUnchanged === true
+        && validHash(evidence.acceptedStateHash) && validHash(evidence.pendingStateHash);
+    }
+    if (event === 'stop-auto-final') {
+      const command = operation.stopAutoCommand;
+      return schedulerBatchRequired && operation.stopAutoSnapshotDecision === 'capture' && !operation.stopped
+        && exact(evidence, ['sessionId', 'firstBatchMessageId', 'firstBatchTargetIds', 'secondBatchMessageId', 'secondBatchTargetIds',
+          'acceptedTargetIds', 'pendingTargetIds', 'acceptedDOMRetained', 'pendingDOMUnchanged', 'acceptedStateHash', 'pendingStateHash',
+          'postStopMutationTargetIds', 'cancellationRequests', 'contentState', 'worker'])
+        && evidence.sessionId === command?.sessionId && evidence.firstBatchMessageId === command?.firstBatchMessageId
+        && sameTargetIds(evidence.firstBatchTargetIds, command?.firstBatchTargetIds)
+        && boundedString(evidence.secondBatchMessageId) && evidence.secondBatchMessageId !== evidence.firstBatchMessageId
+        && isTargetIdsSubset(evidence.secondBatchTargetIds) && sameTargetIds(evidence.pendingTargetIds, evidence.secondBatchTargetIds)
+        && sameTargetIds(evidence.acceptedTargetIds, command?.acceptedTargetIds)
+        && allTargets(evidence.acceptedTargetIds, evidence.pendingTargetIds)
+        && evidence.acceptedDOMRetained === true && evidence.pendingDOMUnchanged === true
+        && evidence.acceptedStateHash === command?.acceptedStateHash && evidence.pendingStateHash === command?.pendingStateHash
+        && Array.isArray(evidence.postStopMutationTargetIds) && evidence.postStopMutationTargetIds.length === 0
+        && validStopContentState(evidence.contentState, evidence.sessionId)
+        && validStopCancellationRequests(evidence.cancellationRequests, evidence.sessionId)
+        && validStopWorkerEvidence(evidence.worker, evidence.sessionId, evidence.firstBatchMessageId, evidence.secondBatchMessageId);
     }
     if (event === 'physical-start') {
       const invocation = operation.invocations.get(evidence.invocationId);
@@ -292,7 +410,8 @@ function createCollector(options, fixtureUrl) {
       const attempts = [...(invocation?.attempts ?? [])].map(id => operation.attempts.get(id));
       return exact(evidence, ['invocationId', 'sessionId', 'outcome', 'code']) && !!invocation
         && invocation.sessionId === evidence.sessionId && ['fulfilled', 'rejected', 'cancelled'].includes(evidence.outcome)
-        && attempts.every(attempt => attempt?.settled) && (evidence.code === null || providerStopCodes.has(evidence.code)) && !invocation.settled
+        && attempts.every(attempt => attempt?.settled)
+        && (evidence.outcome === 'fulfilled' ? evidence.code === null : providerDiagnosticCodes.has(evidence.code)) && !invocation.settled
         && (evidence.outcome !== 'fulfilled' || operation.reports.some(report => report.event === 'parser-success' && report.evidence.invocationId === evidence.invocationId));
     }
     if (event === 'command-result') {
@@ -352,8 +471,9 @@ function createCollector(options, fixtureUrl) {
   }
 
   function decideOperation(gate, decision) {
-    if (gate === 'start') operation.startDecision = decision;
-    else operation.restoreDecision = decision;
+    const property = { start: 'startDecision', restore: 'restoreDecision', stopAuto: 'stopAutoDecision', stopAutoSnapshot: 'stopAutoSnapshotDecision' }[gate];
+    if (!property) throw new TypeError('Unknown provider operation decision gate.');
+    operation[property] = decision;
     for (const waiter of [...operation.decisionWaiters]) {
       if (waiter.gate !== gate) continue;
       operation.decisionWaiters.delete(waiter);
@@ -363,14 +483,18 @@ function createCollector(options, fixtureUrl) {
     notifyOperationChange();
   }
 
-  function waitForDecision(gate, timeoutMs, fallback) {
-    const existing = gate === 'start' ? operation.startDecision : operation.restoreDecision;
+  function waitForDecision(gate, timeoutMs, fallback, polling = false) {
+    const property = { start: 'startDecision', restore: 'restoreDecision', stopAuto: 'stopAutoDecision', stopAutoSnapshot: 'stopAutoSnapshotDecision' }[gate];
+    if (!property) throw new TypeError('Unknown provider operation decision gate.');
+    const existing = operation[property];
     if (existing) return Promise.resolve(existing);
     return new Promise(resolve => {
       const waiter = { gate, resolve, timer: null };
       waiter.timer = setTimeout(() => {
         operation.decisionWaiters.delete(waiter);
+        if (polling) { resolve(null); return; }
         operation.stopped = true; operation.stopCode ??= 'TIMEOUT';
+        if (gate === 'stopAuto' || gate === 'stopAutoSnapshot') operation.failure ??= { code: 'TIMEOUT' };
         decideOperation(gate, fallback);
       }, timeoutMs);
       operation.decisionWaiters.add(waiter);
@@ -380,6 +504,7 @@ function createCollector(options, fixtureUrl) {
   function providerOperationSnapshot() {
     return structuredClone({
       op: 'edge-fr-page-once', released: operation.released, restoreDecision: operation.restoreDecision,
+      stopAutoDecision: operation.stopAutoDecision, stopAutoSnapshotDecision: operation.stopAutoSnapshotDecision,
       stopped: operation.stopped, stopCode: operation.stopCode, reports: operation.reports,
       rejections: { ...operation.rejections }, failure: operation.failure,
       lastRejection: operation.lastRejection ?? null,
@@ -433,6 +558,43 @@ function createCollector(options, fixtureUrl) {
       notifyOperationChange();
       return decision;
     },
+    decideStopAuto(decision) {
+      if (!admissionOpen || failed || operation.failure || operation.stopped || decision !== 'stop'
+          || !operation.released || operation.stopAutoDecision !== null || !operation.schedulerBatchAccepted) {
+        throw new Error('Provider operation Stop Auto decision is invalid or already settled.');
+      }
+      const accepted = operation.schedulerBatchAccepted;
+      const firstBatch = operation.schedulerBatches.get(accepted.messageId);
+      const others = [...operation.schedulerBatches.values()].filter(batch => batch.messageId !== accepted.messageId);
+      const secondBatch = others.length === 1 ? others[0] : null;
+      const secondInvocation = secondBatch && [...operation.invocations.values()].find(item => item.messageId === secondBatch.messageId);
+      const secondStarted = secondInvocation && operation.reports.some(report => report.event === 'physical-start'
+        && report.evidence.invocationId === secondInvocation.invocationId && report.evidence.sessionId === accepted.sessionId);
+      if (!firstBatch || !secondBatch || !secondInvocation || !secondStarted || secondBatch.sessionId !== accepted.sessionId
+          || !sameTargetIds(firstBatch.targetIds, accepted.targetIds)) {
+        throw new Error('Stop Auto decision requires an accepted first batch and an already-started exact subsequent batch.');
+      }
+      operation.stopControlTarget = { sessionId: accepted.sessionId, firstBatchMessageId: firstBatch.messageId, secondBatchMessageId: secondBatch.messageId };
+      decideOperation('stopAuto', decision);
+      return decision;
+    },
+    decideStopAutoSnapshot(decision) {
+      if (!admissionOpen || failed || operation.failure || operation.stopped || decision !== 'capture'
+          || operation.stopAutoDecision !== 'stop' || operation.stopAutoSnapshotDecision !== null || !operation.stopAutoCommand) {
+        throw new Error('Provider operation Stop Auto snapshot decision is invalid or already settled.');
+      }
+      const target = operation.stopControlTarget;
+      const heldInvocation = [...operation.invocations.values()].find(item => item.messageId === target?.secondBatchMessageId);
+      const attempts = [...(heldInvocation?.attempts ?? [])].map(id => operation.attempts.get(id));
+      const cancelledPhysical = attempts.length === 1 && attempts[0]?.settled === true
+        && ['cancelled', 'rejected'].includes(attempts[0].outcome) && attempts[0].status === null
+        && ['ABORTED', 'NETWORK_ERROR', 'FETCH_ERROR'].includes(attempts[0].code);
+      const providerSettled = operation.reports.some(report => report.event === 'provider-settled'
+        && report.evidence.invocationId === heldInvocation?.invocationId && ['rejected', 'cancelled'].includes(report.evidence.outcome));
+      if (!target || !cancelledPhysical || !providerSettled) throw new Error('Stop Auto final capture requires held physical and Provider settlement reports.');
+      decideOperation('stopAutoSnapshot', decision);
+      return decision;
+    },
     stopProviderProbe(reasonCode) {
       if (!providerStopCodes.has(reasonCode)) throw new TypeError('Unknown provider operation stop code.');
       if (operation.stopped) return false;
@@ -449,6 +611,8 @@ function createCollector(options, fixtureUrl) {
       operation.stopCode ??= 'TEARDOWN';
       if (!operation.startDecision) decideOperation('start', 'stop');
       if (!operation.restoreDecision) decideOperation('restore', 'stop');
+      if (!operation.stopAutoDecision) decideOperation('stopAuto', 'deny');
+      if (!operation.stopAutoSnapshotDecision) decideOperation('stopAutoSnapshot', 'deny');
       notifyOperationChange();
       for (const cancel of pending) cancel();
       failWaiters(new Error('Firefox runtime collector admission is closed'));
@@ -492,6 +656,67 @@ export function validateRuntimeBridgeConfig(options) { validateConfig(options); 
 function boundedString(value) { return typeof value === 'string' && value.length > 0 && value.length <= 128; }
 function validIndexes(value) { return Array.isArray(value) && value.length > 0 && value.length <= 12 && value.every(item => Number.isInteger(item) && item >= 0 && item < 12) && new Set(value).size === value.length; }
 function sameIndexes(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => item === right[index]); }
+function sameTargetIds(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((id, index) => id === right[index]); }
+function disjointTargets(left, right) { return Array.isArray(left) && Array.isArray(right) && !left.some(id => right.includes(id)); }
+function allTargets(left, right) {
+  const ids = [...(left ?? []), ...(right ?? [])];
+  return ids.length === 12 && new Set(ids).size === 12 && ids.every((id, index) => /^target-(?:[0-9]|1[01])$/.test(id))
+    && Array.from({ length: 12 }, (_, index) => `target-${index}`).every(id => ids.includes(id));
+}
+function validHash(value) { return typeof value === 'string' && /^[a-f\d]{64}$/i.test(value); }
+function validStopCancellationRequests(value, sessionId) {
+  if (!Array.isArray(value) || value.length !== 2) return false;
+  const translate = value.find(item => item.action === 'CANCEL_TRANSLATION');
+  const session = value.find(item => item.action === 'CANCEL_SESSION');
+  return !!translate && !!session && [translate, session].every(item => exact(item,
+    ['action', 'sessionId', 'status', 'responseSuccess', 'cancelAll', 'context'])
+      && item.sessionId === sessionId && item.status === 'fulfilled' && item.responseSuccess === true)
+    && translate.cancelAll === true && translate.context === 'page-translation-batch'
+    && session.cancelAll === null && session.context === null;
+}
+function validStopContentState(value, sessionId) {
+  return exact(value, ['capturedSessionActive', 'discoveryCancelled', 'currentBridgeOwnsSession', 'schedulerSessionContextOwned', 'pendingOperations',
+    'translationSessionId', 'activeFlushes', 'queueIds', 'activeBatchIds', 'pendingSettlementCount', 'bridgeSessionActive',
+    'bridgeDiscoveryPending', 'bridgeDiscoveryRunning', 'bridgeDiscoveryStarting', 'bridgeDiscoveryQueueDepth', 'bridgeDiscoveryCancelled', 'bridgeDiscoveryFailed'])
+    && value.capturedSessionActive === false && value.discoveryCancelled === true && value.schedulerSessionContextOwned === false
+    && value.pendingOperations === 0 && value.translationSessionId === sessionId && value.activeFlushes === 0
+    && Array.isArray(value.queueIds) && value.queueIds.length === 0 && Array.isArray(value.activeBatchIds) && value.activeBatchIds.length === 0
+    && value.pendingSettlementCount === 0 && value.bridgeSessionActive === false
+    && value.bridgeDiscoveryPending === false && value.bridgeDiscoveryRunning === false && value.bridgeDiscoveryStarting === false
+    && value.bridgeDiscoveryQueueDepth === 0 && value.bridgeDiscoveryCancelled === true && value.bridgeDiscoveryFailed === false;
+}
+function validStopWorkerEvidence(value, sessionId, firstMessageId, secondMessageId) {
+  if (!exact(value, ['providerRoots', 'cancelRequest', 'controllerAbort', 'physical', 'resources'])
+      || !Array.isArray(value.providerRoots) || value.providerRoots.length !== 2) return false;
+  const roots = value.providerRoots;
+  const first = roots.find(item => item.messageId === firstMessageId);
+  const second = roots.find(item => item.messageId === secondMessageId);
+  const cancel = value.cancelRequest; const abort = value.controllerAbort; const physical = value.physical; const resources = value.resources;
+  return !!first && !!second
+    && [first, second].every(item => exact(item, ['messageId', 'sessionId', 'status', 'resultSuccess', 'operationAborted', 'controllerAborted', 'controllerAbortedAtEnd', 'settledSequence']) && item.sessionId === sessionId && Number.isSafeInteger(item.settledSequence))
+    && first.status === 'fulfilled' && first.resultSuccess === true
+    && ((second.status === 'rejected' && (second.operationAborted === true || second.controllerAbortedAtEnd === true))
+      || (second.status === 'fulfilled' && second.resultSuccess === false && second.controllerAbortedAtEnd === true))
+    && second.controllerAborted === true
+    && exact(cancel, ['messageId', 'sessionId', 'status', 'controllerMatched', 'controllerAbortedBefore', 'controllerAbortedAfter', 'responseSuccess'])
+    && cancel.messageId === secondMessageId && cancel.sessionId === sessionId && cancel.status === 'fulfilled'
+    && cancel.controllerMatched === true && cancel.controllerAbortedBefore === false && cancel.controllerAbortedAfter === true && cancel.responseSuccess === true
+    && exact(abort, ['messageId', 'sessionId', 'sequence', 'cancelRequestSequence', 'abortedBefore', 'abortedAfter', 'context'])
+    && abort.messageId === secondMessageId && abort.sessionId === sessionId && Number.isSafeInteger(abort.sequence)
+    && Number.isSafeInteger(abort.cancelRequestSequence) && abort.sequence > abort.cancelRequestSequence
+    && abort.context === 'page-translation-batch' && abort.abortedBefore === false && abort.abortedAfter === true && second.settledSequence > abort.sequence
+    && exact(physical, ['messageId', 'sessionId', 'status', 'operationAborted', 'controllerAbortedAtEnd', 'settledSequence'])
+     && physical.messageId === secondMessageId && physical.sessionId === sessionId && physical.status === 'rejected'
+     && Number.isSafeInteger(physical.settledSequence)
+     && physical.settledSequence > abort.sequence
+    && exact(resources, ['available', 'activeLifecycleIds', 'activeRequestIds', 'requests', 'sourceResolverPresent', 'queueEmpty', 'rateLimitIdle', 'leaseActiveCount', 'leaseTimerActive'])
+    && resources.available === true && Array.isArray(resources.activeLifecycleIds) && resources.activeLifecycleIds.every(id => id !== firstMessageId && id !== secondMessageId)
+    && Array.isArray(resources.activeRequestIds) && resources.activeRequestIds.every(id => id !== firstMessageId && id !== secondMessageId)
+    && Array.isArray(resources.requests) && resources.requests.length === 2
+    && resources.requests.every(item => exact(item, ['messageId', 'status', 'operationOwned']) && [firstMessageId, secondMessageId].includes(item.messageId) && item.operationOwned === false && !['pending', 'processing', 'streaming'].includes(item.status))
+    && resources.sourceResolverPresent === false && resources.queueEmpty === true && resources.rateLimitIdle === true
+    && resources.leaseActiveCount === 0 && resources.leaseTimerActive === false;
+}
 function isTargetIdsSubset(value) {
   return Array.isArray(value) && value.length > 0 && value.length <= 12
     && value.every(id => typeof id === 'string' && /^target-(?:[0-9]|1[01])$/.test(id)) && new Set(value).size === value.length;

@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { createEdgeProviderProbe } from './page-translation-e2e-benchmark/provider-probe.mjs';
 import { mapEdgeResponse } from './page-translation-e2e-benchmark/metrics.mjs';
 import { targetTexts } from './page-translation-e2e-benchmark/fixture.mjs';
+import { matchProviderPhysicalRoot } from './page-translation-e2e-benchmark/cancellation-probes.mjs';
 
 const authToken = 'ab'.repeat(32);
 const runId = 'edge-provider-probe-test';
@@ -51,10 +52,31 @@ const indices = Array.from({ length: 12 }, (_, index) => index);
 const invocation = { invocationId: 'invocation-1', sessionId: 'session-1', messageId: 'message-1', provider: 'edge', itemCount: 12, sourceIndexes: indices };
 const edgeUrl = 'https://edge.microsoft.com/translate/translatetext?isEnterpriseClient=false&to=fr';
 
+describe('provider physical root correlation', () => {
+  const source = 'private source text';
+  const body = JSON.stringify([{ text: source }]);
+  const roots = [{ messageId: 'message-a', sessionId: 'session-a', operation: { texts: [source] } }];
+
+  it('matches one exact root in the same session without returning source text', () => {
+    const result = matchProviderPhysicalRoot({ url: edgeUrl, body, sessionId: 'session-a', roots });
+    expect(result).toBe('message-a');
+    expect(JSON.stringify(result)).not.toContain(source);
+  });
+
+  it.each([
+    ['wrong session', { sessionId: 'session-b', roots }],
+    ['wrong body', { sessionId: 'session-a', body: JSON.stringify([{ text: 'different text' }]), roots }],
+    ['duplicate roots', { sessionId: 'session-a', roots: [...roots, { ...roots[0], messageId: 'message-b' }] }],
+    ['malformed body', { sessionId: 'session-a', body: '{not-json', roots }],
+  ])('fails closed for %s', (_label, overrides) => {
+    expect(matchProviderPhysicalRoot({ url: edgeUrl, body, sessionId: 'session-a', roots, ...overrides })).toBeNull();
+  });
+});
+
 function deferred() {
-  let resolve;
-  const promise = new Promise(yes => { resolve = yes; });
-  return { promise, resolve };
+  let resolve; let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 
 async function waitUntil(predicate) {
@@ -145,6 +167,44 @@ describe('Firefox Edge provider operation collector', () => {
     ]);
     expect(reports[1].evidence).toMatchObject({ sessionId: 'provider-only-session', messageId: 'provider-only-message', method: 'POST', url: edgeUrl });
     expect(reports.at(-1).evidence).toMatchObject({ outcome: 'fulfilled', code: null });
+    probe.stop();
+  });
+
+  it.each([
+    ['TypeError network failure', () => new TypeError('private network detail'), 'rejected', 'NETWORK_ERROR'],
+    ['unknown fetch failure', () => new Error('private request detail'), 'rejected', 'FETCH_ERROR'],
+    ['operation abort wrapped as TypeError', () => Object.assign(new TypeError('private abort detail'), { operationAborted: true }), 'cancelled', 'ABORTED'],
+  ])('classifies %s consistently for physical and Provider-root settlement without exposing details', async (_name, makeError, outcome, code) => {
+    const reports = []; const native = deferred(); let probe;
+    const proxyManager = {
+      isEnabled: options => options?.enabled === true,
+      fetch(url, options) {
+        probe.observeDirectFetch(url, options, native.promise, true);
+        return native.promise;
+      },
+    };
+    const ProviderRequestEngine = { executeApiCall(provider, options) {
+      return proxyManager.fetch(options.url, options.fetchOptions, { enabled: false });
+    } };
+    const Edge = class { _translateChunk(...args) {
+      const texts = args[0]; const options = args[9] ?? {};
+      return ProviderRequestEngine.executeApiCall(this, { url: edgeUrl, sessionId: options.sessionId,
+        abortController: args[4], fetchOptions: { method: 'POST', body: JSON.stringify(texts) } });
+    } };
+    probe = createEdgeProviderProbe(async (event, evidence) => { reports.push({ event, evidence }); });
+    expect(probe.install({ MicrosoftEdgeProvider: Edge, ProviderRequestEngine, proxyManager })).toBe(true);
+    probe.arm();
+    const error = makeError();
+    const translation = new Edge()._translateChunk(targetTexts, 'en', 'fr', 'page', new AbortController(), 0, 12, 0, 1,
+      { sessionId: 'stop-session', messageId: 'held-message' });
+    native.reject(error);
+    await expect(translation).rejects.toBe(error);
+    await vi.waitFor(() => expect(reports.some(report => report.event === 'provider-settled')).toBe(true));
+    const physical = reports.find(report => report.event === 'physical-settled')?.evidence;
+    const provider = reports.find(report => report.event === 'provider-settled')?.evidence;
+    expect(physical).toMatchObject({ outcome, code });
+    expect(provider).toMatchObject({ sessionId: 'stop-session', outcome, code });
+    expect(JSON.stringify(reports)).not.toContain(error.message);
     probe.stop();
   });
 
@@ -518,8 +578,8 @@ describe('Firefox Edge provider operation collector', () => {
       ['armed', { sender: { id: expectedExtensionId, tabId: 9, frameId: 0, url: rejected.url, origin: null, documentId: 'doc-9' }, navigationGeneration: 1, edgeHostPermission: true, proxyDisabled: true, observersInstalled: true }],
       ['provider-invoked', invocation],
       ['physical-start', attempt],
-      ['physical-settled', { attemptId: attempt.attemptId, sessionId: invocation.sessionId, outcome: 'rejected', status: null, code: 'NETWORK_ERROR' }],
-      ['provider-settled', { invocationId: invocation.invocationId, sessionId: invocation.sessionId, outcome: 'rejected', code: 'PROTOCOL_ERROR' }],
+      ['physical-settled', { attemptId: attempt.attemptId, sessionId: invocation.sessionId, outcome: 'rejected', status: null, code: 'FETCH_ERROR' }],
+      ['provider-settled', { invocationId: invocation.invocationId, sessionId: invocation.sessionId, outcome: 'rejected', code: 'FETCH_ERROR' }],
       ['command-result', { success: false, sessionId: invocation.sessionId, code: 'PROTOCOL_ERROR' }],
     ];
     for (const [index, [event, evidence]] of sequence.entries()) {
