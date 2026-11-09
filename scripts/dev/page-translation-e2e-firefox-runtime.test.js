@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { exactKeys, getBackgroundReadinessChecks, installBackgroundProbe, validateProbeEnvelope, validateSender } from './page-translation-e2e-firefox/runtime-background.mjs';
-import { installContentProbe } from './page-translation-e2e-firefox/runtime-content.mjs';
+import { installContentProbe, send as sendRuntimeMessage } from './page-translation-e2e-firefox/runtime-content.mjs';
+import { PROVIDER_ONLY_DEADLINE_MS } from './page-translation-e2e-firefox/runtime-constants.mjs';
 import { installContentProviderProbe } from './page-translation-e2e-benchmark/provider-probe-content.mjs';
 import { targetTexts } from './page-translation-e2e-benchmark/fixture.mjs';
 
@@ -25,10 +26,10 @@ afterEach(() => {
   delete globalThis.__firefoxProbeStartup;
 });
 
-function setup({ permission = true, edgePermission = true, proxyEnabled = false, importFails = false, bindingTabCount = 1, holdReadyReport = false, fixtureUrl = config.fixtureUrl } = {}) {
+function setup({ permission = true, edgePermission = true, proxyEnabled = false, importFails = false, bindingTabCount = 1, holdReadyReport = false, fixtureUrl = config.fixtureUrl, providerOnly = false, invokeProviderOnly = vi.fn(async () => []) } = {}) {
   let onMessage;
   let onCommitted;
-  const bridgeConfig = { ...config, fixtureUrl };
+  const bridgeConfig = { ...config, fixtureUrl, ...(providerOnly ? { providerOnly: true } : {}) };
   let currentUrl = bridgeConfig.bindingUrl;
   const reports = [];
   let releaseReadyReport;
@@ -67,11 +68,11 @@ function setup({ permission = true, edgePermission = true, proxyEnabled = false,
   }));
   const importEntry = vi.fn(async () => {
     if (importFails) throw new Error('do not expose raw error');
-    globalThis.__pageTranslationBenchmark = { ...globalThis.__pageTranslationBenchmark, providerProbe, providerProbeInstalled: true };
+    globalThis.__pageTranslationBenchmark = { ...globalThis.__pageTranslationBenchmark, providerProbe, providerProbeInstalled: true, invokeProviderOnly };
   });
   const sender = { id: browser.runtime.id, tab: { id: 7 }, frameId: 0, url: bridgeConfig.fixtureUrl, origin: new URL(bridgeConfig.fixtureUrl).origin, documentId: 'doc-1' };
   return {
-    browser, reports, sender, importEntry, bridgeConfig, providerProbe,
+    browser, reports, sender, importEntry, bridgeConfig, providerProbe, invokeProviderOnly,
     async start() {
       await installBackgroundProbe(bridgeConfig, importEntry);
       await vi.waitFor(() => expect(reports.some(item => ['ready', 'error'].includes(item.payload.phase))).toBe(true), { timeout: 1000 });
@@ -85,6 +86,18 @@ function setup({ permission = true, edgePermission = true, proxyEnabled = false,
     releaseReady: () => releaseReadyReport?.(),
     setUrl(url) { currentUrl = url; },
   };
+}
+
+async function completeProviderOnlyHandshake(bridge) {
+  await bridge.start();
+  const hello = await bridge.message({ action: '__PAGE_TRANSLATION_RUNTIME_PROBE_V1', v: 1, runId: config.runId, type: 'hello' }, bridge.sender);
+  const nonce = hello.nonce;
+  const base = { action: '__PAGE_TRANSLATION_RUNTIME_PROBE_V1', v: 1, runId: config.runId, nonce };
+  await bridge.message({ ...base, type: 'loaded', entry: 'src/core/content-scripts/index-main.js' }, bridge.sender);
+  await bridge.message({ ...base, type: 'ready', checks, flags }, bridge.sender);
+  await bridge.message({ ...base, type: 'ack-received', ack: 'ready-ack' }, bridge.sender);
+  await bridge.message({ ...base, type: 'content-ready', checks, flags, ackReceived: true }, bridge.sender);
+  return nonce;
 }
 
 describe('Firefox runtime bridge protocol', () => {
@@ -154,6 +167,67 @@ describe('Firefox runtime bridge protocol', () => {
       } }, bridge.sender);
     expect(translated).toMatchObject({ type: 'accepted', nonce, decision: 'restore' });
     expect(bridge.reports.at(-1).payload).toMatchObject({ op: 'edge-fr-page-once', opSeq: 2, event: 'translated' });
+  });
+
+  it('dispatches the authenticated provider-only invoke through the bound worker wrapper only after arm/start', async () => {
+    const invokeProviderOnly = vi.fn(async () => ['actual provider result']);
+    const bridge = setup({ providerOnly: true, invokeProviderOnly });
+    const nonce = await completeProviderOnlyHandshake(bridge);
+    const action = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
+    const valid = { action, v: 1, runId: config.runId, type: 'invoke', nonce, texts: targetTexts,
+      sessionId: `${config.runId}-provider-session`, messageId: `${config.runId}-provider-message` };
+
+    expect((await bridge.message(valid, bridge.sender)).code).toBe('PROTOCOL_ERROR');
+    expect((await bridge.message(valid, { ...bridge.sender, tab: { id: 8 } })).code).toBe('SENDER_REJECTED');
+    expect((await bridge.message({ ...valid, nonce: 'wrong-nonce' }, bridge.sender)).code).toBe('PROTOCOL_ERROR');
+    const arm = await bridge.message({ action, v: 1, runId: config.runId, type: 'arm', nonce, observersInstalled: true }, bridge.sender);
+    expect(arm).toMatchObject({ type: 'armed-ack', decision: 'start' });
+    expect((await bridge.message({ ...valid, sessionId: 'wrong-session' }, bridge.sender)).code).toBe('PROTOCOL_ERROR');
+    expect((await bridge.message({ ...valid, messageId: 'wrong-message' }, bridge.sender)).code).toBe('PROTOCOL_ERROR');
+    expect(invokeProviderOnly).not.toHaveBeenCalled();
+
+    expect(await bridge.message(valid, bridge.sender)).toMatchObject({ type: 'provider-complete', nonce });
+    expect(invokeProviderOnly).toHaveBeenCalledOnce();
+    expect(invokeProviderOnly).toHaveBeenCalledWith(targetTexts, { sessionId: valid.sessionId, messageId: valid.messageId });
+    expect(bridge.reports.map(report => report.payload.phase).filter(Boolean)).toEqual(['bootstrap', 'loaded', 'ready', 'loaded', 'ready']);
+    expect(bridge.reports.some(report => report.payload.phase === 'error')).toBe(false);
+  });
+
+  it('reports provider-only invocation failures through the provider operation lane, not the ready handshake', async () => {
+    const invokeProviderOnly = vi.fn(async () => { throw Object.assign(new Error('private provider detail'), { code: 'TIMEOUT' }); });
+    const bridge = setup({ providerOnly: true, invokeProviderOnly });
+    const nonce = await completeProviderOnlyHandshake(bridge);
+    const action = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
+    await bridge.message({ action, v: 1, runId: config.runId, type: 'arm', nonce, observersInstalled: true }, bridge.sender);
+    const response = await bridge.message({ action, v: 1, runId: config.runId, type: 'invoke', nonce, texts: targetTexts,
+      sessionId: `${config.runId}-provider-session`, messageId: `${config.runId}-provider-message` }, bridge.sender);
+    expect(response).toMatchObject({ type: 'error', code: 'TIMEOUT' });
+    expect(bridge.reports.at(-1).payload).toMatchObject({ op: 'edge-fr-page-once', event: 'error', evidence: { code: 'TIMEOUT' } });
+    expect(bridge.reports.some(report => report.payload.phase === 'error')).toBe(false);
+    expect(JSON.stringify(bridge.reports)).not.toContain('private provider detail');
+  });
+
+  it('keeps ordinary runtime messaging at three seconds and uses the shared ten-second provider-only deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('browser', { runtime: { sendMessage: vi.fn(() => new Promise(() => {})) } });
+    expect(PROVIDER_ONLY_DEADLINE_MS).toBe(10_000);
+    const handshake = sendRuntimeMessage({ type: 'hello' });
+    let handshakeSettled = false;
+    handshake.then(() => { handshakeSettled = true; }, () => { handshakeSettled = true; });
+    const handshakeFailure = expect(handshake).rejects.toMatchObject({ message: 'READINESS_TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(handshakeSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await handshakeFailure;
+
+    const invocation = sendRuntimeMessage({ type: 'invoke' }, PROVIDER_ONLY_DEADLINE_MS);
+    let invocationSettled = false;
+    invocation.then(() => { invocationSettled = true; }, () => { invocationSettled = true; });
+    const invocationFailure = expect(invocation).rejects.toMatchObject({ message: 'TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(PROVIDER_ONLY_DEADLINE_MS - 1);
+    expect(invocationSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await invocationFailure;
   });
 
   it('reports pre-physical Edge permission, proxy, and observer gate failures as protocol blockers', async () => {

@@ -1,12 +1,13 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { Buffer } from 'node:buffer';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { classifyTransportRequest, mapEdgeResponse } from '../page-translation-e2e-benchmark/metrics.mjs';
+import { createEdgeLoopbackCertificates, edgeProxyFirefoxPrefs, importEdgeLoopbackCa, startEdgeLoopbackProxy } from './loopback-edge-proxy.mjs';
 import { blockRuntimeBridgePrerequisite, capability, classifyObservedRealm, classifyRequestAction, isolationSnapshot, notTested, requiredCapabilities, retainExecutedCapability, runtimeProbeGate } from './capabilities.mjs';
 
 const withTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
@@ -582,6 +583,31 @@ export async function reconcileFinalProviderOperation({ bridge, state, contract,
     return { ok: capabilities.providerOperation.status === 'NOT_TESTED', snapshot };
   }
 
+  if (state.providerOnly === true) {
+    const event = name => snapshot.reports.filter(report => report.event === name);
+    const physical = event('physical-start'); const settled = event('physical-settled');
+    const invocations = event('provider-invoked'); const parsers = event('parser-success'); const providers = event('provider-settled');
+    const proofOk = snapshot.stopped && snapshot.stopCode === 'COMPLETED' && !snapshot.failure
+      && invocations.length === 1 && physical.length === 1 && settled.length === 1 && parsers.length === 1 && providers.length === 1
+      && settled[0].evidence.attemptId === physical[0].evidence.attemptId && settled[0].evidence.outcome === 'fulfilled'
+      && settled[0].evidence.status === 200 && settled[0].evidence.code === null
+      && parsers[0].evidence.resultsMatch === true && providers[0].evidence.outcome === 'fulfilled'
+      && invocations[0].evidence.sessionId === physical[0].evidence.sessionId && parsers[0].evidence.sessionId === invocations[0].evidence.sessionId
+      && providers[0].evidence.sessionId === invocations[0].evidence.sessionId
+      && state.proxyCorrelation?.ok === true;
+    if (!proofOk) {
+      const reason = 'Provider-only final proof lacks an exact proxy/native correlation, fulfilled HTTP 200, parser success, or fulfilled provider settlement.';
+      capabilities.providerOperation = capability('FAILED', { reason });
+      artifact.providerOperation = { attempted: true, status: 'FAILED', reason, finalSnapshot: snapshot };
+      return { ok: false, reason, snapshot };
+    }
+    capabilities.providerOperation = capability('SUPPORTED', { source: 'authenticated-provider-only-loopback-tls-proxy', physicalStatus: 200, parserSuccess: true, providerSettled: true });
+    capabilities.domAcceptance = notTested('Provider-only prototype does not exercise page translation or inspect DOM acceptance.');
+    capabilities.providerRestore = notTested('Provider-only prototype does not exercise Stop/Restore.');
+    artifact.providerOperation = { attempted: true, snapshot };
+    return { ok: true, snapshot };
+  }
+
   let reason = null;
   if (!snapshot.released || !snapshot.stopped || (state.stopCode && snapshot.stopCode !== state.stopCode)) reason = 'Provider operation release/stop state differs from the driver lifecycle.';
   if (state.receiptDecision === 'stop' && (!snapshot.stopped || !providerStopCodes.has(snapshot.stopCode))) reason ??= 'Authenticated stop release receipt has no recognized final stop code.';
@@ -732,9 +758,9 @@ export async function removeProviderNetworkControls({ bidi, collectorId, interce
   return { ok: errors.length === 0, errors };
 }
 
-export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, collectorId, fixtureTexts, runId, extensionId, fixtureUrl, tabId, startupSender = null, capabilities, timeoutMs = 12000 }) {
+export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, collectorId, fixtureTexts, runId, extensionId, fixtureUrl, tabId, startupSender = null, capabilities, timeoutMs = 12000, loopbackProxy = null, providerOnly = false }) {
   if (!Array.isArray(fixtureTexts) || fixtureTexts.length !== 12 || new Set(fixtureTexts).size !== 12 || fixtureTexts.some(text => typeof text !== 'string' || !text.trim())) throw new TypeError('Provider fixture source oracle must contain twelve unique target texts.');
-  const state = { attempted: false, released: false, receiptDecision: null, stopped: false, stopCode: null, reports: [], cursor: 0, pendingReports: [], invocations: new Map(), attempts: new Map(), parsers: new Map(), providerSettlements: new Map(), successfulCoverage: new Map(), invocation: null, armed: null, physical: null, physicalStarts: [], requests: [], bodyProofs: [], settlements: [], request: null, bodyProof: null, physicalSettlement: null, parser: null, command: null, translated: null, restored: null, error: null, contract: { runId, extensionId, fixtureUrl, tabId } };
+  const state = { attempted: false, released: false, receiptDecision: null, stopped: false, stopCode: null, providerOnly, proxyCorrelation: null, providerInvocation: null, reports: [], cursor: 0, pendingReports: [], invocations: new Map(), attempts: new Map(), parsers: new Map(), providerSettlements: new Map(), successfulCoverage: new Map(), invocation: null, armed: null, physical: null, physicalStarts: [], requests: [], bodyProofs: [], settlements: [], request: null, bodyProof: null, physicalSettlement: null, parser: null, command: null, translated: null, restored: null, error: null, contract: { runId, extensionId, fixtureUrl, tabId } };
   let operationDeadline = 0;
   const candidateBuffer = [];
   const seenRequestIds = new Set();
@@ -779,6 +805,11 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
           });
           state.cursor = report.opSeq;
           state.reports.push(report);
+          if (providerOnly && report.event === 'provider-invoked') state.providerInvocation = { stage: 'provider-invoked', code: null };
+          if (providerOnly && report.event === 'error' && state.receiptDecision === 'start'
+              && state.reports.some(item => item.event === 'armed') && !state.reports.some(item => item.event === 'provider-invoked')) {
+            state.providerInvocation = { stage: 'provider-only-invoke', code: providerStopCodes.has(report.evidence.code) ? report.evidence.code : 'PROTOCOL_ERROR' };
+          }
           state.pendingReports.push(report);
         }
         const index = state.pendingReports.findIndex(report => events.includes(report.event));
@@ -822,7 +853,19 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
     if (pending.some(result => !result.ok)) throw new Error('One or more held provider requests could not be failed.');
   };
   failPendingRequests = failCachedCandidates;
-  const acquireCandidate = async physical => {
+    const acquireCandidate = async physical => {
+    if (loopbackProxy) {
+      const held = await withTimeout(loopbackProxy.pending, Math.max(1, operationDeadline - Date.now()), 'loopback TLS Edge request');
+      const request = held.request;
+      const url = new URL(request.url, 'https://edge.microsoft.com').toString();
+      const bodyProof = { bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: request.sourceIndexes };
+      if (url !== physical.url || request.method !== physical.method || bodyProof.bodyBytes !== physical.bodyBytes
+          || bodyProof.bodyHash !== physical.bodyHash.toLowerCase() || JSON.stringify(bodyProof.sourceIndexes) !== JSON.stringify(physical.sourceIndexes)) {
+        held.reject(); throw Object.assign(new Error('Loopback TLS request did not match exact authenticated native request bytes and indexes.'), { code: 'INVALID_BODY' });
+      }
+      state.proxyCorrelation = { ok: true, bodyBytes: bodyProof.bodyBytes, bodyHash: bodyProof.bodyHash, sourceIndexes: bodyProof.sourceIndexes, url, method: request.method };
+      return { request: { url, method: request.method, requestId: 'loopback-tls-request', isBlocked: true, bodySize: request.bodyBytes, action: 'loopback-tls-held', sourceIndexes: request.sourceIndexes, bodyHash: request.bodyHash, held }, bodyProof };
+    }
     while (Date.now() < operationDeadline) {
       const cachedIndex = candidateBuffer.findIndex(candidate => candidateMatches(candidate, physical));
       if (cachedIndex >= 0) return candidateBuffer.splice(cachedIndex, 1)[0];
@@ -920,16 +963,30 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
     const { request, bodyProof } = candidate;
     try { validateEdgeProviderCorrelation(owner, physical, request); }
     catch (error) {
-      capabilities.backgroundProviderInterception = capability('FAILED', { reason: error.message, requestId: request.requestId });
-      markLaterNotTested('BiDi request identity did not match the native physical POST.');
+      capabilities.backgroundProviderInterception = loopbackProxy
+        ? notTested('BiDi interception is outside the provider-only TLS proxy lane.')
+        : capability('FAILED', { reason: error.message, requestId: request.requestId });
+      markLaterNotTested('Observed transport request identity did not match the native physical POST.');
       await failHeld(request, 'native-bidi-correlation-failed'); await stop('PROTOCOL_ERROR');
       const settlement = await wait('physical-settled');
       if (settlement.evidence.attemptId === physical.attemptId) recordAttemptOutcome(physical, { request, settlement: settlement.evidence, diagOnly: true });
       return { failed: true };
     }
-    capabilities.backgroundProviderInterception = capability('SUPPORTED', { requestId: request.requestId, attemptId: physical.attemptId, url: request.url, method: request.method });
-    if (!candidateMatches(candidate, physical)) throw new Error('Cached BiDi candidate does not match authenticated native request bytes/hash/source indexes.');
+    capabilities.backgroundProviderInterception = loopbackProxy
+      ? notTested('The actual Edge TLS request was admitted by the loopback proxy, not BiDi interception.')
+      : capability('SUPPORTED', { requestId: request.requestId, attemptId: physical.attemptId, url: request.url, method: request.method });
+    if (!candidateMatches(candidate, physical)) throw new Error('Transport candidate does not match authenticated native request bytes/hash/source indexes.');
     capabilities.providerRequestBody = capability('SUPPORTED', { bodyBytes: bodyProof.bodyBytes, bodyHash: bodyProof.bodyHash, sourceIndexes: bodyProof.sourceIndexes });
+    if (loopbackProxy) {
+      const responseBody = JSON.stringify(mapEdgeResponse(fixtureTexts));
+      await request.held.release(responseBody);
+      request.action = 'loopback-tls-response'; request.requestResolved = true;
+      capabilities.providerResponse = capability('SUPPORTED', { statusCode: 200, responseBodyBytes: Buffer.byteLength(responseBody), source: 'loopback-tls-proxy' });
+      const settlement = await wait('physical-settled');
+      if (settlement.evidence.attemptId !== physical.attemptId || settlement.evidence.outcome !== 'fulfilled' || settlement.evidence.status !== 200 || settlement.evidence.code !== null) throw new Error('Native settlement did not fulfill the loopback TLS 200 response.');
+      recordAttemptOutcome(physical, { request, bodyProof, settlement: settlement.evidence, successful: true });
+      return { failed: false };
+    }
     let provided;
     const responseBody = JSON.stringify(mapEdgeResponse(bodyProof.body));
     try {
@@ -987,8 +1044,8 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
       && state.parsers.size === state.invocations.size && state.providerSettlements.size === state.invocations.size
       && [...state.attempts.values()].every(attempt => attempt.settlement)
       && state.successfulCoverage.size === 12 && indexes012([...state.successfulCoverage.keys()].sort((a, b) => a - b));
-    const providerProofComplete = () => state.command?.evidence.success === true
-      && state.invocation?.evidence.sessionId === state.command.evidence.sessionId && providerWorkComplete();
+    const providerProofComplete = () => providerWorkComplete() && (providerOnly || (state.command?.evidence.success === true
+      && state.invocation?.evidence.sessionId === state.command.evidence.sessionId));
     while (!providerProofComplete() && !terminalFailure) {
       let report;
       try { report = await wait(['provider-invoked', 'physical-start', 'parser-success', 'provider-settled', 'command-result', 'error']); }
@@ -1064,6 +1121,14 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
       throw new Error('Provider work completed while unmatched paused Edge candidates remained.');
     }
     capabilities.providerConsumption = capability('SUPPORTED', { sessionId: state.invocation.evidence.sessionId, sourceIndexes: [...state.successfulCoverage.keys()].sort((a, b) => a - b), attempts: state.attempts.size, invocations: state.invocations.size });
+    if (providerOnly) {
+      state.stopCode = 'COMPLETED';
+      await stop('COMPLETED');
+      capabilities.providerOperation = capability('SUPPORTED', { source: 'authenticated-provider-only-proxy-operation', sessionId: state.invocation.evidence.sessionId, physicalStatus: 200, parserSuccess: true, providerSettled: true });
+      capabilities.domAcceptance = notTested('Provider-only TLS proxy prototype does not issue page-translate or inspect DOM acceptance.');
+      capabilities.providerRestore = notTested('Provider-only TLS proxy prototype does not enter Stop/Restore scenarios.');
+      return state;
+    }
     const sessionId = state.invocation.evidence.sessionId;
     try {
       state.translated = await wait('translated');
@@ -1271,13 +1336,13 @@ async function waitForBiDi(endpoint, process, timeoutMs, secretValues = []) {
   throw new Error(`Firefox BiDi startup failed: ${lastError?.message ?? `process exited ${process.exitCode}`}`);
 }
 
-export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride }) {
+export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride, loopbackTlsProxy = false }) {
   const root = await mkdtemp(resolve(tmpdir(), 'translate-it-firefox-cap-'));
   const profile = resolve(root, 'profile'); const bundle = resolve(root, 'extension');
   const records = []; const errors = []; const cleanupErrors = []; const capabilities = Object.fromEntries(requiredCapabilities.map(name => [name, notTested('Blocked by an earlier capability gate.')]));
   const runId = artifact.runId ?? randomBytes(16).toString('hex'); const authToken = randomBytes(32).toString('hex'); const privateSecrets = [authToken];
   const expectedExtensionId = 'page-translation-e2e-benchmark@translate-it.test';
-  let fixture; let bridge; let bidi; let browser; let extensionId = null; let fixtureOrigin = null; let runtimeReportUrl; let requestDataCollectorId = null; let interceptId = null; let providerOperationState = null; let runtimeBridgeProof; let aborted = false; let dispatcher; let interceptReady = false; let runtimeBridgeAttempted = false; let bridgeDrainSucceeded = true;
+  let fixture; let bridge; let bidi; let browser; let edgeProxy; let extensionId = null; let fixtureOrigin = null; let runtimeReportUrl; let requestDataCollectorId = null; let interceptId = null; let providerOperationState = null; let runtimeBridgeProof; let aborted = false; let dispatcher; let interceptReady = false; let runtimeBridgeAttempted = false; let bridgeDrainSucceeded = true;
   const bridgeAcceptedReports = []; let bridgeContract = null;
   const abort = signal => {
     aborted = true;
@@ -1293,6 +1358,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     records.push({ kind: 'network-isolation', ...network });
     capabilities.isolation = network.ok ? capability('SUPPORTED', { evidence: network }) : capability('FAILED', { evidence: network, reason: 'Loopback-only namespace verification failed.' });
     if (!network.ok) throw new Error('Network isolation verification failed; Firefox was not started.');
+    if (loopbackTlsProxy) artifact.loopbackTlsProxy = { mode: 'provider-only', status: 'SETTING_UP', isolationVerified: true, deniedRequests: [] };
     const { startFixture: defaultStartFixture, createFixture: defaultCreateFixture } = await import('../page-translation-e2e-benchmark/fixture.mjs');
     const fixtureData = (createFixtureOverride ?? defaultCreateFixture)('small');
     fixture = await (startFixtureOverride ?? defaultStartFixture)(fixtureData, { runtimeBridge: { runId, authToken, expectedExtensionId } });
@@ -1315,7 +1381,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     try {
       await buildBenchmarkExtension({
         outputDir: bundle, mode: 'sliced', browser: 'firefox', workerEntry, contentEntry,
-        runtimeBridge: { runId, fixtureUrl: fixture.url, bindingUrl, reportUrl: runtimeReportUrl, authToken },
+        runtimeBridge: { runId, fixtureUrl: fixture.url, bindingUrl, reportUrl: runtimeReportUrl, authToken, ...(loopbackTlsProxy ? { providerOnly: true } : {}) },
       });
     } catch (error) {
       capabilities.runtimeBridge = capability('FAILED', { reason: sanitizePrivate(`Authenticated runtime bridge build failed: ${error.message}`, privateSecrets) });
@@ -1323,6 +1389,16 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     }
     if (aborted) throw new Error('Probe aborted before browser launch.');
     await mkdir(profile);
+    if (loopbackTlsProxy) {
+      const cert = await createEdgeLoopbackCertificates(resolve(root, 'tls'));
+      const nss = await importEdgeLoopbackCa(profile, cert.caCert);
+      const caFingerprint = createHash('sha256').update(await readFile(cert.caCert)).digest('hex');
+      edgeProxy = await startEdgeLoopbackProxy({ tlsCert: cert.leafCert, tlsKey: cert.leafKey, fixtureTexts: fixtureData.targetTexts, responseFor: texts => mapEdgeResponse(texts) });
+      await writeFile(resolve(profile, 'user.js'), edgeProxyFirefoxPrefs(edgeProxy.port), { mode: 0o600 });
+      artifact.loopbackTlsProxy = { mode: 'provider-only', status: 'READY', bindAddress: '127.0.0.1', proxyPort: edgeProxy.port, tlsPort: edgeProxy.tlsPort,
+        certificateVerification: cert.verification, caConstraints: cert.caConstraints, leafConstraints: cert.leafConstraints, caFingerprint, trust: nss.trust, nssListing: nss.listing,
+        profilePrefs: 'manual HTTPS proxy; explicit localhost bypass; localhost hijacking disabled', deniedRequests: [] };
+    }
     browser = spawn('/usr/bin/firefox', ['--no-remote', '--headless', '--profile', profile, '--remote-debugging-port=0', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
     let startupOutput = ''; let endpoint = null;
     browser.stderr.on('data', data => {
@@ -1349,9 +1425,9 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     records.push({ kind: 'network.addIntercept', result: intercept.result });
     interceptReady = !!intercept.result?.intercept;
     interceptId = intercept.result?.intercept ?? null;
-    capabilities.interceptionSetup = interceptReady ? capability('SUPPORTED', { intercept: intercept.result.intercept, subscribedEvents: ['network.beforeRequestSent'] }) : capability('FAILED', { reason: 'network.addIntercept returned no intercept identifier.' });
-    if (!interceptReady) throw new Error('BiDi interception setup acknowledgment missing intercept ID.');
-    requestDataCollectorId = await setupProviderDataCollector(bidi, capabilities);
+    capabilities.interceptionSetup = interceptReady ? capability('SUPPORTED', { intercept: intercept.result.intercept, subscribedEvents: ['network.beforeRequestSent'], edgeTransport: loopbackTlsProxy ? 'separate-loopback-tls-proxy' : null }) : capability('FAILED', { reason: 'network.addIntercept returned no intercept identifier.' });
+    if (!interceptReady) throw new Error('network.addIntercept acknowledgment missing intercept ID.');
+    if (!loopbackTlsProxy) requestDataCollectorId = await setupProviderDataCollector(bidi, capabilities);
     if (!capabilities.providerDataCollector.status) capabilities.providerDataCollector = notTested('BiDi request collector setup was not attempted.');
     const manifest = JSON.parse(await readFile(resolve(bundle, 'manifest.json'), 'utf8'));
     if (manifest.background?.scripts?.[0] !== 'worker.js' || manifest.browser_specific_settings?.gecko?.id !== expectedExtensionId) throw new Error('Firefox MV3 module-worker manifest or pinned Gecko ID missing.');
@@ -1409,10 +1485,23 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     providerOperationState = await runEdgeFrenchProviderProbe({
       bridge, bidi, dispatcher, collectorId: requestDataCollectorId, fixtureTexts: fixtureData.targetTexts,
       runId, extensionId: expectedExtensionId, fixtureUrl: fixture.url, tabId: runtimeBridgeProof.tabId,
-      startupSender: runtimeBridgeProof.contentReady.sender,
+      startupSender: runtimeBridgeProof.contentReady.sender, loopbackProxy: edgeProxy, providerOnly: loopbackTlsProxy,
       capabilities, timeoutMs: 12000,
     });
     artifact.providerProbe = sanitizePrivate(providerProbeArtifact(providerOperationState), privateSecrets);
+    if (loopbackTlsProxy) {
+      const invocationDiagnostic = providerOperationState?.providerInvocation;
+      artifact.loopbackTlsProxy = { ...artifact.loopbackTlsProxy, status: edgeProxy.request ? 'REQUEST_COMPLETED' : 'REQUEST_MISSING',
+        providerInvocation: invocationDiagnostic && ['provider-only-invoke', 'provider-invoked'].includes(invocationDiagnostic.stage)
+          ? { stage: invocationDiagnostic.stage, code: invocationDiagnostic.code ?? null }
+          : { stage: 'NO_PROVIDER_INVOCATION', code: null },
+        profilePrefsStatus: 'written-to-fresh-profile-user.js', connect: edgeProxy.request ? { authority: 'edge.microsoft.com:443', status: 200, boundAddress: '127.0.0.1' } : null,
+        tls: edgeProxy.request ? { sni: edgeProxy.request.sni, host: edgeProxy.request.host, validation: edgeProxy.request.sni === 'edge.microsoft.com' && edgeProxy.request.host === 'edge.microsoft.com' ? 'passed' : 'failed' } : null,
+        request: edgeProxy.request ? { method: 'POST', url: `https://edge.microsoft.com${edgeProxy.request.url}`, bodyBytes: edgeProxy.request.bodyBytes,
+          bodyHash: edgeProxy.request.bodyHash, sourceIndexes: edgeProxy.request.sourceIndexes, sni: edgeProxy.request.sni, host: edgeProxy.request.host, validation: 'accepted' } : null,
+        responseStatus: providerOperationState?.physicalSettlement?.evidence?.status ?? null, deniedRequests: edgeProxy.deniedRequests ?? [] };
+      return capabilities;
+    }
     if (providerProbeRequiresImmediateTeardown(providerOperationState, capabilities)) {
       const reason = `Optional realm and negative-fetch probes were not run because the provider lane stopped at ${providerOperationState.stopCode ?? 'an incomplete proof'}; producer teardown starts immediately.`;
       for (const name of ['backgroundInspection', 'contentInspection', 'backgroundNegativeFetch', 'contentNegativeFetch', 'pageNegativeFetch', 'interceptionDispatch']) {
@@ -1551,6 +1640,14 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       try { await withTimeout(Promise.resolve(bridge.stopProviderProbe('TEARDOWN')), 3000, 'provider operation stop during teardown'); providerOperationState.stopCode = 'TEARDOWN'; providerOperationState.stopped = true; }
       catch (error) { cleanupErrors.push(`Provider operation teardown stop: ${sanitizePrivate(error.message, privateSecrets)}`); }
     }
+    if (edgeProxy) {
+      try {
+        await edgeProxy.close();
+        const drained = await withTimeout(edgeProxy.drain(), 3000, 'loopback TLS proxy drain');
+        if (!drained) cleanupErrors.push('Loopback TLS proxy sockets did not drain.');
+        if (artifact.loopbackTlsProxy) artifact.loopbackTlsProxy.cleanup = { closed: true, drained, socketsClosed: true };
+      } catch (error) { cleanupErrors.push(`Loopback TLS proxy cleanup: ${sanitizePrivate(error.message, privateSecrets)}`); }
+    }
     dispatcher?.closeAdmission();
     try {
       const failedPending = await withTimeout(dispatcher?.failPendingProviderRequests?.('TEARDOWN') ?? Promise.resolve([]), 3000, 'fail held Edge requests');
@@ -1618,6 +1715,9 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       errors.push(...messages);
       capabilities.protocol = capability('FAILED', { reason: 'Request dispatcher reported a dropped, late, unexpected, or failed HTTP(S) request.', errors: messages });
       capabilities.interceptionDispatch = capability('FAILED', { reason: 'Request dispatch errors occurred.', errors: messages });
+    }
+    if (loopbackTlsProxy && artifact.loopbackTlsProxy && !artifact.loopbackTlsProxy.providerInvocation) {
+      artifact.loopbackTlsProxy.providerInvocation = { stage: 'NO_PROVIDER_INVOCATION', code: null };
     }
     await rm(root, { recursive: true, force: true }).catch(error => cleanupErrors.push(`Temporary cleanup: ${error.message}`));
     process.off('SIGTERM', onSigterm); process.off('SIGINT', onSigint);

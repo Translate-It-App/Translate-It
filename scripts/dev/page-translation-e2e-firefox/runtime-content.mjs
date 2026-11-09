@@ -1,3 +1,5 @@
+import { PROVIDER_ONLY_DEADLINE_MS } from './runtime-constants.mjs';
+
 const ACTION = '__PAGE_TRANSLATION_RUNTIME_PROBE_V1';
 const PROVIDER_ACTION = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
 const VERSION = 1;
@@ -7,6 +9,7 @@ const FLAGS = { slicedDiscoveryEnabled: true, viewportFirstDiscoveryEnabled: fal
 export async function installContentProbe(config, importEntry) {
   if (location.href !== config.fixtureUrl || window !== window.top) return;
   let nonce;
+  let runtimeReadyAccepted = false;
   let pageTranslateSent = false;
   try {
     const hello = await send({ action: ACTION, v: VERSION, runId: config.runId, type: 'hello' });
@@ -28,15 +31,41 @@ export async function installContentProbe(config, importEntry) {
     expect(confirmed, 'confirmed', config.runId, nonce);
     const receipt = await send({ action: ACTION, v: VERSION, runId: config.runId, type: 'content-ready', nonce, checks, flags, ackReceived: true });
     if (!validReceipt(receipt, config.runId, nonce)) throw coded('PROTOCOL_REJECTED');
+    runtimeReadyAccepted = true;
+    if (config.providerOnly === true) {
+      await invokeProviderOnly(config, nonce, trace);
+      return;
+    }
     await armProviderProbe(config, nonce, trace, () => {
       if (pageTranslateSent) return false;
       pageTranslateSent = true;
       return true;
     });
   } catch (error) {
+    if (config.providerOnly === true && runtimeReadyAccepted) return;
     const code = nonce && ERROR_CODES.has(error?.message) ? error.message : 'HANDSHAKE_FAILED';
     await notifyError(config.runId, code, nonce).catch(() => {});
   }
+}
+
+async function invokeProviderOnly(config, nonce, trace) {
+  if (location.href !== config.fixtureUrl || window !== window.top) throw coded('PROTOCOL_REJECTED');
+  const texts = [...document.querySelectorAll('[data-bench-id]')].map(element => element.textContent);
+  if (texts.length !== 12 || texts.some((text, index) => text !== `Benchmark sentence ${index + 1} has stable fixture content.`)) throw coded('PROTOCOL_REJECTED');
+  const response = await sendProvider(config, nonce, { type: 'arm', observersInstalled: true });
+  if (!validProviderResponse(response, 'armed-ack', config.runId, nonce, ['start', 'stop'])) throw coded('PROTOCOL_ERROR');
+  if (response.decision !== 'start' || location.href !== config.fixtureUrl || window !== window.top) return;
+  let completion;
+  try {
+    completion = await withDeadline(sendProvider(config, nonce, { type: 'invoke', texts, sessionId: `${config.runId}-provider-session`, messageId: `${config.runId}-provider-message` }), PROVIDER_ONLY_DEADLINE_MS, 'TIMEOUT');
+  } catch (error) {
+    const code = PROVIDER_CODES.has(error?.message) ? error.message : 'PROTOCOL_ERROR';
+    if (!error?.reported) await sendProvider(config, nonce, { type: 'event', event: 'error', evidence: { code } }).catch(() => {});
+    await sendProvider(config, nonce, { type: 'stop', code: PROVIDER_CODES.has(error?.message) ? error.message : 'TEARDOWN' }).catch(() => {});
+    throw error;
+  }
+  if (!exact(completion, ['action', 'v', 'runId', 'type', 'nonce']) || completion.action !== PROVIDER_ACTION || completion.v !== VERSION
+      || completion.runId !== config.runId || completion.type !== 'provider-complete' || completion.nonce !== nonce) throw coded('PROTOCOL_ERROR');
 }
 
 const ERROR_CODES = new Set(['IMPORT_FAILED', 'STARTUP_FAILED', 'READINESS_TIMEOUT', 'HANDSHAKE_FAILED', 'SENDER_REJECTED', 'PROTOCOL_REJECTED', 'NAVIGATION_INVALID', 'REPORT_FAILED', 'PERMISSION_DENIED', 'BINDING_FAILED', 'DISCOVERY_FLAGS_MISMATCH']);
@@ -77,14 +106,22 @@ async function armProviderProbe(config, nonce, trace, claimPageTranslate) {
 function sendProvider(config, nonce, data) {
   const message = data.type === 'event'
     ? { action: PROVIDER_ACTION, v: VERSION, runId: config.runId, type: 'event', nonce, event: data.event, evidence: data.evidence }
-    : { action: PROVIDER_ACTION, v: VERSION, runId: config.runId, type: data.type, nonce, observersInstalled: data.observersInstalled };
-  return send(message).then(response => {
-    if (validProviderError(response, config.runId, nonce)) throw coded(response.code);
+    : data.type === 'invoke'
+      ? { action: PROVIDER_ACTION, v: VERSION, runId: config.runId, type: 'invoke', nonce, texts: data.texts, sessionId: data.sessionId, messageId: data.messageId }
+      : data.type === 'stop'
+        ? { action: PROVIDER_ACTION, v: VERSION, runId: config.runId, type: 'stop', nonce, code: data.code }
+      : { action: PROVIDER_ACTION, v: VERSION, runId: config.runId, type: data.type, nonce, observersInstalled: data.observersInstalled };
+  return send(message, data.type === 'invoke' ? PROVIDER_ONLY_DEADLINE_MS : 3000).then(response => {
+    if (validProviderError(response, config.runId, nonce)) throw Object.assign(coded(response.code), { reported: true });
     if (data.type === 'event') {
       const decisions = data.event === 'translated' ? ['restore', 'stop'] : [];
       if (!validProviderResponse(response, 'accepted', config.runId, nonce, decisions)) throw coded('PROTOCOL_ERROR');
     }
-    if (data.type !== 'event' && !validProviderResponse(response, 'armed-ack', config.runId, nonce, ['start', 'stop'])) throw coded('PROTOCOL_ERROR');
+    if (data.type === 'invoke') {
+      if (!validProviderResponse(response, 'provider-complete', config.runId, nonce)) throw coded('PROTOCOL_ERROR');
+    } else if (data.type === 'stop') {
+      if (!validProviderResponse(response, 'accepted', config.runId, nonce)) throw coded('PROTOCOL_ERROR');
+    } else if (data.type !== 'event' && !validProviderResponse(response, 'armed-ack', config.runId, nonce, ['start', 'stop'])) throw coded('PROTOCOL_ERROR');
     return response;
   });
 }
@@ -122,9 +159,9 @@ async function waitContentReady() {
   return null;
 }
 
-function send(message) {
+export function send(message, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(coded('READINESS_TIMEOUT')), 3000);
+    const timer = setTimeout(() => reject(coded(message.type === 'invoke' ? 'TIMEOUT' : 'READINESS_TIMEOUT')), timeoutMs);
     Promise.resolve(globalThis.browser.runtime.sendMessage(message)).then(
       value => { clearTimeout(timer); resolve(value); },
       error => { clearTimeout(timer); reject(error); },

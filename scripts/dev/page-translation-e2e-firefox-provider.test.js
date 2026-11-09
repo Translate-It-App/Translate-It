@@ -117,6 +117,37 @@ describe('Firefox Edge provider operation collector', () => {
     expect(JSON.stringify(reports)).not.toContain(targetTexts[0]);
   });
 
+  it('runs the provider-only entry through the real Edge chunk/request instrumentation', async () => {
+    const reports = [];
+    let probe;
+    const proxyManager = {
+      isEnabled: config => config?.enabled === true,
+      fetch(url, options, requestConfig) {
+        const response = Promise.resolve({ status: 200 });
+        probe.observeDirectFetch(url, options, response, !this.isEnabled(requestConfig));
+        return response;
+      },
+    };
+    const ProviderRequestEngine = { executeApiCall(provider, options) { return proxyManager.fetch(options.url, options.fetchOptions, { enabled: false }); } };
+    const Edge = class { _translateChunk(texts, ...args) {
+      return ProviderRequestEngine.executeApiCall(this, {
+        url: edgeUrl, fetchOptions: { method: 'POST', body: JSON.stringify(texts) }, sessionId: args[8]?.sessionId,
+      }).then(() => mapEdgeResponse(texts).map(item => item.translations[0].text));
+    } };
+    probe = createEdgeProviderProbe(async (event, evidence) => { reports.push({ event, evidence }); });
+    expect(probe.install({ MicrosoftEdgeProvider: Edge, ProviderRequestEngine, proxyManager })).toBe(true);
+    probe.arm();
+
+    await expect(probe.invokeProviderOnly(Edge, targetTexts, { sessionId: 'provider-only-session', messageId: 'provider-only-message' }))
+      .resolves.toEqual(mapEdgeResponse(targetTexts).map(item => item.translations[0].text));
+    expect(reports.map(report => report.event)).toEqual([
+      'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled',
+    ]);
+    expect(reports[1].evidence).toMatchObject({ sessionId: 'provider-only-session', messageId: 'provider-only-message', method: 'POST', url: edgeUrl });
+    expect(reports.at(-1).evidence).toMatchObject({ outcome: 'fulfilled', code: null });
+    probe.stop();
+  });
+
   it('keeps immediate native/provider settlements causally ordered through the real collector', async () => {
     const fixture = await create();
     await completeStartup(fixture);

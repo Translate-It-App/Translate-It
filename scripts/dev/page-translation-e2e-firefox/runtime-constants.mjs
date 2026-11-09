@@ -1,0 +1,1 @@
+export const PROVIDER_ONLY_DEADLINE_MS = 10_000;

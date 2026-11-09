@@ -36,6 +36,8 @@ export function createEdgeProviderProbe(report) {
   const nativeOptions = new WeakMap();
   let edgeProviderClass;
   let activeInvocation = null;
+  let providerOnlyController = null;
+  let latestInvocation = null;
   const emit = (event, evidence) => {
     chain = chain.then(() => report(event, evidence)).catch(() => {});
     return chain;
@@ -58,6 +60,17 @@ export function createEdgeProviderProbe(report) {
   return {
     arm() { enabled = true; },
     stop() { stopped = true; },
+    async invokeProviderOnly(MicrosoftEdgeProvider, texts, { sessionId, messageId }) {
+      if (!enabled || stopped || providerOnlyController || !Array.isArray(texts) || texts.length !== 12) throw new Error('Provider-only invocation is not available.');
+      providerOnlyController = new AbortController();
+      const provider = new MicrosoftEdgeProvider();
+      try {
+        const result = await provider._translateChunk(texts, 'en', 'fr', 'page', providerOnlyController, 0, texts.length, 0, 1, { sessionId, messageId });
+        await latestInvocation?.completion;
+        return result;
+      } finally { providerOnlyController = null; }
+    },
+    abortProviderOnly() { providerOnlyController?.abort(); },
     proxyDisabled() { return installed && typeof proxyManagerRef?.isEnabled === 'function' && !proxyManagerRef.isEnabled(); },
     get observersInstalled() { return installed; },
     install({ MicrosoftEdgeProvider, ProviderRequestEngine, proxyManager }) {
@@ -80,6 +93,8 @@ export function createEdgeProviderProbe(report) {
           attempts: [],
           settled: false,
         };
+        invocation.completion = new Promise(resolve => { invocation.complete = resolve; });
+        latestInvocation = invocation;
         invocations.push(invocation);
         if (sourceIndexes.length && sourceIndexes.every(index => index >= 0) && new Set(sourceIndexes).size === sourceIndexes.length) {
           void emit('provider-invoked', {
@@ -105,12 +120,13 @@ export function createEdgeProviderProbe(report) {
             if (resultsMatch) await emit('parser-success', { invocationId: invocation.invocationId, sessionId: invocation.sessionId, sourceIndexes, resultsMatch: true });
             else await emit('error', { code: 'INVALID_BODY' });
             await emit('provider-settled', { invocationId: invocation.invocationId, sessionId: invocation.sessionId, outcome: 'fulfilled', code: null });
-          })().catch(() => { void emit('error', { code: 'PROTOCOL_ERROR' }); });
+            invocation.complete();
+          })().catch(() => { void emit('error', { code: 'PROTOCOL_ERROR' }); }).finally(() => invocation.complete());
         }, () => {
           invocation.settled = true;
           void Promise.all(invocation.attempts.map(attempt => attempt.settledReport))
             .then(() => emit('provider-settled', { invocationId: invocation.invocationId, sessionId: invocation.sessionId, outcome: 'rejected', code: 'PROTOCOL_ERROR' }))
-            .catch(() => {});
+            .catch(() => {}).finally(() => invocation.complete());
         });
         return result;
       });

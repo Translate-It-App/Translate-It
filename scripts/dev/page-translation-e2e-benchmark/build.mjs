@@ -242,7 +242,8 @@ function parseDefineString(value) {
 function validBridgeConfig(config) {
   if (!config || typeof config !== 'object' || typeof config.runId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(config.runId)
       || typeof config.authToken !== 'string' || !/^[a-f\d]{64,}$/i.test(config.authToken)) return false;
-  const keys = ['runId', 'fixtureUrl', 'bindingUrl', 'reportUrl', 'authToken'];
+  const keys = ['runId', 'fixtureUrl', 'bindingUrl', 'reportUrl', 'authToken', ...(config.providerOnly === true ? ['providerOnly'] : [])];
+  if (config.providerOnly !== undefined && typeof config.providerOnly !== 'boolean') return false;
   const actualKeys = Object.keys(config);
   if (actualKeys.length !== keys.length || keys.some(key => !Object.hasOwn(config, key)) || actualKeys.some(key => !keys.includes(key))) return false;
   if (config.runId === config.authToken || JSON.stringify({ runId: config.runId, fixtureUrl: config.fixtureUrl }).includes(config.authToken)) return false;
@@ -266,7 +267,7 @@ function createRuntimeBridgePlugins({ runtimeBridge, workerEntry, contentEntry }
   const workerVirtual = '\0virtual:page-translation-probe-worker';
   const contentVirtual = '\0virtual:page-translation-probe-content';
   const workerCode = `import { installBackgroundProbe } from ${JSON.stringify(backgroundRuntime)};\nawait installBackgroundProbe(${JSON.stringify(runtimeBridge)}, () => import(${JSON.stringify(resolve(workerEntry))}));\n`;
-  const contentCode = `import { installContentProbe } from ${JSON.stringify(contentRuntime)};\nawait installContentProbe(${JSON.stringify({ runId: runtimeBridge.runId, fixtureUrl: runtimeBridge.fixtureUrl })}, () => import(${JSON.stringify(resolve(contentEntry))}));\n`;
+  const contentCode = `import { installContentProbe } from ${JSON.stringify(contentRuntime)};\nawait installContentProbe(${JSON.stringify({ runId: runtimeBridge.runId, fixtureUrl: runtimeBridge.fixtureUrl, providerOnly: runtimeBridge.providerOnly === true })}, () => import(${JSON.stringify(resolve(contentEntry))}));\n`;
   return [{
     name: 'firefox-runtime-bridge',
     enforce: 'pre',

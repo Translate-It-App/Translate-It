@@ -242,6 +242,7 @@ if (globalThis.__firefoxProviderProbeEnabled === true) {
   if (providerProbeRuntime) {
     const providerProbe = providerProbeRuntime.createEdgeProviderProbe(providerProbeRuntime.report);
     marker.providerProbe = providerProbe;
+    marker.invokeProviderOnly = (texts, ids) => providerProbe.invokeProviderOnly(MicrosoftEdgeProvider, texts, ids);
     marker.providerProbeInstalled = providerProbe.install({ MicrosoftEdgeProvider, unifiedTranslationService, ProviderRequestEngine, proxyManager: providerProbeRuntime.proxyManager });
   }
 }

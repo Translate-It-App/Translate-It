@@ -1,5 +1,6 @@
 import { proxyManager } from '../../../src/shared/proxy/ProxyManager.js';
 import { createEdgeProviderProbe } from '../page-translation-e2e-benchmark/provider-probe.mjs';
+import { PROVIDER_ONLY_DEADLINE_MS } from './runtime-constants.mjs';
 
 const ACTION = '__PAGE_TRANSLATION_RUNTIME_PROBE_V1';
 const PROVIDER_ACTION = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
@@ -33,7 +34,7 @@ export async function installBackgroundProbe(config, importEntry) {
   if (!browser?.runtime?.onMessage || !config?.authToken) return;
   const state = {
     phase: 'bootstrap', tabId: null, generation: 0, nonce: randomToken(), seq: 0, reporting: Promise.resolve(), startupEntryImported: false,
-     provider: { seq: 0, reporting: Promise.resolve(), armed: false, terminal: false, stopping: false, invocations: new Set(), attempts: new Map() },
+      provider: { seq: 0, reporting: Promise.resolve(), armed: false, terminal: false, errorReported: false, stopping: false, invocations: new Set(), attempts: new Map() },
   };
   const extensionUrl = new URL(browser.runtime.getURL(''));
   if (extensionUrl.protocol !== 'moz-extension:' || !extensionUrl.host) return;
@@ -53,8 +54,16 @@ export async function installBackgroundProbe(config, importEntry) {
   });
   const listener = (message, sender) => {
     if (message?.action === PROVIDER_ACTION) {
-      return withDeadline(onProviderProbeMessage(message, sender, config, browser, state), REPORT_TIMEOUT_MS)
-        .catch(() => providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' }));
+      const isInvoke = message.type === 'invoke';
+      return withDeadline(onProviderProbeMessage(message, sender, config, browser, state), isInvoke ? PROVIDER_ONLY_DEADLINE_MS : REPORT_TIMEOUT_MS, isInvoke ? 'TIMEOUT' : 'PROTOCOL_ERROR')
+        .catch(async error => {
+          const code = isInvoke && state.provider.armed && error?.message === 'TIMEOUT' ? 'TIMEOUT' : 'PROTOCOL_ERROR';
+          if (isInvoke && state.provider.armed && !state.provider.errorReported) {
+            await reportProviderOperation(config, state, 'error', { code });
+            state.provider.terminal = true;
+          }
+          return providerResponse(config, state, 'error', { code });
+        });
     }
     if (message?.action !== ACTION) return false;
     return withDeadline(onProbeMessage(message, sender, config, browser, state), REPORT_TIMEOUT_MS)
@@ -117,6 +126,7 @@ function providerResponse(config, state, type, detail = {}) {
 
 async function reportProviderOperation(config, state, event, evidence) {
   const provider = state.provider;
+  if (event === 'error' && provider.errorReported) return false;
   const admittedSettlement = event === 'physical-settled' && provider.attempts.has(evidence?.attemptId) && !provider.attempts.get(evidence.attemptId);
   const admittedProviderSettlement = event === 'provider-settled' && provider.invocations.has(evidence?.invocationId);
   const admittedFailure = event === 'command-result' && evidence?.success === false && provider.armed;
@@ -124,6 +134,7 @@ async function reportProviderOperation(config, state, event, evidence) {
       || provider.stopping && event !== 'error' && !admittedSettlement && !admittedProviderSettlement && !admittedFailure) return false;
   const opSeq = ++provider.seq;
   if (event === 'provider-invoked') provider.invocations.add(evidence.invocationId);
+  if (event === 'error') provider.errorReported = true;
   if (event === 'physical-start') provider.attempts.set(evidence.attemptId, false);
   if (event === 'physical-settled') provider.attempts.set(evidence.attemptId, true);
   const payload = { v: VERSION, runId: config.runId, op: 'edge-fr-page-once', opSeq, event, evidence };
@@ -161,7 +172,8 @@ async function onProviderProbeMessage(message, sender, config, browser, state) {
   const event = message?.type === 'event';
   const keys = arm ? ['action', 'v', 'runId', 'type', 'nonce', 'observersInstalled']
     : stop ? ['action', 'v', 'runId', 'type', 'nonce', 'code']
-      : event ? ['action', 'v', 'runId', 'type', 'nonce', 'event', 'evidence'] : [];
+      : event ? ['action', 'v', 'runId', 'type', 'nonce', 'event', 'evidence']
+        : message?.type === 'invoke' ? ['action', 'v', 'runId', 'type', 'nonce', 'texts', 'sessionId', 'messageId'] : [];
   if (!keys.length || !exactKeys(message, keys) || message.action !== PROVIDER_ACTION || message.v !== VERSION
       || message.runId !== config.runId || !state.handshakeStarted || message.nonce !== state.nonce) {
     return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
@@ -201,8 +213,30 @@ async function onProviderProbeMessage(message, sender, config, browser, state) {
   if (stop) {
     if (!PROVIDER_CODES.has(message.code)) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
     state.provider.stopping = true;
+    globalThis.__pageTranslationBenchmark?.providerProbe?.abortProviderOnly?.();
     globalThis.__pageTranslationBenchmark?.providerProbe?.stop?.();
     return providerResponse(config, state, 'accepted', { nonce: state.nonce });
+  }
+  if (message.type === 'invoke') {
+      if (config.providerOnly !== true || !state.provider.armed || state.provider.terminal || state.provider.invocations.size
+          || !exactKeys(message, ['action', 'v', 'runId', 'type', 'nonce', 'texts', 'sessionId', 'messageId'])
+          || !Array.isArray(message.texts) || message.texts.length !== 12
+          || message.texts.some((text, index) => text !== `Benchmark sentence ${index + 1} has stable fixture content.`)
+          || message.sessionId !== `${config.runId}-provider-session` || message.messageId !== `${config.runId}-provider-message`) {
+        return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+      }
+      const providerProbe = globalThis.__pageTranslationBenchmark?.providerProbe;
+      try {
+        await globalThis.__pageTranslationBenchmark.invokeProviderOnly(message.texts, { sessionId: message.sessionId, messageId: message.messageId });
+        providerProbe.stop();
+        state.provider.terminal = true;
+        return providerResponse(config, state, 'provider-complete', { nonce: state.nonce });
+      } catch (error) {
+        const code = ['TIMEOUT', 'TEARDOWN', 'INVALID_BODY', 'PROTOCOL_ERROR'].includes(error?.code) ? error.code : 'PROTOCOL_ERROR';
+        await reportProviderOperation(config, state, 'error', { code });
+        state.provider.terminal = true;
+        return providerResponse(config, state, 'error', { code });
+      }
   }
   if (event && message.event === 'error') {
     if (!exactKeys(message.evidence, ['code']) || !PROVIDER_CODES.has(message.evidence.code)) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
