@@ -6,7 +6,7 @@ const phases = ['bootstrap', 'loaded', 'ready'];
 const errorCodes = new Set(['IMPORT_FAILED', 'STARTUP_FAILED', 'READINESS_TIMEOUT', 'HANDSHAKE_FAILED', 'SENDER_REJECTED', 'PROTOCOL_REJECTED', 'NAVIGATION_INVALID', 'REPORT_FAILED', 'PERMISSION_DENIED', 'BINDING_FAILED', 'DISCOVERY_FLAGS_MISMATCH']);
 const providerStopCodes = new Set(['INTERCEPTION_UNSUPPORTED', 'BODY_UNSUPPORTED', 'INVALID_BODY', 'PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN', 'COMPLETED']);
 const providerDiagnosticCodes = new Set([...providerStopCodes, 'ABORTED', 'NETWORK_ERROR', 'HTTP_ERROR', 'FETCH_ERROR']);
-const providerEventNames = new Set(['armed', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
+const providerEventNames = new Set(['armed', 'scheduler-batch', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
 const exact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const checks = value => exact(value, ['lifecycleInitialized', 'translationEngineInitialized', 'enginePresent', 'unifiedEngineMatches', 'unifiedServiceMatches', 'messageListenerActive', 'startupComplete']) && Object.values(value).every(item => item === true);
 const nonnegative = value => Number.isSafeInteger(value) && value >= 0;
@@ -24,13 +24,14 @@ function validateConfig({ runId, authToken, expectedExtensionId }) {
 function createCollector(options, fixtureUrl) {
   validateConfig(options);
   const { runId, authToken, expectedExtensionId } = options;
+  const schedulerBatchRequired = options.schedulerBatchRequired === true;
   const token = Buffer.from(authToken);
   let bindingOpen = true, admissionOpen = true, failed = false, pinnedOrigin, pinnedTab, pinnedSender;
   let seq = 0, accepted = 0;
   const reports = [], rejectionCounts = { unauthorized: 0, originOrType: 0, route: 0, malformed: 0, protocol: 0, bodyLimit: 0 };
   const reject = code => { rejectionCounts[code] = Math.min(1000, rejectionCounts[code] + 1); };
   const stages = { background: [], content: [] };
-  const operation = { released: false, startDecision: null, restoreDecision: null, stopped: false, stopCode: null, failure: null, seq: 0, reports: [], rejections: { originOrType: 0, protocol: 0 }, waiters: new Set(), decisionWaiters: new Set(), invocations: new Map(), attempts: new Map(), coverage: new Set(), terminal: false };
+  const operation = { released: false, startDecision: null, restoreDecision: null, stopped: false, stopCode: null, failure: null, seq: 0, reports: [], rejections: { originOrType: 0, protocol: 0 }, waiters: new Set(), decisionWaiters: new Set(), invocations: new Map(), schedulerBatches: new Map(), attempts: new Map(), coverage: new Set(), terminal: false };
   const pending = new Set(), waiters = new Set();
   const failWaiters = error => { for (const waiter of waiters) waiter.reject(error); };
   const notifyOperationChange = () => { bridge.server?.emit?.('runtime-provider-operation'); };
@@ -171,6 +172,7 @@ function createCollector(options, fixtureUrl) {
     const copied = structuredClone(report);
     operation.reports.push(copied);
     if (report.event === 'armed') operation.armedSender = structuredClone(report.evidence.sender);
+    if (report.event === 'scheduler-batch') operation.schedulerBatches.set(report.evidence.messageId, structuredClone(report.evidence));
     if (report.event === 'provider-invoked') operation.invocations.set(report.evidence.invocationId, { ...structuredClone(report.evidence), attempts: new Set() });
     if (report.event === 'physical-start') {
       const attempt = { settled: false, invocationId: report.evidence.invocationId, sessionId: report.evidence.sessionId, sourceIndexes: [...report.evidence.sourceIndexes] };
@@ -247,8 +249,20 @@ function createCollector(options, fixtureUrl) {
       return operation.released && operation.invocations.size < 12 && !operation.invocations.has(evidence.invocationId) && exact(evidence, ['invocationId', 'sessionId', 'messageId', 'provider', 'itemCount', 'sourceIndexes'])
         && boundedString(evidence.invocationId) && boundedString(evidence.sessionId) && (evidence.messageId === null || boundedString(evidence.messageId))
         && evidence.provider === 'edge' && evidence.itemCount === evidence.sourceIndexes?.length && validIndexes(evidence.sourceIndexes)
-        && (!operation.invocations.size || [...operation.invocations.values()][0].sessionId === evidence.sessionId)
-        && (!priorCommand || (priorCommand.success === true && priorCommand.sessionId === evidence.sessionId));
+         && (!operation.invocations.size || [...operation.invocations.values()][0].sessionId === evidence.sessionId)
+         && (!schedulerBatchRequired || (typeof evidence.messageId === 'string'
+           && (!operation.schedulerBatches.has(evidence.messageId) || sameSchedulerBatch(operation.schedulerBatches.get(evidence.messageId), evidence))))
+         && (!priorCommand || (priorCommand.success === true && priorCommand.sessionId === evidence.sessionId));
+    }
+    if (event === 'scheduler-batch') {
+      if (!schedulerBatchRequired || operation.schedulerBatches.size >= 12 || !exact(evidence, ['messageId', 'sessionId', 'targetIds'])
+          || !boundedString(evidence.messageId) || !boundedString(evidence.sessionId) || !isTargetIdsSubset(evidence.targetIds)
+          || operation.schedulerBatches.has(evidence.messageId)) return false;
+      const indexes = evidence.targetIds.map(id => Number(id.slice(7)));
+      const claimed = [...operation.schedulerBatches.values()].flatMap(batch => batch.targetIds.map(id => Number(id.slice(7))));
+      if (indexes.some(index => claimed.includes(index))) return false;
+      const invocation = [...operation.invocations.values()].find(item => item.messageId === evidence.messageId);
+      return !invocation || sameSchedulerBatch(evidence, invocation);
     }
     if (event === 'physical-start') {
       const invocation = operation.invocations.get(evidence.invocationId);
@@ -291,9 +305,18 @@ function createCollector(options, fixtureUrl) {
         && !operation.reports.some(report => report.event === 'command-result');
     }
     if (event === 'translated') {
-      return exact(evidence, ['sessionId', 'acceptedTargetIds', 'acceptedCount', 'duplicateAcceptances', 'staleWrites', 'domMatches', 'sessionOwned', 'quiescent'])
+      const hasMutationAccounting = Object.hasOwn(evidence, 'acceptedMutationCounts') || Object.hasOwn(evidence, 'unattributedWrites');
+      const mutationAccountingValid = !hasMutationAccounting || (exact(evidence.acceptedMutationCounts, ['text', 'title'])
+        && nonnegative(evidence.acceptedMutationCounts.text) && nonnegative(evidence.acceptedMutationCounts.title)
+        && evidence.acceptedMutationCounts.text + evidence.acceptedMutationCounts.title === 12
+        && evidence.unattributedWrites === 0);
+      return exact(evidence, ['sessionId', 'acceptedTargetIds', 'acceptedCount', 'duplicateAcceptances', 'staleWrites', 'domMatches', 'sessionOwned', 'quiescent', ...(hasMutationAccounting ? ['acceptedMutationCounts', 'unattributedWrites'] : [])])
         && operation.invocations.size > 0 && evidence.sessionId === [...operation.invocations.values()][0].sessionId && isTargetIds(evidence.acceptedTargetIds) && evidence.acceptedCount === 12
         && operation.coverage.size === 12 && [...operation.invocations.values()].every(invocation => invocation.settled)
+        && (!schedulerBatchRequired || (hasMutationAccounting && evidence.acceptedMutationCounts.text === 6 && evidence.acceptedMutationCounts.title === 6))
+        && mutationAccountingValid
+         && (!schedulerBatchRequired || (operation.schedulerBatches.size === operation.invocations.size
+           && [...operation.invocations.values()].every(invocation => operation.schedulerBatches.has(invocation.messageId))))
         && evidence.duplicateAcceptances === 0 && evidence.staleWrites === 0 && evidence.domMatches === true && evidence.sessionOwned === true && evidence.quiescent === true
         && operation.reports.some(report => report.event === 'command-result' && report.evidence.success === true && report.evidence.sessionId === evidence.sessionId)
         && !operation.reports.some(report => report.event === 'translated');
@@ -469,6 +492,14 @@ export function validateRuntimeBridgeConfig(options) { validateConfig(options); 
 function boundedString(value) { return typeof value === 'string' && value.length > 0 && value.length <= 128; }
 function validIndexes(value) { return Array.isArray(value) && value.length > 0 && value.length <= 12 && value.every(item => Number.isInteger(item) && item >= 0 && item < 12) && new Set(value).size === value.length; }
 function sameIndexes(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => item === right[index]); }
+function isTargetIdsSubset(value) {
+  return Array.isArray(value) && value.length > 0 && value.length <= 12
+    && value.every(id => typeof id === 'string' && /^target-(?:[0-9]|1[01])$/.test(id)) && new Set(value).size === value.length;
+}
+function sameSchedulerBatch(batch, invocation) {
+  return batch.sessionId === invocation.sessionId && Array.isArray(batch.targetIds)
+    && sameIndexes(batch.targetIds.map(id => Number(id.slice(7))), invocation.sourceIndexes);
+}
 function isTargetIds(value) { return Array.isArray(value) && value.length === 12 && value.every((id, index) => id === `target-${index}`); }
 function validEdgeUrl(value) {
   try {

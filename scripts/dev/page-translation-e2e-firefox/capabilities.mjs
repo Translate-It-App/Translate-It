@@ -42,12 +42,16 @@ export function classifyObservedRealm({ observation, expectedEntry, expectedFlag
 }
 
 export function summarizeCapabilities(capabilities) {
-  const missing = requiredCapabilities.filter(name => !capabilities[name]);
+  return summarizeCapabilitySet(capabilities, requiredCapabilities);
+}
+
+export function summarizeCapabilitySet(capabilities, required) {
+  const missing = required.filter(name => !capabilities[name]);
   if (missing.length) return { status: 'FAILED', reason: `Required capability results missing: ${missing.join(', ')}`, missing };
-  const values = requiredCapabilities.map(name => capabilities[name]);
-  const failed = requiredCapabilities.filter(name => capabilities[name].status === 'FAILED');
-  const unsupported = requiredCapabilities.filter(name => capabilities[name].status === 'UNSUPPORTED');
-  const untested = requiredCapabilities.filter(name => capabilities[name].status === 'NOT_TESTED');
+  const values = required.map(name => capabilities[name]);
+  const failed = required.filter(name => capabilities[name].status === 'FAILED');
+  const unsupported = required.filter(name => capabilities[name].status === 'UNSUPPORTED');
+  const untested = required.filter(name => capabilities[name].status === 'NOT_TESTED');
   if (failed.length) return { status: 'FAILED', reason: `Required capabilities failed: ${failed.join(', ')}`, failed, unsupported, untested };
   if (unsupported.length || untested.length) return { status: 'UNSUPPORTED', reason: `Required capabilities not supported: ${[...unsupported, ...untested].join(', ')}`, unsupported, untested };
   return { status: values.every(value => value.status === 'SUPPORTED') ? 'SUPPORTED' : 'FAILED', reason: null };

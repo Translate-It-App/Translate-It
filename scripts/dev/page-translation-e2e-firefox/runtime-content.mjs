@@ -18,6 +18,8 @@ export async function installContentProbe(config, importEntry) {
     window.__firefoxProviderProbeEnabled = true;
     try { await withDeadline(importEntry(), DEADLINE_MS, 'IMPORT_FAILED'); }
     catch { throw coded('IMPORT_FAILED'); }
+    const benchmarkTrace = window.__pageTranslationBenchmark;
+    if (benchmarkTrace) benchmarkTrace.pageTranslationE2E = config.pageTranslationE2E === true;
     const loaded = await send({ action: ACTION, v: VERSION, runId: config.runId, type: 'loaded', nonce, entry: 'src/core/content-scripts/index-main.js' });
     expect(loaded, 'loaded-ack', config.runId, nonce);
     const checks = await waitContentReady();

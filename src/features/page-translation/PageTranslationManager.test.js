@@ -778,6 +778,75 @@ describe('PageTranslationManager', () => {
       expect(document.documentElement.classList.contains('ti-translation-active')).toBe(true);
     });
 
+    it.each([
+      ['absent', false, null],
+      ['present-empty', true, ''],
+      ['formatted', true, '  site-root\tlegacy  '],
+    ])('restores the exact root class baseline when it was %s', async (_label, present, value) => {
+      const root = document.documentElement;
+      if (present) root.setAttribute('class', value);
+      else root.removeAttribute('class');
+
+      await manager.activate();
+      expect((await manager.translatePage()).success).toBe(true);
+      expect(root.classList.contains('ti-translation-active')).toBe(true);
+
+      await manager.restorePage();
+
+      expect(root.hasAttribute('class')).toBe(present);
+      expect(root.getAttribute('class')).toBe(value);
+    });
+
+    it('retains external root classes while removing only its owned layout token', async () => {
+      const root = document.documentElement;
+      root.setAttribute('class', '  site-root  ');
+      await manager.translatePage();
+      root.classList.add('host-added');
+      manager._injectLayoutFix();
+
+      await manager.restorePage();
+
+      expect(root.classList.contains('ti-translation-active')).toBe(false);
+      expect(root.classList.contains('site-root')).toBe(true);
+      expect(root.classList.contains('host-added')).toBe(true);
+    });
+
+    it('does not remove a pre-existing layout token it did not add', async () => {
+      const originalClass = 'site-root  ti-translation-active';
+      document.documentElement.setAttribute('class', originalClass);
+      await manager.translatePage();
+
+      await manager.restorePage();
+
+      expect(document.documentElement.getAttribute('class')).toBe(originalClass);
+    });
+
+    it('recaptures the exact class baseline over repeated Start→Stop→Restore cycles', async () => {
+      PageTranslationSettingsLoader.load.mockResolvedValue({
+        ...acceptedSettings, autoTranslateOnDOMChanges: true,
+      });
+      const root = document.documentElement;
+      const baselines = [
+        { present: false, value: null },
+        { present: true, value: '' },
+        { present: true, value: '  host-root\tformatted  ' },
+      ];
+
+      await manager.activate();
+      for (const baseline of baselines) {
+        if (baseline.present) root.setAttribute('class', baseline.value);
+        else root.removeAttribute('class');
+
+        expect((await manager.translatePage({ isAuto: true })).success).toBe(true);
+        expect((await manager.stopAutoTranslation({ cancellationReason: 'operation-abort' })).success).toBe(true);
+        await manager.restorePage();
+
+        expect(root.hasAttribute('class')).toBe(baseline.present);
+        expect(root.getAttribute('class')).toBe(baseline.value);
+        expect(manager._layoutClassOwnership).toBeNull();
+      }
+    });
+
     it('passes attempt-owned discovery callbacks and ignores callbacks after session replacement', async () => {
       await manager.translatePage();
       const options = manager.bridge.initialize.mock.calls[0][3];
@@ -1089,6 +1158,11 @@ describe('PageTranslationManager', () => {
       manager.isTranslating = true;
       manager.translationMessageId = 'stop-session';
       manager.acceptedLifecycleSessionId = 'stop-session';
+      const originalRootClass = {
+        present: document.documentElement.hasAttribute('class'),
+        value: document.documentElement.getAttribute('class'),
+      };
+      manager._injectLayoutFix();
       manager.abortController = new AbortController();
       const controller = manager.abortController;
       manager.sessionContext = Symbol('stop-context');
@@ -1103,6 +1177,8 @@ describe('PageTranslationManager', () => {
       expect(manager.bridge.restore).not.toHaveBeenCalled();
       expect(manager.bridge.cleanup).not.toHaveBeenCalled();
       expect(manager.isTranslated).toBe(true);
+      expect(document.documentElement.classList.contains('ti-translation-active')).toBe(true);
+      expect(manager._layoutClassOwnership).not.toBeNull();
       expect(controller.signal.aborted).toBe(true);
       expect(manager.abortController).toBeNull();
       expect(manager.sessionContext).toBeNull();
@@ -1125,6 +1201,8 @@ describe('PageTranslationManager', () => {
       expect(manager.acceptedLifecycleSessionId).toBe('stop-session');
 
       await manager.restorePage();
+      expect(document.documentElement.hasAttribute('class')).toBe(originalRootClass.present);
+      expect(document.documentElement.getAttribute('class')).toBe(originalRootClass.value);
       expect(pageEventBus.emit).toHaveBeenCalledWith(
         MessageActions.PAGE_RESTORE_COMPLETE,
         expect.objectContaining({ sessionId: 'stop-session' })

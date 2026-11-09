@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { exactKeys, getBackgroundReadinessChecks, installBackgroundProbe, validateProbeEnvelope, validateSender } from './page-translation-e2e-firefox/runtime-background.mjs';
 import { installContentProbe, send as sendRuntimeMessage } from './page-translation-e2e-firefox/runtime-content.mjs';
 import { PROVIDER_ONLY_DEADLINE_MS } from './page-translation-e2e-firefox/runtime-constants.mjs';
-import { installContentProviderProbe } from './page-translation-e2e-benchmark/provider-probe-content.mjs';
-import { targetTexts } from './page-translation-e2e-benchmark/fixture.mjs';
+import { installContentProviderProbe, validateAcceptedMutationAccounting } from './page-translation-e2e-benchmark/provider-probe-content.mjs';
+import { wrapPageTranslationStart } from './page-translation-e2e-benchmark/page-translation-start-probe.mjs';
+import { createPageTranslationFixture, targetTexts } from './page-translation-e2e-benchmark/fixture.mjs';
 
 const config = {
   runId: 'run-123', fixtureUrl: 'http://127.0.0.1:4321/fixture',
@@ -13,6 +14,11 @@ const config = {
 };
 const checks = { coreInitialized: true, listenerActive: true, featureManagerInitialized: true, handlerActive: true, handlerIsActive: true };
 const flags = { slicedDiscoveryEnabled: true, viewportFirstDiscoveryEnabled: false };
+const deferred = () => {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+};
 
 afterEach(() => {
   vi.useRealTimers();
@@ -26,10 +32,10 @@ afterEach(() => {
   delete globalThis.__firefoxProbeStartup;
 });
 
-function setup({ permission = true, edgePermission = true, proxyEnabled = false, importFails = false, bindingTabCount = 1, holdReadyReport = false, fixtureUrl = config.fixtureUrl, providerOnly = false, invokeProviderOnly = vi.fn(async () => []) } = {}) {
+function setup({ permission = true, edgePermission = true, proxyEnabled = false, importFails = false, bindingTabCount = 1, holdReadyReport = false, fixtureUrl = config.fixtureUrl, providerOnly = false, pageTranslationE2E = false, invokeProviderOnly = vi.fn(async () => []) } = {}) {
   let onMessage;
   let onCommitted;
-  const bridgeConfig = { ...config, fixtureUrl, ...(providerOnly ? { providerOnly: true } : {}) };
+  const bridgeConfig = { ...config, fixtureUrl, ...(providerOnly ? { providerOnly: true } : {}), ...(pageTranslationE2E ? { pageTranslationE2E: true } : {}) };
   let currentUrl = bridgeConfig.bindingUrl;
   const reports = [];
   let releaseReadyReport;
@@ -39,6 +45,7 @@ function setup({ permission = true, edgePermission = true, proxyEnabled = false,
       onMessage: { addListener(listener) { onMessage = listener; }, hasListener: () => true },
     },
     permissions: { contains: vi.fn(async ({ origins }) => origins[0].startsWith('https://') ? edgePermission : permission) },
+    storage: { local: { set: vi.fn(async () => {}) } },
     tabs: {
       query: vi.fn(async () => Array.from({ length: bindingTabCount }, (_, index) => ({ id: 7 + index, url: bridgeConfig.bindingUrl }))),
       get: vi.fn(async () => ({ id: 7, url: currentUrl })),
@@ -101,6 +108,48 @@ async function completeProviderOnlyHandshake(bridge) {
 }
 
 describe('Firefox runtime bridge protocol', () => {
+  it('reports the actual PageTranslationManager start result once and waits for its authenticated receipt', async () => {
+    const result = { success: true, messageId: 'page-translate-session-1' };
+    const original = vi.fn(async () => result);
+    const reportStarted = deferred();
+    let releaseReport;
+    const evidence = [];
+    const bridge = setup({ pageTranslationE2E: true });
+    const nonce = await completeProviderOnlyHandshake(bridge);
+    const action = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
+    await bridge.message({ action, v: 1, runId: config.runId, type: 'arm', nonce, observersInstalled: true }, bridge.sender);
+    const manager = { translatePage: original };
+    manager.translatePage = wrapPageTranslationStart(original, {
+      isProbeStart: options => options?.provider === 'edge' && options?.targetLanguage === 'fr',
+      report: async item => {
+        evidence.push(item);
+        const receipt = await bridge.message({ action, v: 1, runId: config.runId, type: 'event', nonce, event: 'command-result', evidence: item }, bridge.sender);
+        reportStarted.resolve(receipt);
+        await new Promise(resolve => { releaseReport = resolve; });
+        return receipt;
+      },
+    });
+    const pending = manager.translatePage({ provider: 'edge', targetLanguage: 'fr' });
+    await expect(reportStarted.promise).resolves.toMatchObject({ type: 'accepted', nonce });
+    expect(original).toHaveBeenCalledOnce();
+    expect(evidence).toEqual([{ success: true, sessionId: result.messageId, code: null }]);
+    expect(bridge.reports.at(-1).payload).toMatchObject({ event: 'command-result', evidence: evidence[0] });
+    releaseReport({ accepted: true });
+    await expect(pending).resolves.toBe(result);
+    await expect(manager.translatePage({ provider: 'edge', targetLanguage: 'fr' })).resolves.toBe(result);
+    expect(evidence).toHaveLength(1);
+
+    const failedEvidence = [];
+    const failedOriginal = vi.fn(async () => ({ success: false, reason: 'private detail' }));
+    const failed = wrapPageTranslationStart(failedOriginal, {
+      isProbeStart: options => options?.provider === 'edge' && options?.targetLanguage === 'fr',
+      report: item => { failedEvidence.push(item); return Promise.resolve({ accepted: true }); },
+    });
+    await expect(failed({ provider: 'edge', targetLanguage: 'fr' })).resolves.toMatchObject({ success: false });
+    expect(failedEvidence).toEqual([{ success: false, sessionId: null, code: 'PROTOCOL_ERROR' }]);
+    expect(JSON.stringify(failedEvidence)).not.toContain('private detail');
+  });
+
   it('validates exact protocol envelopes and browser-provided sender identity', () => {
     const browser = { runtime: { id: 'extension-id' } };
     const envelope = { action: '__PAGE_TRANSLATION_RUNTIME_PROBE_V1', v: 1, runId: config.runId, type: 'hello' };
@@ -167,6 +216,18 @@ describe('Firefox runtime bridge protocol', () => {
       } }, bridge.sender);
     expect(translated).toMatchObject({ type: 'accepted', nonce, decision: 'restore' });
     expect(bridge.reports.at(-1).payload).toMatchObject({ op: 'edge-fr-page-once', opSeq: 2, event: 'translated' });
+  });
+
+  it('accepts safe authenticated Scheduler batch identities only in the Phase-1 runtime lane', async () => {
+    const bridge = setup({ pageTranslationE2E: true });
+    const nonce = await completeProviderOnlyHandshake(bridge);
+    const action = '__PAGE_TRANSLATION_PROVIDER_PROBE_V1';
+    await bridge.message({ action, v: 1, runId: config.runId, type: 'arm', nonce, observersInstalled: true }, bridge.sender);
+    const evidence = { messageId: 'scheduler-message-1', sessionId: 'session-1', targetIds: ['target-0', 'target-1'] };
+    expect(await bridge.message({ action, v: 1, runId: config.runId, type: 'event', nonce, event: 'scheduler-batch', evidence }, bridge.sender)).toMatchObject({ type: 'accepted', nonce });
+    expect(bridge.reports.at(-1).payload).toMatchObject({ event: 'scheduler-batch', evidence });
+    expect(JSON.stringify(bridge.reports.at(-1))).not.toContain(targetTexts[0]);
+    expect(bridge.browser.storage.local.set).toHaveBeenCalledWith({ PROVIDER_OPTIMIZATION_LEVELS: { edge: 5 } });
   });
 
   it('dispatches the authenticated provider-only invoke through the bound worker wrapper only after arm/start', async () => {
@@ -336,14 +397,22 @@ describe('Firefox runtime bridge protocol', () => {
     expect(Object.values(result).every(Boolean)).toBe(false);
   });
 
-  it('reports real scheduler acceptance, translated DOM quiescence, and original-DOM restoration', async () => {
-    document.body.replaceChildren(...targetTexts.map((text, index) => {
+  it('reports exactly-once text and title acceptance, then restores original markup, attributes, and metadata', async () => {
+    vi.useFakeTimers();
+    const fixture = createPageTranslationFixture();
+    document.body.replaceChildren(...fixture.targets.map(target => {
       const element = document.createElement('p');
-      element.dataset.benchId = `target-${index}`;
-      element.textContent = text;
+      element.dataset.benchId = target.id;
+      element.dataset.benchKind = target.kind;
+      if (target.kind === 'text') element.textContent = target.source;
+      else element.title = target.source;
       return element;
     }));
-    const nodes = [...document.querySelectorAll('[data-bench-id]')];
+    const actualNodes = [...document.querySelectorAll('[data-bench-id]')];
+    const schedulerNodes = actualNodes.map((element, index) => index < 6 ? element.firstChild : element.getAttributeNode('title'));
+    const snapshots = actualNodes.map(element => ({ text: element.textContent, markup: element.innerHTML, title: element.getAttribute('title') }));
+    const translatedGate = deferred();
+    const restoredGate = deferred();
     const events = [];
     const manager = {
       isTranslating: false,
@@ -357,7 +426,10 @@ describe('Firefox runtime bridge protocol', () => {
         },
       },
       async restorePage() {
-        for (const [index, node] of nodes.entries()) node.textContent = targetTexts[index];
+        for (const [index, element] of actualNodes.entries()) {
+          if (index < 6) element.textContent = targetTexts[index];
+          else element.title = targetTexts[index];
+        }
         return { success: true, sessionId: 'session-1' };
       },
     };
@@ -368,6 +440,8 @@ describe('Firefox runtime bridge protocol', () => {
     };
     const report = async (event, evidence) => {
       events.push({ event, evidence });
+      if (event === 'translated') translatedGate.resolve(evidence);
+      if (event === 'restored') restoredGate.resolve(evidence);
       return event === 'translated' ? { decision: 'restore' } : undefined;
     };
     vi.stubGlobal('browser', { runtime: { sendMessage: vi.fn(message => {
@@ -379,20 +453,37 @@ describe('Firefox runtime bridge protocol', () => {
     const commandResult = await handler.handlers.get('page-translate')({ action: 'page-translate', context: 'content', data: { provider: 'edge', targetLanguage: 'fr' } });
     expect(commandResult).toMatchObject({ success: true, messageId: 'session-1' });
     expect(events.at(-1)).toMatchObject({ event: 'command-result', evidence: { success: true, sessionId: 'session-1', code: null } });
-    for (const [index, node] of nodes.entries()) {
+    for (const [index, node] of schedulerNodes.entries()) {
       const settlement = manager.scheduler._createSettlement({ node });
       settlement.settle('accepted');
-      node.firstChild.nodeValue = `\u200efixture translation: ${targetTexts[index]}`;
+      if (index < 6) node.nodeValue = `\u200efixture translation: ${targetTexts[index]}`;
+      else node.ownerElement.title = `\u200efixture translation: ${targetTexts[index]}`;
     }
-    await vi.waitFor(() => expect(events.some(item => item.event === 'translated')).toBe(true), { timeout: 1000 });
+    await vi.advanceTimersByTimeAsync(150);
+    const translatedEvidence = await translatedGate.promise;
     expect(events.find(item => item.event === 'translated').evidence).toMatchObject({
       sessionId: 'session-1', acceptedCount: 12, duplicateAcceptances: 0, staleWrites: 0,
       domMatches: true, sessionOwned: true, quiescent: true,
+      acceptedMutationCounts: { text: 6, title: 6 }, unattributedWrites: 0,
     });
-    await vi.waitFor(() => expect(events.some(item => item.event === 'restored')).toBe(true), { timeout: 1000 });
-    expect(events.find(item => item.event === 'restored').evidence).toEqual({
+    expect(translatedEvidence.acceptedCount).toBe(12);
+    const restoredEvidence = await restoredGate.promise;
+    expect(restoredEvidence).toEqual({
       sessionId: 'session-1', commandSuccess: true, domMatchesOriginal: true, metadataRestored: true, restoreObserved: true,
     });
+    expect(actualNodes.map(element => ({ text: element.textContent, markup: element.innerHTML, title: element.getAttribute('title') }))).toEqual(snapshots);
+    expect(schedulerNodes).toHaveLength(12);
+    expect(events.some(item => item.event === 'error')).toBe(false);
+  });
+
+  it('rejects missing, duplicate, and unattributed text/title mutation accounting', () => {
+    const ids = Array.from({ length: 12 }, (_, index) => `target-${index}`);
+    const kinds = [...Array(6).fill('text'), ...Array(6).fill('title')];
+    const valid = { targetKinds: kinds, acceptedIds: ids, mutationIds: ids, duplicateAcceptances: 0, staleWrites: 0, unattributedWrites: 0 };
+    expect(validateAcceptedMutationAccounting(valid)).toEqual({ ok: true, counts: { text: 6, title: 6 } });
+    expect(validateAcceptedMutationAccounting({ ...valid, mutationIds: ids.slice(1) }).ok).toBe(false);
+    expect(validateAcceptedMutationAccounting({ ...valid, mutationIds: [...ids, ids[6]], duplicateAcceptances: 1 }).ok).toBe(false);
+    expect(validateAcceptedMutationAccounting({ ...valid, unattributedWrites: 1 }).ok).toBe(false);
   });
 
   it('rejects a real restore that leaves a translation marker on the owned root', async () => {

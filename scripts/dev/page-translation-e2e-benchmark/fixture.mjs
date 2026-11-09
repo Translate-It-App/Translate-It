@@ -49,6 +49,25 @@ export function createFixture(scenario = 'small') {
   };
 }
 
+export function createPageTranslationFixture() {
+  const targets = targetTexts.map((source, index) => ({
+    id: `target-${index}`,
+    source,
+    kind: index < 6 ? 'text' : 'title',
+    visible: true,
+  }));
+  const html = `<!doctype html><meta charset="utf-8"><title>Page translation Firefox E2E</title><main>${targets.map(target =>
+    target.kind === 'text'
+      ? `<p data-bench-id="${target.id}" data-bench-kind="text">${target.source}</p>`
+      : `<p data-bench-id="${target.id}" data-bench-kind="title" title="${target.source}"></p>`,
+  ).join('')}</main>`;
+  return {
+    scenario: 'page-translation', targetCount: targets.length, targets,
+    targetTexts: targets.map(target => target.source), visibleIds: targets.map(target => target.id), html,
+    viewport: { width: 1280, height: 900 }, scroll: { x: 0, y: 0 }, responseDelayMs: 0,
+  };
+}
+
 export async function startFixture(fixture = createFixture(), { runtimeBridge } = {}) {
   if (runtimeBridge) validateRuntimeBridgeConfig(runtimeBridge);
   let bridge;

@@ -6,13 +6,22 @@ import { spawn } from 'node:child_process';
 import process from 'node:process';
 import { writeBenchmarkArtifact } from '../page-translation-e2e-benchmark/artifact-writer.mjs';
 import { buildBenchmarkExtension } from '../page-translation-e2e-benchmark/build.mjs';
-import { requiredCapabilities, summarizeCapabilities, capability } from './capabilities.mjs';
+import { requiredCapabilities, summarizeCapabilities, summarizeCapabilitySet, capability } from './capabilities.mjs';
 import { runFirefoxProbe, verifyIsolation } from './driver.mjs';
 import { launchIsolatedWorker } from './launcher.mjs';
 
 const script = resolve(process.argv[1]);
 const inside = process.argv.includes('--inside');
 const loopbackTlsProxy = process.env.FIREFOX_E2E_LOOPBACK_TLS_PROXY === '1';
+const pageTranslationE2E = process.env.FIREFOX_E2E_PAGE_TRANSLATION === '1';
+if (pageTranslationE2E && !loopbackTlsProxy) throw new Error('FIREFOX_E2E_PAGE_TRANSLATION requires FIREFOX_E2E_LOOPBACK_TLS_PROXY=1.');
+const phase1RequiredCapabilities = [
+  'isolation', 'fixture', 'bidiSession', 'protocol', 'interceptionSetup', 'extensionInstall',
+  'runtimeBridge', 'backgroundLoaded', 'contentLoaded', 'runtimeHandshake', 'hostPermissions',
+  'backgroundReadiness', 'contentReadiness', 'discoveryFlags', 'loopbackTlsProxy', 'providerPhysicalRequest',
+  'providerRequestBody', 'providerResponse', 'providerOperation', 'providerConsumption', 'schedulerBatchCorrelation',
+  'domAcceptance', 'providerRestore', 'pageTranslationProof', 'cleanup',
+];
 const runId = inside ? process.env.FIREFOX_PROBE_RUN_ID ?? randomUUID() : randomUUID();
 let artifactPath = resolve(process.env.FIREFOX_PROBE_ARTIFACT ?? resolve(tmpdir(), 'opencode', `page-translation-firefox-${runId}.json`));
 try { await stat(artifactPath); artifactPath = `${artifactPath}.${runId}.json`; } catch { /* A new target path is safe to publish atomically. */ }
@@ -20,8 +29,8 @@ const baseArtifact = {
   probe: 'benchmark-only Firefox page-translation capability probe', runId, createdAt: new Date().toISOString(),
   commands: ['unshare --user --map-root-user --net', 'ip link set lo up', `node ${script} --inside`],
   networkScope: 'Must be verified in the process namespace before launching Firefox.',
-  mode: loopbackTlsProxy ? 'opt-in loopback TLS provider-only prototype' : 'default Firefox capability probe',
-  flags: { sourceDefaults: { slicedDiscovery: false, viewportFirstDiscovery: false }, benchmarkBuild: { slicedDiscovery: true, viewportFirstDiscovery: false }, loopbackTlsProxy },
+  mode: pageTranslationE2E ? 'opt-in loopback TLS Firefox page-translation E2E' : loopbackTlsProxy ? 'opt-in loopback TLS provider-only prototype' : 'default Firefox capability probe',
+  flags: { sourceDefaults: { slicedDiscovery: false, viewportFirstDiscovery: false }, benchmarkBuild: { slicedDiscovery: true, viewportFirstDiscovery: false }, loopbackTlsProxy, pageTranslationE2E },
   capabilities: Object.fromEntries(requiredCapabilities.map(name => [name, { status: 'NOT_TESTED', reason: 'Setup did not reach this capability.' }])),
 };
 
@@ -49,14 +58,19 @@ if (!inside) {
     artifact.capabilities.isolation = capability('SUPPORTED', { evidence: isolation });
     artifact.versions = { node: process.version, firefox: await commandOutput('/usr/bin/firefox', ['--version']) };
     artifact.provenance = await provenance();
-     const capabilities = await runFirefoxProbe({ buildBenchmarkExtension, workerEntry: resolve('scripts/dev/page-translation-e2e-benchmark/worker-entry.mjs'), contentEntry: resolve('scripts/dev/page-translation-e2e-benchmark/content-entry.mjs'), artifact, loopbackTlsProxy });
-    const summary = summarizeCapabilities({ ...artifact.capabilities, ...capabilities });
+     const capabilities = await runFirefoxProbe({ buildBenchmarkExtension, workerEntry: resolve('scripts/dev/page-translation-e2e-benchmark/worker-entry.mjs'), contentEntry: resolve('scripts/dev/page-translation-e2e-benchmark/content-entry.mjs'), artifact, loopbackTlsProxy, pageTranslationE2E });
+    const allCapabilities = { ...artifact.capabilities, ...capabilities };
+    const fullSummary = summarizeCapabilities(allCapabilities);
+    const summary = pageTranslationE2E ? summarizeCapabilitySet(allCapabilities, phase1RequiredCapabilities) : fullSummary;
+    if (pageTranslationE2E) artifact.fullCapabilitySummary = fullSummary;
     artifact.status = summary.status; artifact.reason = summary.reason; artifact.summary = summary;
     status = summary.status === 'SUPPORTED' ? 0 : summary.status === 'UNSUPPORTED' ? 2 : 1;
   } catch (error) {
     artifact.status = 'FAILED'; artifact.reason = error.message;
     artifact.errors = [...(artifact.errors ?? []), error.stack ?? String(error)];
-    artifact.summary = summarizeCapabilities(artifact.capabilities);
+    const fullSummary = summarizeCapabilities(artifact.capabilities);
+    if (pageTranslationE2E) artifact.fullCapabilitySummary = fullSummary;
+    artifact.summary = pageTranslationE2E ? summarizeCapabilitySet(artifact.capabilities, phase1RequiredCapabilities) : fullSummary;
     status = 1;
   } finally {
     artifact.cleanup ??= { status: artifact.capabilities.cleanup?.status ?? 'NOT_TESTED', reason: 'Cleanup is performed by the probe finally block.' };
@@ -78,14 +92,14 @@ async function commandOutput(command, args) {
 async function provenance() {
   const head = await commandOutput('git', ['rev-parse', 'HEAD']);
   const candidates = [
-     'scripts/dev/page-translation-e2e-firefox/capabilities.mjs', 'scripts/dev/page-translation-e2e-firefox/driver.mjs',
-     'scripts/dev/page-translation-e2e-firefox/run.mjs', 'scripts/dev/page-translation-e2e-firefox/launcher.mjs', 'scripts/dev/page-translation-e2e-firefox/README.md', 'scripts/dev/page-translation-e2e-firefox/loopback-edge-proxy.mjs', 'scripts/dev/page-translation-e2e-firefox-proxy.test.js', 'scripts/dev/page-translation-e2e-firefox.test.js', 'scripts/dev/page-translation-e2e-benchmark/build.mjs',
+      'scripts/dev/page-translation-e2e-firefox/capabilities.mjs', 'scripts/dev/page-translation-e2e-firefox/driver.mjs',
+      'scripts/dev/page-translation-e2e-firefox/run.mjs', 'scripts/dev/page-translation-e2e-firefox/launcher.mjs', 'scripts/dev/page-translation-e2e-firefox/README.md', 'scripts/dev/page-translation-e2e-firefox/loopback-edge-proxy.mjs', 'scripts/dev/page-translation-e2e-firefox-proxy.test.js', 'scripts/dev/page-translation-e2e-firefox.test.js', 'scripts/dev/page-translation-e2e-firefox-runtime.test.js', 'scripts/dev/page-translation-e2e-benchmark/build.mjs',
     'scripts/dev/page-translation-e2e-benchmark/build-environment.mjs',
-     'scripts/dev/page-translation-e2e-firefox/runtime-background.mjs', 'scripts/dev/page-translation-e2e-firefox/runtime-content.mjs', 'scripts/dev/page-translation-e2e-firefox/runtime-constants.mjs', 'scripts/dev/page-translation-e2e-firefox/runtime-collector.mjs',
-    'scripts/dev/page-translation-e2e-benchmark/provider-probe.mjs', 'scripts/dev/page-translation-e2e-benchmark/provider-probe-content.mjs',
+     'scripts/dev/page-translation-e2e-firefox/runtime-background.mjs', 'scripts/dev/page-translation-e2e-firefox/runtime-content.mjs', 'scripts/dev/page-translation-e2e-firefox/runtime-constants.mjs', 'scripts/dev/page-translation-e2e-firefox/runtime-collector.mjs', 'scripts/dev/page-translation-e2e-firefox/restore-dom-diagnostics.mjs',
+     'scripts/dev/page-translation-e2e-benchmark/provider-probe.mjs', 'scripts/dev/page-translation-e2e-benchmark/provider-probe-content.mjs',
     'scripts/dev/page-translation-e2e-benchmark/worker-entry.mjs', 'scripts/dev/page-translation-e2e-benchmark/content-entry.mjs',
     'scripts/dev/page-translation-e2e-benchmark/cancellation-probes.mjs', 'scripts/dev/page-translation-e2e-benchmark/fixture.mjs',
-    'scripts/dev/page-translation-e2e-benchmark/metrics.mjs', 'scripts/dev/page-translation-e2e-benchmark/trace.mjs', 'scripts/dev/page-translation-e2e-benchmark/artifact-writer.mjs',
+     'scripts/dev/page-translation-e2e-benchmark/metrics.mjs', 'scripts/dev/page-translation-e2e-benchmark/trace.mjs', 'scripts/dev/page-translation-e2e-benchmark/page-translation-start-probe.mjs', 'scripts/dev/page-translation-e2e-benchmark/artifact-writer.mjs',
     'src/features/page-translation/PageTranslationConstants.js',
   ];
   const sourceHashes = {};

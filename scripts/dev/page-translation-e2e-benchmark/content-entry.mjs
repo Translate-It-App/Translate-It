@@ -8,6 +8,7 @@ import { captureViewportWindow, installCallThrough, installPrimitiveAdmissionObs
 import { drainAndDisconnectMeasurementObservers, groupMutationRecords, isDuplicateAcceptedMutation, trackAcceptedTarget } from './measurement-lifecycle.mjs';
 import { createCancellationLedger, installCancellationRuntimeMessageObserver, installTrustedLifecycleObserver, sessionIdForTranslationContext } from './cancellation-probes.mjs';
 import { createRawDOMMutationEvidence, installSuccessfulReplyProbe } from './successful-reply-probes.mjs';
+import { wrapPageTranslationStart } from './page-translation-start-probe.mjs';
 
 let successfulReplyMutationObserver = null;
 let successfulReplyMutationEvidence = null;
@@ -21,6 +22,9 @@ const trace = {
   discoveryAdmissionOrder: null,
   schedulerEnqueueOrder: [],
   selectedBatchMembers: [],
+  schedulerRequests: [],
+  pageTranslationE2E: false,
+  pageTranslationStartReporter: null,
   viewportWindowObservation: null,
   admissionHookInstalled: false,
   discoveryFlags: {
@@ -59,7 +63,33 @@ const trace = {
     }
   },
   interceptSchedulerBatchReply(message, originalPromise) {
+    if (message?.action === 'page-translate-batch' && typeof message.messageId === 'string') {
+      const targetIds = this.selectedBatchMembers.at(-1);
+      if (Array.isArray(targetIds) && targetIds.length) this.schedulerRequests.push({
+        messageId: message.messageId,
+        sessionId: message.data?.sessionId ?? null,
+        targetIds: [...targetIds],
+      });
+    }
     return this.successfulReplyProbe?.interceptSchedulerBatchReply(message, originalPromise) ?? originalPromise;
+  },
+  captureSchedulerBatch(message) {
+    const targetIds = this.selectedBatchMembers.at(-1);
+    if (message?.action !== 'page-translate-batch' || typeof message.messageId !== 'string'
+        || typeof message.data?.sessionId !== 'string' || !Array.isArray(targetIds) || !targetIds.length
+        || targetIds.some(id => !/^target-(?:[0-9]|1[01])$/.test(id))
+        || this.schedulerRequests.some(item => item.messageId === message.messageId)) {
+      this.schedulerBatchError = true;
+      return false;
+    }
+    const evidence = { messageId: message.messageId, sessionId: message.data.sessionId, targetIds: [...targetIds] };
+    this.schedulerRequests.push(evidence);
+    const reported = this.schedulerBatchReporter?.(evidence);
+    if (!reported || typeof reported.then !== 'function') {
+      this.schedulerBatchError = true;
+      return false;
+    }
+    return reported.catch(error => { this.schedulerBatchError = true; throw error; });
   },
   beginSuccessfulReplyMutationCapture() {
     if (!successfulReplyMutationObserver || !successfulReplyMutationEvidence) throw new Error('Raw fixture mutation observer is unavailable');
@@ -304,22 +334,27 @@ const trace = {
   },
 };
 const originalTranslate = PageTranslationManager.prototype.translatePage;
-PageTranslationManager.prototype.translatePage = function(...args) {
-  const at = Date.now();
-  const options = args[0] ?? {};
-  trace.record('manager.translatePage.entry', { isAuto: options.isAuto === true, targetLanguage: options.targetLanguage ?? null });
-  const append = () => trace.calls.push({ at, endedAt: Date.now(), settings: {
-    targetLanguage: this.settings?.targetLanguage ?? null,
-    lazyLoading: this.settings?.lazyLoading ?? null,
-    translateAfterScrollStop: this.settings?.translateAfterScrollStop ?? null,
-    autoTranslateOnDOMChanges: this.settings?.autoTranslateOnDOMChanges ?? null,
-  }, messageId: this.translationMessageId, totalTasks: this.scheduler?.totalTasks });
-  let result;
-  try { result = originalTranslate.apply(this, args); } catch (error) { append(); throw error; }
-  if (result && typeof result.then === 'function') result.then(append, append);
-  else append();
-  return result;
-};
+PageTranslationManager.prototype.translatePage = wrapPageTranslationStart(originalTranslate, {
+  isProbeStart: options => trace.pageTranslationE2E === true && options?.provider === 'edge' && options?.targetLanguage === 'fr',
+  report: evidence => trace.pageTranslationStartReporter?.(evidence) ?? Promise.reject(new Error('Authenticated page-translation start reporter is unavailable.')),
+  onStart(_manager, args, at) {
+    const options = args[0] ?? {};
+    trace.record('manager.translatePage.entry', {
+      at,
+      isAuto: options.isAuto === true,
+      targetLanguage: options.targetLanguage ?? null,
+    });
+  },
+  onSettled(manager, args, at, endedAt) {
+    const options = args[0] ?? {};
+    trace.calls.push({ at, endedAt, settings: {
+      targetLanguage: manager.settings?.targetLanguage ?? options.targetLanguage ?? null,
+      lazyLoading: manager.settings?.lazyLoading ?? null,
+      translateAfterScrollStop: manager.settings?.translateAfterScrollStop ?? null,
+      autoTranslateOnDOMChanges: manager.settings?.autoTranslateOnDOMChanges ?? null,
+    }, messageId: manager.translationMessageId, totalTasks: manager.scheduler?.totalTasks });
+  },
+});
 
 const benchmarkTargetId = node => {
   const element = node?.nodeType === Node.ELEMENT_NODE

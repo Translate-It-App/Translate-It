@@ -100,6 +100,9 @@ async function beginBackground(config, browser, state, extensionOrigin, importEn
       proxyManager,
       report: (event, evidence) => reportProviderOperation(config, state, event, evidence),
     };
+    if (config.pageTranslationE2E === true) {
+      await browser.storage.local.set({ PROVIDER_OPTIMIZATION_LEVELS: { edge: 5 } });
+    }
     try { await withDeadline(importEntry(), Math.max(1, deadline - Date.now()), 'READINESS_TIMEOUT'); state.startupEntryImported = true; }
     catch (error) { throw error?.message === 'READINESS_TIMEOUT' ? error : codeError('IMPORT_FAILED'); }
     await report(config, state, 'background', 'loaded', { entry: 'src/core/background/index.js' });
@@ -242,6 +245,11 @@ async function onProviderProbeMessage(message, sender, config, browser, state) {
     if (!exactKeys(message.evidence, ['code']) || !PROVIDER_CODES.has(message.evidence.code)) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
     const accepted = await reportProviderOperation(config, state, 'error', message.evidence);
     state.provider.terminal = true;
+    return accepted ? providerResponse(config, state, 'accepted', { nonce: state.nonce }) : providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+  }
+  if (event && message.event === 'scheduler-batch') {
+    if (config.pageTranslationE2E !== true || !state.provider.armed || state.provider.terminal) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
+    const accepted = await reportProviderOperation(config, state, 'scheduler-batch', message.evidence);
     return accepted ? providerResponse(config, state, 'accepted', { nonce: state.nonce }) : providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });
   }
   if (!event || !state.provider.armed || state.provider.terminal || !['command-result', 'translated', 'restored'].includes(message.event)) return providerResponse(config, state, 'error', { code: 'PROTOCOL_ERROR' });

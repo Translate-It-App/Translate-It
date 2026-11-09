@@ -59,6 +59,7 @@ export class PageTranslationManager extends ResourceTracker {
     this.autoStartCancelledUrls = new Set();
     this.translationSettingsRevision = 0;
     this.pendingSettingsAttempt = null;
+    this._layoutClassOwnership = null;
 
     
     this.scheduler = new PageTranslationScheduler({
@@ -914,8 +915,31 @@ export class PageTranslationManager extends ResourceTracker {
    */
   _injectLayoutFix() {
     try {
-      // Mark html for specificity and styling hooks
-      document.documentElement.classList.add('ti-translation-active');
+      const root = document.documentElement;
+      const currentClass = { present: root.hasAttribute('class'), value: root.getAttribute('class') };
+      let ownership = this._layoutClassOwnership;
+      if (!ownership) {
+        const addedToken = !root.classList.contains('ti-translation-active');
+        if (addedToken) root.classList.add('ti-translation-active');
+        ownership = this._layoutClassOwnership = {
+          originalPresent: currentClass.present,
+          originalValue: currentClass.value,
+          addedToken,
+          lastAppliedPresent: root.hasAttribute('class'),
+          lastAppliedValue: root.getAttribute('class'),
+          externalClassChangesObserved: false,
+        };
+      } else {
+        if (currentClass.present !== ownership.lastAppliedPresent || currentClass.value !== ownership.lastAppliedValue) {
+          ownership.externalClassChangesObserved = true;
+        }
+        if (!root.classList.contains('ti-translation-active')) {
+          root.classList.add('ti-translation-active');
+          ownership.addedToken = true;
+          ownership.lastAppliedPresent = root.hasAttribute('class');
+          ownership.lastAppliedValue = root.getAttribute('class');
+        }
+      }
 
       if (!document.getElementById('ti-translation-layout-fix')) {
         const style = document.createElement('style');
@@ -971,11 +995,23 @@ export class PageTranslationManager extends ResourceTracker {
    */
   _removeLayoutFix() {
     try {
-      document.documentElement.classList.remove('ti-translation-active');
+      const root = document.documentElement;
+      const ownership = this._layoutClassOwnership;
+      if (ownership?.addedToken) {
+        const classUnchanged = root.hasAttribute('class') === ownership.lastAppliedPresent
+          && root.getAttribute('class') === ownership.lastAppliedValue;
+        if (root.classList.contains('ti-translation-active')) root.classList.remove('ti-translation-active');
+        if (classUnchanged && !ownership.externalClassChangesObserved) {
+          if (ownership.originalPresent) root.setAttribute('class', ownership.originalValue);
+          else root.removeAttribute('class');
+        }
+      }
       const style = document.getElementById('ti-translation-layout-fix');
       if (style) style.remove();
     } catch (e) {
       this.logger.debug('Failed to remove layout fix:', e);
+    } finally {
+      this._layoutClassOwnership = null;
     }
   }
 

@@ -8,10 +8,12 @@ import { describe, expect, it } from 'vitest';
 import { classifyTransportRequest, mapEdgeResponse } from './page-translation-e2e-benchmark/metrics.mjs';
 import { BiDi, applyRuntimeBridgeFailure, applyRuntimeBridgeReportedError, classifyProtocolFailure, createRequestDispatcher, decodeEdgeRequestBody, latestRealmObservations, providerProbeArtifact, providerProbeRequiresImmediateTeardown, reconcileFinalProviderOperation, reconcileFinalRuntimeBridge, recordUnattemptedRuntimeBridge, removeProviderNetworkControls, runEdgeFrenchProviderProbe, runFirefoxProbe, runRuntimeBridgeSequence, setupProviderDataCollector, validateEdgeBodyAgainstNative, validateEdgeProviderCorrelation, validateProviderOperationSnapshot, validateProviderReleaseReceipt, validateRuntimeBridgeErrorReport, validateRuntimeBridgeReport, validateRuntimeBridgeSnapshot, validEdgePageTranslateUrl } from './page-translation-e2e-firefox/driver.mjs';
 import { launchIsolatedWorker } from './page-translation-e2e-firefox/launcher.mjs';
+import { compareRestoreDOMSnapshots } from './page-translation-e2e-firefox/restore-dom-diagnostics.mjs';
 import { writeBenchmarkArtifact } from './page-translation-e2e-benchmark/artifact-writer.mjs';
 import {
   blockRuntimeBridgePrerequisite, capability, classifyObservedRealm, classifyRequestAction, isolationSnapshot, notTested,
   requiredCapabilities, retainExecutedCapability, runtimeProbeGate, summarizeCapabilities,
+  summarizeCapabilitySet,
 } from './page-translation-e2e-firefox/capabilities.mjs';
 
 function fakeSocket() {
@@ -157,6 +159,9 @@ function subsetOperationSnapshot(fixture, duplicateSuccessfulBatch = false) {
   const invocation = (id, indexes) => ({ invocationId: id, sessionId: fixture.invocation.sessionId, messageId: `message-${id}`, provider: 'edge', itemCount: indexes.length, sourceIndexes: indexes });
   const invocations = [invocation('chunk-a', first), invocation('chunk-b', second)];
   const events = [fixture.reports[0]];
+  invocations.forEach(item => events.push({ event: 'scheduler-batch', evidence: {
+    messageId: item.messageId, sessionId: item.sessionId, targetIds: item.sourceIndexes.map(index => `target-${index}`),
+  } }));
   invocations.forEach(evidence => events.push({ event: 'provider-invoked', evidence }));
   const attempts = [
     { attemptId: 'failed-first', invocationId: 'chunk-a', indexes: first, outcome: 'rejected' },
@@ -185,6 +190,9 @@ function providerBatchScenario(fixture) {
     return { texts, body, bytes, attemptId, physical: { ...fixture.physical, attemptId, invocationId: invocations[index].invocationId, messageId: invocations[index].messageId, bodyBytes: bytes.length, bodyHash: createHash('sha256').update(bytes).digest('hex'), sourceIndexes: invocations[index].sourceIndexes } };
   });
   const events = [fixture.reports[0]];
+  invocations.forEach(item => events.push({ event: 'scheduler-batch', evidence: {
+    messageId: item.messageId, sessionId: item.sessionId, targetIds: item.sourceIndexes.map(index => `target-${index}`),
+  } }));
   invocations.forEach(evidence => events.push({ event: 'provider-invoked', evidence }));
   batches.forEach(({ physical }) => events.push({ event: 'physical-start', evidence: physical }));
   batches.forEach(({ attemptId, physical }) => events.push({ event: 'physical-settled', evidence: { attemptId, sessionId: physical.sessionId, outcome: 'fulfilled', status: 200, code: null } }));
@@ -253,6 +261,34 @@ function providerRetryScenario(fixture) {
 }
 
 describe('Firefox capability gates', () => {
+  it('compares safe Restore DOM evidence without equating an absent class to an empty class', () => {
+    const targets = Array.from({ length: 12 }, (_, index) => ({
+      id: `target-${index}`, kind: index < 6 ? 'text' : 'title',
+      text: { size: index < 6 ? 8 : 0, sha256: 'a'.repeat(64), matchesExpected: true },
+      markup: { size: index < 6 ? 8 : 0, sha256: 'b'.repeat(64), matchesExpected: true },
+      title: { present: index >= 6, size: index >= 6 ? 8 : 0, sha256: 'c'.repeat(64), matchesExpected: true },
+    }));
+    const baseline = { htmlClass: { present: false, value: null }, targets };
+    const final = structuredClone(baseline);
+    final.htmlClass = { present: true, value: '' };
+    final.targets[0].text = { ...final.targets[0].text, sha256: 'd'.repeat(64), matchesExpected: false };
+    final.targets[6].title = { ...final.targets[6].title, sha256: 'e'.repeat(64), matchesExpected: false };
+    const evidence = compareRestoreDOMSnapshots(baseline, final);
+    expect(evidence.htmlClass).toMatchObject({ baseline: { present: false, value: null }, final: { present: true, value: '' }, equal: false });
+    expect(evidence.targets[0].text).toMatchObject({ unchanged: false, restored: false });
+    expect(evidence.targets[6].title).toMatchObject({ unchanged: false, restored: false });
+    expect(evidence.matchesOriginal).toBe(false);
+    expect(JSON.stringify(evidence)).not.toContain('Benchmark sentence');
+  });
+
+  it('summarizes only explicit Phase-1 requirements without promoting Phase-2 NOT_TESTED fields', () => {
+    const capabilities = { isolation: capability('SUPPORTED'), restore: capability('SUPPORTED'), cancellation: notTested('Phase 2') };
+    expect(summarizeCapabilitySet(capabilities, ['isolation', 'restore'])).toMatchObject({ status: 'SUPPORTED' });
+    expect(summarizeCapabilitySet(capabilities, ['isolation', 'restore', 'cancellation']).status).toBe('UNSUPPORTED');
+    capabilities.restore = capability('FAILED');
+    expect(summarizeCapabilitySet(capabilities, ['isolation', 'restore']).status).toBe('FAILED');
+  });
+
   it('requires a complete flat map and never treats NOT_TESTED as successful', () => {
     expect(summarizeCapabilities({}).status).toBe('FAILED');
     const pending = allSupported(); pending.pageNegativeFetch = notTested('gated');
@@ -1078,8 +1114,19 @@ describe('Firefox native Edge provider probe', () => {
   it('correlates bounded source subsets and lets failed physical attempts remain diagnostics, not coverage', () => {
     const fixture = providerReports();
     const contract = { runId: fixture.runId, extensionId: fixture.extensionId, fixtureUrl: fixture.fixtureUrl, tabId: fixture.tabId };
-    expect(validateProviderOperationSnapshot(subsetOperationSnapshot(fixture), contract).reports).toHaveLength(14);
+    expect(validateProviderOperationSnapshot(subsetOperationSnapshot(fixture), contract).reports).toHaveLength(16);
     expect(() => validateProviderOperationSnapshot(subsetOperationSnapshot(fixture, true), contract)).toThrow(/exact-once/);
+  });
+
+  it('rejects translated acceptance when the actual production start result is absent', () => {
+    const fixture = providerReports();
+    const reports = fixture.reports.filter(report => report.event !== 'command-result')
+      .map((report, index) => ({ ...report, opSeq: index + 1 }));
+    const snapshot = { op: 'edge-fr-page-once', released: true, restoreDecision: 'restore', stopped: true,
+      stopCode: 'COMPLETED', reports, rejections: { originOrType: 0, protocol: 0 }, failure: null };
+    expect(() => validateProviderOperationSnapshot(snapshot, {
+      runId: fixture.runId, extensionId: fixture.extensionId, fixtureUrl: fixture.fixtureUrl, tabId: fixture.tabId,
+    })).toThrow(/command success evidence/);
   });
 
   it('services two independently queued six-source batches through distinct native bodies before restore', async () => {
@@ -1102,6 +1149,20 @@ describe('Firefox native Edge provider probe', () => {
     expect(harness.calls.filter(call => call.method === 'network.provideResponse').map(call => call.params.request)).toEqual(['request-0', 'request-1']);
     expect(state.successfulCoverage.size).toBe(12);
     expect(state.invocations.size).toBe(2);
+    expect(state.schedulerBatches.size).toBe(2);
+    expect([...state.schedulerBatches.values()].map(batch => batch.targetIds)).toEqual([
+      Array.from({ length: 6 }, (_, index) => `target-${index}`),
+      Array.from({ length: 6 }, (_, index) => `target-${index + 6}`),
+    ]);
+  });
+
+  it('provides the deterministic mixed text/title fixture without changing Provider-only fixture sources', async () => {
+    const { createPageTranslationFixture, createFixture } = await import('./page-translation-e2e-benchmark/fixture.mjs');
+    const page = createPageTranslationFixture();
+    expect(page.targets.map(target => target.kind)).toEqual([...Array(6).fill('text'), ...Array(6).fill('title')]);
+    expect(page.targets.map(target => target.id)).toEqual(Array.from({ length: 12 }, (_, index) => `target-${index}`));
+    expect(page.targetTexts).toEqual(createFixture('small').targetTexts);
+    expect(page.html).toContain('data-bench-kind="title" title="Benchmark sentence 7 has stable fixture content."');
   });
 
   it('treats a successful command acknowledgment before provider work as a start signal, not completion', async () => {
@@ -1461,6 +1522,27 @@ describe('Firefox native Edge provider probe', () => {
     expect(JSON.stringify(providerProbeArtifact(state))).not.toContain(harness.bodyText);
     const final = await reconcileFinalProviderOperation({ bridge: harness.bridge, state, contract: { runId: harness.runId, extensionId: harness.extensionId, fixtureUrl: harness.fixtureUrl, tabId: harness.tabId }, capabilities: harness.capabilities, artifact: {} });
     expect(final.ok).toBe(true); expect(harness.capabilities.providerOperation.status).toBe('SUPPORTED');
+  });
+
+  it('accepts final Provider proof through the loopback proxy without requiring BiDi body collection', async () => {
+    const fixture = providerReports();
+    const capabilities = Object.fromEntries(requiredCapabilities.map(name => [name, notTested('not reached')]));
+    for (const name of ['loopbackTlsProxy', 'providerPhysicalRequest', 'providerRequestBody', 'providerResponse', 'providerConsumption', 'domAcceptance', 'providerRestore']) {
+      capabilities[name] = capability('SUPPORTED');
+    }
+    const bridge = { operationSnapshot: () => ({ op: 'edge-fr-page-once', released: true, restoreDecision: 'restore', stopped: true,
+      stopCode: 'COMPLETED', reports: fixture.reports, rejections: { originOrType: 0, protocol: 0 }, failure: null }) };
+
+    const result = await reconcileFinalProviderOperation({
+      bridge, state: { attempted: true, providerOnly: false, receiptDecision: 'start', stopCode: 'COMPLETED' },
+      contract: { runId: fixture.runId, extensionId: fixture.extensionId, fixtureUrl: fixture.fixtureUrl, tabId: fixture.tabId },
+      capabilities, artifact: {},
+    });
+
+    expect(result.ok).toBe(true);
+    expect(capabilities.providerOperation.status).toBe('SUPPORTED');
+    expect(capabilities.backgroundProviderInterception.status).toBe('NOT_TESTED');
+    expect(capabilities.providerDataCollector.status).toBe('NOT_TESTED');
   });
 
   it('fails physical proof with no native start and preserves native proof when BiDi cannot see the request', async () => {

@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { classifyTransportRequest, mapEdgeResponse } from '../page-translation-e2e-benchmark/metrics.mjs';
+import { compareRestoreDOMSnapshots } from './restore-dom-diagnostics.mjs';
 import { createEdgeLoopbackCertificates, edgeProxyFirefoxPrefs, importEdgeLoopbackCa, startEdgeLoopbackProxy } from './loopback-edge-proxy.mjs';
 import { blockRuntimeBridgePrerequisite, capability, classifyObservedRealm, classifyRequestAction, isolationSnapshot, notTested, requiredCapabilities, retainExecutedCapability, runtimeProbeGate } from './capabilities.mjs';
 
@@ -396,7 +397,7 @@ export function classifyProtocolFailure(error) {
 
 const providerStopCodes = new Set(['INTERCEPTION_UNSUPPORTED', 'BODY_UNSUPPORTED', 'INVALID_BODY', 'PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN', 'COMPLETED']);
 const providerDiagnosticCodes = new Set([...providerStopCodes, 'ABORTED', 'NETWORK_ERROR', 'HTTP_ERROR', 'FETCH_ERROR']);
-const operationEvents = new Set(['armed', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
+const operationEvents = new Set(['armed', 'scheduler-batch', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled', 'command-result', 'translated', 'restored', 'error']);
 const operationName = 'edge-fr-page-once';
 const operationExact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
@@ -453,7 +454,13 @@ export function validateProviderOperationReport(report, { runId, event, opSeq, e
   } else if (event === 'provider-invoked') {
     if (!operationExact(evidence, ['invocationId', 'sessionId', 'messageId', 'provider', 'itemCount', 'sourceIndexes']) || !safeId(evidence.invocationId)
         || !safeId(evidence.sessionId) || (evidence.messageId !== null && !safeId(evidence.messageId)) || evidence.provider !== 'edge'
-        || evidence.itemCount !== evidence.sourceIndexes?.length || !indexesSubset012(evidence.sourceIndexes)) throw new Error('Provider invocation evidence is invalid.');
+         || evidence.itemCount !== evidence.sourceIndexes?.length || !indexesSubset012(evidence.sourceIndexes)) throw new Error('Provider invocation evidence is invalid.');
+  } else if (event === 'scheduler-batch') {
+    if (!operationExact(evidence, ['messageId', 'sessionId', 'targetIds']) || !safeId(evidence.messageId) || !safeId(evidence.sessionId)
+        || !Array.isArray(evidence.targetIds) || !evidence.targetIds.length || evidence.targetIds.length > 12
+        || evidence.targetIds.some(id => !/^target-(?:[0-9]|1[01])$/.test(id)) || new Set(evidence.targetIds).size !== evidence.targetIds.length) {
+      throw new Error('Authenticated Scheduler batch evidence is invalid.');
+    }
   } else if (event === 'physical-start') {
     if (!operationExact(evidence, ['attemptId', 'invocationId', 'sessionId', 'messageId', 'provider', 'method', 'url', 'bodyBytes', 'bodyHash', 'sourceIndexes'])
         || !safeId(evidence.attemptId) || !safeId(evidence.invocationId) || !safeId(evidence.sessionId) || (evidence.messageId !== null && !safeId(evidence.messageId))
@@ -475,9 +482,15 @@ export function validateProviderOperationReport(report, { runId, event, opSeq, e
         || (evidence.sessionId !== null && !safeId(evidence.sessionId)) || (evidence.code !== null && !providerStopCodes.has(evidence.code))
         || (evidence.success && (!safeId(evidence.sessionId) || evidence.code !== null))) throw new Error('Production page-translate command result is invalid.');
   } else if (event === 'translated') {
-    if (!operationExact(evidence, ['sessionId', 'acceptedTargetIds', 'acceptedCount', 'duplicateAcceptances', 'staleWrites', 'domMatches', 'sessionOwned', 'quiescent'])
+    const hasMutationAccounting = Object.hasOwn(evidence, 'acceptedMutationCounts') || Object.hasOwn(evidence, 'unattributedWrites');
+    const translatedKeys = ['sessionId', 'acceptedTargetIds', 'acceptedCount', 'duplicateAcceptances', 'staleWrites', 'domMatches', 'sessionOwned', 'quiescent', ...(hasMutationAccounting ? ['acceptedMutationCounts', 'unattributedWrites'] : [])];
+    const mutationAccountingValid = !hasMutationAccounting || (operationExact(evidence.acceptedMutationCounts, ['text', 'title'])
+      && Number.isSafeInteger(evidence.acceptedMutationCounts.text) && evidence.acceptedMutationCounts.text >= 0
+      && Number.isSafeInteger(evidence.acceptedMutationCounts.title) && evidence.acceptedMutationCounts.title >= 0
+      && evidence.acceptedMutationCounts.text + evidence.acceptedMutationCounts.title === 12 && evidence.unattributedWrites === 0);
+    if (!operationExact(evidence, translatedKeys)
         || !safeId(evidence.sessionId) || !targetIds012(evidence.acceptedTargetIds) || evidence.acceptedCount !== 12 || evidence.duplicateAcceptances !== 0
-        || evidence.staleWrites !== 0 || evidence.domMatches !== true || evidence.sessionOwned !== true || evidence.quiescent !== true) throw new Error('Real translated DOM acceptance evidence is invalid.');
+        || evidence.staleWrites !== 0 || evidence.domMatches !== true || evidence.sessionOwned !== true || evidence.quiescent !== true || !mutationAccountingValid) throw new Error('Real translated DOM acceptance evidence is invalid.');
   } else if (event === 'restored') {
     if (!operationExact(evidence, ['sessionId', 'commandSuccess', 'domMatchesOriginal', 'metadataRestored', 'restoreObserved']) || !safeId(evidence.sessionId)
         || evidence.commandSuccess !== true || evidence.domMatchesOriginal !== true || evidence.metadataRestored !== true || evidence.restoreObserved !== true) throw new Error('Real page-restore evidence is invalid.');
@@ -510,7 +523,7 @@ export function validateProviderOperationSnapshot(snapshot, { runId, extensionId
   }));
   const seenEvents = new Set();
   for (const report of reports) {
-    if (seenEvents.has(report.event) && !['provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled'].includes(report.event)) throw new Error(`Provider operation duplicated ${report.event}.`);
+    if (seenEvents.has(report.event) && !['scheduler-batch', 'provider-invoked', 'physical-start', 'physical-settled', 'parser-success', 'provider-settled'].includes(report.event)) throw new Error(`Provider operation duplicated ${report.event}.`);
     seenEvents.add(report.event);
   }
   const evidence = event => reports.find(report => report.event === event)?.evidence;
@@ -628,8 +641,14 @@ export async function reconcileFinalProviderOperation({ bridge, state, contract,
         || parser?.resultsMatch !== true || command?.success !== true || translated?.domMatches !== true || restored?.restoreObserved !== true) reason ??= 'Provider operation omitted required native consumption, DOM, or restore proof.';
     const providerSettlements = snapshot.reports.filter(report => report.event === 'provider-settled').map(report => report.evidence);
     if (providerSettlements.some(item => item.outcome !== 'fulfilled')) reason ??= 'Provider settlement did not fulfill.';
-    if (['providerPhysicalRequest', 'backgroundProviderInterception', 'providerDataCollector', 'providerRequestBody', 'providerResponse', 'providerConsumption', 'domAcceptance', 'providerRestore']
-      .some(name => capabilities[name]?.status !== 'SUPPORTED')) reason ??= 'A required provider physical/interception/body/response/consumption/DOM/restore capability was not supported.';
+    const requiresBiDiProviderInterception = capabilities.loopbackTlsProxy?.status !== 'SUPPORTED';
+    const requiredProviderCapabilities = [
+      'providerPhysicalRequest', ...(requiresBiDiProviderInterception ? ['backgroundProviderInterception', 'providerDataCollector'] : []),
+      'providerRequestBody', 'providerResponse', 'providerConsumption', 'domAcceptance', 'providerRestore',
+    ];
+    if (requiredProviderCapabilities.some(name => capabilities[name]?.status !== 'SUPPORTED')) {
+      reason ??= 'A required provider physical/interception/body/response/consumption/DOM/restore capability was not supported.';
+    }
   }
   if (reportError) applyProviderOperationError(capabilities, reportError.evidence.code);
   const protocolFailure = reportError?.evidence.code === 'PROTOCOL_ERROR' || snapshot.failure?.code === 'PROTOCOL_ERROR';
@@ -760,7 +779,7 @@ export async function removeProviderNetworkControls({ bidi, collectorId, interce
 
 export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, collectorId, fixtureTexts, runId, extensionId, fixtureUrl, tabId, startupSender = null, capabilities, timeoutMs = 12000, loopbackProxy = null, providerOnly = false }) {
   if (!Array.isArray(fixtureTexts) || fixtureTexts.length !== 12 || new Set(fixtureTexts).size !== 12 || fixtureTexts.some(text => typeof text !== 'string' || !text.trim())) throw new TypeError('Provider fixture source oracle must contain twelve unique target texts.');
-  const state = { attempted: false, released: false, receiptDecision: null, stopped: false, stopCode: null, providerOnly, proxyCorrelation: null, providerInvocation: null, reports: [], cursor: 0, pendingReports: [], invocations: new Map(), attempts: new Map(), parsers: new Map(), providerSettlements: new Map(), successfulCoverage: new Map(), invocation: null, armed: null, physical: null, physicalStarts: [], requests: [], bodyProofs: [], settlements: [], request: null, bodyProof: null, physicalSettlement: null, parser: null, command: null, translated: null, restored: null, error: null, contract: { runId, extensionId, fixtureUrl, tabId } };
+  const state = { attempted: false, released: false, receiptDecision: null, stopped: false, stopCode: null, providerOnly, proxyCorrelation: null, providerInvocation: null, reports: [], cursor: 0, pendingReports: [], invocations: new Map(), schedulerBatches: new Map(), attempts: new Map(), parsers: new Map(), providerSettlements: new Map(), successfulCoverage: new Map(), invocation: null, armed: null, physical: null, physicalStarts: [], requests: [], bodyProofs: [], settlements: [], request: null, bodyProof: null, physicalSettlement: null, parser: null, command: null, translated: null, restored: null, error: null, contract: { runId, extensionId, fixtureUrl, tabId } };
   let operationDeadline = 0;
   const candidateBuffer = [];
   const seenRequestIds = new Set();
@@ -855,16 +874,24 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
   failPendingRequests = failCachedCandidates;
     const acquireCandidate = async physical => {
     if (loopbackProxy) {
-      const held = await withTimeout(loopbackProxy.pending, Math.max(1, operationDeadline - Date.now()), 'loopback TLS Edge request');
-      const request = held.request;
+      const held = loopbackProxy.waitForRequest
+        ? await loopbackProxy.waitForRequest({ match: request => new URL(request.url, 'https://edge.microsoft.com').toString() === physical.url && request.method === physical.method
+          && request.bodyBytes === physical.bodyBytes && request.bodyHash === physical.bodyHash.toLowerCase()
+          && request.sni === 'edge.microsoft.com' && request.host === 'edge.microsoft.com'
+          && JSON.stringify(request.sourceIndexes) === JSON.stringify(physical.sourceIndexes),
+        timeoutMs: Math.max(1, operationDeadline - Date.now()) })
+        : await withTimeout(loopbackProxy.pending, Math.max(1, operationDeadline - Date.now()), 'loopback TLS Edge request');
+      const request = held.request ?? held;
       const url = new URL(request.url, 'https://edge.microsoft.com').toString();
       const bodyProof = { bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: request.sourceIndexes };
       if (url !== physical.url || request.method !== physical.method || bodyProof.bodyBytes !== physical.bodyBytes
-          || bodyProof.bodyHash !== physical.bodyHash.toLowerCase() || JSON.stringify(bodyProof.sourceIndexes) !== JSON.stringify(physical.sourceIndexes)) {
+          || bodyProof.bodyHash !== physical.bodyHash.toLowerCase() || request.sni !== 'edge.microsoft.com' || request.host !== 'edge.microsoft.com'
+          || JSON.stringify(bodyProof.sourceIndexes) !== JSON.stringify(physical.sourceIndexes)) {
         held.reject(); throw Object.assign(new Error('Loopback TLS request did not match exact authenticated native request bytes and indexes.'), { code: 'INVALID_BODY' });
       }
-      state.proxyCorrelation = { ok: true, bodyBytes: bodyProof.bodyBytes, bodyHash: bodyProof.bodyHash, sourceIndexes: bodyProof.sourceIndexes, url, method: request.method };
-      return { request: { url, method: request.method, requestId: 'loopback-tls-request', isBlocked: true, bodySize: request.bodyBytes, action: 'loopback-tls-held', sourceIndexes: request.sourceIndexes, bodyHash: request.bodyHash, held }, bodyProof };
+      state.proxyCorrelation ??= [];
+      state.proxyCorrelation.push({ ok: true, requestId: request.requestId ?? null, bodyBytes: bodyProof.bodyBytes, bodyHash: bodyProof.bodyHash, sourceIndexes: bodyProof.sourceIndexes, url, method: request.method });
+      return { request: { url, method: request.method, requestId: request.requestId ?? 'loopback-tls-request', isBlocked: true, bodySize: request.bodyBytes, action: 'loopback-tls-held', sourceIndexes: request.sourceIndexes, bodyHash: request.bodyHash, held }, bodyProof };
     }
     while (Date.now() < operationDeadline) {
       const cachedIndex = candidateBuffer.findIndex(candidate => candidateMatches(candidate, physical));
@@ -978,7 +1005,7 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
     if (!candidateMatches(candidate, physical)) throw new Error('Transport candidate does not match authenticated native request bytes/hash/source indexes.');
     capabilities.providerRequestBody = capability('SUPPORTED', { bodyBytes: bodyProof.bodyBytes, bodyHash: bodyProof.bodyHash, sourceIndexes: bodyProof.sourceIndexes });
     if (loopbackProxy) {
-      const responseBody = JSON.stringify(mapEdgeResponse(fixtureTexts));
+      const responseBody = JSON.stringify(mapEdgeResponse(bodyProof.sourceIndexes.map(index => fixtureTexts[index])));
       await request.held.release(responseBody);
       request.action = 'loopback-tls-response'; request.requestResolved = true;
       capabilities.providerResponse = capability('SUPPORTED', { statusCode: 200, responseBodyBytes: Buffer.byteLength(responseBody), source: 'loopback-tls-proxy' });
@@ -1048,7 +1075,7 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
       && state.invocation?.evidence.sessionId === state.command.evidence.sessionId));
     while (!providerProofComplete() && !terminalFailure) {
       let report;
-      try { report = await wait(['provider-invoked', 'physical-start', 'parser-success', 'provider-settled', 'command-result', 'error']); }
+      try { report = await wait(['scheduler-batch', 'provider-invoked', 'physical-start', 'parser-success', 'provider-settled', 'command-result', 'error']); }
       catch (error) {
         if (!nativeStarted) markFailure('providerPhysicalRequest', `No authenticated native physical POST was observed during the production command: ${error.message}`);
         else capabilities.providerConsumption = capability('FAILED', { reason: `Native provider operation did not reach exact source coverage: ${error.message}` });
@@ -1062,11 +1089,28 @@ export async function runEdgeFrenchProviderProbe({ bridge, bidi, dispatcher, col
         if (terminalFailure === 'PROTOCOL_ERROR' && capabilities.providerOperation) capabilities.providerOperation = capability('FAILED', { reason: 'Authenticated provider operation protocol failure.' });
         markLaterNotTested(`Authenticated provider operation stopped with ${terminalFailure}.`);
         await stop(terminalFailure);
+      } else if (report.event === 'scheduler-batch') {
+        const evidence = report.evidence;
+        if (state.schedulerBatches.has(evidence.messageId)
+            || [...state.schedulerBatches.values()].some(batch => batch.targetIds.some(id => evidence.targetIds.includes(id)))) {
+          throw new Error('Scheduler batch message or target membership was duplicated.');
+        }
+        state.schedulerBatches.set(evidence.messageId, evidence);
+        const invocation = [...state.invocations.values()].find(item => item.messageId === evidence.messageId);
+        if (invocation && (invocation.sessionId !== evidence.sessionId
+            || JSON.stringify(invocation.sourceIndexes) !== JSON.stringify(evidence.targetIds.map(id => Number(id.slice(7)))))) {
+          throw new Error('Scheduler batch did not match its Background provider invocation.');
+        }
       } else if (report.event === 'provider-invoked') {
         const invocation = report.evidence;
         if (state.invocations.size >= 12 || state.invocations.has(invocation.invocationId)
             || (state.invocation && invocation.sessionId !== state.invocation.evidence.sessionId)
             || (state.command?.evidence.sessionId && invocation.sessionId !== state.command.evidence.sessionId)) throw new Error('Provider logical invocation exceeded bounds or changed the acknowledged page session.');
+        const schedulerBatch = state.schedulerBatches.get(invocation.messageId);
+        if (schedulerBatch && (schedulerBatch.sessionId !== invocation.sessionId
+            || JSON.stringify(schedulerBatch.targetIds.map(id => Number(id.slice(7)))) !== JSON.stringify(invocation.sourceIndexes))) {
+          throw new Error('Background provider invocation did not match its authenticated Scheduler batch.');
+        }
         state.invocations.set(invocation.invocationId, invocation);
         state.invocation ??= report;
       } else if (report.event === 'physical-start') {
@@ -1336,13 +1380,31 @@ async function waitForBiDi(endpoint, process, timeoutMs, secretValues = []) {
   throw new Error(`Firefox BiDi startup failed: ${lastError?.message ?? `process exited ${process.exitCode}`}`);
 }
 
-export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride, loopbackTlsProxy = false }) {
+async function snapshotFixtureDOM(bidi, context, fixtureTargets) {
+  const expected = fixtureTargets.map(target => {
+    const text = target.kind === 'text' ? target.source : '';
+    const markup = text;
+    const title = target.kind === 'title' ? target.source : null;
+    const safeField = value => ({ size: Buffer.byteLength(value), sha256: createHash('sha256').update(value).digest('hex') });
+    return {
+      id: target.id, kind: target.kind, text: safeField(text), markup: safeField(markup),
+      title: { present: title !== null, ...(title === null ? safeField('') : safeField(title)) },
+    };
+  });
+  const expression = `(()=>{const expected=${JSON.stringify(expected)};const encoder=new TextEncoder();const hash=async value=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(value)))].map(byte=>byte.toString(16).padStart(2,'0')).join('');const size=value=>encoder.encode(value).length;return Promise.all(expected.map(async item=>{const element=[...document.querySelectorAll('[data-bench-id]')].find(node=>node.dataset.benchId===item.id);const text=element?.textContent??'';const markup=element?.innerHTML??'';const titlePresent=!!element?.hasAttribute('title');const title=element?.getAttribute('title')??'';const textHash=await hash(text);const markupHash=await hash(markup);const titleHash=await hash(title);return{id:item.id,kind:item.kind,text:{size:size(text),sha256:textHash,matchesExpected:!!element&&size(text)===item.text.size&&textHash===item.text.sha256},markup:{size:size(markup),sha256:markupHash,matchesExpected:!!element&&size(markup)===item.markup.size&&markupHash===item.markup.sha256},title:{present:titlePresent,size:size(title),sha256:titleHash,matchesExpected:!!element&&titlePresent===item.title.present&&size(title)===item.title.size&&titleHash===item.title.sha256}}})).then(targets=>JSON.stringify({htmlClass:{present:document.documentElement.hasAttribute('class'),value:document.documentElement.hasAttribute('class')?document.documentElement.getAttribute('class'):null},targets}))})()`;
+  const result = await bidi.command('script.evaluate', { expression, target: { context }, awaitPromise: true });
+  const remote = result.result?.result;
+  if (remote?.type !== 'string' || typeof remote.value !== 'string') throw new Error('Restore DOM diagnostic evaluation did not return safe JSON.');
+  return JSON.parse(remote.value);
+}
+
+export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride, loopbackTlsProxy = false, pageTranslationE2E = false }) {
   const root = await mkdtemp(resolve(tmpdir(), 'translate-it-firefox-cap-'));
   const profile = resolve(root, 'profile'); const bundle = resolve(root, 'extension');
   const records = []; const errors = []; const cleanupErrors = []; const capabilities = Object.fromEntries(requiredCapabilities.map(name => [name, notTested('Blocked by an earlier capability gate.')]));
   const runId = artifact.runId ?? randomBytes(16).toString('hex'); const authToken = randomBytes(32).toString('hex'); const privateSecrets = [authToken];
   const expectedExtensionId = 'page-translation-e2e-benchmark@translate-it.test';
-  let fixture; let bridge; let bidi; let browser; let edgeProxy; let extensionId = null; let fixtureOrigin = null; let runtimeReportUrl; let requestDataCollectorId = null; let interceptId = null; let providerOperationState = null; let runtimeBridgeProof; let aborted = false; let dispatcher; let interceptReady = false; let runtimeBridgeAttempted = false; let bridgeDrainSucceeded = true;
+  let fixture; let bridge; let bidi; let browser; let edgeProxy; let extensionId = null; let fixtureOrigin = null; let runtimeReportUrl; let requestDataCollectorId = null; let interceptId = null; let providerOperationState = null; let runtimeBridgeProof; let restoreDOMBaseline = null; let aborted = false; let dispatcher; let interceptReady = false; let runtimeBridgeAttempted = false; let bridgeDrainSucceeded = true;
   const bridgeAcceptedReports = []; let bridgeContract = null;
   const abort = signal => {
     aborted = true;
@@ -1358,10 +1420,12 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     records.push({ kind: 'network-isolation', ...network });
     capabilities.isolation = network.ok ? capability('SUPPORTED', { evidence: network }) : capability('FAILED', { evidence: network, reason: 'Loopback-only namespace verification failed.' });
     if (!network.ok) throw new Error('Network isolation verification failed; Firefox was not started.');
-    if (loopbackTlsProxy) artifact.loopbackTlsProxy = { mode: 'provider-only', status: 'SETTING_UP', isolationVerified: true, deniedRequests: [] };
+    if (loopbackTlsProxy) artifact.loopbackTlsProxy = { mode: pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'SETTING_UP', isolationVerified: true, deniedRequests: [] };
     const { startFixture: defaultStartFixture, createFixture: defaultCreateFixture } = await import('../page-translation-e2e-benchmark/fixture.mjs');
-    const fixtureData = (createFixtureOverride ?? defaultCreateFixture)('small');
-    fixture = await (startFixtureOverride ?? defaultStartFixture)(fixtureData, { runtimeBridge: { runId, authToken, expectedExtensionId } });
+    const fixtureData = pageTranslationE2E
+      ? (await import('../page-translation-e2e-benchmark/fixture.mjs')).createPageTranslationFixture()
+      : (createFixtureOverride ?? defaultCreateFixture)('small');
+    fixture = await (startFixtureOverride ?? defaultStartFixture)(fixtureData, { runtimeBridge: { runId, authToken, expectedExtensionId, ...(pageTranslationE2E ? { schedulerBatchRequired: true } : {}) } });
     bridge = fixture.bridge;
     fixtureOrigin = new URL(fixture.url).origin;
     artifact.fixture = { url: fixture.url, scope: 'loopback-only small capability fixture' };
@@ -1381,7 +1445,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     try {
       await buildBenchmarkExtension({
         outputDir: bundle, mode: 'sliced', browser: 'firefox', workerEntry, contentEntry,
-        runtimeBridge: { runId, fixtureUrl: fixture.url, bindingUrl, reportUrl: runtimeReportUrl, authToken, ...(loopbackTlsProxy ? { providerOnly: true } : {}) },
+        runtimeBridge: { runId, fixtureUrl: fixture.url, bindingUrl, reportUrl: runtimeReportUrl, authToken, ...(loopbackTlsProxy && !pageTranslationE2E ? { providerOnly: true } : {}), ...(pageTranslationE2E ? { pageTranslationE2E: true } : {}) },
       });
     } catch (error) {
       capabilities.runtimeBridge = capability('FAILED', { reason: sanitizePrivate(`Authenticated runtime bridge build failed: ${error.message}`, privateSecrets) });
@@ -1395,7 +1459,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       const caFingerprint = createHash('sha256').update(await readFile(cert.caCert)).digest('hex');
       edgeProxy = await startEdgeLoopbackProxy({ tlsCert: cert.leafCert, tlsKey: cert.leafKey, fixtureTexts: fixtureData.targetTexts, responseFor: texts => mapEdgeResponse(texts) });
       await writeFile(resolve(profile, 'user.js'), edgeProxyFirefoxPrefs(edgeProxy.port), { mode: 0o600 });
-      artifact.loopbackTlsProxy = { mode: 'provider-only', status: 'READY', bindAddress: '127.0.0.1', proxyPort: edgeProxy.port, tlsPort: edgeProxy.tlsPort,
+      artifact.loopbackTlsProxy = { mode: pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'READY', bindAddress: '127.0.0.1', proxyPort: edgeProxy.port, tlsPort: edgeProxy.tlsPort,
         certificateVerification: cert.verification, caConstraints: cert.caConstraints, leafConstraints: cert.leafConstraints, caFingerprint, trust: nss.trust, nssListing: nss.listing,
         profilePrefs: 'manual HTTPS proxy; explicit localhost bypass; localhost hijacking disabled', deniedRequests: [] };
     }
@@ -1482,14 +1546,26 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     }
     capabilities.runtimeBridge = capability('SUPPORTED', { reportCount: runtimeBridgeProof.reports.length, snapshot: runtimeBridgeProof.snapshot, source: 'authenticated-runtime-bridge' });
     artifact.runtimeBridge = sanitizePrivate({ runId, tabId: runtimeBridgeProof.tabId, extensionOrigin: runtimeBridgeProof.extensionOrigin, reports: runtimeBridgeProof.reports, snapshot: runtimeBridgeProof.snapshot }, privateSecrets);
+    if (pageTranslationE2E) {
+      try { restoreDOMBaseline = await snapshotFixtureDOM(bidi, created.context, fixtureData.targets); }
+      catch { /* Keep the primary translation/restore outcome; record diagnostic unavailability without the script or page data. */ }
+    }
     providerOperationState = await runEdgeFrenchProviderProbe({
       bridge, bidi, dispatcher, collectorId: requestDataCollectorId, fixtureTexts: fixtureData.targetTexts,
       runId, extensionId: expectedExtensionId, fixtureUrl: fixture.url, tabId: runtimeBridgeProof.tabId,
-      startupSender: runtimeBridgeProof.contentReady.sender, loopbackProxy: edgeProxy, providerOnly: loopbackTlsProxy,
+      startupSender: runtimeBridgeProof.contentReady.sender, loopbackProxy: edgeProxy, providerOnly: loopbackTlsProxy && !pageTranslationE2E,
       capabilities, timeoutMs: 12000,
     });
     artifact.providerProbe = sanitizePrivate(providerProbeArtifact(providerOperationState), privateSecrets);
-    if (loopbackTlsProxy) {
+    if (pageTranslationE2E) {
+      let restoreDOMFinal = null;
+      try { restoreDOMFinal = await snapshotFixtureDOM(bidi, created.context, fixtureData.targets); }
+      catch { /* The safe diagnostic record below notes unavailable final evidence. */ }
+      artifact.restoreDOMDiagnostics = restoreDOMBaseline && restoreDOMFinal
+        ? compareRestoreDOMSnapshots(restoreDOMBaseline, restoreDOMFinal)
+        : { available: false, reason: 'DOM_DIAGNOSTIC_UNAVAILABLE', baselineCaptured: !!restoreDOMBaseline, finalCaptured: !!restoreDOMFinal };
+    }
+    if (loopbackTlsProxy && !pageTranslationE2E) {
       const invocationDiagnostic = providerOperationState?.providerInvocation;
       artifact.loopbackTlsProxy = { ...artifact.loopbackTlsProxy, status: edgeProxy.request ? 'REQUEST_COMPLETED' : 'REQUEST_MISSING',
         providerInvocation: invocationDiagnostic && ['provider-only-invoke', 'provider-invoked'].includes(invocationDiagnostic.stage)
@@ -1500,6 +1576,40 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
         request: edgeProxy.request ? { method: 'POST', url: `https://edge.microsoft.com${edgeProxy.request.url}`, bodyBytes: edgeProxy.request.bodyBytes,
           bodyHash: edgeProxy.request.bodyHash, sourceIndexes: edgeProxy.request.sourceIndexes, sni: edgeProxy.request.sni, host: edgeProxy.request.host, validation: 'accepted' } : null,
         responseStatus: providerOperationState?.physicalSettlement?.evidence?.status ?? null, deniedRequests: edgeProxy.deniedRequests ?? [] };
+      return capabilities;
+    }
+    if (pageTranslationE2E) {
+      const batchCorrelations = [...providerOperationState.invocations.values()].map(invocation => {
+        const batch = providerOperationState.schedulerBatches.get(invocation.messageId);
+        const indexes = batch?.targetIds.map(id => Number(id.slice(7)));
+        return { invocationId: invocation.invocationId, messageId: invocation.messageId, sessionId: invocation.sessionId,
+          sourceIndexes: invocation.sourceIndexes, schedulerTargetIds: batch?.targetIds ?? [],
+          matched: !!batch && batch.sessionId === invocation.sessionId && JSON.stringify(indexes) === JSON.stringify(invocation.sourceIndexes) };
+      });
+      const schedulerCorrelationOk = batchCorrelations.length === 2
+        && providerOperationState.schedulerBatches.size === 2 && batchCorrelations.every(item => item.matched)
+        && new Set(batchCorrelations.flatMap(item => item.sourceIndexes)).size === 12;
+      const proxyRequests = edgeProxy.requests ?? [];
+      const proxyRequestSetOk = proxyRequests.length === 2
+        && proxyRequests.every(request => request.method === 'POST' && request.host === 'edge.microsoft.com'
+          && Array.isArray(request.sourceIndexes) && request.sourceIndexes.length > 0)
+        && new Set(proxyRequests.flatMap(request => request.sourceIndexes)).size === 12;
+      if (!schedulerCorrelationOk || !proxyRequestSetOk) capabilities.providerConsumption = capability('FAILED', {
+        reason: 'Scheduler/provider correlation or exact two-request proxy batch coverage failed.', batches: batchCorrelations,
+      });
+      capabilities.loopbackTlsProxy = capability(proxyRequestSetOk ? 'SUPPORTED' : 'FAILED', {
+        requestCount: proxyRequests.length, sourceIndexes: [...new Set(proxyRequests.flatMap(request => request.sourceIndexes ?? []))].sort((a, b) => a - b),
+      });
+      capabilities.schedulerBatchCorrelation = capability(schedulerCorrelationOk ? 'SUPPORTED' : 'FAILED', { batchCount: batchCorrelations.length, batches: batchCorrelations });
+      artifact.loopbackTlsProxy = { ...artifact.loopbackTlsProxy, status: proxyRequestSetOk ? 'REQUESTS_COMPLETED' : 'REQUEST_SET_INVALID', requests: providerOperationState.proxyCorrelation ?? [], deniedRequests: edgeProxy.deniedRequests ?? [] };
+      artifact.pageTranslationE2E = {
+        scenario: 'start-sliced-discovery-scheduler-edge-bridge-restore',
+        targetKinds: fixtureData.targets.map(({ id, kind }) => ({ id, kind })),
+        schedulerBatches: batchCorrelations,
+        status: schedulerCorrelationOk && proxyRequestSetOk && capabilities.providerRestore?.status === 'SUPPORTED' ? 'SUPPORTED' : 'FAILED',
+        lifecycle: { started: true, translated: !!providerOperationState.translated, restored: !!providerOperationState.restored },
+        limitations: ['Stop/cancellation/replacement scenarios NOT TESTED'],
+      };
       return capabilities;
     }
     if (providerProbeRequiresImmediateTeardown(providerOperationState, capabilities)) {
@@ -1722,6 +1832,17 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     await rm(root, { recursive: true, force: true }).catch(error => cleanupErrors.push(`Temporary cleanup: ${error.message}`));
     process.off('SIGTERM', onSigterm); process.off('SIGINT', onSigint);
     capabilities.cleanup = cleanupErrors.length ? capability('FAILED', { errors: [...cleanupErrors] }) : capability('SUPPORTED', { browserExited: !browser || browser.exitCode !== null || browser.signalCode !== null, exitCode: browser?.exitCode ?? null, signalCode: browser?.signalCode ?? null, fixtureClosed: !fixture || !fixture.server.listening, tempRemoved: true });
+    if (pageTranslationE2E) {
+      const gates = ['loopbackTlsProxy', 'schedulerBatchCorrelation', 'providerPhysicalRequest', 'providerRequestBody', 'providerResponse', 'providerOperation', 'providerConsumption', 'domAcceptance', 'providerRestore', 'cleanup'];
+      const passed = gates.every(name => capabilities[name]?.status === 'SUPPORTED');
+      capabilities.pageTranslationProof = capability(passed ? 'SUPPORTED' : 'FAILED', {
+        start: runtimeBridgeProof?.reports?.some(report => report.realm === 'content' && report.phase === 'ready') === true,
+        translated: providerOperationState?.translated != null,
+        restored: providerOperationState?.restored != null,
+        gates: Object.fromEntries(gates.map(name => [name, capabilities[name]?.status ?? 'NOT_TESTED'])),
+      });
+      if (artifact.pageTranslationE2E) artifact.pageTranslationE2E.status = passed ? 'SUPPORTED' : 'FAILED';
+    }
     const safeCapabilities = sanitizePrivate(capabilities, privateSecrets);
     Object.assign(capabilities, safeCapabilities);
     artifact.capabilities = safeCapabilities; artifact.events = sanitizePrivate(records, privateSecrets); artifact.errors = sanitizePrivate(errors, privateSecrets);

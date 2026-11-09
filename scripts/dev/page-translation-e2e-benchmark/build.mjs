@@ -83,6 +83,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   try {
   const environmentProfiles = { worker: [], content: [] };
   const bridgePlugins = runtimeBridge ? createRuntimeBridgePlugins({ runtimeBridge, workerEntry, contentEntry }) : [];
+  const firefoxSchedulerBatchPlugin = runtimeBridge?.pageTranslationE2E === true ? createFirefoxSchedulerBatchPlugin() : null;
   const successfulReplyBoundaryPlugin = successfulReplyGate ? createSuccessfulReplyBoundaryPlugin() : null;
   const environmentPlugin = role => ({
     name: `benchmark-build-environment-${role}`,
@@ -119,7 +120,8 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
         return guarded;
       },
     },
-    ...bridgePlugins,
+     ...bridgePlugins,
+     ...(firefoxSchedulerBatchPlugin ? [firefoxSchedulerBatchPlugin] : []),
   ] });
 
   const workerOut = resolve(outDir, '.worker-build');
@@ -148,6 +150,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     await buildEntry('worker', { worker: runtimeBridge ? 'virtual:page-translation-probe-worker' : workerEntry ?? resolve('src/core/background/index.js') }, workerOut, false);
     await buildEntry('content', { 'content-entry': runtimeBridge ? 'virtual:page-translation-probe-content' : contentEntry ?? resolve('src/core/content-scripts/index-main.js') }, contentOut, true);
     successfulReplyBoundaryPlugin?.assertApplied();
+    firefoxSchedulerBatchPlugin?.assertApplied();
     const environment = { worker: environmentProfiles.worker[0], content: environmentProfiles.content[0] };
     const parity = validateBuildParity([{ mode, status: 'passed', environment }], [mode]);
     if (environmentProfiles.worker.length !== 1 || environmentProfiles.content.length !== 1 || !parity.ok) {
@@ -242,8 +245,10 @@ function parseDefineString(value) {
 function validBridgeConfig(config) {
   if (!config || typeof config !== 'object' || typeof config.runId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(config.runId)
       || typeof config.authToken !== 'string' || !/^[a-f\d]{64,}$/i.test(config.authToken)) return false;
-  const keys = ['runId', 'fixtureUrl', 'bindingUrl', 'reportUrl', 'authToken', ...(config.providerOnly === true ? ['providerOnly'] : [])];
+  const keys = ['runId', 'fixtureUrl', 'bindingUrl', 'reportUrl', 'authToken', ...(config.providerOnly === true ? ['providerOnly'] : []), ...(config.pageTranslationE2E === true ? ['pageTranslationE2E'] : [])];
   if (config.providerOnly !== undefined && typeof config.providerOnly !== 'boolean') return false;
+  if (config.pageTranslationE2E !== undefined && typeof config.pageTranslationE2E !== 'boolean') return false;
+  if (config.providerOnly === true && config.pageTranslationE2E === true) return false;
   const actualKeys = Object.keys(config);
   if (actualKeys.length !== keys.length || keys.some(key => !Object.hasOwn(config, key)) || actualKeys.some(key => !keys.includes(key))) return false;
   if (config.runId === config.authToken || JSON.stringify({ runId: config.runId, fixtureUrl: config.fixtureUrl }).includes(config.authToken)) return false;
@@ -267,7 +272,7 @@ function createRuntimeBridgePlugins({ runtimeBridge, workerEntry, contentEntry }
   const workerVirtual = '\0virtual:page-translation-probe-worker';
   const contentVirtual = '\0virtual:page-translation-probe-content';
   const workerCode = `import { installBackgroundProbe } from ${JSON.stringify(backgroundRuntime)};\nawait installBackgroundProbe(${JSON.stringify(runtimeBridge)}, () => import(${JSON.stringify(resolve(workerEntry))}));\n`;
-  const contentCode = `import { installContentProbe } from ${JSON.stringify(contentRuntime)};\nawait installContentProbe(${JSON.stringify({ runId: runtimeBridge.runId, fixtureUrl: runtimeBridge.fixtureUrl, providerOnly: runtimeBridge.providerOnly === true })}, () => import(${JSON.stringify(resolve(contentEntry))}));\n`;
+  const contentCode = `import { installContentProbe } from ${JSON.stringify(contentRuntime)};\nawait installContentProbe(${JSON.stringify({ runId: runtimeBridge.runId, fixtureUrl: runtimeBridge.fixtureUrl, providerOnly: runtimeBridge.providerOnly === true, pageTranslationE2E: runtimeBridge.pageTranslationE2E === true })}, () => import(${JSON.stringify(resolve(contentEntry))}));\n`;
   return [{
     name: 'firefox-runtime-bridge',
     enforce: 'pre',
@@ -289,6 +294,34 @@ function createRuntimeBridgePlugins({ runtimeBridge, workerEntry, contentEntry }
       return null;
     },
   }];
+}
+
+function createFirefoxSchedulerBatchPlugin() {
+  const schedulerSuffix = '/src/features/page-translation/PageTranslationScheduler.js';
+  const importLine = "import { sendRegularMessage, safeSendMessage } from '@/shared/messaging/core/UnifiedMessaging.js';";
+  const callLine = "const result = await safeSendMessage(batchMessage, 'page-translation-batch');";
+  let transformed = false;
+  return {
+    name: 'firefox-page-translation-scheduler-batch-evidence',
+    enforce: 'pre',
+    transform(source, id) {
+      if (!id.split('?')[0].replaceAll('\\', '/').endsWith(schedulerSuffix)) return null;
+      if (transformed || source.split(importLine).length !== 2 || source.split(callLine).length !== 2) {
+        throw new Error(`Firefox Scheduler batch evidence boundary drifted in ${id}`);
+      }
+      transformed = true;
+      const imported = `${importLine.replace('safeSendMessage }', 'safeSendMessage as benchmarkProductionSafeSendMessage }')}\nconst safeSendMessage = async (...args) => {
+  const captured = globalThis.__pageTranslationBenchmark?.captureSchedulerBatch?.(args[0]);
+  if (captured && typeof captured.then === 'function') await captured;
+  else if (captured !== true) throw new Error('Firefox Scheduler batch evidence was not authenticated.');
+  return benchmarkProductionSafeSendMessage(...args);
+};`;
+      return { code: source.replace(importLine, imported), map: null };
+    },
+    assertApplied() {
+      if (!transformed) throw new Error('Firefox page-translation Scheduler batch evidence transform was not applied.');
+    },
+  };
 }
 
 function transformProviderContentEntry(source, id) {
