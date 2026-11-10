@@ -444,7 +444,9 @@ export class ContentMessageHandler extends ResourceTracker {
       
       if (!isAllowed) {
         this.logger.debug('Select Element mode activation blocked by page exclusion or settings');
-        return { success: false, error: 'Feature blocked on this page' };
+        // Report the real manager activity: an already-active session (e.g. exclusion
+        // changed mid-session) must NOT read as a definitive negative confirmation.
+        return { success: false, activated: getSelectElementActiveState(this.selectElementManager), error: 'Feature blocked on this page' };
       }
 
       // 2. If SelectElementManager is not available, try to load the feature on-demand
@@ -459,11 +461,11 @@ export class ContentMessageHandler extends ResourceTracker {
           } else {
             // This happens if the feature is blocked by exclusion (returns null)
             this.logger.debug('Select Element mode activation blocked by page exclusion or settings');
-            return { success: false, error: 'Feature blocked on this page' };
+            return { success: false, activated: false, error: 'Feature blocked on this page' };
           }
         } catch (loadError) {
           this.logger.info('Failed to load SelectElement feature on-demand:', loadError);
-          return { success: false, error: 'Feature failed to load' };
+          return { success: false, activated: false, error: 'Feature failed to load' };
         }
       }
 

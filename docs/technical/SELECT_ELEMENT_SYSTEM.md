@@ -120,6 +120,15 @@ Restricted pages preserve restricted-page metadata and do not attempt content
 activation. Iframe activation uses `IFRAME_ACTIVATE_SELECT_ELEMENT` and the
 Select Element branch of `IFRAME_COORDINATE_OPERATION`.
 
+An activation refusal from a frame that reports `activated: false` (no active
+Select Element manager in that frame, for example a feature-load failure) is an
+explicit negative confirmation and discharges that frame's provisional cleanup
+ownership in the background. A refusal that reports `activated: true` (an
+already-active manager, for example exclusion settings changed mid-session) is
+not a negative confirmation and keeps the frame's cleanup ownership. Ambiguous
+or undelivered activation outcomes also keep the frame's cleanup ownership until
+it can be resolved.
+
 Unexpected activation failures use the shared
 `getSelectElementActivationErrorMessage()` contract and
 `ErrorTypes.SELECT_ELEMENT`. Original exceptions remain diagnostic only; raw
