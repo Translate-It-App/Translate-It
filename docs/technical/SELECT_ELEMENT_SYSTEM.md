@@ -120,6 +120,78 @@ Restricted pages preserve restricted-page metadata and do not attempt content
 activation. Iframe activation uses `IFRAME_ACTIVATE_SELECT_ELEMENT` and the
 Select Element branch of `IFRAME_COORDINATE_OPERATION`.
 
+An activation refusal from a frame that reports `activated: false` (no Select
+Element manager in that frame, for example a feature-load failure) is an
+explicit negative confirmation and discharges that frame's provisional cleanup
+ownership in the background. A refusal that reports `activated: true` is not a
+negative confirmation and keeps the frame's cleanup ownership until cleanup is
+acknowledged. That applies to every frame that still holds a Select Element
+manager, including an exclusion refusal: the manager clears its active flag
+before its cleanup work completes, so an inactive manager is not proof that
+cleanup finished and a refusal must never read as definitive inactivity while
+the manager may still own cleanup. Ambiguous or undelivered activation outcomes
+also keep the frame's cleanup ownership until it can be resolved.
+
+Subframes that cannot load the full ContentMessageHandler (for example excluded
+frames) answer Select Element activation, deactivation, and frame-state requests
+with a minimal in-frame responder installed on the frame's existing message
+handler. Only a frame with NO Select Element manager is provably free of
+Select Element state: it gives a definitive negative confirmation and a no-op
+cleanup ack, discharging its provisional cleanup ownership. A frame that still
+has a manager answers conservatively — it never reports `activated: false` and
+never confirms cleanup — because the manager clears its active flag before its
+cleanup work completes, so its presence alone means Select Element state may
+still exist and the frame keeps its cleanup ownership. The fallback never
+overwrites a registration owned by the real ContentMessageHandler.
+
+Activation dispatch targets only structurally eligible frames. A frame that the
+extension never injects the Select Element content script into — a structurally
+non-injectable frame such as `about:blank`, `about:srcdoc` or a browser
+internal URL — can never hold Select Element state and can never acknowledge
+cleanup, so the background filters such frames out before dispatch and before
+any provisional cleanup ownership is registered for them. Dispatching to them
+would leave ownership that no frame can ever release and would block every
+later activation with `Select Element previous session cleanup pending`.
+
+Three outcomes stay distinct for dispatched frames:
+
+- **Proven no receiver** — the frame reports that no receiver exists, or
+  refuses with `activated: false`. No Select Element state can exist there, so
+  the frame's provisional cleanup ownership is discharged.
+- **Ambiguous or unanswered** — the request to an eligible frame was delivered
+  without a usable answer. The frame may hold Select Element state, so it
+  keeps its provisional cleanup ownership until the ownership can be resolved
+  (for example by document identity or by the frame disappearing).
+- **Negative or state-bearing response** — an explicit `activated: true` refusal
+  keeps the ownership for the same reason.
+
+The top frame stays a dispatch target even when frame enumeration is
+unavailable, and document identity, epoch, generation and activation-attempt
+ownership semantics are unchanged by this filtering.
+
+Cleanup is only acknowledged when it is confirmed. The manager clears its
+active flag before its cleanup work completes, so an inactive manager is not
+proof that cleanup finished. A cleanup that fails is never turned into a
+successful acknowledgment by a later deactivation: the manager retries the
+cleanup and confirms it only once the cleanup actually completes. Until then
+the frame keeps its provisional cleanup ownership and the background's cleanup
+barrier stays up.
+
+Frame state reports cleanup ownership separately from UI activity. `active`
+keeps reporting the real UI activity, and `cleanupUnconfirmed` marks a frame
+that still owns an unconfirmed cleanup. Background frame discovery treats such
+a frame as requiring reconciliation instead of an inactive frame that can be
+skipped, so a background that lost its own ownership — for example after a
+service worker restart — still cleans the frame up instead of reporting it as
+inactive. Frame-state queries stay read-only and never mutate lifecycle state.
+
+Activation cannot bypass an outstanding cleanup. While a cleanup is
+unconfirmed, an activation resolves that cleanup first and only proceeds once
+it is confirmed. When it cannot be confirmed, the activation is refused and
+the refusal is not a negative confirmation: the frame still owns cleanup work,
+so the background keeps its provisional cleanup ownership instead of
+discharging it.
+
 Unexpected activation failures use the shared
 `getSelectElementActivationErrorMessage()` contract and
 `ErrorTypes.SELECT_ELEMENT`. Original exceptions remain diagnostic only; raw

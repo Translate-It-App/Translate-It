@@ -293,7 +293,14 @@ async function discoverAndCleanupRetainedFrames(tabId) {
       kind = FrameStateKind.UNKNOWN;
       reason = 'transient';
     }
-    if (kind === 'ACTIVE' || (typeof FrameStateKind !== 'undefined' && kind === FrameStateKind.ACTIVE)) {
+    if (
+      kind === 'ACTIVE'
+      || (typeof FrameStateKind !== 'undefined' && kind === FrameStateKind.ACTIVE)
+      // A frame that owns an unconfirmed cleanup must be reconciled, not
+      // skipped: its cleanup has to be retried and confirmed before the
+      // background can report an inactive frame.
+      || (typeof FrameStateKind !== 'undefined' && kind === FrameStateKind.CLEANUP_PENDING)
+    ) {
       activeFrames.push({ frameId, documentId, state });
     } else if (kind === FrameStateKind.UNKNOWN) {
       if (reason === 'no-receiver') {

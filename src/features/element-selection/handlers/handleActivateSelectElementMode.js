@@ -22,6 +22,7 @@ import {
   isActivationAttemptCurrent,
   isDeactivationPending,
   isRetainedSessionRecoveryCurrent,
+  isStructurallyNonInjectableFrame,
   recordActivationAttemptFrames,
   retainCompatibilityFrames,
   registerParticipant,
@@ -244,9 +245,14 @@ export async function handleActivateSelectElementMode(message, sender, internalO
         : [{ frameId: 0 }];
       const frameDetails = new Map();
       for (const f of Array.isArray(rawFrames) ? rawFrames : []) {
-        if (Number.isInteger(f?.frameId) && f.frameId >= 0) {
-          frameDetails.set(f.frameId, f.documentId && typeof f.documentId === 'string' && f.documentId.trim() ? f.documentId : null);
-        }
+        if (!Number.isInteger(f?.frameId) || f.frameId < 0) continue;
+        // A structurally non-injectable frame (for example about:blank) can
+        // never host the Select Element content script, so it can never hold
+        // Select Element state and can never acknowledge cleanup. Dispatching
+        // to it would create permanent provisional cleanup debt and block the
+        // next activation. Filter before dispatch and ownership registration.
+        if (isStructurallyNonInjectableFrame(f)) continue;
+        frameDetails.set(f.frameId, f.documentId && typeof f.documentId === 'string' && f.documentId.trim() ? f.documentId : null);
       }
       if (!frameDetails.has(0)) frameDetails.set(0, null);
       const frameIds = [...frameDetails.keys()];

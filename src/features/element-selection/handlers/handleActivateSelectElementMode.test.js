@@ -31,6 +31,7 @@ vi.mock('./selectElementStateManager.js', () => ({
   isActivationAttemptCurrent: vi.fn(() => true),
   isDeactivationPending: vi.fn(() => false),
   isRetainedSessionRecoveryCurrent: vi.fn(() => true),
+  isStructurallyNonInjectableFrame: vi.fn(() => false),
   recordActivationAttemptFrames: vi.fn(),
   retainCompatibilityFrames: vi.fn(),
   registerParticipant: vi.fn(() => true),
@@ -98,6 +99,7 @@ import {
   isActivationAttemptCurrent,
   isDeactivationPending,
   isRetainedSessionRecoveryCurrent,
+  isStructurallyNonInjectableFrame,
   recordActivationAttemptFrames,
   retainCompatibilityFrames,
   registerParticipant,
@@ -120,6 +122,7 @@ describe('handleActivateSelectElementMode', () => {
     isActivationAttemptCurrent.mockReturnValue(true);
     isDeactivationPending.mockReturnValue(false);
     isRetainedSessionRecoveryCurrent.mockReturnValue(true);
+    isStructurallyNonInjectableFrame.mockReturnValue(false);
     compensateInvalidatedActivationAttempts.mockResolvedValue([]);
     recordActivationAttemptFrames.mockReturnValue(undefined);
     retainCompatibilityFrames.mockReturnValue(undefined);

@@ -38,6 +38,27 @@ function getSelectElementActiveState(manager) {
   return manager?.isActive === true;
 }
 
+/**
+ * Whether the frame still owns an unconfirmed cleanup. This is cleanup
+ * ownership, not UI activity: the manager clears its active flag before its
+ * cleanup completes, so a frame can be inactive and still own cleanup work.
+ */
+function getSelectElementCleanupUnconfirmed(manager) {
+  if (typeof manager?.isSelectElementCleanupUnconfirmed === 'function') {
+    return manager.isSelectElementCleanupUnconfirmed() === true;
+  }
+  return false;
+}
+
+/**
+ * The activity signal of an activation refusal. A frame that still owns an
+ * unconfirmed cleanup must not read as definitively inactive: the background
+ * would then discharge its provisional cleanup ownership.
+ */
+function getSelectElementRefusalState(manager) {
+  return getSelectElementActiveState(manager) || getSelectElementCleanupUnconfirmed(manager);
+}
+
 export class ContentMessageHandler extends ResourceTracker {
   constructor() {
     super('content-message-handler')
@@ -444,7 +465,13 @@ export class ContentMessageHandler extends ResourceTracker {
       
       if (!isAllowed) {
         this.logger.debug('Select Element mode activation blocked by page exclusion or settings');
-        return { success: false, error: 'Feature blocked on this page' };
+        // A refusal must not read as a definitive negative confirmation while a
+        // manager may still own cleanup: SelectElementManager clears isActive
+        // BEFORE its cleanup work completes, so isActive === false is not proof
+        // that cleanup finished. Without a manager nothing can hold Select
+        // Element state; with one, cleanup may still be pending, so the frame
+        // keeps its background cleanup ownership until cleanup is acknowledged.
+        return { success: false, activated: !!this.selectElementManager, error: 'Feature blocked on this page' };
       }
 
       // 2. If SelectElementManager is not available, try to load the feature on-demand
@@ -459,11 +486,11 @@ export class ContentMessageHandler extends ResourceTracker {
           } else {
             // This happens if the feature is blocked by exclusion (returns null)
             this.logger.debug('Select Element mode activation blocked by page exclusion or settings');
-            return { success: false, error: 'Feature blocked on this page' };
+            return { success: false, activated: false, error: 'Feature blocked on this page' };
           }
         } catch (loadError) {
           this.logger.info('Failed to load SelectElement feature on-demand:', loadError);
-          return { success: false, error: 'Feature failed to load' };
+          return { success: false, activated: false, error: 'Feature failed to load' };
         }
       }
 
@@ -473,7 +500,7 @@ export class ContentMessageHandler extends ResourceTracker {
         if (!isSelectElementEpoch(requestedEpoch) && this.acceptedSelectElementEpoch !== null) {
           return {
             success: false,
-            activated: getSelectElementActiveState(this.selectElementManager),
+            activated: getSelectElementRefusalState(this.selectElementManager),
             staleEpoch: true,
           };
         }
@@ -481,7 +508,7 @@ export class ContentMessageHandler extends ResourceTracker {
         if (!epochAdmission.accepted) {
           return {
             success: false,
-            activated: getSelectElementActiveState(this.selectElementManager),
+            activated: getSelectElementRefusalState(this.selectElementManager),
             staleEpoch: true,
           };
         }
@@ -495,7 +522,7 @@ export class ContentMessageHandler extends ResourceTracker {
         ) {
           return {
             success: false,
-            activated: getSelectElementActiveState(this.selectElementManager),
+            activated: getSelectElementRefusalState(this.selectElementManager),
             staleGeneration: true,
           };
         }
@@ -506,7 +533,7 @@ export class ContentMessageHandler extends ResourceTracker {
         ) {
           return {
             success: false,
-            activated: getSelectElementActiveState(this.selectElementManager),
+            activated: getSelectElementRefusalState(this.selectElementManager),
             staleGeneration: true,
           };
         }
@@ -521,6 +548,10 @@ export class ContentMessageHandler extends ResourceTracker {
         this.logger.info("SelectElementManager activation process completed");
 
         const activated = result?.isActive === true || result === true;
+        // An activation refused because a previous cleanup is unconfirmed is
+        // not a definitive negative confirmation: the frame still owns cleanup
+        // work, so the background must keep its provisional cleanup ownership.
+        const ownsOutstandingCleanup = result?.cleanupUnconfirmed === true;
         if (
           activated
           && isSelectElementGeneration(requestedGeneration)
@@ -535,7 +566,7 @@ export class ContentMessageHandler extends ResourceTracker {
         // Return success result
         const response = {
           success: activated,
-          activated,
+          activated: activated || ownsOutstandingCleanup,
           managerId: result?.instanceId,
         };
         if (
@@ -565,7 +596,7 @@ export class ContentMessageHandler extends ResourceTracker {
       return { 
         success: false, 
         error: errorInfo.message, 
-        activated: false,
+        activated: getSelectElementRefusalState(this.selectElementManager),
         errorType: errorInfo.type
       };
     }
@@ -695,6 +726,9 @@ export class ContentMessageHandler extends ResourceTracker {
       activationEpoch: this.acceptedSelectElementEpoch,
       activationGeneration: this.acceptedSelectElementGeneration,
       hasManager: !!this.selectElementManager,
+      // Cleanup ownership is reported separately from UI activity: an inactive
+      // frame can still own an unconfirmed cleanup.
+      cleanupUnconfirmed: getSelectElementCleanupUnconfirmed(this.selectElementManager),
     };
   }
 
