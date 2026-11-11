@@ -13,13 +13,35 @@ class MessageHandler {
     this.pendingResponses = new Map();
     this._pendingRegistrations = [];
     this._registrationTimeout = null;
+    // Actions whose current handler is a fallback. A fallback is expected to
+    // be replaced by the authoritative handler for the same action, so that
+    // replacement is not a duplicate registration.
+    this._fallbackActions = new Set();
   }
 
-  registerHandler(action, handler) {
+  /**
+   * Register a handler for an action.
+   * @param {string} action - Action name
+   * @param {Function} handler - Handler function
+   * @param {{ fallback?: boolean }} [options] - `fallback: true` marks this
+   *   registration as a fallback that the authoritative handler for the same
+   *   action replaces without the duplicate-registration warning.
+   */
+  registerHandler(action, handler, { fallback = false } = {}) {
     if (this.handlers.has(action)) {
-      logger.warn(`Handler for action '${action}' is already registered. Overwriting.`);
+      if (this._fallbackActions.has(action)) {
+        logger.debug(`Handler for action '${action}' replaced by the authoritative handler.`);
+      } else {
+        logger.warn(`Handler for action '${action}' is already registered. Overwriting.`);
+      }
     }
     this.handlers.set(action, handler);
+
+    if (fallback) {
+      this._fallbackActions.add(action);
+    } else {
+      this._fallbackActions.delete(action);
+    }
 
     // Collect registrations for batched logging
     this._pendingRegistrations.push(action);
@@ -40,6 +62,7 @@ class MessageHandler {
   }
 
   unregisterHandler(action) {
+    this._fallbackActions.delete(action);
     if (this.handlers.has(action)) {
       this.handlers.delete(action);
       logger.debug(`Handler for action '${action}' unregistered.`);

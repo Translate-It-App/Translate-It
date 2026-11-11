@@ -65,7 +65,9 @@ export function createSelectElementFallbackResponders() {
  * Install the fallback responders on the frame's existing message handler.
  * Never overwrites a handler owned by the real ContentMessageHandler: an
  * action that already has an owner is skipped, so the sanctioned hand-off to
- * the real handler stays intact. Returns the installed action map.
+ * the real handler stays intact. The fallback is registered as replaceable, so
+ * the real handler taking ownership is not reported as a duplicate
+ * registration. Returns the installed action map.
  */
 export function installSelectElementFallbackHandlers(messageHandler) {
   if (!messageHandler || typeof messageHandler.registerHandler !== 'function') {
@@ -84,7 +86,7 @@ export function installSelectElementFallbackHandlers(messageHandler) {
     if (typeof messageHandler.getHandlerForMessage === 'function' && messageHandler.getHandlerForMessage(action)) {
       continue;
     }
-    messageHandler.registerHandler(action, responder);
+    messageHandler.registerHandler(action, responder, { fallback: true });
     installed.set(action, responder);
   }
   return installed;
