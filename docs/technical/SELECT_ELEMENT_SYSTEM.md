@@ -141,6 +141,31 @@ cleanup work completes, so its presence alone means Select Element state may
 still exist and the frame keeps its cleanup ownership. The fallback never
 overwrites a registration owned by the real ContentMessageHandler.
 
+Activation dispatch targets only structurally eligible frames. A frame that the
+extension never injects the Select Element content script into — a structurally
+non-injectable frame such as `about:blank`, `about:srcdoc` or a browser
+internal URL — can never hold Select Element state and can never acknowledge
+cleanup, so the background filters such frames out before dispatch and before
+any provisional cleanup ownership is registered for them. Dispatching to them
+would leave ownership that no frame can ever release and would block every
+later activation with `Select Element previous session cleanup pending`.
+
+Three outcomes stay distinct for dispatched frames:
+
+- **Proven no receiver** — the frame reports that no receiver exists, or
+  refuses with `activated: false`. No Select Element state can exist there, so
+  the frame's provisional cleanup ownership is discharged.
+- **Ambiguous or unanswered** — the request to an eligible frame was delivered
+  without a usable answer. The frame may hold Select Element state, so it
+  keeps its provisional cleanup ownership until the ownership can be resolved
+  (for example by document identity or by the frame disappearing).
+- **Negative or state-bearing response** — an explicit `activated: true` refusal
+  keeps the ownership for the same reason.
+
+The top frame stays a dispatch target even when frame enumeration is
+unavailable, and document identity, epoch, generation and activation-attempt
+ownership semantics are unchanged by this filtering.
+
 Unexpected activation failures use the shared
 `getSelectElementActivationErrorMessage()` contract and
 `ErrorTypes.SELECT_ELEMENT`. Original exceptions remain diagnostic only; raw
