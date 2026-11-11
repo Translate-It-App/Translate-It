@@ -129,6 +129,18 @@ not a negative confirmation and keeps the frame's cleanup ownership. Ambiguous
 or undelivered activation outcomes also keep the frame's cleanup ownership until
 it can be resolved.
 
+Subframes that cannot load the full ContentMessageHandler (for example excluded
+frames) answer Select Element activation, deactivation, and frame-state requests
+with a minimal in-frame responder installed on the frame's existing message
+handler. Only a frame with NO Select Element manager is provably free of
+Select Element state: it gives a definitive negative confirmation and a no-op
+cleanup ack, discharging its provisional cleanup ownership. A frame that still
+has a manager answers conservatively — it never reports `activated: false` and
+never confirms cleanup — because the manager clears its active flag before its
+cleanup work completes, so its presence alone means Select Element state may
+still exist and the frame keeps its cleanup ownership. The fallback never
+overwrites a registration owned by the real ContentMessageHandler.
+
 Unexpected activation failures use the shared
 `getSelectElementActivationErrorMessage()` contract and
 `ErrorTypes.SELECT_ELEMENT`. Original exceptions remain diagnostic only; raw

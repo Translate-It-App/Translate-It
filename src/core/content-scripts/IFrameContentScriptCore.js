@@ -5,6 +5,92 @@ import { BaseContentScriptCore } from './BaseContentScriptCore.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 
 /**
+ * State source for Select Element in a frame that cannot load the full
+ * ContentMessageHandler. window.selectElementManagerInstance is set by
+ * SelectElementManager's constructor. `active` mirrors the manager's real
+ * isActive flag, but is NOT proof that cleanup finished: the manager clears
+ * isActive BEFORE its cleanup work completes, so a manager's presence alone
+ * means Select Element state may still exist in the frame.
+ */
+function getIframeSelectElementState() {
+  const manager = typeof window !== 'undefined' ? window.selectElementManagerInstance : null;
+  const active = typeof manager?.isSelectElementActive === 'function'
+    ? manager.isSelectElementActive() === true
+    : manager?.isActive === true;
+  return { active, hasManager: !!manager };
+}
+
+/**
+ * Minimal Select Element responders for frames that cannot load the full
+ * ContentMessageHandler (e.g. excluded frames). Truthful and fail-closed:
+ * only a frame with NO Select Element manager is provably free of Select
+ * Element state and answers with a definitive negative confirmation (and a
+ * no-op cleanup ack), discharging Background provisional cleanup ownership.
+ * A frame that still has a manager keeps that ownership: the manager clears
+ * its active flag before cleanup completes, so it never confirms cleanup.
+ */
+export function createSelectElementFallbackResponders() {
+  return {
+    handleActivateSelectElementMode: async () => {
+      const { hasManager } = getIframeSelectElementState();
+      if (hasManager) {
+        return { success: false, activated: true, error: 'Select Element state may still exist in this frame' };
+      }
+      return { success: false, activated: false, error: 'Select Element feature not available in this frame' };
+    },
+
+    handleDeactivateSelectElementMode: async () => {
+      const { hasManager } = getIframeSelectElementState();
+      if (hasManager) {
+        return { success: false, cleanupCompleted: false, activated: true, error: 'Select Element state may still exist in this frame' };
+      }
+      return { success: true, cleanupCompleted: true, activated: false };
+    },
+
+    handleGetSelectElementFrameState: async () => {
+      const { hasManager } = getIframeSelectElementState();
+      // Read-only: the fallback adopts no epoch and no generation. A frame
+      // with a manager is never reported definitively inactive.
+      return {
+        active: hasManager,
+        activationEpoch: null,
+        activationGeneration: null,
+        hasManager,
+      };
+    },
+  };
+}
+
+/**
+ * Install the fallback responders on the frame's existing message handler.
+ * Never overwrites a handler owned by the real ContentMessageHandler: an
+ * action that already has an owner is skipped, so the sanctioned hand-off to
+ * the real handler stays intact. Returns the installed action map.
+ */
+export function installSelectElementFallbackHandlers(messageHandler) {
+  if (!messageHandler || typeof messageHandler.registerHandler !== 'function') {
+    return new Map();
+  }
+
+  const responders = createSelectElementFallbackResponders();
+  const installed = new Map();
+  const actions = [
+    [MessageActions.ACTIVATE_SELECT_ELEMENT_MODE, responders.handleActivateSelectElementMode],
+    [MessageActions.DEACTIVATE_SELECT_ELEMENT_MODE, responders.handleDeactivateSelectElementMode],
+    [MessageActions.GET_SELECT_ELEMENT_FRAME_STATE, responders.handleGetSelectElementFrameState],
+  ];
+
+  for (const [action, responder] of actions) {
+    if (typeof messageHandler.getHandlerForMessage === 'function' && messageHandler.getHandlerForMessage(action)) {
+      continue;
+    }
+    messageHandler.registerHandler(action, responder);
+    installed.set(action, responder);
+  }
+  return installed;
+}
+
+/**
  * IFrameContentScriptCore - Specialized lite version for subframes.
  */
 export function IFrameContentScriptCore() {
@@ -12,6 +98,10 @@ export function IFrameContentScriptCore() {
 
   core.registerCoreHandlers = function() {
     if (!this.messageHandler) return;
+
+    // No frame is ever silent: excluded frames without the full content
+    // handler still answer Select Element activation/cleanup probes.
+    installSelectElementFallbackHandlers(this.messageHandler);
 
     this.messageHandler.registerHandler(MessageActions.SPA_NAVIGATION, async (message) => {
       const { FeatureManager } = await import('@/core/managers/content/FeatureManager.js');
