@@ -27,11 +27,14 @@ export const replacementEventSchemas = Object.freeze({
   'stop-B': ['sessionId', 'success', 'resultSessionId', 'isAutoTranslating', 'bridgeActive', 'schedulerActive', 'discoveryActive', 'observerRelease'],
   cleanup: ['activeOperations', 'pendingRequests', 'cleanupCancelledAttemptIds'],
   'final-dom': ['sessionId', 'targets', 'postInvalidationAWrites'],
+  'stale-reply-held': ['sessionId', 'messageId', 'targetIds', 'replyItemCount', 'replyHash'],
+  'stale-reply-released': ['sessionId', 'messageId'],
+  'stale-batch-rejected': ['sessionId', 'messageId', 'targetIds', 'outcome'],
   error: ['code'],
 });
 
 export const replacementProtocol = Object.freeze({ operation: OPERATION, version: VERSION, reportPath: REPORT_PATH,
-  controlPaths: Object.freeze({ navigateToB: `${CONTROL_PREFIX}navigate-to-b`, captureFinal: `${CONTROL_PREFIX}capture-final` }),
+  controlPaths: Object.freeze({ navigateToB: `${CONTROL_PREFIX}navigate-to-b`, captureFinal: `${CONTROL_PREFIX}capture-final`, releaseStale: `${CONTROL_PREFIX}release-stale` }),
   events: replacementEventSchemas, nativeCodes: replacementNativeCodes, errorCodes: replacementErrorCodes,
   cancellationReasons: replacementCancellationReasons,
   contentEventAction: replacementContentEventAction, contentStatusAction: replacementContentStatusAction,

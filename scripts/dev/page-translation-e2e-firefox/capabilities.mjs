@@ -25,9 +25,22 @@ export const replacementRequiredCapabilities = Object.freeze([
   'physicalSettlement', 'rootSettlement', 'replacementSessionOwnership', 'replacementDomOwnership', 'cleanup',
 ]);
 
-export function assertFirefoxProbeModeFlags({ loopbackTlsProxy = false, pageTranslationE2E = false, pageTranslationStopE2E = false, pageTranslationReplacementE2E = false, phase1E2E = pageTranslationE2E } = {}) {
+// Phase 2C Stale-Success proof: the same replacement A→B lane without any
+// controller abort — the second A batch is a genuine released Provider success
+// whose reply the harness holds across the navigation, and production's
+// Scheduler must reject it. heldRequestAbort is therefore absent here.
+export const staleSuccessRequiredCapabilities = Object.freeze([
+  'isolation', 'fixture', 'bidiSession', 'protocol', 'interceptionSetup', 'extensionInstall', 'runtimeBridge',
+  'backgroundReadiness', 'contentReadiness', 'discoveryFlags', 'loopbackTlsProxy', 'providerPhysicalRequest',
+  'providerRequestBody', 'providerResponse', 'schedulerBatchCorrelation',
+  'physicalSettlement', 'rootSettlement', 'replacementSessionOwnership', 'replacementDomOwnership',
+  'staleSuccessfulReply', 'staleReplyHeld', 'staleSchedulerRejection', 'cleanup',
+]);
+
+export function assertFirefoxProbeModeFlags({ loopbackTlsProxy = false, pageTranslationE2E = false, pageTranslationStopE2E = false, pageTranslationReplacementE2E = false, pageTranslationStaleSuccessE2E = false, phase1E2E = pageTranslationE2E } = {}) {
   if (typeof loopbackTlsProxy !== 'boolean' || typeof pageTranslationE2E !== 'boolean'
       || typeof pageTranslationStopE2E !== 'boolean' || typeof pageTranslationReplacementE2E !== 'boolean'
+      || typeof pageTranslationStaleSuccessE2E !== 'boolean'
       || typeof phase1E2E !== 'boolean') {
     throw new TypeError('Firefox probe mode flags must be booleans.');
   }
@@ -36,6 +49,12 @@ export function assertFirefoxProbeModeFlags({ loopbackTlsProxy = false, pageTran
   if (phase1E2E && pageTranslationStopE2E) throw new Error('Choose either Phase 1 page E2E or Phase 2A Stop Auto mode.');
   if (pageTranslationReplacementE2E && (pageTranslationE2E || pageTranslationStopE2E)) {
     throw new Error('Choose exactly one of page E2E, Stop Auto, or Page Replacement mode.');
+  }
+  if (pageTranslationStaleSuccessE2E && (pageTranslationE2E || pageTranslationStopE2E || pageTranslationReplacementE2E)) {
+    throw new Error('Choose exactly one of page E2E, Stop Auto, Page Replacement, or Stale-Success mode.');
+  }
+  if (pageTranslationStaleSuccessE2E && !loopbackTlsProxy) {
+    throw new Error('FIREFOX_E2E_PAGE_TRANSLATION_STALE_SUCCESS requires FIREFOX_E2E_LOOPBACK_TLS_PROXY=1.');
   }
   if (pageTranslationReplacementE2E && !loopbackTlsProxy) {
     throw new Error('FIREFOX_E2E_PAGE_TRANSLATION_REPLACEMENT requires FIREFOX_E2E_LOOPBACK_TLS_PROXY=1.');

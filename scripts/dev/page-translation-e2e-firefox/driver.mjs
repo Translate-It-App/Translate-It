@@ -11,6 +11,7 @@ import { PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES } from './runtime-constants.mjs
 import { compareRestoreDOMSnapshots } from './restore-dom-diagnostics.mjs';
 import { createEdgeLoopbackCertificates, edgeProxyFirefoxPrefs, importEdgeLoopbackCa, startEdgeLoopbackProxy } from './loopback-edge-proxy.mjs';
 import { createReplacementCollector } from './runtime-replacement-collector.mjs';
+import { createStaleCollector } from './runtime-stale-collector.mjs';
 import { blockRuntimeBridgePrerequisite, capability, classifyObservedRealm, classifyRequestAction, isolationSnapshot, notTested, requiredCapabilities, retainExecutedCapability, runtimeProbeGate } from './capabilities.mjs';
 
 const withTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
@@ -578,14 +579,19 @@ export function classifyReplacementFinalDom({ finalDOM, targetTexts, sourcesB, r
  * requests, one per observed Scheduler batch, with the expected source-index
  * window derived from that batch's own target membership (A targets map to
  * the A source manifest, B targets to the B source manifest), and the expected
- * statuses released / aborted / released.
+ * statuses released / aborted / released. The Phase 2C Stale-Success mode
+ * passes its own expectedStatuses (all released — an aborted request there is
+ * a scenario failure, never stale success).
  */
-export function classifyReplacementProxyRequests({ requests, expectedWindows = null }) {
+export function classifyReplacementProxyRequests({ requests, expectedWindows = null, expectedStatuses = ['released', 'aborted', 'released'] }) {
+  const statuses = Array.isArray(expectedStatuses) && expectedStatuses.length === 3 && expectedStatuses.every(status => typeof status === 'string')
+    ? expectedStatuses : null;
   if (!Array.isArray(requests) || requests.length !== 3) return { ok: false, reason: 'shape', statuses: (requests ?? []).map(request => request?.status) };
+  if (!statuses) return { ok: false, reason: 'statuses', statuses: requests.map(request => request?.status) };
   if (!Array.isArray(expectedWindows) || expectedWindows.length !== 3 || expectedWindows.some(window => !Array.isArray(window) || !window.length)) {
     return { ok: false, reason: 'windows', statuses: requests.map(request => request?.status) };
   }
-  const expectedStatuses = ['released', 'aborted', 'released'];
+  const expectedStatusList = statuses;
   const windows = requests.map(request => request?.sourceIndexes);
   const coverage = new Set(requests.flatMap(request => request?.sourceIndexes ?? []));
   const expectedCoverage = new Set(expectedWindows.flat());
@@ -593,12 +599,44 @@ export function classifyReplacementProxyRequests({ requests, expectedWindows = n
     && request.sni === 'edge.microsoft.com' && /^[a-f\d]{64}$/i.test(request.bodyHash ?? '')
     && Array.isArray(windows[index]) && windows[index].length === expectedWindows[index].length
     && [...windows[index]].sort((a, b) => a - b).every((value, position) => value === [...expectedWindows[index]].sort((a, b) => a - b)[position])
-    && request.status === expectedStatuses[index])
+    && request.status === expectedStatusList[index])
     && coverage.size === expectedCoverage.size
     && [...coverage].every(value => expectedCoverage.has(value))
     && new Set(requests.map(request => request?.requestId)).size === 3;
   return matches ? { ok: true, windows } : { ok: false, reason: 'requests', windows, statuses: requests.map(request => request?.status) };
 }
+
+/**
+ * Phase 2C stale-reply evidence: the held reply's item count must match the
+ * stale batch's target membership and its hash must equal the sha256 of
+ * JSON.stringify of the expected oracle translations for those targets —
+ * `fixture translation: ${targetTexts[index]}` — accepting either the plain
+ * or the uniformly U+200E-prefixed convention (the single hash covers the
+ * whole batch, so a mixed convention can never pass).
+ */
+export function classifyStaleReplyHash({ targetIds, targetTexts, replyItemCount, replyHash }) {
+  if (!Array.isArray(targetIds) || !targetIds.length || !targetIds.every(id => typeof id === 'string' && /^target-(?:[0-9]|1[01])$/.test(id))
+      || new Set(targetIds).size !== targetIds.length
+      || !Array.isArray(targetTexts) || targetTexts.length !== 12
+      || replyItemCount !== targetIds.length
+      || typeof replyHash !== 'string' || !/^[a-f\d]{64}$/i.test(replyHash)) return { ok: false, reason: 'shape' };
+  const candidates = [false, true].map(marker => {
+    const texts = targetIds.map(id => {
+      const value = `fixture translation: ${targetTexts[Number(id.slice('target-'.length))]}`;
+      return marker ? `\u200e${value}` : value;
+    });
+    return createHash('sha256').update(JSON.stringify(texts)).digest('hex');
+  });
+  const style = candidates.findIndex(candidate => candidate.toLowerCase() === replyHash.toLowerCase());
+  return style >= 0 ? { ok: true, markerStyle: style } : { ok: false, reason: 'reply-hash', markerStyle: null };
+}
+
+/**
+ * Phase 2C hold window: the collector rejects a stale-reply release later than
+ * this (the production PAGE_TRANSLATE_BATCH reply timeout is 8000 ms, so a
+ * release beyond this bound would be a timeout, not the ownership check).
+ */
+export const STALE_SUCCESS_HOLD_WINDOW_MS = 6000;
 
 /**
  * Map observed Scheduler target membership to the proxy's source-index window:
@@ -1729,7 +1767,8 @@ async function snapshotFixtureDOM(bidi, context, fixtureTargets) {
   return JSON.parse(remote.value);
 }
 
-export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride, loopbackTlsProxy = false, pageTranslationE2E = false, pageTranslationStopE2E = false, pageTranslationReplacementE2E = false }) {
+export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride, loopbackTlsProxy = false, pageTranslationE2E = false, pageTranslationStopE2E = false, pageTranslationReplacementE2E = false, pageTranslationStaleSuccessE2E = false }) {
+  const staleMode = pageTranslationStaleSuccessE2E === true;
   const root = await mkdtemp(resolve(tmpdir(), 'translate-it-firefox-cap-'));
   const profile = resolve(root, 'profile'); const bundle = resolve(root, 'extension');
   const records = []; const errors = []; const cleanupErrors = []; const capabilities = Object.fromEntries(requiredCapabilities.map(name => [name, notTested('Blocked by an earlier capability gate.')]));
@@ -1751,24 +1790,27 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     records.push({ kind: 'network-isolation', ...network });
     capabilities.isolation = network.ok ? capability('SUPPORTED', { evidence: network }) : capability('FAILED', { evidence: network, reason: 'Loopback-only namespace verification failed.' });
     if (!network.ok) throw new Error('Network isolation verification failed; Firefox was not started.');
-    if (loopbackTlsProxy) artifact.loopbackTlsProxy = { mode: pageTranslationReplacementE2E ? 'page-translation-replacement' : pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'SETTING_UP', isolationVerified: true, deniedRequests: [] };
+    if (loopbackTlsProxy) artifact.loopbackTlsProxy = { mode: pageTranslationReplacementE2E ? 'page-translation-replacement' : staleMode ? 'page-translation-stale-success' : pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'SETTING_UP', isolationVerified: true, deniedRequests: [] };
     const { startFixture: defaultStartFixture, createFixture: defaultCreateFixture } = await import('../page-translation-e2e-benchmark/fixture.mjs');
     const fixtureModule = await import('../page-translation-e2e-benchmark/fixture.mjs');
-    const fixtureData = pageTranslationReplacementE2E
+    const fixtureData = pageTranslationReplacementE2E || staleMode
       ? fixtureModule.createPageTranslationReplacementFixture()
       : pageTranslationE2E
         ? fixtureModule.createPageTranslationFixture()
         : (createFixtureOverride ?? defaultCreateFixture)('small');
-    // Phase 2B: the replacement collector instance is created after listen()
-    // with the bound port; the fixture routes its report/control paths to it.
-    fixture = await (startFixtureOverride ?? defaultStartFixture)(fixtureData, pageTranslationReplacementE2E
-      ? { replacementCollector: url => createReplacementCollector({ runId, authToken, expectedExtensionId, expectedTabId: null, expectedDocumentId: null, fixtureUrl: url }) }
+    // Phase 2B/2C: the replacement/stale collector instance is created after
+    // listen() with the bound port; the fixture routes its report/control
+    // paths to it.
+    fixture = await (startFixtureOverride ?? defaultStartFixture)(fixtureData, pageTranslationReplacementE2E || staleMode
+      ? { replacementCollector: url => staleMode
+        ? createStaleCollector({ runId, authToken, expectedExtensionId, expectedTabId: null, expectedDocumentId: null, fixtureUrl: url })
+        : createReplacementCollector({ runId, authToken, expectedExtensionId, expectedTabId: null, expectedDocumentId: null, fixtureUrl: url }) }
       : { runtimeBridge: { runId, authToken, expectedExtensionId, ...(pageTranslationE2E ? { schedulerBatchRequired: true } : {}) } });
     fixtureOrigin = new URL(fixture.url).origin;
-    bridge = pageTranslationReplacementE2E ? null : fixture.bridge;
+    bridge = pageTranslationReplacementE2E || staleMode ? null : fixture.bridge;
     let bindingUrl = null;
     let replacementCollector = null;
-    if (pageTranslationReplacementE2E) {
+    if (pageTranslationReplacementE2E || staleMode) {
       replacementCollector = fixture.replacementCollector;
       if (!replacementCollector || typeof replacementCollector.waitFor !== 'function' || typeof replacementCollector.snapshot !== 'function'
           || typeof replacementCollector.closeAdmission !== 'function' || typeof replacementCollector.drain !== 'function'
@@ -1782,7 +1824,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
         capabilities.runtimeBridge = capability('FAILED', { reason: 'Replacement collector endpoint escaped the loopback fixture origin.' });
         throw new Error('Replacement collector endpoint escaped the loopback fixture origin.');
       }
-      artifact.fixture = { url: fixture.url, scope: 'trusted page-replacement A/B fixture' };
+      artifact.fixture = { url: fixture.url, scope: staleMode ? 'trusted page-replacement stale-success A/B fixture' : 'trusted page-replacement A/B fixture' };
     } else {
       if (!bridge || typeof bridge.waitFor !== 'function' || typeof bridge.snapshot !== 'function' || typeof bridge.closeAdmission !== 'function' || typeof bridge.drain !== 'function') {
         capabilities.runtimeBridge = capability('FAILED', { reason: 'Fixture did not expose the required authenticated runtime bridge API.' });
@@ -1800,10 +1842,10 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     }
     capabilities.fixture = capability('SUPPORTED', { url: fixture.url, targetCount: fixtureData.targetCount });
     try {
-      if (pageTranslationReplacementE2E) {
+      if (pageTranslationReplacementE2E || staleMode) {
         await buildBenchmarkExtension({
           outputDir: bundle, mode: 'sliced', browser: 'firefox', workerEntry, contentEntry,
-          replacementConfig: { runId, authToken, fixtureUrl: fixture.url, expectedExtensionId, expectedTabId: null, expectedDocumentId: null },
+          replacementConfig: { runId, authToken, fixtureUrl: fixture.url, expectedExtensionId, expectedTabId: null, expectedDocumentId: null, ...(staleMode ? { staleSuccess: true } : {}) },
         });
       } else {
         await buildBenchmarkExtension({
@@ -1821,11 +1863,11 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       const cert = await createEdgeLoopbackCertificates(resolve(root, 'tls'));
       const nss = await importEdgeLoopbackCa(profile, cert.caCert);
       const caFingerprint = createHash('sha256').update(await readFile(cert.caCert)).digest('hex');
-      edgeProxy = await startEdgeLoopbackProxy({ tlsCert: cert.leafCert, tlsKey: cert.leafKey, fixtureTexts: pageTranslationReplacementE2E
+      edgeProxy = await startEdgeLoopbackProxy({ tlsCert: cert.leafCert, tlsKey: cert.leafKey, fixtureTexts: pageTranslationReplacementE2E || staleMode
         ? [...fixtureData.targetTexts, ...fixtureData.sourceManifests.B]
         : fixtureData.targetTexts, responseFor: texts => mapEdgeResponse(texts) });
       await writeFile(resolve(profile, 'user.js'), edgeProxyFirefoxPrefs(edgeProxy.port), { mode: 0o600 });
-      artifact.loopbackTlsProxy = { mode: pageTranslationReplacementE2E ? 'page-translation-replacement' : pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'READY', bindAddress: '127.0.0.1', proxyPort: edgeProxy.port, tlsPort: edgeProxy.tlsPort,
+      artifact.loopbackTlsProxy = { mode: pageTranslationReplacementE2E ? 'page-translation-replacement' : staleMode ? 'page-translation-stale-success' : pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'READY', bindAddress: '127.0.0.1', proxyPort: edgeProxy.port, tlsPort: edgeProxy.tlsPort,
         certificateVerification: cert.verification, caConstraints: cert.caConstraints, leafConstraints: cert.leafConstraints, caFingerprint, trust: nss.trust, nssListing: nss.listing,
         profilePrefs: 'manual HTTPS proxy; explicit localhost bypass; localhost hijacking disabled', deniedRequests: [] };
     }
@@ -1862,7 +1904,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     const manifest = JSON.parse(await readFile(resolve(bundle, 'manifest.json'), 'utf8'));
     if (manifest.background?.scripts?.[0] !== 'worker.js' || manifest.browser_specific_settings?.gecko?.id !== expectedExtensionId) throw new Error('Firefox MV3 module-worker manifest or pinned Gecko ID missing.');
     const { result: created } = await bidi.command('browsingContext.create', { type: 'tab' });
-    if (pageTranslationReplacementE2E) {
+    if (pageTranslationReplacementE2E || staleMode) {
       // Capture the browser console so a content-side failure is reported as
       // evidence instead of a generic readiness timeout.
       const consoleEntries = [];
@@ -1877,10 +1919,12 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       records.push({ kind: 'session.subscribe', events: ['log.entryAdded'] });
       let contentRealm = null;
       try {
-        // Phase 2B lane: trusted SPA-navigation replacement A→B inside one live
-        // tab. The replacement collector (fixture-side), the BiDi session, and
-        // the 24-source TLS proxy oracle are already armed; this sequence only
-        // drives production behavior and asserts the collector's evidence.
+        // Phase 2B/2C lane: trusted SPA-navigation replacement A→B inside one
+        // live tab. The replacement/stale collector (fixture-side), the BiDi
+        // session, and the 24-source TLS proxy oracle are already armed; this
+        // sequence only drives production behavior and asserts the collector's
+        // evidence. In Phase 2C (staleMode) the second A batch is RELEASED as a
+        // genuine success and its reply is held by the content barrier.
         const collector = replacementCollector;
         // Collector.waitFor only returns the first stored match, so repeated
         // events (session-start A/B, scheduler-batch A1/A2/B) poll by count.
@@ -1979,7 +2023,7 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
           capabilities.fixture = capability('FAILED', { reason: 'Fixture A page did not present the expected replacement targets/control.' });
           throw new Error('Fixture A page evidence invalid.');
         }
-        capabilities.runtimeBridge = capability('SUPPORTED', { runId, source: 'authenticated-replacement-collector', lane: 'page-translation-replacement' });
+        capabilities.runtimeBridge = capability('SUPPORTED', { runId, source: 'authenticated-replacement-collector', lane: staleMode ? 'page-translation-stale-success' : 'page-translation-replacement' });
 
         const batchA1 = await awaitEventWhere('scheduler-batch', evidence => evidence?.owner === 'A', 20_000, 'the first A scheduler batch');
         records.push({ kind: 'replacement-event', event: 'scheduler-batch', owner: 'A', targets: batchA1.evidence?.targetIds ?? null });
@@ -1998,21 +2042,57 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
         const acceptedA = await awaitEvent('accepted-A', 20_000);
         records.push({ kind: 'replacement-event', event: 'accepted-A', targets: acceptedA.evidence?.targetIds ?? null });
 
-        const batchA2 = await awaitEventWhere('scheduler-batch', evidence => evidence?.owner === 'A' && evidence?.messageId !== batchA1.evidence?.messageId, 20_000, 'the held second A scheduler batch');
+        const batchA2 = await awaitEventWhere('scheduler-batch', evidence => evidence?.owner === 'A' && evidence?.messageId !== batchA1.evidence?.messageId, 20_000, staleMode ? 'the stale second A scheduler batch' : 'the held second A scheduler batch');
         records.push({ kind: 'replacement-event', event: 'scheduler-batch', owner: 'A', targets: batchA2.evidence?.targetIds ?? null });
-        const physicalA2 = await awaitEventWhere('physical-start', evidence => evidence?.messageId === batchA2.evidence?.messageId, 10_000, 'the held A physical attempt');
-        const heldAttemptId = physicalA2.evidence?.attemptId ?? null;
-        const heldMessageId = batchA2.evidence?.messageId ?? null;
+        const physicalA2 = await awaitEventWhere('physical-start', evidence => evidence?.messageId === batchA2.evidence?.messageId, 10_000, staleMode ? 'the stale A physical attempt' : 'the held A physical attempt');
+        const staleAttemptId = physicalA2.evidence?.attemptId ?? null;
+        const staleMessageId = batchA2.evidence?.messageId ?? null;
+        let staleRequestStatus = null;
         const windowA2 = replacementSourceIndexes(batchA2.evidence?.targetIds, 'A');
-        if (!windowA2) throw new Error('The held A batch did not expose usable target membership.');
+        if (!windowA2) throw new Error(staleMode ? 'The stale A batch did not expose usable target membership.' : 'The held A batch did not expose usable target membership.');
         const requestA2 = await edgeProxy.waitForRequest({ match: request => request.method === 'POST'
           && JSON.stringify(request.sourceIndexes) === JSON.stringify(windowA2), timeoutMs: 15_000 });
-        // Do NOT release requestA2: it must still be held when the trusted SPA
-        // navigation triggers production cancellation of the A session.
+        if (!staleMode) {
+          // Do NOT release requestA2: it must still be held when the trusted SPA
+          // navigation triggers production cancellation of the A session.
+        } else {
+          // Phase 2C: the stale batch's genuine success is RELEASED — a
+          // fulfilled provider request, never an abort — and the content-side
+          // reply barrier holds it before the navigation. The settled status
+          // comes from the proxy's fresh snapshot, not the claim snapshot.
+          await requestA2.release(undefined);
+          staleRequestStatus = (await edgeProxy.waitForStatus(requestA2.requestId, 'released', { timeoutMs: 5_000 }))?.status ?? null;
+        }
+        if (staleMode) {
+          // The stale reply must be held BEFORE the navigation: the collector
+          // admits 'stale-reply-held' only pre-navigation, and the proxy
+          // status already proves the A2 request was a fulfilled success, not
+          // an abort.
+          const heldReply = await awaitEventWhere('stale-reply-held', evidence => evidence?.messageId === staleMessageId, 15_000, 'the held stale successful reply');
+          const replyCheck = classifyStaleReplyHash({ targetIds: heldReply.evidence?.targetIds, targetTexts: fixtureData.targetTexts,
+            replyItemCount: heldReply.evidence?.replyItemCount, replyHash: heldReply.evidence?.replyHash });
+          capabilities.staleSuccessfulReply = capability(replyCheck.ok && staleRequestStatus === 'released' ? 'SUPPORTED' : 'FAILED', {
+            requestId: requestA2.requestId, proxyStatus: staleRequestStatus, messageId: staleMessageId,
+            replyItemCount: heldReply.evidence?.replyItemCount ?? null, targetCount: batchA2.evidence?.targetIds?.length ?? null,
+            markerStyle: replyCheck.markerStyle ?? null, reason: replyCheck.ok ? null : replyCheck.reason });
+          if (!replyCheck.ok) throw new Error(`Stale successful-delivery evidence was invalid: ${replyCheck.reason ?? 'reply-hash mismatch'}.`);
+          if (staleRequestStatus !== 'released') throw new Error('The stale A2 request was not a released fulfilled provider request.');
+          const staleAttempt = (collector.snapshot().attempts ?? []).find(item => item.attemptId === staleAttemptId) ?? null;
+          capabilities.physicalSettlement = staleAttempt?.settled === true && staleAttempt?.outcome === 'fulfilled' && staleAttempt?.code === null
+            ? capability('SUPPORTED', { attemptId: staleAttemptId, outcome: 'fulfilled', requestId: requestA2.requestId, source: 'genuine-provider-success' })
+            : capability('FAILED', { reason: 'The stale batch physical attempt did not settle as a clean fulfilled success.', attemptId: staleAttemptId, outcome: staleAttempt?.outcome ?? null, code: staleAttempt?.code ?? null });
+          capabilities.rootSettlement = staleAttempt?.rootSettled === true && staleAttempt?.rootStatus === 'fulfilled' && staleAttempt?.rootCode === null
+            ? capability('SUPPORTED', { rootSettled: true, status: 'fulfilled', requestId: requestA2.requestId, operationAborted: staleAttempt?.rootOperationAborted === true })
+            : capability('FAILED', { reason: 'The stale batch Provider root did not settle as a clean fulfilled success.', attemptId: staleAttemptId, status: staleAttempt?.rootStatus ?? null, code: staleAttempt?.rootCode ?? null });
+          if (capabilities.physicalSettlement.status !== 'SUPPORTED' || capabilities.rootSettlement.status !== 'SUPPORTED') {
+            throw new Error('The stale batch did not settle as a genuine fulfilled Provider success.');
+          }
+          records.push({ kind: 'replacement-event', event: 'stale-reply-held', messageId: staleMessageId, targets: heldReply.evidence?.targetIds ?? null, replyItemCount: heldReply.evidence?.replyItemCount ?? null });
+        }
         const readiness = collector.snapshot().navigationReadiness;
         if (!readiness?.ready) {
           capabilities.replacementSessionOwnership = capability('FAILED', { reason: 'Navigation readiness unmet.', readiness });
-          throw new Error('Replacement navigation readiness was never armed.');
+          throw new Error(`Replacement navigation readiness was never armed: ${JSON.stringify(readiness)}`);
         }
         const navigateResponse = await fetch(replacementCollector.controlUrl('navigate-to-b'), {
           headers: { authorization: `Bearer ${authToken}` }, signal: AbortSignal.timeout(5_000),
@@ -2024,17 +2104,21 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
           target: { realm: contentRealm }, awaitPromise: true });
         records.push({ kind: 'replacement-click', control: 'page-translation-replacement-control' });
         const spaNavigation = await awaitEvent('spa-navigation', 15_000);
-        await edgeProxy.waitForStatus(requestA2.requestId, 'aborted', { timeoutMs: 10_000 });
-        capabilities.heldRequestAbort = capability('SUPPORTED', { requestId: requestA2.requestId, status: 'aborted', reason: 'client-aborted' });
         await awaitEventWhere('stop-ack', evidence => evidence?.sessionId === sessionIdA, 15_000, 'the navigation Stop acknowledgement for session A');
-        const controllerAbort = await awaitEventWhere('controller-abort', evidence => evidence?.attemptId === heldAttemptId, 15_000, 'the controller abort of the held A attempt');
-        const physicalSettlement = await awaitEventWhere('physical-settled', evidence => evidence?.attemptId === heldAttemptId, 15_000, 'the physical settlement of the held A attempt');
-        if (physicalSettlement.evidence?.outcome === 'fulfilled') throw new Error('The held A physical request settled successfully instead of aborting.');
-        capabilities.physicalSettlement = capability('SUPPORTED', { heldRequestId: requestA2.requestId, attemptId: heldAttemptId, outcome: physicalSettlement.evidence?.outcome ?? null, code: physicalSettlement.evidence?.code ?? null });
-        const rootSettlement = await awaitEventWhere('provider-root-settled', evidence => evidence?.messageId === heldMessageId && evidence?.sessionId === sessionIdA, 15_000, 'the Provider-root settlement of the held A attempt');
-        if (rootSettlement.evidence?.status === 'fulfilled') throw new Error('The held A Provider root fulfilled instead of settling as cancelled.');
-        capabilities.rootSettlement = capability('SUPPORTED', { rootSettled: true, heldRequestId: requestA2.requestId, status: rootSettlement.evidence?.status ?? null, code: rootSettlement.evidence?.code ?? null, operationAborted: rootSettlement.evidence?.operationAborted === true });
-        records.push({ kind: 'replacement-event', event: 'spa-navigation-completed', from: spaNavigation.evidence?.fromUrl ?? null, controllerAbort: controllerAbort.evidence ?? null });
+        let controllerAbortEvidence = null;
+        if (!staleMode) {
+          await edgeProxy.waitForStatus(requestA2.requestId, 'aborted', { timeoutMs: 10_000 });
+          capabilities.heldRequestAbort = capability('SUPPORTED', { requestId: requestA2.requestId, status: 'aborted', reason: 'client-aborted' });
+          const controllerAbort = await awaitEventWhere('controller-abort', evidence => evidence?.attemptId === staleAttemptId, 15_000, 'the controller abort of the held A attempt');
+          controllerAbortEvidence = controllerAbort.evidence ?? null;
+          const physicalSettlement = await awaitEventWhere('physical-settled', evidence => evidence?.attemptId === staleAttemptId, 15_000, 'the physical settlement of the held A attempt');
+          if (physicalSettlement.evidence?.outcome === 'fulfilled') throw new Error('The held A physical request settled successfully instead of aborting.');
+          capabilities.physicalSettlement = capability('SUPPORTED', { heldRequestId: requestA2.requestId, attemptId: staleAttemptId, outcome: physicalSettlement.evidence?.outcome ?? null, code: physicalSettlement.evidence?.code ?? null });
+          const rootSettlement = await awaitEventWhere('provider-root-settled', evidence => evidence?.messageId === staleMessageId && evidence?.sessionId === sessionIdA, 15_000, 'the Provider-root settlement of the held A attempt');
+          if (rootSettlement.evidence?.status === 'fulfilled') throw new Error('The held A Provider root fulfilled instead of settling as cancelled.');
+          capabilities.rootSettlement = capability('SUPPORTED', { rootSettled: true, heldRequestId: requestA2.requestId, status: rootSettlement.evidence?.status ?? null, code: rootSettlement.evidence?.code ?? null, operationAborted: rootSettlement.evidence?.operationAborted === true });
+        }
+        records.push({ kind: 'replacement-event', event: 'spa-navigation-completed', from: spaNavigation.evidence?.fromUrl ?? null, controllerAbort: controllerAbortEvidence });
 
         const sessionStartB = await awaitEventWhere('session-start', evidence => evidence?.owner === 'B', 15_000, 'the replacement session B start');
         records.push({ kind: 'replacement-event', event: 'session-start', owner: 'B', targets: sessionStartB.evidence?.sessionId ?? null });
@@ -2050,6 +2134,27 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
         await requestB.release(undefined);
         await edgeProxy.waitForStatus(requestB.requestId, 'released', { timeoutMs: 5_000 });
         const acceptedB = await awaitEventWhere('accepted-B', evidence => evidence?.sessionId === sessionIdB, 20_000, 'the accepted B ownership evidence');
+        if (staleMode) {
+          // The held reply is released only by the brokered production flow:
+          // the content polls the background's release-stale broker, the
+          // background asks the collector's release-stale control, and the
+          // collector grants it only after the hold and accepted-B are
+          // admitted. The driver never fabricates the release itself.
+          const releasedReply = await awaitEventWhere('stale-reply-released', evidence => evidence?.sessionId === sessionIdA && evidence?.messageId === staleMessageId, 20_000, 'the brokered stale release');
+          const staleRejected = await awaitEventWhere('stale-batch-rejected', evidence => evidence?.sessionId === sessionIdA && evidence?.messageId === staleMessageId && evidence?.outcome === 'cancelled', 20_000, 'the Scheduler stale rejection');
+          const staleHold = collector.snapshot().staleHold ?? null;
+          const heldWithinWindow = staleHold?.held === true && staleHold?.released === true
+            && Number.isSafeInteger(staleHold?.elapsedMs) && staleHold.elapsedMs >= 0 && staleHold.elapsedMs <= STALE_SUCCESS_HOLD_WINDOW_MS;
+          capabilities.staleReplyHeld = capability(heldWithinWindow ? 'SUPPORTED' : 'FAILED', {
+            heldAt: staleHold?.heldAt ?? null, releasedAt: staleHold?.releasedAt ?? null, elapsedMs: staleHold?.elapsedMs ?? null,
+            holdWindowMs: STALE_SUCCESS_HOLD_WINDOW_MS, releasedReplySeq: releasedReply.seq ?? null });
+          if (!heldWithinWindow) throw new Error(`The stale hold was not released within the ${STALE_SUCCESS_HOLD_WINDOW_MS} ms ownership-check window.`);
+          capabilities.staleSchedulerRejection = capability(staleRejected.evidence?.outcome === 'cancelled' ? 'SUPPORTED' : 'FAILED', {
+            messageId: staleMessageId, sessionId: sessionIdA, outcome: staleRejected.evidence?.outcome ?? null,
+            targetIds: staleRejected.evidence?.targetIds ?? null, releasedReplySeq: releasedReply.seq ?? null });
+          if (capabilities.staleSchedulerRejection.status !== 'SUPPORTED') throw new Error('Production did not report the Scheduler rejection of the released stale reply.');
+          records.push({ kind: 'replacement-event', event: 'stale-release-and-rejection', messageId: staleMessageId, elapsedMs: staleHold.elapsedMs });
+        }
         await awaitEventWhere('stop-B', evidence => evidence?.sessionId === sessionIdB, 20_000, 'the production B Stop evidence');
         capabilities.replacementSessionOwnership = capability('SUPPORTED', {
           sessionIdA, sessionIdB, distinctSessions: sessionIdA !== sessionIdB,
@@ -2059,7 +2164,11 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
         await awaitEvent('cleanup', 20_000);
 
         const proxyEvidence = [...(edgeProxy.requests ?? [])];
-        const correlation = classifyReplacementProxyRequests({ requests: proxyEvidence, expectedWindows: [windowA1, windowA2, windowB] });
+        // Phase 2C: exactly three provider requests, ALL released — an aborted
+        // request is not stale success, and a retry would surface as a fourth
+        // request, so both must fail this classification.
+        const correlation = classifyReplacementProxyRequests({ requests: proxyEvidence, expectedWindows: [windowA1, windowA2, windowB],
+          expectedStatuses: staleMode ? ['released', 'released', 'released'] : undefined });
         capabilities.loopbackTlsProxy = capability(correlation.ok ? 'SUPPORTED' : 'FAILED', {
           requestCount: proxyEvidence.length, statuses: proxyEvidence.map(item => item.status),
           sourceIndexes: [...new Set(proxyEvidence.flatMap(item => item.sourceIndexes ?? []))].sort((a, b) => a - b),
@@ -2068,27 +2177,57 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
           requestCount: proxyEvidence.length, windows: correlation.windows ?? null, statuses: proxyEvidence.map(item => item.status) });
         if (!correlation.ok) throw new Error(`Replacement proxy correlation failed: ${correlation.reason ?? 'mismatch'}`);
         const finalDomReport = await awaitEvent('final-dom', 60_000);
+        if (staleMode && (finalDomReport.evidence?.postInvalidationAWrites ?? []).length !== 0) {
+          throw new Error('Post-invalidation session-A writes were observed after the stale rejection.');
+        }
         const classification = classifyReplacementFinalDom({ finalDOM: finalDomReport.evidence, targetTexts: fixtureData.targetTexts,
           sourcesB: fixtureData.sourceManifests.B, retainedTargetIds: acceptedA.evidence?.targetIds ?? null,
           acceptedTargetIds: acceptedB.evidence?.targetIds ?? null });
         capabilities.replacementDomOwnership = capability(classification.ok ? 'SUPPORTED' : 'FAILED', {
           capturedTargets: finalDomReport.evidence?.targets?.length ?? null, mismatches: classification.mismatches ?? null, markerStyle: classification.markerStyle ?? null });
         if (!classification.ok) throw new Error('Final replacement DOM ownership/hash evidence was invalid.');
-        artifact.pageTranslationReplacement = {
-          scenario: 'trusted-spa-navigation-replacement-retained-A-retranslate-B',
-          batches: { A1: { ...batchA1.evidence }, A2: { ...batchA2.evidence }, B: { ...batchB.evidence } },
-          proxyRequests: proxyEvidence.map(request => ({ requestId: request.requestId, method: request.method, url: request.url, host: request.host, sni: request.sni,
-            bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: [...request.sourceIndexes], status: request.status, responseStatus: request.responseStatus })),
-          statuses: proxyEvidence.map(request => request.status), runId,
-          finalDomTargets: (finalDomReport.evidence?.targets ?? []).map(target => ({ targetId: target.targetId, owner: target.owner, state: target.state, hash: target.hash })),
-          limitations: ['No Stale-Success scenario is implemented or tested; no separated released A success after replacement abort.'],
-        };
-        artifact.loopbackTlsProxy = {
-          ...artifact.loopbackTlsProxy, mode: 'page-translation-replacement', status: 'REPLACEMENT_REQUESTS_CORRELATED',
-          requests: proxyEvidence.map(request => ({ requestId: request.requestId, method: request.method, url: request.url, sni: request.sni, host: request.host,
-            bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: [...request.sourceIndexes], status: request.status, responseStatus: request.responseStatus })),
-          deniedRequests: edgeProxy.deniedRequests ?? [],
-        };
+        if (staleMode) {
+          const staleHold = collector.snapshot().staleHold ?? {};
+          artifact.pageTranslationStaleSuccess = {
+            scenario: 'trusted-spa-navigation-stale-successful-delivery-rejection',
+            batches: { A1: { ...batchA1.evidence }, A2: { ...batchA2.evidence }, B: { ...batchB.evidence } },
+            staleReply: {
+              sessionId: sessionIdA, messageId: staleMessageId, targetIds: [...(batchA2.evidence?.targetIds ?? [])],
+              replyItemCount: capabilities.staleSuccessfulReply.replyItemCount, replyHashMarkerStyle: capabilities.staleSuccessfulReply.markerStyle,
+              proxyStatus: staleRequestStatus,
+            },
+            staleHold: { heldAt: staleHold.heldAt ?? null, releasedAt: staleHold.releasedAt ?? null, elapsedMs: staleHold.elapsedMs ?? null, holdWindowMs: STALE_SUCCESS_HOLD_WINDOW_MS },
+            proxyRequests: proxyEvidence.map(request => ({ requestId: request.requestId, method: request.method, url: request.url, host: request.host, sni: request.sni,
+              bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: [...request.sourceIndexes], status: request.status, responseStatus: request.responseStatus })),
+            statuses: proxyEvidence.map(request => request.status), runId,
+            finalDomTargets: (finalDomReport.evidence?.targets ?? []).map(target => ({ targetId: target.targetId, owner: target.owner, state: target.state, hash: target.hash })),
+            postInvalidationAWrites: finalDomReport.evidence?.postInvalidationAWrites ?? [],
+            limitations: ['No controller abort is used: the stale batch settles as a genuine fulfilled Provider success and production must reject the released reply at its Scheduler ownership check.',
+              'Stale-reply evidence records only ids, counts and hashes; no reply payload is stored.'],
+          };
+          artifact.loopbackTlsProxy = {
+            ...artifact.loopbackTlsProxy, mode: 'page-translation-stale-success', status: 'STALE_SUCCESS_REQUESTS_CORRELATED',
+            requests: proxyEvidence.map(request => ({ requestId: request.requestId, method: request.method, url: request.url, sni: request.sni, host: request.host,
+              bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: [...request.sourceIndexes], status: request.status, responseStatus: request.responseStatus })),
+            deniedRequests: edgeProxy.deniedRequests ?? [],
+          };
+        } else {
+          artifact.pageTranslationReplacement = {
+            scenario: 'trusted-spa-navigation-replacement-retained-A-retranslate-B',
+            batches: { A1: { ...batchA1.evidence }, A2: { ...batchA2.evidence }, B: { ...batchB.evidence } },
+            proxyRequests: proxyEvidence.map(request => ({ requestId: request.requestId, method: request.method, url: request.url, host: request.host, sni: request.sni,
+              bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: [...request.sourceIndexes], status: request.status, responseStatus: request.responseStatus })),
+            statuses: proxyEvidence.map(request => request.status), runId,
+            finalDomTargets: (finalDomReport.evidence?.targets ?? []).map(target => ({ targetId: target.targetId, owner: target.owner, state: target.state, hash: target.hash })),
+            limitations: ['No Stale-Success scenario is implemented or tested; no separated released A success after replacement abort.'],
+          };
+          artifact.loopbackTlsProxy = {
+            ...artifact.loopbackTlsProxy, mode: 'page-translation-replacement', status: 'REPLACEMENT_REQUESTS_CORRELATED',
+            requests: proxyEvidence.map(request => ({ requestId: request.requestId, method: request.method, url: request.url, sni: request.sni, host: request.host,
+              bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: [...request.sourceIndexes], status: request.status, responseStatus: request.responseStatus })),
+            deniedRequests: edgeProxy.deniedRequests ?? [],
+          };
+        }
         replacementCollector.closeAdmission();
         const drainedCollector = await replacementCollector.drain();
         capabilities.cleanup = capability(drainedCollector ? 'SUPPORTED' : 'FAILED', { collectedRequests: proxyEvidence.length });
@@ -2541,6 +2680,16 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       });
       if (artifact.pageTranslationReplacement) artifact.pageTranslationReplacement.status = passed ? 'SUPPORTED' : 'FAILED';
     }
+    if (pageTranslationStaleSuccessE2E) {
+      const gates = ['loopbackTlsProxy', 'schedulerBatchCorrelation', 'providerPhysicalRequest', 'providerRequestBody', 'providerResponse',
+        'physicalSettlement', 'rootSettlement', 'replacementSessionOwnership', 'replacementDomOwnership',
+        'staleSuccessfulReply', 'staleReplyHeld', 'staleSchedulerRejection', 'cleanup'];
+      const passed = gates.every(name => capabilities[name]?.status === 'SUPPORTED');
+      capabilities.staleSuccessProof = capability(passed ? 'SUPPORTED' : 'FAILED', {
+        gates: Object.fromEntries(gates.map(name => [name, capabilities[name]?.status ?? 'NOT_TESTED'])),
+      });
+      if (artifact.pageTranslationStaleSuccess) artifact.pageTranslationStaleSuccess.status = passed ? 'SUPPORTED' : 'FAILED';
+    }
     const safeCapabilities = sanitizePrivate(capabilities, privateSecrets);
     Object.assign(capabilities, safeCapabilities);
     artifact.capabilities = safeCapabilities; artifact.events = sanitizePrivate(records, privateSecrets); artifact.errors = sanitizePrivate(errors, privateSecrets);
@@ -2551,7 +2700,9 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     artifact.protocolJournal = bidi?.journal ?? [];
     artifact.limitations = [pageTranslationReplacementE2E
       ? 'Only production trusted SPA-navigation replacement A→B is exercised; the Stale-Success delivery-barrier scenario remains NOT_TESTED and no released A success is delivered after replacement.'
-      : pageTranslationStopE2E ? 'Only production Stop Auto cancellation of one held subsequent provider batch is exercised; Replacement and Stale-Success scenarios remain NOT_TESTED.' : 'Provider cancellation and stale-delivery lifecycle scenarios remain NOT_TESTED.', 'Background/content negative fetches only run when both actual realms, readiness, and exact discovery flags pass.', 'When a runtime gate is inaccessible, dependent checks remain NOT_TESTED.', 'No mock provider, fetch substitute, URL rewrite, forced abort, or fabricated runtime result was used.', 'This is a bounded capability probe, not the full 1000-target E2E matrix.'];
+      : pageTranslationStaleSuccessE2E
+        ? 'Only production trusted SPA-navigation Stale-Success rejection is exercised; the held A reply is released only by the brokered production flow and no controller abort exists.'
+        : pageTranslationStopE2E ? 'Only production Stop Auto cancellation of one held subsequent provider batch is exercised; Replacement and Stale-Success scenarios remain NOT_TESTED.' : 'Provider cancellation and stale-delivery lifecycle scenarios remain NOT_TESTED.', 'Background/content negative fetches only run when both actual realms, readiness, and exact discovery flags pass.', 'When a runtime gate is inaccessible, dependent checks remain NOT_TESTED.', 'No mock provider, fetch substitute, URL rewrite, forced abort, or fabricated runtime result was used.', 'This is a bounded capability probe, not the full 1000-target E2E matrix.'];
     for (const key of Object.keys(artifact)) artifact[key] = sanitizePrivate(artifact[key], privateSecrets);
   }
   return capabilities;

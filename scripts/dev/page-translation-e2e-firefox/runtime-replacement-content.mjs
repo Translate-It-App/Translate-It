@@ -9,7 +9,8 @@ const exact = (value, keys) => value !== null && typeof value === 'object' && !A
   && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const idPattern = /^target-(?:[0-9]|1[01])$/;
 const idValid = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
-const allowedReports = new Set(['session-start', 'scheduler-batch', 'accepted-A', 'spa-navigation', 'stop-ack', 'retained-A', 'accepted-B', 'stop-B', 'cleanup', 'final-dom', 'error']);
+const allowedReports = new Set(['session-start', 'scheduler-batch', 'accepted-A', 'spa-navigation', 'stop-ack', 'retained-A', 'accepted-B', 'stop-B', 'cleanup', 'final-dom', 'error',
+  'stale-reply-held', 'stale-reply-released', 'stale-batch-rejected']);
 const ownerCode = error => ['PROTOCOL_ERROR', 'TIMEOUT', 'TEARDOWN', 'PROVIDER_ERROR', 'DOM_MISMATCH'].includes(error?.code) ? error.code : 'PROTOCOL_ERROR';
 
 function routesFor(fixtureUrl) {
@@ -49,6 +50,24 @@ function sha256(value) {
 function errorCode(error) { return ownerCode(error); }
 
 /**
+ * Phase 2C stale-success reply texts: the background's successful
+ * PAGE_TRANSLATE_BATCH reply carries translatedText as a JSON string whose
+ * items are plain strings or objects carrying text/t/translatedText (the same
+ * shapes production _executeBatchRequest resolves). Returns the aligned text
+ * list, or null when the reply cannot be parsed for the barrier evidence.
+ */
+function staleReplyTexts(targetCount, translatedText) {
+  let parsed;
+  try { parsed = JSON.parse(translatedText); } catch { return null; }
+  if (!Array.isArray(parsed) || parsed.length !== targetCount) return null;
+  return parsed.map(item => typeof item === 'string' ? item
+    : item && typeof item === 'object'
+      ? (typeof item.text === 'string' ? item.text : typeof item.t === 'string' ? item.t
+        : typeof item.translatedText === 'string' ? item.translatedText : '')
+    : '');
+}
+
+/**
  * Observation-only content adapter. Requires actual production classes,
  * browser.runtime and config {runId,fixtureUrl,expectedExtensionId,
  * expectedTabId|null (null pins the bootstrap sender in the harness),
@@ -80,6 +99,13 @@ export function createReplacementContentRuntime(config, {
       || !PageTranslationBridge?.prototype || !FeatureManager?.prototype || typeof fetchImpl !== 'function') {
     throw new TypeError('Replacement content adapter requires Firefox runtime and production Page feature prototypes.');
   }
+  // Phase 2C stale-success delivery barrier is active only in stale mode; the
+  // deadline is bounded so a missing release grant fails closed, never hangs.
+  const staleSuccess = config.staleSuccess === true;
+  const staleReplyTimeoutMs = config.staleReplyTimeoutMs ?? 30_000;
+  if (staleSuccess && (!Number.isFinite(staleReplyTimeoutMs) || staleReplyTimeoutMs < 10 || staleReplyTimeoutMs > 60_000)) {
+    throw new TypeError('Invalid stale-reply barrier deadline.');
+  }
   const state = {
     installed: false, disposed: false, currentRoute: routes.A, navigationCursor: null,
     startOptions: new WeakMap(), sessions: new Map(), sessionPromises: new Map(), itemBatch: new WeakMap(),
@@ -89,6 +115,7 @@ export function createReplacementContentRuntime(config, {
     postInvalidationAWrites: new Set(), authorizedFixtureTitleUpdates: new Map(), observer: null,
     navigationStopInvoked: false, urlChangeLog: [], lastRejection: null, rejections: [], reportLog: [],
     originalRuntimeSendMessage: null, restores: [], lastError: null, cleanupReport: null, finalDOMEvidence: null,
+    staleItems: new WeakMap(),
   };
   const fixtureElements = () => [...(documentRef?.querySelectorAll?.('[data-bench-id]') ?? [])];
   const elementForId = target => fixtureElements().find(element => element.dataset.benchId === target) ?? null;
@@ -314,6 +341,73 @@ export function createReplacementContentRuntime(config, {
     })().catch(emitError);
   }
 
+  // Phase 2C stale-success delivery barrier: the stale batch's genuine success
+  // reply is captured exactly once (never re-sent, never modified) and held
+  // until the brokered release-stale control is granted. A rejected send or a
+  // non-successful reply passes straight through; only the overall deadline is
+  // fatal, and it fails closed through the adapter error path.
+  async function failBarrier(barrier, message, code = 'PROTOCOL_ERROR') {
+    const error = Object.assign(new Error(message), { code });
+    await emitError(error);
+    barrier.rejectGate(error);
+  }
+  async function runStaleBarrier(barrier, callOriginal) {
+    let reply;
+    try { reply = await callOriginal(); }
+    catch (error) { barrier.rejectGate(error); return; }
+    if (reply?.success !== true || reply?.hasError === true) { barrier.resolveGate(reply); return; }
+    const texts = staleReplyTexts(barrier.targetIds.length, reply.translatedText);
+    if (texts === null) { await failBarrier(barrier, 'Stale batch reply could not be parsed for the delivery barrier.'); return; }
+    barrier.replyTexts = texts;
+    // The hold is only reported once the Provider settlement of this batch is
+    // admitted as a clean fulfilled success: the reply is captured before the
+    // Provider-root settlement reaches the collector, and the collector admits
+    // the hold only after that evidence.
+    if (!await waitForAdmittedProviderSettlement(barrier.record, 15_000)) {
+      await failBarrier(barrier, 'The stale batch Provider settlement was not admitted as a clean fulfilled success.');
+      return;
+    }
+    const held = await report('stale-reply-held', { sessionId: barrier.sessionId, messageId: barrier.messageId,
+      targetIds: [...barrier.targetIds], replyItemCount: texts.length, replyHash: await sha256(JSON.stringify(texts)) }).catch(error => error);
+    if (held !== true) {
+      await failBarrier(barrier, held instanceof Error ? `Stale-reply-held report failed: ${held.message}` : 'Stale-reply-held evidence was not admitted.');
+      return;
+    }
+    barrier.held = true;
+    const end = now() + staleReplyTimeoutMs;
+    while (now() < end) {
+      try {
+        const receipt = await browserApi.runtime.sendMessage({ action: replacementContentStatusAction, v: VERSION, runId: config.runId, type: 'release-stale' });
+        if (exact(receipt, ['v', 'runId', 'type']) && receipt.v === VERSION && receipt.runId === config.runId && receipt.type === 'release-stale') {
+          barrier.resolveGate(reply);
+          void report('stale-reply-released', { sessionId: barrier.sessionId, messageId: barrier.messageId }).catch(emitError);
+          return;
+        }
+      } catch { /* An ungranted release control is the expected pre-grant state; only the deadline is fatal. */ }
+      await wait(Math.min(15, Math.max(1, end - now())));
+    }
+    await failBarrier(barrier, 'Timed out waiting for the stale-reply release grant.', 'TIMEOUT');
+  }
+  async function verifyStaleRejection(barrier) {
+    if (barrier.verified) return;
+    barrier.verified = true;
+    const problems = [];
+    if (barrier.settlements.length !== barrier.targetIds.length) problems.push(`settled ${barrier.settlements.length} of ${barrier.targetIds.length} stale items`);
+    barrier.settlements.forEach((entry, index) => {
+      if (entry.outcome !== 'cancelled') problems.push(`stale item ${index} settled as ${entry.outcome}`);
+      if (entry.text !== barrier.sourceTexts[index]) problems.push(`stale item ${index} was not settled with its original source text`);
+      else if (entry.text === barrier.replyTexts[index]) problems.push(`stale item ${index} was settled with the provider translation`);
+    });
+    if (problems.length) {
+      await emitError(Object.assign(new Error(`Stale batch was not rejected by the Scheduler: ${problems.join('; ')}`), { code: 'PROTOCOL_ERROR' }));
+      return;
+    }
+    if (!await report('stale-batch-rejected', { sessionId: barrier.sessionId, messageId: barrier.messageId,
+      targetIds: [...barrier.targetIds], outcome: 'cancelled' })) {
+      await emitError(Object.assign(new Error('Stale-batch-rejected evidence was not admitted.'), { code: 'PROTOCOL_ERROR' }));
+    }
+  }
+
   function installRuntimeBatchObserver() {
     const runtime = browserApi.runtime; const original = runtime.sendMessage;
     if (typeof original !== 'function') throw new Error('Firefox runtime.sendMessage is unavailable.');
@@ -349,6 +443,28 @@ export function createReplacementContentRuntime(config, {
       // Telemetry failure never invokes the production send twice. The one
       // call-through runs after the bounded report attempt regardless of its
       // outcome; its result/rejection is returned unchanged.
+      // Phase 2C stale-success delivery barrier: the SECOND A batch is the
+      // stale one. It is identified by the admitted A-batch ordinal, not by
+      // `acceptedA`: production creates the next A batch before the previous
+      // batch's DOM acceptance is reported, so the accepted-A evidence is not
+      // available yet when this message is sent. The original sendMessage is
+      // called exactly once and the captured reply value is resolved unchanged
+      // once the broker grants the release; every other message passes through.
+      const admittedABatches = state.batches.filter(item => item.owner === 'A').length;
+      const isStaleBatch = record.owner === 'A' && admittedABatches === 1
+        && (!state.acceptedA || record.messageId !== state.acceptedA.messageId);
+      if (config.staleSuccess === true && isStaleBatch) {
+        const barrier = { sessionId: record.sessionId, messageId: record.messageId, targetIds, record,
+          sourceTexts: batch.items.map(item => typeof item?.text === 'string' ? item.text : null),
+          settlements: [], replyTexts: null, held: false, verified: false, resolveGate: null, rejectGate: null };
+        for (const item of batch.items) state.staleItems.set(item, barrier);
+        batch.staleBarrier = barrier;
+        const gate = new Promise((resolve, reject) => { barrier.resolveGate = resolve; barrier.rejectGate = reject; });
+        void telemetry.then(() => runStaleBarrier(barrier, callOriginal)).catch(error => {
+          void emitError(error); barrier.rejectGate?.(error);
+        });
+        return gate;
+      }
       return telemetry.then(callOriginal);
     };
     state.restores.push(() => { if (runtime.sendMessage === wrappedRuntimeSend) runtime.sendMessage = original; });
@@ -487,15 +603,33 @@ export function createReplacementContentRuntime(config, {
       const record = owner && manager && typeof sessionId === 'string' && targetIds.length && internalIds.every(idValid)
         ? { owner, manager, options, sessionId, items: batch, targetIds, internalIds } : null;
       const previous = state.activeBatch; state.activeBatch = record;
-      try { return originalExecute.call(this, batch, configArg, context, sessionId, ...rest); }
+      let result;
+      try { result = originalExecute.call(this, batch, configArg, context, sessionId, ...rest); }
       finally { state.activeBatch = previous; }
+      // Phase 2C: when the Scheduler's promise for the held stale batch settles,
+      // its ownership check has finished; verify the discard evidence and report
+      // the production rejection once.
+      const barrier = record?.staleBarrier;
+      if (barrier && result && typeof result.then === 'function') {
+        result.then(() => { if (barrier.held === true) void verifyStaleRejection(barrier); },
+          () => { /* A barrier failure already surfaced through the adapter error path. */ });
+      }
+      return result;
     };
     const wrappedSettlement = function (item, ...rest) {
       const settlement = originalSettlement.call(this, item, ...rest); const settle = settlement?.settle;
       if (typeof settle !== 'function') return settlement;
+      // Phase 2C: capture each stale item's settled text and outcome so the
+      // release verification can prove the ownership check discarded the batch.
+      const staleBarrier = config.staleSuccess === true ? state.staleItems.get(item) ?? null : null;
+      const staleEntry = staleBarrier ? { text: rest[0] ?? null, outcome: null } : null;
+      if (staleEntry) staleBarrier.settlements.push(staleEntry);
       settlement.settle = function (outcome) {
         const result = settle.call(this, outcome);
-        if (result === true) observeAcceptedSettlement(item, outcome);
+        if (result === true) {
+          if (staleEntry) staleEntry.outcome = outcome;
+          observeAcceptedSettlement(item, outcome);
+        }
         return result;
       };
       return settlement;

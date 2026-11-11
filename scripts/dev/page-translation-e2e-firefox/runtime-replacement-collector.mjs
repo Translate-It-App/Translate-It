@@ -46,20 +46,20 @@ const NATIVE_CODES = new Set(replacementNativeCodes);
 const ERROR_CODES = new Set(replacementErrorCodes);
 export { replacementEventSchemas, replacementProtocol };
 
-const exact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value)
+export const exact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
-const id = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
-const targetIds = value => Array.isArray(value) && value.length > 0 && value.length <= MAX_FINAL_TARGETS
+export const id = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+export const targetIds = value => Array.isArray(value) && value.length > 0 && value.length <= MAX_FINAL_TARGETS
   && value.every(item => /^target-(?:[0-9]|1[01])$/.test(item)) && new Set(value).size === value.length;
-const same = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, i) => value === b[i]);
-const disjoint = (a, b) => Array.isArray(a) && Array.isArray(b) && a.every(value => !b.includes(value));
-const sameCursor = (a, b) => exact(a, ['documentEpoch', 'routeRevision', 'url']) && exact(b, ['documentEpoch', 'routeRevision', 'url'])
+export const same = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, i) => value === b[i]);
+export const disjoint = (a, b) => Array.isArray(a) && Array.isArray(b) && a.every(value => !b.includes(value));
+export const sameCursor = (a, b) => exact(a, ['documentEpoch', 'routeRevision', 'url']) && exact(b, ['documentEpoch', 'routeRevision', 'url'])
   && a.documentEpoch === b.documentEpoch && a.routeRevision === b.routeRevision && a.url === b.url;
-const validCursor = (value, url) => exact(value, ['documentEpoch', 'routeRevision', 'url'])
+export const validCursor = (value, url) => exact(value, ['documentEpoch', 'routeRevision', 'url'])
   && Number.isSafeInteger(value.documentEpoch) && value.documentEpoch > 0
   && Number.isSafeInteger(value.routeRevision) && value.routeRevision >= 0 && value.url === url;
 
-function canonicalRoutes(fixtureUrl) {
+export function canonicalRoutes(fixtureUrl) {
   let a;
   try { a = new URL(fixtureUrl); } catch { throw new TypeError('fixtureUrl must be canonical loopback HTTP at an explicit non-default port and path /.'); }
   if (a.protocol !== 'http:' || a.hostname !== '127.0.0.1' || !a.port || a.username || a.password || a.search || a.hash || a.pathname !== '/') {

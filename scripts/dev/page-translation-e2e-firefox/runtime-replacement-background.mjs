@@ -254,10 +254,13 @@ export function createReplacementBackgroundAdapter(config, {
     if (message?.action === replacementContentStatusAction) {
       const withTimeoutKeys = message?.type === 'wait-quiescence';
       const statusKeys = withTimeoutKeys ? ['action', 'v', 'runId', 'type', 'timeoutMs'] : ['action', 'v', 'runId', 'type'];
+      // Phase 2C: the stale-release control exists only in stale mode, so the
+      // Phase 2B accepted status surface is unchanged otherwise.
+      const statusTypes = config.staleSuccess === true ? ['status', 'capture-final', 'release-stale'] : ['status', 'capture-final'];
       if (!exact(message, statusKeys) || message.v !== VERSION || message.runId !== config.runId
           || (withTimeoutKeys
             ? message.type !== 'wait-quiescence' || !Number.isFinite(message.timeoutMs) || message.timeoutMs < 1 || message.timeoutMs > 60_000
-            : !['status', 'capture-final'].includes(message?.type))) return false;
+            : !statusTypes.includes(message?.type))) return false;
       const actualSender = normalizeSender(sender);
       if (currentRoute === routes.A && actualSender.url === routes.B && pinnedSender && senderIsPinned(actualSender, routes.B)) {
         return queueForObservedNavigation(message, sender);
@@ -267,6 +270,9 @@ export function createReplacementBackgroundAdapter(config, {
       // Capture-final authorization itself lives in the collector; the content
       // realm never sees the driver token, so the background brokers the call.
       if (message.type === 'capture-final') return Promise.resolve(getReplacementControl(config, 'capture-final', fetchImpl));
+      // The stale-reply release grant is brokered the same way; an ungranted
+      // release answers with an error the caller can retry.
+      if (message.type === 'release-stale') return Promise.resolve(getReplacementControl(config, 'release-stale', fetchImpl));
       return message.type === 'wait-quiescence'
         ? waitForWorkerQuiescence({ timeoutMs: message.timeoutMs }).then(status) : Promise.resolve(status());
     }
@@ -410,8 +416,12 @@ export function createReplacementBackgroundAdapter(config, {
 export async function getReplacementControl(config, type, fetchImpl = globalThis.fetch) {
   const routes = configRoutes(config);
   const path = type === 'navigate-to-b' ? replacementProtocol.controlPaths.navigateToB
-    : type === 'capture-final' ? replacementProtocol.controlPaths.captureFinal : null;
-  if (!path || typeof fetchImpl !== 'function') throw new TypeError('Only the two fixed replacement controls are available.');
+    : type === 'capture-final' ? replacementProtocol.controlPaths.captureFinal
+    // The release-stale path is added to the shared protocol by the Phase 2C
+    // lane; fall back to the fixed literal so this adapter still loads if the
+    // constant is missing.
+    : type === 'release-stale' ? (replacementProtocol.controlPaths.releaseStale ?? '/__page-translation-replacement/control/release-stale') : null;
+  if (!path || typeof fetchImpl !== 'function') throw new TypeError('Only the fixed replacement controls are available.');
   const response = await fetchImpl(`${routes.origin}${path}`, { method: 'GET', headers: { authorization: `Bearer ${config.authToken}` },
     redirect: 'error', signal: AbortSignal.timeout(5_000) });
   if (!response?.ok) throw new Error(`Replacement control ${type} is not ready.`);

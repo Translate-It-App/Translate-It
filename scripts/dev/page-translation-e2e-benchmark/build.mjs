@@ -296,7 +296,8 @@ function validReplacementConfig(config) {
   if (!config || typeof config !== 'object' || typeof config.runId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(config.runId)
       || typeof config.authToken !== 'string' || !/^[a-f\d]{64,}$/i.test(config.authToken)
       || typeof config.expectedExtensionId !== 'string' || !config.expectedExtensionId) return false;
-  const keys = ['runId', 'authToken', 'fixtureUrl', 'expectedExtensionId', 'expectedTabId', 'expectedDocumentId'];
+  const keys = ['runId', 'authToken', 'fixtureUrl', 'expectedExtensionId', 'expectedTabId', 'expectedDocumentId',
+    ...(typeof config.staleSuccess === 'boolean' ? ['staleSuccess'] : [])];
   const actualKeys = Object.keys(config);
   if (actualKeys.length !== keys.length || keys.some(key => !Object.hasOwn(config, key)) || actualKeys.some(key => !keys.includes(key))) return false;
   // The Firefox tab and document identities are unknown at build time; null
@@ -314,9 +315,13 @@ function createReplacementPlugins({ replacementConfig, workerEntry, contentEntry
   if (!workerEntry || !contentEntry) throw new TypeError('replacementConfig requires explicit replacement workerEntry and contentEntry paths.');
   const workerVirtual = '\0virtual:page-replacement-worker';
   const contentVirtual = '\0virtual:page-replacement-content';
+  // Phase 2C: staleSuccess is opt-in; when absent the Phase 2B build is
+  // byte-identical to before.
+  const staleSuccess = replacementConfig.staleSuccess === true ? { staleSuccess: true } : {};
   const workerCode = `globalThis.__firefoxPageTranslationReplacementConfig = ${JSON.stringify({
     runId: replacementConfig.runId, authToken: replacementConfig.authToken, fixtureUrl: replacementConfig.fixtureUrl,
     expectedExtensionId: replacementConfig.expectedExtensionId, expectedTabId: null, expectedDocumentId: null,
+    ...staleSuccess,
   })};
 await import(${JSON.stringify(resolve(workerEntry))});
 `;
@@ -327,6 +332,7 @@ await import(${JSON.stringify(resolve(workerEntry))});
   const contentCode = `globalThis.__firefoxPageTranslationReplacementConfig = ${JSON.stringify({
     runId: replacementConfig.runId, fixtureUrl: replacementConfig.fixtureUrl, expectedExtensionId: replacementConfig.expectedExtensionId,
     expectedTabId: null, expectedDocumentId: null,
+    ...staleSuccess,
   })};
 try {
   const constants = await import(${JSON.stringify(constantsEntry)});

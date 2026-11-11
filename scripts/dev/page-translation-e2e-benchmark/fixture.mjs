@@ -134,7 +134,9 @@ export async function startFixture(fixture = createFixture(), { runtimeBridge, r
         if (bridge && await bridge._handle(request, response, url)) return;
         const replacementPaths = replacementCollector ? new Set([
           replacementCollector.reportUrl && new URL(replacementCollector.reportUrl).pathname,
-          ...['navigate-to-b', 'capture-final'].map(type => {
+          // Phase 2C adds the release-stale control; other collectors simply
+          // never expose that pathname, so including it is inert for them.
+          ...['navigate-to-b', 'capture-final', 'release-stale'].map(type => {
             try { return new URL(replacementCollector.controlUrl(type)).pathname; } catch { return null; }
           }),
         ].filter(Boolean)) : new Set();
