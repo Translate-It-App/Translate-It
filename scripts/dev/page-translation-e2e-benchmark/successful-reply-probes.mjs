@@ -357,7 +357,7 @@ export function validateStaleSuccessEvidence({ gate, invalidation, guard, batch,
   if (schedulerBatchSettled !== true) issues.push('A scheduler batch did not fulfill after its stale ownership guard');
   if (postInvalidationOk !== true) issues.push('post-invalidation settlement/DOM ownership evidence is incomplete or invalid');
   if (domNoUnexpectedWrites !== true) issues.push('post-release DOM contains an unexpected A/unowned value');
-  if (requireBPending && bStateStable !== true) issues.push('B session counters, queue, context, controller, or runtime resources drifted');
+  if (requireBPending && bStateStable !== true) issues.push('B session ownership, provider request, or resource state is invalid');
   if (requireBPending && !bStillPending) issues.push('replacement B was not still pending when A reply was released');
   if (expectedIds?.length && (!Array.isArray(acceptedBIds) || acceptedBIds.length !== expectedIds.length
       || new Set(acceptedBIds).size !== expectedIds.length || expectedIds.some(id => !acceptedBIds.includes(id)))) {
@@ -370,7 +370,7 @@ export function validateStaleSuccessEvidence({ gate, invalidation, guard, batch,
   return { ok: issues.length === 0, issues };
 }
 
-export function validateRuntimeResources(snapshot, { activeMessageId = null, terminalMessageIds = [], sessionIds = [], final = false } = {}) {
+export function validateRuntimeResources(snapshot, { activeMessageId = null, terminalMessageIds = [], sessionIds = [], final = false, additionalAllowedMessageIds = [] } = {}) {
   const issues = [];
   if (snapshot?.available !== true) issues.push('runtime resource APIs are missing or unavailable');
   const lifecycleIds = snapshot?.lifecycle?.activeIds;
@@ -393,7 +393,8 @@ export function validateRuntimeResources(snapshot, { activeMessageId = null, ter
       || !Number.isInteger(state.queuedRequests) || typeof state.isProcessingQueue !== 'boolean')) issues.push('RateLimitManager active/queued snapshot is missing');
   if (!lease || !Array.isArray(lease.activeOperationIds) || !Number.isInteger(lease.activeOperationCount)
       || typeof lease.timerActive !== 'boolean') issues.push('BackgroundOperationLease snapshot is missing');
-  else if ((lease.activeOperationCount > 0) !== (lease.activeOperationIds.length > 0)) issues.push('BackgroundOperationLease ID/count accounting is inconsistent');
+  else if ((lease.activeOperationCount > 0) !== (lease.activeOperationIds.length > 0)
+      || lease.activeOperationCount < lease.activeOperationIds.length) issues.push('BackgroundOperationLease ID/count accounting is inconsistent');
   if (!resolvers || typeof resolvers !== 'object' || sessionIds.some(id => !Object.prototype.hasOwnProperty.call(resolvers, id))) {
     issues.push('session AUTO-resolution snapshot is missing');
   }
@@ -401,7 +402,15 @@ export function validateRuntimeResources(snapshot, { activeMessageId = null, ter
 
   if (activeMessageId) {
     if (!lifecycleIds?.includes(activeMessageId) || !serviceActiveIds?.includes(activeMessageId)) issues.push('expected active request is not registered in both lifecycle and service tracker');
-    if (lifecycleIds?.some(id => id !== activeMessageId) || serviceActiveIds?.some(id => id !== activeMessageId)) issues.push('unrelated active lifecycle/service request exists during isolated probe');
+    // B may legitimately hold additional concurrent requests; only explicitly attributed ids are allowed.
+    const allowedActiveIds = new Set([activeMessageId, ...additionalAllowedMessageIds].filter(Boolean));
+    const ACTIVE_REQUEST_STATUSES = ['pending', 'processing', 'streaming'];
+    if (lifecycleIds?.some(id => !allowedActiveIds.has(id)) || serviceActiveIds?.some(id => !allowedActiveIds.has(id))) issues.push('unrelated active lifecycle/service request exists during isolated probe');
+    if (requestStates.some(item => item?.messageId !== activeMessageId && item?.messageId && !allowedActiveIds.has(item.messageId)
+        && ACTIVE_REQUEST_STATUSES.includes(item.status) && item.operationOwned === true)) {
+      issues.push('unrelated active service request record exists during isolated probe');
+    }
+    if (lease?.activeOperationIds?.some(id => !allowedActiveIds.has(id))) issues.push('unrelated active background operation lease ID exists during isolated probe');
     if (!lease?.activeOperationIds?.includes(activeMessageId)) issues.push(`BackgroundOperationLease does not hold the exact active request ID ${activeMessageId}`);
     const request = requestStates.find(item => item.messageId === activeMessageId);
     if (!request || !['pending', 'processing', 'streaming'].includes(request.status) || request.operationOwned !== true) {
@@ -413,7 +422,7 @@ export function validateRuntimeResources(snapshot, { activeMessageId = null, ter
     if (!request || !['completed', 'failed', 'cancelled', 'timeout'].includes(request.status) || request.operationOwned !== false) {
       issues.push(`terminal request/operation cleanup is unavailable for ${messageId}`);
     }
-    if (lifecycleIds?.includes(messageId) || serviceActiveIds?.includes(messageId)) issues.push(`terminal request remains active: ${messageId}`);
+    if (lifecycleIds?.includes(messageId) || serviceActiveIds?.includes(messageId) || lease?.activeOperationIds?.includes(messageId)) issues.push(`terminal request remains active: ${messageId}`);
   }
   if (final) {
     if (lifecycleIds?.length || serviceActiveIds?.length) issues.push('active lifecycle/service requests remain after cleanup');
@@ -428,40 +437,53 @@ export function validateRuntimeResources(snapshot, { activeMessageId = null, ter
   return { ok: issues.length === 0, issues };
 }
 
-export function validateReplacementStability({ schedulerBefore, schedulerAfter, resourcesBefore, resourcesAfter, providerRootAfter, controllerAfter, heldRequest, sessionId, messageId, terminalMessageIds = [], sessionIds = [] }) {
+export function validateReplacementStability({ schedulerBefore, schedulerAfter, resourcesBefore, resourcesAfter, providerRootAfter, controllerAfter, heldRequest, sessionId, messageId, terminalMessageIds = [], sessionIds = [], allowedConcurrentMessageIds = [] }) {
   const issues = [];
+  // B legitimately dispatches additional batches (extra in-flight requests, counter/queue movement)
+  // while its first provider request is held; strict equality of snapshots is intentionally not required.
   const schedulerFields = ['translationSessionId', 'isTranslated', 'translatedCount', 'failedCount', 'totalTasks', 'activeFlushes',
     'sessionContextOwned', 'pendingSettlementCount', 'batchTimerActive', 'completionTimerActive', 'discoveryPending',
     'bridgeSessionOwned', 'bridgeSessionActive', 'bridgeDiscoveryPending', 'bridgeDiscoveryRunning',
     'bridgeDiscoveryStarting', 'bridgeDiscoveryQueueDepth', 'bridgeDiscoveryCancelled', 'bridgeDiscoveryFailed'];
+  const ownershipIssues = [];
   if (!schedulerBefore || !schedulerAfter || schedulerFields.some(key => schedulerBefore[key] === null || schedulerBefore[key] === undefined
       || schedulerAfter[key] === null || schedulerAfter[key] === undefined)
       || !Array.isArray(schedulerBefore?.queueIds) || !Array.isArray(schedulerAfter?.queueIds)
-      || !Array.isArray(schedulerBefore?.activeBatchIds) || !Array.isArray(schedulerAfter?.activeBatchIds)) issues.push('B scheduler snapshot fields are unavailable');
-  else if (schedulerFields.some(key => schedulerBefore[key] !== schedulerAfter[key])
-      || JSON.stringify(schedulerBefore.queueIds) !== JSON.stringify(schedulerAfter.queueIds)
-      || JSON.stringify(schedulerBefore.activeBatchIds) !== JSON.stringify(schedulerAfter.activeBatchIds)) {
-    issues.push('B scheduler counters, queue, active batches, context, or timers changed');
+      || !Array.isArray(schedulerBefore?.activeBatchIds) || !Array.isArray(schedulerAfter?.activeBatchIds)) {
+    ownershipIssues.push('B scheduler snapshot fields are unavailable');
+  } else {
+    if (schedulerAfter.translationSessionId !== sessionId) ownershipIssues.push('B scheduler no longer owns its translation session');
+    if (schedulerAfter.isTranslated !== true) ownershipIssues.push('B session is no longer translating');
+    if (schedulerAfter.sessionContextOwned !== true) ownershipIssues.push('B scheduler lost session context ownership');
+    if (schedulerAfter.bridgeSessionOwned !== true || schedulerAfter.bridgeSessionActive !== true) ownershipIssues.push('B Bridge no longer owns the active session');
+    if (schedulerAfter.totalTasks !== schedulerBefore.totalTasks) ownershipIssues.push('B admitted target count changed during A reply release');
+    if (schedulerAfter.translatedCount < schedulerBefore.translatedCount || schedulerAfter.failedCount < schedulerBefore.failedCount) ownershipIssues.push('B settlement counters regressed during A reply release');
   }
+  issues.push(...ownershipIssues);
   const beforeValidation = validateRuntimeResources(resourcesBefore, {
-    activeMessageId: messageId, terminalMessageIds, sessionIds,
+    activeMessageId: messageId, terminalMessageIds, sessionIds, additionalAllowedMessageIds: allowedConcurrentMessageIds,
   });
   const afterValidation = validateRuntimeResources(resourcesAfter, {
-    activeMessageId: messageId, terminalMessageIds, sessionIds,
+    activeMessageId: messageId, terminalMessageIds, sessionIds, additionalAllowedMessageIds: allowedConcurrentMessageIds,
   });
   issues.push(...beforeValidation.issues.map(issue => `before A release: ${issue}`), ...afterValidation.issues.map(issue => `after A release: ${issue}`));
-  for (const key of ['lifecycle', 'queue', 'rateLimit', 'lease', 'sourceResolvers', 'service']) {
-    if (JSON.stringify(resourcesBefore?.[key]) !== JSON.stringify(resourcesAfter?.[key])) issues.push(`B/worker ${key} snapshot changed during A reply release`);
-  }
-  if (heldRequest?.pageSessionId !== sessionId || heldRequest?.batchMessageId !== messageId
-      || heldRequest?.released !== false || heldRequest?.handlerSettled !== false) issues.push('B held Fetch is not still pending for the exact locked session/message');
-  if (providerRootAfter?.sessionId !== sessionId || providerRootAfter?.messageId !== messageId || providerRootAfter?.status !== 'pending') {
-    issues.push('B provider root is not still pending for the exact locked session/message');
-  }
-  if (controllerAfter?.sessionId !== sessionId || controllerAfter?.messageId !== messageId || controllerAfter?.aborted !== false) {
-    issues.push('B controller is not still active for the exact locked session/message');
-  }
-  return { ok: issues.length === 0, issues, resourceValidationBefore: beforeValidation, resourceValidationAfter: afterValidation };
+  const heldPending = heldRequest?.pageSessionId === sessionId && heldRequest?.batchMessageId === messageId
+    && heldRequest?.released === false && heldRequest?.handlerSettled === false;
+  if (!heldPending) issues.push('B held Fetch is not still pending for the exact locked session/message');
+  const providerRootPending = providerRootAfter?.sessionId === sessionId && providerRootAfter?.messageId === messageId && providerRootAfter?.status === 'pending';
+  if (!providerRootPending) issues.push('B provider root is not still pending for the exact locked session/message');
+  const controllerActive = controllerAfter?.sessionId === sessionId && controllerAfter?.messageId === messageId && controllerAfter?.aborted === false;
+  if (!controllerActive) issues.push('B controller is not still active for the exact locked session/message');
+  const afterRequest = Array.isArray(resourcesAfter?.service?.requests)
+    ? resourcesAfter.service.requests.find(item => item.messageId === messageId) : null;
+  const lockedIdStillActive = resourcesAfter?.lifecycle?.activeIds?.includes(messageId) === true
+    && resourcesAfter?.service?.activeRequestIds?.includes(messageId) === true
+    && resourcesAfter?.lease?.activeOperationIds?.includes(messageId) === true
+    && ['pending', 'processing', 'streaming'].includes(afterRequest?.status) === true
+    && afterRequest?.operationOwned === true;
+  const pending = heldPending && providerRootPending && controllerActive && lockedIdStillActive;
+  const ownership = ownershipIssues.length === 0 && beforeValidation.ok && afterValidation.ok;
+  return { ok: issues.length === 0, issues, pending, ownership, resourceValidationBefore: beforeValidation, resourceValidationAfter: afterValidation };
 }
 
 export function validateReplacementDiscoverySnapshot({ snapshot, sessionId, targetCount, firstBatchSize, settlementOperations = [] }) {
@@ -505,6 +527,7 @@ export function installSuccessfulReplyProbe({ runtime, scheduler, gateFactory = 
   const guards = [];
   const guardDiagnostics = [];
   const instrumentationErrors = [];
+  const sentPageBatches = [];
   let armed = false;
   let closed = false;
   let selectedBatch = null;
@@ -680,6 +703,9 @@ export function installSuccessfulReplyProbe({ runtime, scheduler, gateFactory = 
   };
 
   const interceptSchedulerBatchReply = (message, originalPromise) => {
+    if (message?.action === PAGE_TRANSLATE_BATCH_WIRE_ACTION && typeof message?.messageId === 'string') {
+      sentPageBatches.push({ messageId: message.messageId, sessionId: message?.data?.sessionId ?? null, at: Date.now() });
+    }
     const execution = executionStack.at(-1);
     const isTarget = armed && !closed && !gate && execution && execution === selectedBatch && message?.action === PAGE_TRANSLATE_BATCH_WIRE_ACTION
       && message?.data?.sessionId === execution.sessionId && typeof message?.messageId === 'string';
@@ -790,6 +816,7 @@ export function installSuccessfulReplyProbe({ runtime, scheduler, gateFactory = 
           currentMethodName: instance._ownsFlushSession?.name ?? null,
         })),
         instrumentationErrors: [...instrumentationErrors],
+        sentPageBatches: sentPageBatches.map(item => ({ ...item })),
         staleGuard: matchingGuard ?? null,
         events: [...events],
       };

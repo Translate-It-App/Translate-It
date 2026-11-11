@@ -1084,25 +1084,34 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         let bEvidence = null;
         let bStillPending = false;
         let bStable = true;
+        let bAttribution = null;
         if (replacement) {
-          const [schedulerAfter, workerAfter] = await Promise.all([
+          // Take the worker snapshot BEFORE the content-side snapshot/send log so the send log is never older than the worker evidence.
+          const workerAfter = await snapshotWorker(replacement.sessionId, [capturedMessage.messageId, replacement.messageId], [sessionIdA, replacement.sessionId]);
+          const [schedulerAfter, probeSnapshot] = await Promise.all([
             evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
-            snapshotWorker(replacement.sessionId, [capturedMessage.messageId, replacement.messageId], [sessionIdA, replacement.sessionId]),
+            evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false),
           ]);
           const rootAfter = workerAfter.probe.providerRoots.find(root => root.messageId === replacement.messageId && root.sessionId === replacement.sessionId);
           const controllerAfter = workerAfter.probe.controllers.find(controller => controller.messageId === replacement.messageId && controller.sessionId === replacement.sessionId);
+          const sentByB = (probeSnapshot?.sentPageBatches ?? [])
+            .filter(entry => entry?.sessionId === replacement.sessionId && typeof entry?.messageId === 'string')
+            .map(entry => entry.messageId);
+          const allowedConcurrentMessageIds = [...new Set(sentByB)].filter(id => id !== replacement.messageId);
           const stability = validateReplacementStability({
             schedulerBefore: replacement.scheduler, schedulerAfter: schedulerAfter,
             resourcesBefore: replacement.worker.resources, resourcesAfter: workerAfter.resources,
             providerRootAfter: rootAfter, controllerAfter, heldRequest: replacement.held,
             sessionId: replacement.sessionId, messageId: replacement.messageId,
             terminalMessageIds: [capturedMessage.messageId], sessionIds: [sessionIdA, replacement.sessionId],
+            allowedConcurrentMessageIds,
           });
-          bStable = stability.ok;
-          bStillPending = stability.ok;
+          bStable = stability.ownership;
+          bStillPending = stability.pending;
           if (!stability.ok) issues.push(...stability.issues);
-          if (!bStable) issues.push('B scheduler counters/queues/context/controller or runtime resources drifted during A reply release');
+          if (!bStable) issues.push('B session ownership, provider request, or resource state is invalid during A reply release');
           bEvidence = { scheduler: schedulerAfter, worker: workerAfter, root: rootAfter, controller: controllerAfter, stability };
+          bAttribution = { allowedConcurrentMessageIds, sentPageBatches: probeSnapshot?.sentPageBatches ?? [] };
         }
         const gateReleasedAt = aAfterRelease.probe.events.find(event => event.name === 'gate' && event.event?.type === 'released')?.at ?? null;
         const gateForValidation = { ...gateWithOrder, releasedAt: gateReleasedAt };
@@ -1121,7 +1130,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         return {
           probe: aAfterRelease.probe, gate: gateForValidation, guard, operations: allOperations,
           acceptedAIds: aAccepted, postInvalidation, lateLifecycle, batchSettlements,
-          domAfterAReply, bEvidence, bStillPending, bStable, validation: proof,
+          domAfterAReply, bEvidence, bAttribution, bStillPending, bStable, validation: proof,
         };
       };
 
@@ -1267,12 +1276,21 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         return validation.ok ? { scheduler, content, validation } : null;
       }, 20_000);
       trial.staleSuccess.bDiscoveryCheckpoint = bDiscoveryCheckpoint;
+      const bAttributedMessageIds = async () => {
+        const snapshot = await evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false);
+        return [...new Set((snapshot?.sentPageBatches ?? [])
+          .filter(entry => entry?.sessionId === sessionIdB && typeof entry?.messageId === 'string')
+          .map(entry => entry.messageId))];
+      };
       const bContentBeforeRelease = await snapshotContent(sessionIdB);
       const bSchedulerBeforeRelease = await evaluate(chrome, pageSession,
         'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
       const bResourcesBeforeRelease = workerAtB.resources;
+      const bAllowedIds = (await bAttributedMessageIds()).filter(id => id !== heldB.batchMessageId);
       const bResourceValidation = validateRuntimeResources(bResourcesBeforeRelease, {
         activeMessageId: heldB.batchMessageId, terminalMessageIds: [capturedMessage.messageId], sessionIds: [sessionIdA, sessionIdB],
+        additionalAllowedMessageIds: bAllowedIds,
       });
       const bLeaseHeld = bResourcesBeforeRelease.lease?.activeOperationIds?.includes(heldB.batchMessageId) === true;
       const bTrackedRequest = bResourcesBeforeRelease.service?.requests?.find(request => request.messageId === heldB.batchMessageId) ?? null;
@@ -1285,6 +1303,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         serviceRequest: bTrackedRequest,
         leaseSnapshot: bResourcesBeforeRelease.lease ?? null,
         exactMessageIdHeld: bLeaseHeld,
+        allowedConcurrentMessageIds: bAllowedIds,
       };
       const aGateBeforeRelease = await evaluate(chrome, pageSession,
         'window.__pageTranslationBenchmark.successfulReplySnapshot()', contentContext, false);
@@ -1301,8 +1320,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       const controllerImmediatelyBeforeRelease = workerImmediatelyBeforeRelease.probe.controllers.find(controller => controller.messageId === heldB.batchMessageId && controller.sessionId === sessionIdB);
       const schedulerImmediatelyBeforeRelease = await evaluate(chrome, pageSession,
         'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+      const bAllowedIdsNow = (await bAttributedMessageIds()).filter(id => id !== heldB.batchMessageId);
       const resourcesImmediatelyBeforeRelease = validateRuntimeResources(workerImmediatelyBeforeRelease.resources, {
         activeMessageId: heldB.batchMessageId, terminalMessageIds: [capturedMessage.messageId], sessionIds: [sessionIdA, sessionIdB],
+        additionalAllowedMessageIds: bAllowedIdsNow,
       });
       const bSchedulerCurrentAtRelease = schedulerImmediatelyBeforeRelease?.translationSessionId === sessionIdB
         && schedulerImmediatelyBeforeRelease?.isTranslated === true
@@ -1324,6 +1345,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         schedulerImmediatelyBeforeRelease,
         resourcesImmediatelyBeforeRelease: workerImmediatelyBeforeRelease.resources,
         resourcesValidation: resourcesImmediatelyBeforeRelease,
+        allowedConcurrentMessageIds: bAllowedIdsNow,
         schedulerOwnedAndInspectable: bSchedulerCurrentAtRelease,
       };
       if (rootImmediatelyBeforeRelease?.status !== 'pending' || controllerImmediatelyBeforeRelease?.aborted !== false

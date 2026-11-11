@@ -412,42 +412,209 @@ describe('successful stale Page reply probe', () => {
     }).ok).toBe(false);
   });
 
-  it('rejects B counter, queue, lifecycle, controller, and held-request drift across A release', () => {
-    const scheduler = {
-      translationSessionId: 'B', isTranslated: true, translatedCount: 0, failedCount: 0,
-      totalTasks: 1000, activeFlushes: 1, sessionContextOwned: true,
-      discoveryPending: false, bridgeSessionOwned: true, bridgeSessionActive: true,
-      bridgeDiscoveryPending: false, bridgeDiscoveryRunning: false, bridgeDiscoveryStarting: false,
-      bridgeDiscoveryQueueDepth: 0, bridgeDiscoveryCancelled: false, bridgeDiscoveryFailed: false,
-      pendingSettlementCount: 25, batchTimerActive: false, completionTimerActive: true,
-      queueIds: [], activeBatchIds: Array.from({ length: 25 }, (_, i) => `b-${i}`),
-    };
-    const resources = {
-      available: true,
-      lifecycle: { activeIds: ['batch-B'] },
-      service: { activeRequestIds: ['batch-B'], requests: [
+  const baseStaleScheduler = {
+    translationSessionId: 'B', isTranslated: true, translatedCount: 0, failedCount: 0,
+    totalTasks: 1000, activeFlushes: 1, sessionContextOwned: true, pendingSettlementCount: 25,
+    batchTimerActive: true, completionTimerActive: true, discoveryPending: false,
+    bridgeSessionOwned: true, bridgeSessionActive: true,
+    bridgeDiscoveryPending: false, bridgeDiscoveryRunning: false, bridgeDiscoveryStarting: false,
+    bridgeDiscoveryQueueDepth: 0, bridgeDiscoveryCancelled: false, bridgeDiscoveryFailed: false,
+    queueIds: Array.from({ length: 975 }, (_, i) => `queued-${i}`),
+    activeBatchIds: Array.from({ length: 25 }, (_, i) => `b-${i}`),
+  };
+  const makeStaleResources = activeIds => ({
+    available: true,
+    lifecycle: { activeIds },
+    service: {
+      activeRequestIds: activeIds,
+      requests: [
         { messageId: 'batch-A', status: 'completed', operationOwned: false },
-        { messageId: 'batch-B', status: 'processing', operationOwned: true },
-      ] },
-      sourceResolvers: { A: { present: false }, B: { present: true } },
-      queue: { depths: { edge: 0 }, processing: { edge: true }, retryTimeoutCount: 0 },
-      rateLimit: { edge: { activeRequests: 1, queuedRequests: 0, isProcessingQueue: true } },
-      lease: { activeOperationIds: ['batch-B'], activeOperationCount: 1, timerActive: true },
+        ...activeIds.map(id => ({ messageId: id, status: id === 'batch-B' ? 'pending' : 'processing', operationOwned: true })),
+      ],
+    },
+    sourceResolvers: { A: { present: false }, B: { present: true } },
+    queue: { depths: { edge: 0 }, processing: { edge: true }, retryTimeoutCount: 0 },
+    rateLimit: { edge: { activeRequests: activeIds.length, queuedRequests: 0, isProcessingQueue: true } },
+    lease: { activeOperationIds: activeIds, activeOperationCount: activeIds.length, timerActive: true },
+  });
+  const staleStabilityFixture = () => ({
+    schedulerBefore: structuredClone(baseStaleScheduler),
+    schedulerAfter: {
+      ...baseStaleScheduler, translatedCount: 1, failedCount: 0, activeFlushes: 2, batchTimerActive: false,
+      queueIds: baseStaleScheduler.queueIds.slice(0, 950),
+      activeBatchIds: Array.from({ length: 50 }, (_, i) => `b-${i}`),
+    },
+    resourcesBefore: makeStaleResources(['batch-B']),
+    resourcesAfter: makeStaleResources(['batch-B', 'batch-B2']),
+    providerRootAfter: { sessionId: 'B', messageId: 'batch-B', status: 'pending' },
+    controllerAfter: { sessionId: 'B', messageId: 'batch-B', aborted: false },
+    heldRequest: { pageSessionId: 'B', batchMessageId: 'batch-B', released: false, handlerSettled: false },
+    sessionId: 'B', messageId: 'batch-B', terminalMessageIds: ['batch-A'], sessionIds: ['A', 'B'],
+  });
+
+  it('accepts a legitimate second B batch while A reply is released when every request is attributed to B', () => {
+    const result = validateReplacementStability({ ...staleStabilityFixture(), allowedConcurrentMessageIds: ['batch-B2'] });
+    expect(result).toMatchObject({ ok: true, issues: [], pending: true, ownership: true });
+  });
+
+  it('rejects an extra active request that the B send log does not attribute', () => {
+    const unattributed = validateReplacementStability(staleStabilityFixture());
+    expect(unattributed.ok).toBe(false);
+    expect(unattributed.issues).toEqual(expect.arrayContaining([
+      expect.stringContaining('unrelated active lifecycle/service request exists during isolated probe'),
+    ]));
+    const wronglyAttributed = validateReplacementStability({ ...staleStabilityFixture(), allowedConcurrentMessageIds: ['batch-other'] });
+    expect(wronglyAttributed.ok).toBe(false);
+    expect(wronglyAttributed.issues).toEqual(expect.arrayContaining([
+      expect.stringContaining('unrelated active lifecycle/service request exists during isolated probe'),
+    ]));
+  });
+
+  it('fails closed on incorrect B ownership fields across A release', () => {
+    const fixture = staleStabilityFixture();
+    const cases = [
+      [{ schedulerAfter: { ...fixture.schedulerAfter, translationSessionId: 'C' } }, 'B scheduler no longer owns its translation session'],
+      [{ schedulerAfter: { ...fixture.schedulerAfter, isTranslated: false } }, 'B session is no longer translating'],
+      [{ schedulerAfter: { ...fixture.schedulerAfter, sessionContextOwned: false } }, 'B scheduler lost session context ownership'],
+      [{ schedulerAfter: { ...fixture.schedulerAfter, bridgeSessionOwned: false } }, 'B Bridge no longer owns the active session'],
+      [{ schedulerAfter: { ...fixture.schedulerAfter, bridgeSessionActive: false } }, 'B Bridge no longer owns the active session'],
+      [{ schedulerBefore: { ...fixture.schedulerBefore, totalTasks: 999 } }, 'B admitted target count changed during A reply release'],
+      [{
+        schedulerBefore: { ...fixture.schedulerBefore, translatedCount: 1 },
+        schedulerAfter: { ...fixture.schedulerAfter, translatedCount: 0 },
+      }, 'B settlement counters regressed during A reply release'],
+    ];
+    for (const [override, expectedIssue] of cases) {
+      const result = validateReplacementStability({ ...fixture, allowedConcurrentMessageIds: ['batch-B2'], ...override });
+      expect(result.ok).toBe(false);
+      expect(result.ownership).toBe(false);
+      expect(result.issues).toContain(expectedIssue);
+    }
+  });
+
+  it('rejects an unexpected B cancellation across the held Fetch, controller, and provider root', () => {
+    const fixture = staleStabilityFixture();
+    const result = validateReplacementStability({
+      ...fixture, allowedConcurrentMessageIds: ['batch-B2'],
+      heldRequest: { ...fixture.heldRequest, released: true },
+      controllerAfter: { ...fixture.controllerAfter, aborted: true },
+      providerRootAfter: { ...fixture.providerRootAfter, status: 'rejected' },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.pending).toBe(false);
+    expect(result.ownership).toBe(true);
+    expect(result.issues).toEqual(expect.arrayContaining([
+      'B held Fetch is not still pending for the exact locked session/message',
+      'B provider root is not still pending for the exact locked session/message',
+      'B controller is not still active for the exact locked session/message',
+    ]));
+  });
+
+  it('fails closed when provider, resource, or held-request evidence is missing', () => {
+    const fixture = staleStabilityFixture();
+    const result = validateReplacementStability({
+      ...fixture, schedulerAfter: null, resourcesAfter: { available: false },
+      providerRootAfter: null, controllerAfter: null, heldRequest: null,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.pending).toBe(false);
+    expect(result.ownership).toBe(false);
+    expect(result.issues).toEqual(expect.arrayContaining([
+      'B scheduler snapshot fields are unavailable',
+      'B held Fetch is not still pending for the exact locked session/message',
+      'B provider root is not still pending for the exact locked session/message',
+      'B controller is not still active for the exact locked session/message',
+    ]));
+    expect(validateReplacementStability({ ...fixture, schedulerBefore: null }).ok).toBe(false);
+  });
+
+  it('records every page-batch send with its session id and ignores other actions', () => {
+    const runtime = { sendMessage: () => Promise.resolve({ success: true }) };
+    const scheduler = {
+      _executeBatchRequest() { return Promise.resolve({ success: true }); },
+      _ownsFlushSession() { return false; },
     };
-    const valid = {
-      schedulerBefore: scheduler, schedulerAfter: structuredClone(scheduler),
-      resourcesBefore: resources, resourcesAfter: structuredClone(resources),
-      providerRootAfter: { sessionId: 'B', messageId: 'batch-B', status: 'pending' },
-      controllerAfter: { sessionId: 'B', messageId: 'batch-B', aborted: false },
-      heldRequest: { pageSessionId: 'B', batchMessageId: 'batch-B', released: false, handlerSettled: false },
-      sessionId: 'B', messageId: 'batch-B', terminalMessageIds: ['batch-A'], sessionIds: ['A', 'B'],
+    const probe = installSuccessfulReplyProbe({ runtime, scheduler });
+    probe.arm();
+    runtime.sendMessage({ action: 'page-translate-batch', messageId: 'batch-1', data: { sessionId: 'S1' } });
+    runtime.sendMessage({ action: 'other-action', messageId: 'other-1', data: { sessionId: 'S1' } });
+    runtime.sendMessage({ action: 'page-translate-batch', messageId: 'batch-2', data: { sessionId: 'S2' } });
+    runtime.sendMessage({ action: 'page-translate-batch', data: { sessionId: 'S3' } });
+    const sent = probe.snapshot().sentPageBatches;
+    expect(sent.map(({ messageId, sessionId }) => ({ messageId, sessionId })))
+      .toEqual([{ messageId: 'batch-1', sessionId: 'S1' }, { messageId: 'batch-2', sessionId: 'S2' }]);
+    expect(sent.every(entry => Number.isInteger(entry.at))).toBe(true);
+    probe.close();
+  });
+
+  it('allows only explicitly attributed additional active ids in runtime resources', () => {
+    expect(validateRuntimeResources(makeStaleResources(['batch-B', 'batch-B2']), {
+      activeMessageId: 'batch-B', additionalAllowedMessageIds: ['batch-B2'],
+    }).ok).toBe(true);
+    const unknown = validateRuntimeResources(makeStaleResources(['batch-B', 'unknown-1']), {
+      activeMessageId: 'batch-B', additionalAllowedMessageIds: ['batch-B2'],
+    });
+    expect(unknown.ok).toBe(false);
+    expect(unknown.issues).toContain('unrelated active lifecycle/service request exists during isolated probe');
+  });
+
+  it('extends attribution to service request records and the background operation lease', () => {
+    const base = { activeMessageId: 'batch-B', terminalMessageIds: ['batch-A'], additionalAllowedMessageIds: ['batch-B2'] };
+
+    // valid concurrent B operation present in all trackers plus an operation-owned record
+    expect(validateRuntimeResources(makeStaleResources(['batch-B', 'batch-B2']), base).ok).toBe(true);
+
+    // attributed id may appear in only one tracker (valid asynchronous transition)
+    const leaseOnly = {
+      ...makeStaleResources(['batch-B']),
+      lease: { activeOperationIds: ['batch-B', 'batch-B2'], activeOperationCount: 2, timerActive: true },
     };
-    expect(validateReplacementStability(valid)).toMatchObject({ ok: true, issues: [] });
-    expect(validateReplacementStability({ ...valid, schedulerAfter: { ...scheduler, translatedCount: 1 } }).ok).toBe(false);
-    expect(validateReplacementStability({ ...valid, resourcesAfter: { ...valid.resourcesAfter, lifecycle: { activeIds: [] } } }).ok).toBe(false);
-    expect(validateReplacementStability({ ...valid, resourcesAfter: { ...valid.resourcesAfter, queue: { ...resources.queue, depths: { edge: 1 } } } }).ok).toBe(false);
-    expect(validateReplacementStability({ ...valid, controllerAfter: { ...valid.controllerAfter, aborted: true } }).ok).toBe(false);
-    expect(validateReplacementStability({ ...valid, heldRequest: { ...valid.heldRequest, released: true } }).ok).toBe(false);
+    expect(validateRuntimeResources(leaseOnly, base).ok).toBe(true);
+
+    // lease count smaller than the id count is inconsistent
+    const countTooSmall = validateRuntimeResources({
+      ...makeStaleResources(['batch-B']),
+      lease: { activeOperationIds: ['batch-B', 'batch-B2'], activeOperationCount: 1, timerActive: true },
+    }, base);
+    expect(countTooSmall.ok).toBe(false);
+    expect(countTooSmall.issues).toContain('BackgroundOperationLease ID/count accounting is inconsistent');
+
+    // lease count larger than the id count is a valid reference count
+    expect(validateRuntimeResources({
+      ...makeStaleResources(['batch-B']),
+      lease: { activeOperationIds: ['batch-B'], activeOperationCount: 2, timerActive: true },
+    }, { ...base, terminalMessageIds: [] }).ok).toBe(true);
+
+    // unknown id in the lease
+    const leaseLeak = validateRuntimeResources({
+      ...makeStaleResources(['batch-B']),
+      lease: { activeOperationIds: ['batch-B', 'unexpected-A'], activeOperationCount: 2, timerActive: true },
+    }, base);
+    expect(leaseLeak.ok).toBe(false);
+    expect(leaseLeak.issues).toContain('unrelated active background operation lease ID exists during isolated probe');
+
+    // unknown active, operation-owned service request record
+    const recordLeak = validateRuntimeResources({
+      ...makeStaleResources(['batch-B']),
+      service: {
+        activeRequestIds: ['batch-B'],
+        requests: [
+          { messageId: 'batch-A', status: 'completed', operationOwned: false },
+          { messageId: 'batch-B', status: 'pending', operationOwned: true },
+          { messageId: 'unexpected-A', status: 'processing', operationOwned: true },
+        ],
+      },
+    }, base);
+    expect(recordLeak.ok).toBe(false);
+    expect(recordLeak.issues).toContain('unrelated active service request record exists during isolated probe');
+
+    // terminal message id must not remain in the lease either
+    const terminalLeak = validateRuntimeResources({
+      ...makeStaleResources(['batch-B']),
+      lease: { activeOperationIds: ['batch-B', 'batch-A'], activeOperationCount: 2, timerActive: true },
+    }, base);
+    expect(terminalLeak.ok).toBe(false);
+    expect(terminalLeak.issues).toContain('terminal request remains active: batch-A');
   });
 
   it('waits for read-only B discovery completion before treating its counters and queue as a release baseline', () => {
