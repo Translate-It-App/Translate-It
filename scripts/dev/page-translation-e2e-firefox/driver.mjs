@@ -10,6 +10,7 @@ import { classifyTransportRequest, mapEdgeResponse } from '../page-translation-e
 import { PAGE_TRANSLATION_STOP_DIAGNOSTIC_STAGES } from './runtime-constants.mjs';
 import { compareRestoreDOMSnapshots } from './restore-dom-diagnostics.mjs';
 import { createEdgeLoopbackCertificates, edgeProxyFirefoxPrefs, importEdgeLoopbackCa, startEdgeLoopbackProxy } from './loopback-edge-proxy.mjs';
+import { createReplacementCollector } from './runtime-replacement-collector.mjs';
 import { blockRuntimeBridgePrerequisite, capability, classifyObservedRealm, classifyRequestAction, isolationSnapshot, notTested, requiredCapabilities, retainExecutedCapability, runtimeProbeGate } from './capabilities.mjs';
 
 const withTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
@@ -534,6 +535,82 @@ export function validateProviderOperationReport(report, { runId, event, opSeq, e
     if (!operationExact(evidence, ['code']) || !providerStopCodes.has(evidence.code)) throw new Error('Provider operation error code is invalid.');
   }
   return { v: 1, runId, op: operationName, opSeq: report.opSeq, event, evidence: { ...evidence } };
+}
+
+/**
+ * Phase 2B final-DOM verification. Ownership and the served text are derived
+ * from the observed Scheduler evidence, never from an assumed fixture split:
+ * targets production accepted under session A keep A's translation, and the
+ * targets B accepted carry B's translation of the mutated B source. Production
+ * may render a leading U+200E marker, so either representation is accepted
+ * but the convention must be consistent across all 12 targets.
+ */
+export function classifyReplacementFinalDom({ finalDOM, targetTexts, sourcesB, retainedTargetIds = null, acceptedTargetIds = null }) {
+  if (!finalDOM || !Array.isArray(finalDOM.targets) || !Array.isArray(targetTexts) || targetTexts.length !== 12
+      || !Array.isArray(sourcesB) || sourcesB.length !== 12) return { ok: false, reason: 'invalid-input' };
+  const retained = new Set(retainedTargetIds ?? []);
+  const accepted = new Set(acceptedTargetIds ?? []);
+  const mismatches = [];
+  const covered = new Set(finalDOM.targets.map(target => target?.targetId));
+  let markerStyle = null;
+  for (let index = 0; index < 12; index++) {
+    const targetId = `target-${index}`;
+    if (!covered.has(targetId)) { mismatches.push({ targetId, reason: 'missing' }); continue; }
+    const observed = finalDOM.targets.find(target => target.targetId === targetId);
+    const expectedState = retained.has(targetId) ? 'retained' : accepted.has(targetId) ? 'accepted' : null;
+    if (expectedState === null) { mismatches.push({ targetId, reason: 'unclassified' }); continue; }
+    if (observed.owner !== 'B' || observed.state !== expectedState) {
+      mismatches.push({ targetId, reason: 'ownership', owner: observed.owner, state: observed.state, expectedState }); continue;
+    }
+    const source = expectedState === 'retained' ? targetTexts[index] : sourcesB[index];
+    const value = `fixture translation: ${source}`;
+    const candidates = [value, `\u200e${value}`].map(entry => createHash('sha256').update(entry).digest('hex'));
+    if (!candidates.includes(observed.hash)) { mismatches.push({ targetId, reason: 'hash' }); continue; }
+    const style = candidates.indexOf(observed.hash);
+    if (markerStyle === null) markerStyle = style;
+    else if (markerStyle !== style) mismatches.push({ targetId, reason: 'marker-convention' });
+  }
+  return { ok: mismatches.length === 0, mismatches, markerStyle };
+}
+
+/**
+ * Phase 2B proxy-vs-Scheduler correlation: exactly three admitted provider
+ * requests, one per observed Scheduler batch, with the expected source-index
+ * window derived from that batch's own target membership (A targets map to
+ * the A source manifest, B targets to the B source manifest), and the expected
+ * statuses released / aborted / released.
+ */
+export function classifyReplacementProxyRequests({ requests, expectedWindows = null }) {
+  if (!Array.isArray(requests) || requests.length !== 3) return { ok: false, reason: 'shape', statuses: (requests ?? []).map(request => request?.status) };
+  if (!Array.isArray(expectedWindows) || expectedWindows.length !== 3 || expectedWindows.some(window => !Array.isArray(window) || !window.length)) {
+    return { ok: false, reason: 'windows', statuses: requests.map(request => request?.status) };
+  }
+  const expectedStatuses = ['released', 'aborted', 'released'];
+  const windows = requests.map(request => request?.sourceIndexes);
+  const coverage = new Set(requests.flatMap(request => request?.sourceIndexes ?? []));
+  const expectedCoverage = new Set(expectedWindows.flat());
+  const matches = requests.every((request, index) => request?.method === 'POST' && request.host === 'edge.microsoft.com'
+    && request.sni === 'edge.microsoft.com' && /^[a-f\d]{64}$/i.test(request.bodyHash ?? '')
+    && Array.isArray(windows[index]) && windows[index].length === expectedWindows[index].length
+    && [...windows[index]].sort((a, b) => a - b).every((value, position) => value === [...expectedWindows[index]].sort((a, b) => a - b)[position])
+    && request.status === expectedStatuses[index])
+    && coverage.size === expectedCoverage.size
+    && [...coverage].every(value => expectedCoverage.has(value))
+    && new Set(requests.map(request => request?.requestId)).size === 3;
+  return matches ? { ok: true, windows } : { ok: false, reason: 'requests', windows, statuses: requests.map(request => request?.status) };
+}
+
+/**
+ * Map observed Scheduler target membership to the proxy's source-index window:
+ * A targets use their A source manifest, B targets use the B source manifest.
+ */
+export function replacementSourceIndexes(targetIds, owner, bManifestOffset = 12) {
+  if (!Array.isArray(targetIds) || !targetIds.length) return null;
+  return targetIds.map(id => {
+    const index = Number(String(id).slice('target-'.length));
+    if (!Number.isInteger(index) || index < 0 || index > 11) return null;
+    return owner === 'B' ? bManifestOffset + index : index;
+  });
 }
 
 function targetIdsSubset(value) {
@@ -1652,7 +1729,7 @@ async function snapshotFixtureDOM(bidi, context, fixtureTargets) {
   return JSON.parse(remote.value);
 }
 
-export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride, loopbackTlsProxy = false, pageTranslationE2E = false, pageTranslationStopE2E = false }) {
+export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, contentEntry, artifact, checkIsolation = verifyIsolation, startFixtureOverride, createFixtureOverride, loopbackTlsProxy = false, pageTranslationE2E = false, pageTranslationStopE2E = false, pageTranslationReplacementE2E = false }) {
   const root = await mkdtemp(resolve(tmpdir(), 'translate-it-firefox-cap-'));
   const profile = resolve(root, 'profile'); const bundle = resolve(root, 'extension');
   const records = []; const errors = []; const cleanupErrors = []; const capabilities = Object.fromEntries(requiredCapabilities.map(name => [name, notTested('Blocked by an earlier capability gate.')]));
@@ -1674,35 +1751,68 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     records.push({ kind: 'network-isolation', ...network });
     capabilities.isolation = network.ok ? capability('SUPPORTED', { evidence: network }) : capability('FAILED', { evidence: network, reason: 'Loopback-only namespace verification failed.' });
     if (!network.ok) throw new Error('Network isolation verification failed; Firefox was not started.');
-    if (loopbackTlsProxy) artifact.loopbackTlsProxy = { mode: pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'SETTING_UP', isolationVerified: true, deniedRequests: [] };
+    if (loopbackTlsProxy) artifact.loopbackTlsProxy = { mode: pageTranslationReplacementE2E ? 'page-translation-replacement' : pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'SETTING_UP', isolationVerified: true, deniedRequests: [] };
     const { startFixture: defaultStartFixture, createFixture: defaultCreateFixture } = await import('../page-translation-e2e-benchmark/fixture.mjs');
-    const fixtureData = pageTranslationE2E
-      ? (await import('../page-translation-e2e-benchmark/fixture.mjs')).createPageTranslationFixture()
-      : (createFixtureOverride ?? defaultCreateFixture)('small');
-    fixture = await (startFixtureOverride ?? defaultStartFixture)(fixtureData, { runtimeBridge: { runId, authToken, expectedExtensionId, ...(pageTranslationE2E ? { schedulerBatchRequired: true } : {}) } });
-    bridge = fixture.bridge;
+    const fixtureModule = await import('../page-translation-e2e-benchmark/fixture.mjs');
+    const fixtureData = pageTranslationReplacementE2E
+      ? fixtureModule.createPageTranslationReplacementFixture()
+      : pageTranslationE2E
+        ? fixtureModule.createPageTranslationFixture()
+        : (createFixtureOverride ?? defaultCreateFixture)('small');
+    // Phase 2B: the replacement collector instance is created after listen()
+    // with the bound port; the fixture routes its report/control paths to it.
+    fixture = await (startFixtureOverride ?? defaultStartFixture)(fixtureData, pageTranslationReplacementE2E
+      ? { replacementCollector: url => createReplacementCollector({ runId, authToken, expectedExtensionId, expectedTabId: null, expectedDocumentId: null, fixtureUrl: url }) }
+      : { runtimeBridge: { runId, authToken, expectedExtensionId, ...(pageTranslationE2E ? { schedulerBatchRequired: true } : {}) } });
     fixtureOrigin = new URL(fixture.url).origin;
-    artifact.fixture = { url: fixture.url, scope: 'loopback-only small capability fixture' };
-    capabilities.fixture = capability('SUPPORTED', { url: fixture.url, targetCount: fixtureData.targetCount });
-    if (!bridge || typeof bridge.waitFor !== 'function' || typeof bridge.snapshot !== 'function' || typeof bridge.closeAdmission !== 'function' || typeof bridge.drain !== 'function') {
-      capabilities.runtimeBridge = capability('FAILED', { reason: 'Fixture did not expose the required authenticated runtime bridge API.' });
-      throw new Error('Fixture did not expose the required authenticated runtime bridge API.');
-    }
-    const bindingUrl = bridge.bindingUrl; runtimeReportUrl = bridge.reportUrl;
-    for (const endpoint of [bindingUrl, runtimeReportUrl]) {
-      const parsed = new URL(endpoint);
-      if (parsed.origin !== fixtureOrigin || parsed.protocol !== 'http:' || parsed.username || parsed.password || parsed.hash || containsPrivateSecret(endpoint, privateSecrets)) {
-        capabilities.runtimeBridge = capability('FAILED', { reason: 'Runtime bridge endpoint escaped loopback or exposed its private token.' });
-        throw new Error('Runtime bridge endpoint escaped the loopback fixture origin or exposed its private token.');
+    bridge = pageTranslationReplacementE2E ? null : fixture.bridge;
+    let bindingUrl = null;
+    let replacementCollector = null;
+    if (pageTranslationReplacementE2E) {
+      replacementCollector = fixture.replacementCollector;
+      if (!replacementCollector || typeof replacementCollector.waitFor !== 'function' || typeof replacementCollector.snapshot !== 'function'
+          || typeof replacementCollector.closeAdmission !== 'function' || typeof replacementCollector.drain !== 'function'
+          || typeof replacementCollector.controlUrl !== 'function') {
+        capabilities.runtimeBridge = capability('FAILED', { reason: 'Fixture did not expose the required authenticated replacement collector API.' });
+        throw new Error('Fixture did not expose the required authenticated replacement collector API.');
       }
+      runtimeReportUrl = replacementCollector.reportUrl;
+      const reportOrigin = new URL(runtimeReportUrl);
+      if (reportOrigin.origin !== fixtureOrigin || reportOrigin.protocol !== 'http:') {
+        capabilities.runtimeBridge = capability('FAILED', { reason: 'Replacement collector endpoint escaped the loopback fixture origin.' });
+        throw new Error('Replacement collector endpoint escaped the loopback fixture origin.');
+      }
+      artifact.fixture = { url: fixture.url, scope: 'trusted page-replacement A/B fixture' };
+    } else {
+      if (!bridge || typeof bridge.waitFor !== 'function' || typeof bridge.snapshot !== 'function' || typeof bridge.closeAdmission !== 'function' || typeof bridge.drain !== 'function') {
+        capabilities.runtimeBridge = capability('FAILED', { reason: 'Fixture did not expose the required authenticated runtime bridge API.' });
+        throw new Error('Fixture did not expose the required authenticated runtime bridge API.');
+      }
+      bindingUrl = bridge.bindingUrl; runtimeReportUrl = bridge.reportUrl;
+      for (const endpoint of [bindingUrl, runtimeReportUrl]) {
+        const parsed = new URL(endpoint);
+        if (parsed.origin !== fixtureOrigin || parsed.protocol !== 'http:' || parsed.username || parsed.password || parsed.hash || containsPrivateSecret(endpoint, privateSecrets)) {
+          capabilities.runtimeBridge = capability('FAILED', { reason: 'Runtime bridge endpoint escaped loopback or exposed its private token.' });
+          throw new Error('Runtime bridge endpoint escaped the loopback fixture origin or exposed its private token.');
+        }
+      }
+      artifact.fixture = { url: fixture.url, scope: 'loopback-only small capability fixture' };
     }
+    capabilities.fixture = capability('SUPPORTED', { url: fixture.url, targetCount: fixtureData.targetCount });
     try {
-      await buildBenchmarkExtension({
-        outputDir: bundle, mode: 'sliced', browser: 'firefox', workerEntry, contentEntry,
-        runtimeBridge: { runId, fixtureUrl: fixture.url, bindingUrl, reportUrl: runtimeReportUrl, authToken, ...(loopbackTlsProxy && !pageTranslationE2E ? { providerOnly: true } : {}), ...(pageTranslationE2E ? { pageTranslationE2E: true } : {}) },
-      });
+      if (pageTranslationReplacementE2E) {
+        await buildBenchmarkExtension({
+          outputDir: bundle, mode: 'sliced', browser: 'firefox', workerEntry, contentEntry,
+          replacementConfig: { runId, authToken, fixtureUrl: fixture.url, expectedExtensionId, expectedTabId: null, expectedDocumentId: null },
+        });
+      } else {
+        await buildBenchmarkExtension({
+          outputDir: bundle, mode: 'sliced', browser: 'firefox', workerEntry, contentEntry,
+          runtimeBridge: { runId, fixtureUrl: fixture.url, bindingUrl, reportUrl: runtimeReportUrl, authToken, ...(loopbackTlsProxy && !pageTranslationE2E ? { providerOnly: true } : {}), ...(pageTranslationE2E ? { pageTranslationE2E: true } : {}) },
+        });
+      }
     } catch (error) {
-      capabilities.runtimeBridge = capability('FAILED', { reason: sanitizePrivate(`Authenticated runtime bridge build failed: ${error.message}`, privateSecrets) });
+      capabilities.runtimeBridge = capability('FAILED', { reason: sanitizePrivate(`Authenticated harness build failed: ${error.message}`, privateSecrets) });
       throw error;
     }
     if (aborted) throw new Error('Probe aborted before browser launch.');
@@ -1711,9 +1821,11 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       const cert = await createEdgeLoopbackCertificates(resolve(root, 'tls'));
       const nss = await importEdgeLoopbackCa(profile, cert.caCert);
       const caFingerprint = createHash('sha256').update(await readFile(cert.caCert)).digest('hex');
-      edgeProxy = await startEdgeLoopbackProxy({ tlsCert: cert.leafCert, tlsKey: cert.leafKey, fixtureTexts: fixtureData.targetTexts, responseFor: texts => mapEdgeResponse(texts) });
+      edgeProxy = await startEdgeLoopbackProxy({ tlsCert: cert.leafCert, tlsKey: cert.leafKey, fixtureTexts: pageTranslationReplacementE2E
+        ? [...fixtureData.targetTexts, ...fixtureData.sourceManifests.B]
+        : fixtureData.targetTexts, responseFor: texts => mapEdgeResponse(texts) });
       await writeFile(resolve(profile, 'user.js'), edgeProxyFirefoxPrefs(edgeProxy.port), { mode: 0o600 });
-      artifact.loopbackTlsProxy = { mode: pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'READY', bindAddress: '127.0.0.1', proxyPort: edgeProxy.port, tlsPort: edgeProxy.tlsPort,
+      artifact.loopbackTlsProxy = { mode: pageTranslationReplacementE2E ? 'page-translation-replacement' : pageTranslationStopE2E ? 'page-translation-stop-auto' : pageTranslationE2E ? 'page-translation-e2e' : 'provider-only', status: 'READY', bindAddress: '127.0.0.1', proxyPort: edgeProxy.port, tlsPort: edgeProxy.tlsPort,
         certificateVerification: cert.verification, caConstraints: cert.caConstraints, leafConstraints: cert.leafConstraints, caFingerprint, trust: nss.trust, nssListing: nss.listing,
         profilePrefs: 'manual HTTPS proxy; explicit localhost bypass; localhost hijacking disabled', deniedRequests: [] };
     }
@@ -1750,6 +1862,277 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     const manifest = JSON.parse(await readFile(resolve(bundle, 'manifest.json'), 'utf8'));
     if (manifest.background?.scripts?.[0] !== 'worker.js' || manifest.browser_specific_settings?.gecko?.id !== expectedExtensionId) throw new Error('Firefox MV3 module-worker manifest or pinned Gecko ID missing.');
     const { result: created } = await bidi.command('browsingContext.create', { type: 'tab' });
+    if (pageTranslationReplacementE2E) {
+      // Capture the browser console so a content-side failure is reported as
+      // evidence instead of a generic readiness timeout.
+      const consoleEntries = [];
+      let realmEvidence = null;
+      const realmProbes = [];
+      bidi.onEvent(message => {
+        if (message?.method !== 'log.entryAdded') return Promise.resolve();
+        if (consoleEntries.length < 64) consoleEntries.push({ level: message.params?.level ?? null, text: String(message.params?.text ?? '').slice(0, 500) });
+        return Promise.resolve();
+      });
+      await bidi.command('session.subscribe', { events: ['log.entryAdded'] });
+      records.push({ kind: 'session.subscribe', events: ['log.entryAdded'] });
+      let contentRealm = null;
+      try {
+        // Phase 2B lane: trusted SPA-navigation replacement A→B inside one live
+        // tab. The replacement collector (fixture-side), the BiDi session, and
+        // the 24-source TLS proxy oracle are already armed; this sequence only
+        // drives production behavior and asserts the collector's evidence.
+        const collector = replacementCollector;
+        // Collector.waitFor only returns the first stored match, so repeated
+        // events (session-start A/B, scheduler-batch A1/A2/B) poll by count.
+        const seen = new Map();
+        const awaitEvent = async (event, timeoutMs) => {
+          const target = (seen.get(event) ?? 0) + 1;
+          const end = Date.now() + timeoutMs;
+          for (;;) {
+            const reports = (collector.snapshot().reports ?? []).filter(report => report?.event === event);
+            if (reports.length >= target) { seen.set(event, target); return structuredClone(reports[target - 1]); }
+            if (Date.now() >= end) throw new Error(`Timed out waiting for replacement event ${event} occurrence #${target}.`);
+            await delay(50);
+          }
+        };
+        // Settlement evidence must be matched by identity, never by arrival
+        // order: the first A batch settles successfully before navigation, so an
+        // occurrence counter would accept the wrong settlement.
+        const awaitEventWhere = async (event, predicate, timeoutMs, label) => {
+          const end = Date.now() + timeoutMs;
+          for (;;) {
+            const reports = (collector.snapshot().reports ?? []).filter(report => report?.event === event && predicate(report.evidence) === true);
+            if (reports.length) return structuredClone(reports[0]);
+            if (Date.now() >= end) throw new Error(`Timed out waiting for replacement event ${event} matching ${label}.`);
+            await delay(50);
+          }
+        };
+        const installed = await bidi.command('webExtension.install', { extensionData: { type: 'path', path: bundle } });
+        extensionId = installed.result?.extension ?? installed.result?.extensionId ?? null;
+        records.push({ kind: 'webExtension.install', result: installed.result });
+        capabilities.extensionInstall = extensionId === expectedExtensionId
+          ? capability('SUPPORTED', { extensionId, manifestWorker: manifest.background.scripts[0], geckoId: manifest.browser_specific_settings.gecko.id })
+          : capability('FAILED', { reason: 'Firefox installed extension ID differs from the pinned manifest Gecko ID.' });
+        if (extensionId !== expectedExtensionId) throw new Error('Firefox extension ID mismatch in replacement lane.');
+        await bidi.command('browsingContext.navigate', { context: created.context, url: fixture.url, wait: 'none' });
+        records.push({ kind: 'replacement-navigate-a', url: fixture.url });
+
+        // The authenticated collector stream is the readiness proof: session A
+        // can only be reported by the installed content adapter through the
+        // production background bridge. WebDriver cannot evaluate scripts in an
+        // extension realm, and a content-script sandbox is invisible to the
+        // page, so DOM markers are only read after that proof.
+        const listAllRealms = async () => (await bidi.command('script.getRealms', {})).result?.realms ?? [];
+        const findPageRealm = async (timeoutMs) => {
+          const end = Date.now() + timeoutMs;
+          for (;;) {
+            const realms = await listAllRealms();
+            if (!realmEvidence) realmEvidence = realms.map(realm => ({ realm: realm.realm, type: realm.type ?? null, origin: realm.origin ?? null, context: realm.context ?? null }));
+            for (const realm of realms) {
+              if (typeof realm?.origin !== 'string' || realm.origin !== fixtureOrigin) continue;
+              try {
+                const result = await bidi.command('script.evaluate', {
+                  expression: 'JSON.stringify({ ready: document.documentElement?.getAttribute("data-translate-it-replacement-content-ready") === "1", error: document.documentElement?.getAttribute("data-translate-it-replacement-error") ?? null, attrs: Array.from(document.documentElement?.attributes ?? []).map(attribute => attribute.name).filter(name => name.startsWith("data-translate-it")).sort(), url: location.href, hasContent: typeof document.querySelector === "function" })',
+                  target: { realm: realm.realm }, awaitPromise: true });
+                const remote = result?.result?.result;
+                const state = typeof remote?.value === 'string' ? JSON.parse(remote.value) : null;
+                realmProbes.push({ realm: realm.realm, context: realm.context ?? null, state });
+                if (state?.ready === true) return realm.realm;
+                if (state?.error) throw new Error(`Replacement content entry failed: ${state.error}`);
+              } catch (error) {
+                if (String(error?.message ?? '').startsWith('Replacement content entry failed:')) throw error;
+                realmProbes.push({ realm: realm.realm, context: realm.context ?? null, error: String(error?.message ?? error).slice(0, 200) });
+              }
+            }
+            if (Date.now() >= end || aborted) return null;
+            await delay(100);
+          }
+        };
+        const sessionStartA = await awaitEvent('session-start', 30_000);
+        records.push({ kind: 'replacement-event', event: 'session-start', owner: sessionStartA.evidence?.owner ?? null });
+        if (sessionStartA.evidence?.owner !== 'A') throw new Error('The first production session was not session A.');
+        const sessionIdA = sessionStartA.evidence?.sessionId ?? null;
+        contentRealm = await findPageRealm(30_000);
+        capabilities.contentReadiness = contentRealm
+          ? capability('SUPPORTED', { realm: contentRealm, source: 'authenticated-replacement-adapter' })
+          : capability('FAILED', { reason: 'Content replacement adapter did not install in the fixture page realm.' });
+        if (!contentRealm) throw new Error('Replacement content readiness marker was never observed.');
+        const readinessResult = await bidi.command('script.evaluate', {
+          expression: 'JSON.stringify({ backgroundReady: document.documentElement?.getAttribute("data-translate-it-replacement-background-ready") === "1", contentReady: document.documentElement?.getAttribute("data-translate-it-replacement-content-ready") === "1", flags: document.documentElement?.getAttribute("data-translate-it-replacement-flags") ?? null, route: location.origin + location.pathname, targets: document.querySelectorAll("[data-bench-id]").length, titles: document.querySelectorAll("[data-bench-kind=title]").length, control: Boolean(document.getElementById("page-translation-replacement-control")) })',
+          target: { realm: contentRealm }, awaitPromise: true });
+        let pageReadiness = null;
+        try { pageReadiness = JSON.parse(readinessResult?.result?.result?.value ?? 'null'); } catch { pageReadiness = null; }
+        capabilities.backgroundReadiness = pageReadiness?.backgroundReady === true
+          ? capability('SUPPORTED', { source: 'authenticated-replacement-adapter', marker: 'data-translate-it-replacement-background-ready' })
+          : capability('FAILED', { reason: 'Background replacement adapter never acknowledged the seeded handshake.' });
+        if (pageReadiness?.backgroundReady !== true) throw new Error('Replacement background readiness marker was never observed.');
+        let flagsObserved = null;
+        try { flagsObserved = JSON.parse(pageReadiness?.flags ?? 'null'); } catch { flagsObserved = null; }
+        flagsObserved = flagsObserved && flagsObserved.slicedDiscoveryEnabled === true && flagsObserved.viewportFirstDiscoveryEnabled === false
+          ? flagsObserved : null;
+        capabilities.discoveryFlags = flagsObserved
+          ? capability('SUPPORTED', { flags: flagsObserved, source: 'replacement-harness-bundled-constants' })
+          : capability('FAILED', { reason: 'Discovery markers were not observed in the bundled constants module.' });
+        if (!flagsObserved) throw new Error('Discovery flag evidence was unavailable in the bundle.');
+        const routeAValid = pageReadiness?.route === fixture.url && pageReadiness?.targets === 12 && pageReadiness?.titles === 6 && pageReadiness?.control === true;
+        if (!routeAValid) {
+          capabilities.fixture = capability('FAILED', { reason: 'Fixture A page did not present the expected replacement targets/control.' });
+          throw new Error('Fixture A page evidence invalid.');
+        }
+        capabilities.runtimeBridge = capability('SUPPORTED', { runId, source: 'authenticated-replacement-collector', lane: 'page-translation-replacement' });
+
+        const batchA1 = await awaitEventWhere('scheduler-batch', evidence => evidence?.owner === 'A', 20_000, 'the first A scheduler batch');
+        records.push({ kind: 'replacement-event', event: 'scheduler-batch', owner: 'A', targets: batchA1.evidence?.targetIds ?? null });
+        await awaitEventWhere('provider-invoked', evidence => evidence?.messageId === batchA1.evidence?.messageId, 10_000, 'the first A provider invocation');
+        await awaitEventWhere('physical-start', evidence => evidence?.messageId === batchA1.evidence?.messageId, 10_000, 'the first A physical attempt');
+        capabilities.providerPhysicalRequest = capability('SUPPORTED', { source: 'authenticated-replacement-collector' });
+
+        const windowA1 = replacementSourceIndexes(batchA1.evidence?.targetIds, 'A');
+        if (!windowA1) throw new Error('The first A batch did not expose usable target membership.');
+        const requestA1 = await edgeProxy.waitForRequest({ match: request => request.method === 'POST'
+          && JSON.stringify(request.sourceIndexes) === JSON.stringify(windowA1), timeoutMs: 15_000 });
+        capabilities.providerRequestBody = capability('SUPPORTED', { requestId: requestA1.requestId, bodyHash: requestA1.bodyHash, bodyBytes: requestA1.bodyBytes });
+        await requestA1.release(undefined);
+        capabilities.providerResponse = capability('SUPPORTED', { requestId: requestA1.requestId, status: requestA1.status === 'released' ? 'released' : 'unknown' });
+        await edgeProxy.waitForStatus(requestA1.requestId, 'released', { timeoutMs: 5_000 });
+        const acceptedA = await awaitEvent('accepted-A', 20_000);
+        records.push({ kind: 'replacement-event', event: 'accepted-A', targets: acceptedA.evidence?.targetIds ?? null });
+
+        const batchA2 = await awaitEventWhere('scheduler-batch', evidence => evidence?.owner === 'A' && evidence?.messageId !== batchA1.evidence?.messageId, 20_000, 'the held second A scheduler batch');
+        records.push({ kind: 'replacement-event', event: 'scheduler-batch', owner: 'A', targets: batchA2.evidence?.targetIds ?? null });
+        const physicalA2 = await awaitEventWhere('physical-start', evidence => evidence?.messageId === batchA2.evidence?.messageId, 10_000, 'the held A physical attempt');
+        const heldAttemptId = physicalA2.evidence?.attemptId ?? null;
+        const heldMessageId = batchA2.evidence?.messageId ?? null;
+        const windowA2 = replacementSourceIndexes(batchA2.evidence?.targetIds, 'A');
+        if (!windowA2) throw new Error('The held A batch did not expose usable target membership.');
+        const requestA2 = await edgeProxy.waitForRequest({ match: request => request.method === 'POST'
+          && JSON.stringify(request.sourceIndexes) === JSON.stringify(windowA2), timeoutMs: 15_000 });
+        // Do NOT release requestA2: it must still be held when the trusted SPA
+        // navigation triggers production cancellation of the A session.
+        const readiness = collector.snapshot().navigationReadiness;
+        if (!readiness?.ready) {
+          capabilities.replacementSessionOwnership = capability('FAILED', { reason: 'Navigation readiness unmet.', readiness });
+          throw new Error('Replacement navigation readiness was never armed.');
+        }
+        const navigateResponse = await fetch(replacementCollector.controlUrl('navigate-to-b'), {
+          headers: { authorization: `Bearer ${authToken}` }, signal: AbortSignal.timeout(5_000),
+        });
+        if (navigateResponse.status !== 200) throw new Error(`Navigate-to-b control failed: HTTP ${navigateResponse.status}`);
+        records.push({ kind: 'replacement-control', control: 'navigate-to-b', status: navigateResponse.status });
+        await bidi.command('script.evaluate', {
+          expression: 'document.getElementById("page-translation-replacement-control").click(); undefined;',
+          target: { realm: contentRealm }, awaitPromise: true });
+        records.push({ kind: 'replacement-click', control: 'page-translation-replacement-control' });
+        const spaNavigation = await awaitEvent('spa-navigation', 15_000);
+        await edgeProxy.waitForStatus(requestA2.requestId, 'aborted', { timeoutMs: 10_000 });
+        capabilities.heldRequestAbort = capability('SUPPORTED', { requestId: requestA2.requestId, status: 'aborted', reason: 'client-aborted' });
+        await awaitEventWhere('stop-ack', evidence => evidence?.sessionId === sessionIdA, 15_000, 'the navigation Stop acknowledgement for session A');
+        const controllerAbort = await awaitEventWhere('controller-abort', evidence => evidence?.attemptId === heldAttemptId, 15_000, 'the controller abort of the held A attempt');
+        const physicalSettlement = await awaitEventWhere('physical-settled', evidence => evidence?.attemptId === heldAttemptId, 15_000, 'the physical settlement of the held A attempt');
+        if (physicalSettlement.evidence?.outcome === 'fulfilled') throw new Error('The held A physical request settled successfully instead of aborting.');
+        capabilities.physicalSettlement = capability('SUPPORTED', { heldRequestId: requestA2.requestId, attemptId: heldAttemptId, outcome: physicalSettlement.evidence?.outcome ?? null, code: physicalSettlement.evidence?.code ?? null });
+        const rootSettlement = await awaitEventWhere('provider-root-settled', evidence => evidence?.messageId === heldMessageId && evidence?.sessionId === sessionIdA, 15_000, 'the Provider-root settlement of the held A attempt');
+        if (rootSettlement.evidence?.status === 'fulfilled') throw new Error('The held A Provider root fulfilled instead of settling as cancelled.');
+        capabilities.rootSettlement = capability('SUPPORTED', { rootSettled: true, heldRequestId: requestA2.requestId, status: rootSettlement.evidence?.status ?? null, code: rootSettlement.evidence?.code ?? null, operationAborted: rootSettlement.evidence?.operationAborted === true });
+        records.push({ kind: 'replacement-event', event: 'spa-navigation-completed', from: spaNavigation.evidence?.fromUrl ?? null, controllerAbort: controllerAbort.evidence ?? null });
+
+        const sessionStartB = await awaitEventWhere('session-start', evidence => evidence?.owner === 'B', 15_000, 'the replacement session B start');
+        records.push({ kind: 'replacement-event', event: 'session-start', owner: 'B', targets: sessionStartB.evidence?.sessionId ?? null });
+        const sessionIdB = sessionStartB.evidence?.sessionId ?? null;
+        if (!sessionIdA || !sessionIdB || sessionIdA === sessionIdB) throw new Error('Production replacement did not admit a distinct session B.');
+        const retainedA = await awaitEventWhere('retained-A', evidence => evidence?.sessionId === sessionIdB, 15_000, 'the retained A ownership evidence');
+        const batchB = await awaitEventWhere('scheduler-batch', evidence => evidence?.owner === 'B', 15_000, 'the B scheduler batch');
+        records.push({ kind: 'replacement-event', event: 'scheduler-batch', owner: 'B', targets: batchB.evidence?.targetIds ?? null });
+        const windowB = replacementSourceIndexes(batchB.evidence?.targetIds, 'B');
+        if (!windowB) throw new Error('The B batch did not expose usable target membership.');
+        const requestB = await edgeProxy.waitForRequest({ match: request => request.method === 'POST'
+          && JSON.stringify(request.sourceIndexes) === JSON.stringify(windowB), timeoutMs: 15_000 });
+        await requestB.release(undefined);
+        await edgeProxy.waitForStatus(requestB.requestId, 'released', { timeoutMs: 5_000 });
+        const acceptedB = await awaitEventWhere('accepted-B', evidence => evidence?.sessionId === sessionIdB, 20_000, 'the accepted B ownership evidence');
+        await awaitEventWhere('stop-B', evidence => evidence?.sessionId === sessionIdB, 20_000, 'the production B Stop evidence');
+        capabilities.replacementSessionOwnership = capability('SUPPORTED', {
+          sessionIdA, sessionIdB, distinctSessions: sessionIdA !== sessionIdB,
+          batchMessageIds: [batchA1.evidence?.messageId ?? null, batchA2.evidence?.messageId ?? null, batchB.evidence?.messageId ?? null],
+          batchSessionIds: [batchA1.evidence?.sessionId ?? null, batchA2.evidence?.sessionId ?? null, batchB.evidence?.sessionId ?? null],
+          retainedTargetIds: retainedA.evidence?.targetIds ?? null, acceptedBTargetIds: acceptedB.evidence?.targetIds ?? null });
+        await awaitEvent('cleanup', 20_000);
+
+        const proxyEvidence = [...(edgeProxy.requests ?? [])];
+        const correlation = classifyReplacementProxyRequests({ requests: proxyEvidence, expectedWindows: [windowA1, windowA2, windowB] });
+        capabilities.loopbackTlsProxy = capability(correlation.ok ? 'SUPPORTED' : 'FAILED', {
+          requestCount: proxyEvidence.length, statuses: proxyEvidence.map(item => item.status),
+          sourceIndexes: [...new Set(proxyEvidence.flatMap(item => item.sourceIndexes ?? []))].sort((a, b) => a - b),
+        });
+        capabilities.schedulerBatchCorrelation = capability(correlation.ok ? 'SUPPORTED' : 'FAILED', {
+          requestCount: proxyEvidence.length, windows: correlation.windows ?? null, statuses: proxyEvidence.map(item => item.status) });
+        if (!correlation.ok) throw new Error(`Replacement proxy correlation failed: ${correlation.reason ?? 'mismatch'}`);
+        const finalDomReport = await awaitEvent('final-dom', 60_000);
+        const classification = classifyReplacementFinalDom({ finalDOM: finalDomReport.evidence, targetTexts: fixtureData.targetTexts,
+          sourcesB: fixtureData.sourceManifests.B, retainedTargetIds: acceptedA.evidence?.targetIds ?? null,
+          acceptedTargetIds: acceptedB.evidence?.targetIds ?? null });
+        capabilities.replacementDomOwnership = capability(classification.ok ? 'SUPPORTED' : 'FAILED', {
+          capturedTargets: finalDomReport.evidence?.targets?.length ?? null, mismatches: classification.mismatches ?? null, markerStyle: classification.markerStyle ?? null });
+        if (!classification.ok) throw new Error('Final replacement DOM ownership/hash evidence was invalid.');
+        artifact.pageTranslationReplacement = {
+          scenario: 'trusted-spa-navigation-replacement-retained-A-retranslate-B',
+          batches: { A1: { ...batchA1.evidence }, A2: { ...batchA2.evidence }, B: { ...batchB.evidence } },
+          proxyRequests: proxyEvidence.map(request => ({ requestId: request.requestId, method: request.method, url: request.url, host: request.host, sni: request.sni,
+            bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: [...request.sourceIndexes], status: request.status, responseStatus: request.responseStatus })),
+          statuses: proxyEvidence.map(request => request.status), runId,
+          finalDomTargets: (finalDomReport.evidence?.targets ?? []).map(target => ({ targetId: target.targetId, owner: target.owner, state: target.state, hash: target.hash })),
+          limitations: ['No Stale-Success scenario is implemented or tested; no separated released A success after replacement abort.'],
+        };
+        artifact.loopbackTlsProxy = {
+          ...artifact.loopbackTlsProxy, mode: 'page-translation-replacement', status: 'REPLACEMENT_REQUESTS_CORRELATED',
+          requests: proxyEvidence.map(request => ({ requestId: request.requestId, method: request.method, url: request.url, sni: request.sni, host: request.host,
+            bodyBytes: request.bodyBytes, bodyHash: request.bodyHash, sourceIndexes: [...request.sourceIndexes], status: request.status, responseStatus: request.responseStatus })),
+          deniedRequests: edgeProxy.deniedRequests ?? [],
+        };
+        replacementCollector.closeAdmission();
+        const drainedCollector = await replacementCollector.drain();
+        capabilities.cleanup = capability(drainedCollector ? 'SUPPORTED' : 'FAILED', { collectedRequests: proxyEvidence.length });
+        await bidi.command('browsingContext.close', { context: created.context });
+        return capabilities;
+      } catch (error) {
+        errors.push(sanitizePrivate(error.stack ?? String(error), privateSecrets));
+        if (contentRealm) {
+          try {
+            const probed = await bidi.command('script.evaluate', {
+              expression: 'document.documentElement?.getAttribute("data-translate-it-replacement-error") ?? null',
+              target: { realm: contentRealm }, awaitPromise: true });
+            const reason = probed?.result?.result?.value;
+            if (typeof reason === 'string' && reason) errors.push(`Replacement content failure: ${reason}`);
+          } catch { /* The page realm may be gone. */ }
+        }
+        if (consoleEntries.length) records.push({ kind: 'replacement-browser-console', entries: sanitizePrivate(consoleEntries, privateSecrets) });
+        if (realmEvidence) records.push({ kind: 'replacement-realms', realms: sanitizePrivate(realmEvidence, privateSecrets) });
+        if (realmProbes.length) records.push({ kind: 'replacement-realm-probes', probes: sanitizePrivate(realmProbes.slice(-12), privateSecrets) });
+        if (replacementCollector) {
+          const collected = replacementCollector.snapshot();
+          records.push({ kind: 'replacement-collector-evidence', failure: collected.failure ?? null, sequence: collected.sequence ?? null,
+            failLog: sanitizePrivate(collected.failLog ?? [], privateSecrets),
+            postLog: sanitizePrivate(collected.postLog ?? [], privateSecrets),
+            timeline: sanitizePrivate(collected.timeline ?? [], privateSecrets),
+            rejections: sanitizePrivate((collected.rejections ?? []).map(rejection => ({ event: rejection.event, seq: rejection.seq,
+              owner: rejection.evidence?.owner ?? null, sessionId: rejection.evidence?.sessionId ?? null, messageId: rejection.evidence?.messageId ?? null })), privateSecrets),
+            reports: sanitizePrivate((collected.reports ?? []).map(report => ({ seq: report.seq, event: report.event,
+              owner: report.evidence?.owner ?? null, sessionId: report.evidence?.sessionId ?? null, messageId: report.evidence?.messageId ?? null,
+              attemptId: report.evidence?.attemptId ?? null, code: report.evidence?.code ?? null, outcome: report.evidence?.outcome ?? null })), privateSecrets) });
+        }
+        // The content adapter runs in the content-script realm, so its own
+        // snapshot is only reachable through the DOM markers it writes.
+        try {
+          const probe = await bidi.command('script.evaluate', {
+            expression: 'document.documentElement?.getAttribute("data-translate-it-replacement-url-change-log") ?? null',
+            target: { realm: contentRealm }, awaitPromise: true });
+          const raw = probe?.result?.result?.value;
+          if (raw) records.push({ kind: 'replacement-url-change-log', log: sanitizePrivate(JSON.parse(raw), privateSecrets) });
+        } catch { /* The page realm may be gone. */ }
+        capabilities.replacementSessionOwnership = capability('FAILED', { reason: sanitizePrivate(error.message, privateSecrets) });
+        throw error;
+      }
+    }
     try {
         runtimeBridgeProof = await runRuntimeBridgeSequence({
         bidi, bridge, context: created.context, bindingUrl, fixtureUrl: fixture.url, runId, extensionId: expectedExtensionId,
@@ -2149,6 +2532,15 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
       });
       if (artifact.pageTranslationStopAuto) artifact.pageTranslationStopAuto.status = passed ? 'SUPPORTED' : 'FAILED';
     }
+    if (pageTranslationReplacementE2E) {
+      const gates = ['loopbackTlsProxy', 'schedulerBatchCorrelation', 'providerPhysicalRequest', 'providerRequestBody', 'providerResponse',
+        'heldRequestAbort', 'physicalSettlement', 'rootSettlement', 'replacementSessionOwnership', 'replacementDomOwnership', 'cleanup'];
+      const passed = gates.every(name => capabilities[name]?.status === 'SUPPORTED');
+      capabilities.replacementProof = capability(passed ? 'SUPPORTED' : 'FAILED', {
+        gates: Object.fromEntries(gates.map(name => [name, capabilities[name]?.status ?? 'NOT_TESTED'])),
+      });
+      if (artifact.pageTranslationReplacement) artifact.pageTranslationReplacement.status = passed ? 'SUPPORTED' : 'FAILED';
+    }
     const safeCapabilities = sanitizePrivate(capabilities, privateSecrets);
     Object.assign(capabilities, safeCapabilities);
     artifact.capabilities = safeCapabilities; artifact.events = sanitizePrivate(records, privateSecrets); artifact.errors = sanitizePrivate(errors, privateSecrets);
@@ -2157,7 +2549,9 @@ export async function runFirefoxProbe({ buildBenchmarkExtension, workerEntry, co
     artifact.protocolEvents = bidi?.events ?? [];
     artifact.networkRequests = artifact.requests;
     artifact.protocolJournal = bidi?.journal ?? [];
-    artifact.limitations = [pageTranslationStopE2E ? 'Only production Stop Auto cancellation of one held subsequent provider batch is exercised; Replacement and Stale-Success scenarios remain NOT_TESTED.' : 'Provider cancellation and stale-delivery lifecycle scenarios remain NOT_TESTED.', 'Background/content negative fetches only run when both actual realms, readiness, and exact discovery flags pass.', 'When a runtime gate is inaccessible, dependent checks remain NOT_TESTED.', 'No mock provider, fetch substitute, URL rewrite, forced abort, or fabricated runtime result was used.', 'This is a bounded capability probe, not the full 1000-target E2E matrix.'];
+    artifact.limitations = [pageTranslationReplacementE2E
+      ? 'Only production trusted SPA-navigation replacement A→B is exercised; the Stale-Success delivery-barrier scenario remains NOT_TESTED and no released A success is delivered after replacement.'
+      : pageTranslationStopE2E ? 'Only production Stop Auto cancellation of one held subsequent provider batch is exercised; Replacement and Stale-Success scenarios remain NOT_TESTED.' : 'Provider cancellation and stale-delivery lifecycle scenarios remain NOT_TESTED.', 'Background/content negative fetches only run when both actual realms, readiness, and exact discovery flags pass.', 'When a runtime gate is inaccessible, dependent checks remain NOT_TESTED.', 'No mock provider, fetch substitute, URL rewrite, forced abort, or fabricated runtime result was used.', 'This is a bounded capability probe, not the full 1000-target E2E matrix.'];
     for (const key of Object.keys(artifact)) artifact[key] = sanitizePrivate(artifact[key], privateSecrets);
   }
   return capabilities;

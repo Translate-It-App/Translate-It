@@ -15,6 +15,37 @@ export const requiredCapabilities = Object.freeze([
   'heldRequestAbort', 'rootSettlement', 'physicalSettlement', 'heldResponseRelease', 'staleDeliveryCheck', 'nostaleDOM', 'cleanup',
 ]);
 
+// Phase 2B page-replacement proof: trusted SPA-navigation replacement within one
+// live extension tab. runtimeBridge here means the authenticated replacement
+// collector lane (no Phase-1 runtime collector bridge runs in this mode).
+export const replacementRequiredCapabilities = Object.freeze([
+  'isolation', 'fixture', 'bidiSession', 'protocol', 'interceptionSetup', 'extensionInstall', 'runtimeBridge',
+  'backgroundReadiness', 'contentReadiness', 'discoveryFlags', 'loopbackTlsProxy', 'providerPhysicalRequest',
+  'providerRequestBody', 'providerResponse', 'schedulerBatchCorrelation', 'heldRequestAbort',
+  'physicalSettlement', 'rootSettlement', 'replacementSessionOwnership', 'replacementDomOwnership', 'cleanup',
+]);
+
+export function assertFirefoxProbeModeFlags({ loopbackTlsProxy = false, pageTranslationE2E = false, pageTranslationStopE2E = false, pageTranslationReplacementE2E = false, phase1E2E = pageTranslationE2E } = {}) {
+  if (typeof loopbackTlsProxy !== 'boolean' || typeof pageTranslationE2E !== 'boolean'
+      || typeof pageTranslationStopE2E !== 'boolean' || typeof pageTranslationReplacementE2E !== 'boolean'
+      || typeof phase1E2E !== 'boolean') {
+    throw new TypeError('Firefox probe mode flags must be booleans.');
+  }
+  // Phase 2A runs the same lane as Phase 1, so the lane flag is implied by the
+  // Stop Auto flag; the two modes are exclusive by their own flags.
+  if (phase1E2E && pageTranslationStopE2E) throw new Error('Choose either Phase 1 page E2E or Phase 2A Stop Auto mode.');
+  if (pageTranslationReplacementE2E && (pageTranslationE2E || pageTranslationStopE2E)) {
+    throw new Error('Choose exactly one of page E2E, Stop Auto, or Page Replacement mode.');
+  }
+  if (pageTranslationReplacementE2E && !loopbackTlsProxy) {
+    throw new Error('FIREFOX_E2E_PAGE_TRANSLATION_REPLACEMENT requires FIREFOX_E2E_LOOPBACK_TLS_PROXY=1.');
+  }
+  if (pageTranslationE2E && !loopbackTlsProxy) {
+    throw new Error('FIREFOX_E2E_PAGE_TRANSLATION requires FIREFOX_E2E_LOOPBACK_TLS_PROXY=1.');
+  }
+  return true;
+}
+
 export function notTested(reason) { return capability('NOT_TESTED', { reason }); }
 
 export function classifyRequestAction(kind) {

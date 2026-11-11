@@ -68,26 +68,90 @@ export function createPageTranslationFixture() {
   };
 }
 
-export async function startFixture(fixture = createFixture(), { runtimeBridge } = {}) {
+export function createPageTranslationReplacementFixture() {
+  const sourceManifests = {
+    A: [...targetTexts],
+    // Every target gets a distinct B source so any pending subset produced by
+    // production batching can be re-translated without reusing an A source.
+    B: targetTexts.map((source, index) => `Replacement benchmark sentence ${index + 1} has stable fixture content.`),
+  };
+  const targets = sourceManifests.A.map((source, index) => ({
+    id: `target-${index}`,
+    source,
+    kind: index < 6 ? 'text' : 'title',
+    visible: true,
+  }));
+  const html = `<!doctype html><meta charset="utf-8"><title>Page translation Firefox replacement E2E</title><main>${targets.map(target =>
+    target.kind === 'text'
+      ? `<p data-bench-id="${target.id}" data-bench-kind="text">${target.source}</p>`
+      : `<p data-bench-id="${target.id}" data-bench-kind="title" title="${target.source}"></p>`,
+  ).join('')}<button id="page-translation-replacement-control" type="button" translate="no">Navigate to replacement</button><main style="display:none"></main><script>
+let replacementNavigationStarted = false;
+window.addEventListener('translate-it:page-translation-replacement-invalidated', () => {
+  if (!replacementNavigationStarted) return;
+  // Only the targets production left pending may change source; already
+  // accepted translations must stay untouched. The runner publishes the
+  // pending target ids it observed in the real Scheduler batches.
+  const pending = (document.documentElement?.getAttribute('data-translate-it-replacement-pending') ?? '').split(',').map(id => id.trim()).filter(Boolean);
+  const sources = ${JSON.stringify(sourceManifests.B)};
+  for (const id of pending) {
+    const element = document.querySelector('[data-bench-id="' + id + '"]');
+    if (!element) continue;
+    const index = Number(id.slice('target-'.length));
+    if (element.dataset.benchKind === 'title') element.setAttribute('title', sources[index]);
+    else if (element.firstChild) element.firstChild.nodeValue = sources[index];
+  }
+}, { once: true });
+document.getElementById('page-translation-replacement-control').addEventListener('click', () => {
+  if (replacementNavigationStarted) return;
+  replacementNavigationStarted = true;
+  history.pushState({}, '', '/replacement');
+});
+</script>`;
+  return {
+    scenario: 'page-translation-replacement', targetCount: targets.length, targets,
+    targetTexts: targets.map(target => target.source), visibleIds: targets.map(target => target.id), html,
+    sourceManifests,
+    // Runtime adapters trigger the one-click same-document navigation using this fixed button ID.
+    replacementControlId: 'page-translation-replacement-control',
+    viewport: { width: 1280, height: 900 }, scroll: { x: 0, y: 0 }, responseDelayMs: 0,
+  };
+}
+
+export async function startFixture(fixture = createFixture(), { runtimeBridge, replacementCollector: replacementCollectorOption } = {}) {
   if (runtimeBridge) validateRuntimeBridgeConfig(runtimeBridge);
   let bridge;
+  // The collector may be a ready instance or a factory invoked once with the
+  // bound URL (harness builds need the real port); either way the request
+  // handler below only dereferences it after listen().
+  let replacementCollector = replacementCollectorOption ?? null;
   const sockets = new Set();
   const server = createServer((request, response) => {
-    if (bridge) {
+    if (bridge || replacementCollector) {
       let url;
       try { url = new URL(request.url, `http://127.0.0.1:${server.address().port}`); } catch { response.writeHead(400).end(); return; }
-      void bridge._handle(request, response, url).then(handled => {
-        if (handled) return;
-        if (url.pathname !== '/' || url.search) { response.writeHead(404).end(); return; }
+      void (async () => {
+        if (bridge && await bridge._handle(request, response, url)) return;
+        const replacementPaths = replacementCollector ? new Set([
+          replacementCollector.reportUrl && new URL(replacementCollector.reportUrl).pathname,
+          ...['navigate-to-b', 'capture-final'].map(type => {
+            try { return new URL(replacementCollector.controlUrl(type)).pathname; } catch { return null; }
+          }),
+        ].filter(Boolean)) : new Set();
+        if (replacementCollector && replacementPaths.has(url.pathname)
+            && await replacementCollector.handle(request, response)) return;
+        const replacementFixture = fixture.scenario === 'page-translation-replacement';
+        const isFixtureRoute = url.pathname === '/' || (replacementFixture && url.pathname === '/replacement');
+        if (!isFixtureRoute || url.search) { response.writeHead(404).end(); return; }
         response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fixture.html);
-      }).catch(() => {
+      })().catch(() => {
         if (response.destroyed) return;
         if (response.headersSent) response.destroy();
         else { response.writeHead(500).end(); response.once('finish', () => request.destroy()); }
       });
       return;
     }
-    if (request.url !== '/') { response.writeHead(404).end(); return; }
+    if (request.url !== '/' && !(fixture.scenario === 'page-translation-replacement' && request.url === '/replacement')) { response.writeHead(404).end(); return; }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(fixture.html);
   });
@@ -100,6 +164,7 @@ export async function startFixture(fixture = createFixture(), { runtimeBridge } 
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const url = `http://127.0.0.1:${server.address().port}/`;
+  if (typeof replacementCollectorOption === 'function') replacementCollector = replacementCollectorOption(url);
   if (runtimeBridge) {
     server.maxConnections = 16;
     server.requestTimeout = 3000;
@@ -108,5 +173,5 @@ export async function startFixture(fixture = createFixture(), { runtimeBridge } 
     bridge._attach(server, sockets);
     return { server, url, bridge };
   }
-  return { server, url };
+  return replacementCollector ? { server, url, replacementCollector } : { server, url };
 }

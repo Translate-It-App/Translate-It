@@ -67,6 +67,13 @@ export function edgeProxyFirefoxPrefs(port) {
   ].join('\n') + '\n';
 }
 
+// Replacement mode (Phase 2B) supplies a 24-source oracle: the 12 fixture
+// A-route target texts plus all 12 B-route sources. The pending subset that
+// production leaves unaccepted is only known at runtime, so every possible
+// B source must be admitted by the oracle; per-index single-admission and
+// the ascending-requirement still apply.
+const REPLACEMENT_ORACLE_SIZE = 24;
+
 export function validateEdgeProxyRequest({ method, url, headers, body, fixtureTexts, seen = false }) {
   if (seen) return { ok: false, reason: 'repeated-request' };
   let parsed;
@@ -84,12 +91,13 @@ export function validateEdgeProxyRequest({ method, url, headers, body, fixtureTe
   if (!Array.isArray(texts) || !texts.length || texts.length > fixtureTexts.length
       || texts.some(value => typeof value !== 'string' || !value.trim()) || new Set(texts).size !== texts.length) return { ok: false, reason: 'body-mismatch' };
   const sourceIndexes = texts.map(text => fixtureTexts.indexOf(text));
-  if (sourceIndexes.some(index => index < 0) || sourceIndexes.some((index, position) => position > 0 && index <= sourceIndexes[position - 1])) return { ok: false, reason: 'body-mismatch' };
+  if (sourceIndexes.some(index => index < 0) || (fixtureTexts.length !== REPLACEMENT_ORACLE_SIZE
+      && sourceIndexes.some((index, position) => position > 0 && index <= sourceIndexes[position - 1]))) return { ok: false, reason: 'body-mismatch' };
   return { ok: true, bodyBytes: body.length, bodyHash: createHash('sha256').update(body).digest('hex'), sourceIndexes };
 }
 
 export async function startEdgeLoopbackProxy({ tlsCert, tlsKey, fixtureTexts, responseFor, host = '127.0.0.1', holdTimeoutMs = HOLD_TIMEOUT_MS }) {
-  if (host !== '127.0.0.1' || !Array.isArray(fixtureTexts) || fixtureTexts.length !== 12
+  if (host !== '127.0.0.1' || !Array.isArray(fixtureTexts) || ![12, REPLACEMENT_ORACLE_SIZE].includes(fixtureTexts.length)
       || fixtureTexts.some(text => typeof text !== 'string' || !text.trim()) || new Set(fixtureTexts).size !== fixtureTexts.length
       || typeof responseFor !== 'function' || !Number.isFinite(holdTimeoutMs) || holdTimeoutMs < 1 || holdTimeoutMs > HOLD_TIMEOUT_MS) throw new TypeError('Invalid loopback Edge proxy configuration.');
   let accepted = null; let resolvePending; let rejectPending; let closed = false; let closePromise = null;

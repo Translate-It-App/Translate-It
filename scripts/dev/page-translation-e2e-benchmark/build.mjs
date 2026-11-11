@@ -47,7 +47,7 @@ const safeSendMessage = (...args) => {
   };
 }
 
-export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge, onBuildEnvironment, successfulReplyGate = false }) {
+export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge, replacementConfig, onBuildEnvironment, successfulReplyGate = false }) {
   if (!flags[mode]) throw new TypeError(`Unknown discovery mode: ${mode}`);
   if (browser !== 'chrome' && browser !== 'firefox') throw new TypeError(`Unknown browser: ${browser}`);
   if (typeof successfulReplyGate !== 'boolean') throw new TypeError('successfulReplyGate must be boolean.');
@@ -56,6 +56,12 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   }
   if (runtimeBridge !== undefined && (browser !== 'firefox' || mode !== 'sliced' || !validBridgeConfig(runtimeBridge))) {
     throw new TypeError('runtimeBridge requires a sliced Firefox build and absolute fixtureUrl, bindingUrl, and reportUrl plus runId and authToken.');
+  }
+  if (replacementConfig !== undefined && (browser !== 'firefox' || mode !== 'sliced' || !validReplacementConfig(replacementConfig))) {
+    throw new TypeError('replacementConfig requires a sliced Firefox build plus runId, authToken, fixtureUrl, and expectedExtensionId.');
+  }
+  if (replacementConfig !== undefined && runtimeBridge !== undefined) {
+    throw new TypeError('Choose either runtimeBridge or replacementConfig for a harness build, not both.');
   }
   if (typeof outputDir !== 'string' || !isAbsolute(outputDir)) {
     throw new TypeError('outputDir must be an absolute path to a fresh temporary directory.');
@@ -83,6 +89,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   try {
   const environmentProfiles = { worker: [], content: [] };
   const bridgePlugins = runtimeBridge ? createRuntimeBridgePlugins({ runtimeBridge, workerEntry, contentEntry }) : [];
+  const replacementPlugins = replacementConfig ? createReplacementPlugins({ replacementConfig, workerEntry, contentEntry }) : [];
   const firefoxSchedulerBatchPlugin = runtimeBridge?.pageTranslationE2E === true ? createFirefoxSchedulerBatchPlugin() : null;
   const successfulReplyBoundaryPlugin = successfulReplyGate ? createSuccessfulReplyBoundaryPlugin() : null;
   const environmentPlugin = role => ({
@@ -121,6 +128,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
       },
     },
      ...bridgePlugins,
+     ...replacementPlugins,
      ...(firefoxSchedulerBatchPlugin ? [firefoxSchedulerBatchPlugin] : []),
   ] });
 
@@ -133,7 +141,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     plugins: [...base.plugins, environmentPlugin(role), ...(role === 'content' && successfulReplyBoundaryPlugin ? [successfulReplyBoundaryPlugin] : [])],
     configFile: false,
     publicDir: false,
-    logLevel: runtimeBridge ? 'silent' : 'error',
+    logLevel: runtimeBridge || replacementConfig ? 'silent' : 'error',
     build: {
       ...base.build,
       outDir: entryOut,
@@ -147,8 +155,14 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     },
   });
   try {
-    await buildEntry('worker', { worker: runtimeBridge ? 'virtual:page-translation-probe-worker' : workerEntry ?? resolve('src/core/background/index.js') }, workerOut, false);
-    await buildEntry('content', { 'content-entry': runtimeBridge ? 'virtual:page-translation-probe-content' : contentEntry ?? resolve('src/core/content-scripts/index-main.js') }, contentOut, true);
+    const workerInput = runtimeBridge ? 'virtual:page-translation-probe-worker'
+      : replacementConfig ? 'virtual:page-replacement-worker'
+      : workerEntry ?? resolve('src/core/background/index.js');
+    const contentInput = runtimeBridge ? 'virtual:page-translation-probe-content'
+      : replacementConfig ? 'virtual:page-replacement-content'
+      : contentEntry ?? resolve('src/core/content-scripts/index-main.js');
+    await buildEntry('worker', { worker: workerInput }, workerOut, false);
+    await buildEntry('content', { 'content-entry': contentInput }, contentOut, true);
     successfulReplyBoundaryPlugin?.assertApplied();
     firefoxSchedulerBatchPlugin?.assertApplied();
     const environment = { worker: environmentProfiles.worker[0], content: environmentProfiles.content[0] };
@@ -159,17 +173,27 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     await cp(workerOut, outDir, { recursive: true, force: true });
     await cp(contentOut, outDir, { recursive: true, force: true });
   } catch (error) {
-    if (runtimeBridge) throw new Error('Firefox runtime bridge build failed; generated configuration details were suppressed.');
+    if (runtimeBridge || replacementConfig) {
+      // Opt-in diagnostic: the default stays redacted because build errors can
+      // echo bundle source that embeds the harness token.
+      if (process.env.HARNESS_BUILD_VERBOSE === '1') {
+        const secret = runtimeBridge?.authToken ?? replacementConfig?.authToken;
+        const message = secret ? String(error?.message ?? error).split(secret).join('[REDACTED]') : String(error?.message ?? error);
+        throw new Error(`Firefox harness build failed: ${message}`);
+      }
+      throw new Error('Firefox harness build failed; generated configuration details were suppressed.');
+    }
     throw error;
   } finally {
     await Promise.all([rm(workerOut, { recursive: true, force: true }), rm(contentOut, { recursive: true, force: true })]);
   }
-  if (runtimeBridge) await assertBridgeTokenIsolation(outDir, runtimeBridge.authToken);
+  const harnessSecret = runtimeBridge?.authToken ?? replacementConfig?.authToken;
+  if (harnessSecret) await assertBridgeTokenIsolation(outDir, harnessSecret);
   if (onBuildEnvironment) {
     const environment = { worker: environmentProfiles.worker[0], content: environmentProfiles.content[0] };
     try { await onBuildEnvironment(structuredClone(environment)); }
     catch (error) {
-      if (runtimeBridge) throw new Error('Firefox runtime bridge build failed; generated configuration details were suppressed.');
+      if (runtimeBridge || replacementConfig) throw new Error('Firefox harness build failed; generated configuration details were suppressed.');
       throw error;
     }
   }
@@ -203,7 +227,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   await writeFile(resolve(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   const runtime = browser === 'firefox' ? 'browser' : 'chrome';
   await writeFile(resolve(outDir, 'content-loader.js'), `import(${runtime}.runtime.getURL('content-entry.js')).catch(error => console.error('Benchmark content entry failed', error));\n`);
-  if (runtimeBridge) await assertBridgeTokenIsolation(outDir, runtimeBridge.authToken);
+  if (harnessSecret) await assertBridgeTokenIsolation(outDir, harnessSecret);
   return outDir;
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
@@ -263,6 +287,70 @@ function parseLoopbackUrl(value) {
     const url = new URL(value);
     return url.protocol === 'http:' && url.hostname === '127.0.0.1' && !url.username && !url.password && !url.hash ? url : null;
   } catch { return null; }
+}
+
+// Phase 2B page-replacement harness build. The auth token is baked into the
+// private worker bundle only; the content bundle receives a token-free config
+// and the background brokers every authenticated collector call.
+function validReplacementConfig(config) {
+  if (!config || typeof config !== 'object' || typeof config.runId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(config.runId)
+      || typeof config.authToken !== 'string' || !/^[a-f\d]{64,}$/i.test(config.authToken)
+      || typeof config.expectedExtensionId !== 'string' || !config.expectedExtensionId) return false;
+  const keys = ['runId', 'authToken', 'fixtureUrl', 'expectedExtensionId', 'expectedTabId', 'expectedDocumentId'];
+  const actualKeys = Object.keys(config);
+  if (actualKeys.length !== keys.length || keys.some(key => !Object.hasOwn(config, key)) || actualKeys.some(key => !keys.includes(key))) return false;
+  // The Firefox tab and document identities are unknown at build time; null
+  // means "pin once from the first authenticated real sender", never a
+  // caller-supplied identity.
+  if (config.expectedTabId !== null || config.expectedDocumentId !== null) return false;
+  if (config.runId === config.authToken || JSON.stringify({ runId: config.runId, fixtureUrl: config.fixtureUrl, expectedExtensionId: config.expectedExtensionId }).includes(config.authToken)) return false;
+  const fixtureUrl = parseLoopbackUrl(config.fixtureUrl);
+  return !!fixtureUrl && fixtureUrl.pathname === '/' && fixtureUrl.search === '';
+}
+
+// The replacement extension entries auto-start from a config global, so the
+// virtual modules only seed the global and await the real entry module.
+function createReplacementPlugins({ replacementConfig, workerEntry, contentEntry }) {
+  if (!workerEntry || !contentEntry) throw new TypeError('replacementConfig requires explicit replacement workerEntry and contentEntry paths.');
+  const workerVirtual = '\0virtual:page-replacement-worker';
+  const contentVirtual = '\0virtual:page-replacement-content';
+  const workerCode = `globalThis.__firefoxPageTranslationReplacementConfig = ${JSON.stringify({
+    runId: replacementConfig.runId, authToken: replacementConfig.authToken, fixtureUrl: replacementConfig.fixtureUrl,
+    expectedExtensionId: replacementConfig.expectedExtensionId, expectedTabId: null, expectedDocumentId: null,
+  })};
+await import(${JSON.stringify(resolve(workerEntry))});
+`;
+  // Discovery flags are read from the same bundled constants the page's
+  // content code observes, after the build's flag transform, so the emitted
+  // evidence reflects the actual shipped values instead of build-time intent.
+  const constantsEntry = resolve('src/features/page-translation/PageTranslationConstants.js');
+  const contentCode = `globalThis.__firefoxPageTranslationReplacementConfig = ${JSON.stringify({
+    runId: replacementConfig.runId, fixtureUrl: replacementConfig.fixtureUrl, expectedExtensionId: replacementConfig.expectedExtensionId,
+    expectedTabId: null, expectedDocumentId: null,
+  })};
+try {
+  const constants = await import(${JSON.stringify(constantsEntry)});
+  globalThis.__firefoxPageTranslationReplacementFlags = {
+    slicedDiscoveryEnabled: constants.PAGE_TRANSLATION_SLICED_DISCOVERY === true,
+    viewportFirstDiscoveryEnabled: constants.PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY === true,
+  };
+} catch (error) { console.error('Replacement discovery-flag evidence failed', error); }
+await import(${JSON.stringify(resolve(contentEntry))});
+`;
+  return [{
+    name: 'firefox-page-replacement-harness',
+    enforce: 'pre',
+    resolveId(id) {
+      if (id === 'virtual:page-replacement-worker') return workerVirtual;
+      if (id === 'virtual:page-replacement-content') return contentVirtual;
+      return null;
+    },
+    load(id) {
+      if (id === workerVirtual) return workerCode;
+      if (id === contentVirtual) return contentCode;
+      return null;
+    },
+  }];
 }
 
 function createRuntimeBridgePlugins({ runtimeBridge, workerEntry, contentEntry }) {
