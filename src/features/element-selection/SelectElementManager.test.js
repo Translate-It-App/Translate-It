@@ -602,6 +602,55 @@ describe('SelectElementManager', () => {
     expect(result.error).not.toContain('internal cleanup detail');
   });
 
+  it('does not acknowledge a successful cleanup while the previous cleanup is unconfirmed', async () => {
+    manager.isActive = true;
+    manager.domTranslatorAdapter.cancelTranslation.mockRejectedValue(new Error('cleanup failed'));
+
+    await expect(manager.deactivate({ fromBackground: true })).resolves.toEqual({
+      success: false,
+      cleanupCompleted: false,
+      error: 'Could not deactivate Select Element mode.',
+    });
+
+    // The manager is inactive, but the cleanup was never confirmed.
+    expect(manager.isActive).toBe(false);
+    await expect(manager.deactivate({ fromBackground: true })).resolves.toMatchObject({
+      success: false,
+      cleanupCompleted: false,
+    });
+  });
+
+  it('resolves an unconfirmed cleanup by retrying it', async () => {
+    manager.isActive = true;
+    manager.domTranslatorAdapter.cancelTranslation
+      .mockRejectedValueOnce(new Error('cleanup failed'))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(manager.deactivate({ fromBackground: true })).resolves.toMatchObject({
+      success: false,
+      cleanupCompleted: false,
+    });
+
+    await expect(manager.deactivate({ fromBackground: true })).resolves.toEqual({
+      success: true,
+      cleanupCompleted: true,
+    });
+  });
+
+  it('keeps deactivation idempotent after a successful cleanup', async () => {
+    manager.isActive = true;
+
+    await expect(manager.deactivate({ fromBackground: true })).resolves.toEqual({
+      success: true,
+      cleanupCompleted: true,
+    });
+    await expect(manager.deactivate({ fromBackground: true })).resolves.toEqual({
+      success: true,
+      cleanupCompleted: true,
+      alreadyInactive: true,
+    });
+  });
+
   it('waits for adapter cancellation before continuing cleanup', async () => {
     manager.isActive = true;
     let resolveCancellation;
