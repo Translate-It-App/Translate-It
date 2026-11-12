@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { runProductionFixture } from './fixture.js';
+import { runProductionFixture } from './page-translation-production-benchmark/fixture.js';
 
 const LRM = '\u200e';
 
