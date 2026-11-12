@@ -15,7 +15,7 @@ vi.mock('@/shared/vue/vue-utils.js', () => ({
 }));
 vi.mock('./IFrameContentScriptCore.js', () => ({
   IFrameContentScriptCore: class {
-    constructor() { mocks.coreCtor(); this.initialized = false; }
+    constructor(options) { mocks.coreCtor(options); this.initialized = false; }
   },
 }));
 vi.mock('./contentStartup.js', () => ({
@@ -50,11 +50,19 @@ describe('index-iframe entry', () => {
     expect(mocks.coreCtor).not.toHaveBeenCalled();
   });
 
-  it('does not run for tiny frames', async () => {
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 50 });
-    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 50 });
+  it('bootstraps a messaging-only core for tiny frames', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 256 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 60 });
     await import('./index-iframe.js');
-    expect(mocks.coreCtor).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.coreCtor).toHaveBeenCalledOnce());
+    expect(mocks.coreCtor).toHaveBeenCalledWith({ tinyFrame: true });
+    await vi.waitFor(() => expect(mocks.initContentCore).toHaveBeenCalledOnce());
+  });
+
+  it('creates a normal core for regular frames', async () => {
+    await import('./index-iframe.js');
+    await vi.waitFor(() => expect(mocks.coreCtor).toHaveBeenCalledOnce());
+    expect(mocks.coreCtor).toHaveBeenCalledWith({ tinyFrame: false });
   });
 
   it('does not run when isExtensionFrame', async () => {

@@ -24,7 +24,7 @@ src/features/iframe-support/
 
 ### Dual-Entry Architecture
 - **index-main.js**: Orchestrator for the top frame. Manages UI, Stores, and Coordination.
-- **index-iframe.js**: Lightweight proxy for all iframes. Filters out tiny frames (ads) and handles text detection.
+- **index-iframe.js**: Lightweight proxy for all iframes. Tiny frames (ads) get a messaging-only core and handles text detection.
 
 ### Cross-Frame Coordination
 - **Event Synchronization**: Coordinated `ESC` key, `Revert`, and `Deactivation` across all frames.
@@ -36,7 +36,7 @@ src/features/iframe-support/
 - **Lazy Promotion**: Heavy translation modules are only loaded in iframes when they become visible or are triggered by the user.
 
 ### Performance Optimized
-- **Tiny Frame Filter**: Automatically ignores frames smaller than 80x80px (ads/trackers).
+- **Tiny Frame Filter**: Frames smaller than 80x80px (ads/trackers) keep messaging only: they answer Select Element probes but load no features.
 - **Zero Memory Leaks**: Full integration with `ResourceTracker` for automatic cleanup of cross-frame listeners.
 
 ## Usage
