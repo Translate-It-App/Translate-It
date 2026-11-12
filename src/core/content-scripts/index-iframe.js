@@ -13,12 +13,14 @@ if (!window.translateItContentScriptCore) {
   // 1. FAST FAIL: Never run in the top frame
   if (window === window.top) return;
 
-  // 2. SMART FILTER: Ignore tiny iframes (ads, trackers, etc.)
+  // 2. SMART FILTER: tiny iframes (ads, trackers, captcha widgets) get a
+  //    messaging-only core: they must answer Select Element frame probes so
+  //    the background can settle cleanup ownership, but load no features.
+  // The size is sampled once at load. A tiny frame that grows later
+  // stays messaging-only until its document reloads or navigates.
   const MIN_FRAME_SIZE = 80;
   const isTinyFrame = window.innerWidth > 0 && window.innerHeight > 0 && 
                       (window.innerWidth < MIN_FRAME_SIZE || window.innerHeight < MIN_FRAME_SIZE);
-
-  if (isTinyFrame) return;
 
   // 3. PREVENT RE-INJECTION
   if (window.translateItContentScriptLoaded) return;
@@ -43,7 +45,7 @@ if (!window.translateItContentScriptCore) {
 
     // 6. MINIMAL CORE BOOTSTRAP — always alive, even when policy-excluded
     const { IFrameContentScriptCore } = await import('./IFrameContentScriptCore.js');
-    const contentScriptCore = new IFrameContentScriptCore();
+    const contentScriptCore = new IFrameContentScriptCore({ tinyFrame: isTinyFrame });
     window.translateItContentCore = contentScriptCore;
     window.translateItContentScriptCore = contentScriptCore;
     

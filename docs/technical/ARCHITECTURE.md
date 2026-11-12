@@ -46,7 +46,7 @@ Startup loading and interaction-triggered loading are distinct: startup stages c
 
 ### Iframe content script
 
-[`src/core/content-scripts/index-iframe.js`](../../src/core/content-scripts/index-iframe.js) uses `IFrameContentScriptCore`, a lighter content runtime that excludes tiny/extension frames and does not mount the top-frame Vue UI. When allowed, it initializes the interaction coordinator, loads its limited content features, and signals frame readiness. Top-frame and iframe responsibilities are related but not interchangeable.
+[`src/core/content-scripts/index-iframe.js`](../../src/core/content-scripts/index-iframe.js) uses `IFrameContentScriptCore`, a lighter content runtime that excludes extension frames and does not mount the top-frame Vue UI. Tiny frames get a messaging-only core: they answer Select Element probes so the background can settle cleanup ownership, but load no features. When allowed, a normal frame initializes the interaction coordinator, loads its limited content features, and signals frame readiness. Top-frame and iframe responsibilities are related but not interchangeable.
 
 ### Extension UI and in-page UI
 

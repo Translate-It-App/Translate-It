@@ -94,9 +94,14 @@ export function installSelectElementFallbackHandlers(messageHandler) {
 
 /**
  * IFrameContentScriptCore - Specialized lite version for subframes.
+ * @param {{ tinyFrame?: boolean }} [options] - `tinyFrame: true` keeps the core
+ *   messaging-only: the frame answers Select Element probes but loads no
+ *   features and never starts the allowed runtime.
  */
-export function IFrameContentScriptCore() {
+export function IFrameContentScriptCore({ tinyFrame = false } = {}) {
   const core = BaseContentScriptCore();
+
+  core.tinyFrame = tinyFrame === true;
 
   core.registerCoreHandlers = function() {
     if (!this.messageHandler) return;
@@ -104,6 +109,9 @@ export function IFrameContentScriptCore() {
     // No frame is ever silent: excluded frames without the full content
     // handler still answer Select Element activation/cleanup probes.
     installSelectElementFallbackHandlers(this.messageHandler);
+
+    // Tiny frames stay feature-free: no SPA navigation feature bootstrap.
+    if (this.tinyFrame) return;
 
     this.messageHandler.registerHandler(MessageActions.SPA_NAVIGATION, async (message) => {
       const { FeatureManager } = await import('@/core/managers/content/FeatureManager.js');
@@ -206,6 +214,13 @@ export function IFrameContentScriptCore() {
       if (!success) return false;
 
       this.registerCoreHandlers();
+
+      // Tiny frames stop here: messaging plus the Select Element fallback
+      // responders are enough to answer probes, features are not initialized.
+      if (this.tinyFrame) {
+        this.initialized = true;
+        return true;
+      }
 
       const { default: SettingsManager } = await import('@/shared/managers/SettingsManager.js');
       await SettingsManager.initialize();
