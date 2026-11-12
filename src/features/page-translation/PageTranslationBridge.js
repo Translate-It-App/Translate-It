@@ -88,13 +88,17 @@ const getEditableState = (element) => {
   let current = element;
 
   while (current) {
-    const value = current.getAttribute?.('contenteditable');
-    if (value !== null && value !== undefined) {
-      const normalized = value.trim().toLowerCase();
-      if (normalized === 'false') return false;
-      if (normalized === '' || normalized === 'true' || normalized === 'plaintext-only') return true;
-    }
-    current = current.parentElement;
+    // One ancestor walk instead of a getAttribute() call per level: the nearest
+    // ancestor that declares `contenteditable` decides the editable state.
+    const declared = current.closest?.('[contenteditable]');
+    if (!declared) return false;
+    const value = declared.getAttribute('contenteditable');
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'false') return false;
+    if (normalized === '' || normalized === 'true' || normalized === 'plaintext-only') return true;
+    // An unrecognized value (e.g. "inherit") does not decide the state, so the
+    // search continues with the next ancestor.
+    current = declared.parentElement;
   }
 
   return false;
@@ -843,15 +847,27 @@ export class PageTranslationBridge extends ResourceTracker {
       `.${PAGE_TRANSLATION_SELECTORS.STANDARD_NO_TRANSLATE_CLASS}`,
       `[translate='${PAGE_TRANSLATION_SELECTORS.TRANSLATE_NO_VALUE}']`
     ];
-    const domTranslatorFilter = createNodesFilter({
-      ignoredSelectors: composedExcludedSelectors,
+    const nodeTypeFilter = createNodesFilter({
+      // Eligibility by node type and attribute name only. The exclusion rules
+      // are evaluated separately with a single ancestor walk per selector.
+      ignoredSelectors: [],
       attributesList: settings.attributesToTranslate || ['title', 'alt', 'placeholder'],
     });
+    const isExcludedElement = (element) => composedExcludedSelectors.some((selector) => {
+      try {
+        // `closest()` already matches the element itself, so no extra
+        // `matches()` call is needed for the same selector.
+        return Boolean(element.closest(selector));
+      } catch {
+        return false;
+      }
+    });
     const filter = (node) => {
-      if (!domTranslatorFilter(node) || isMutableEditableNode(node)) return false;
+      if (!nodeTypeFilter(node) || isMutableEditableNode(node)) return false;
 
       const owner = getFilterElement(node);
-      const root = owner?.getRootNode?.();
+      if (!owner || isExcludedElement(owner)) return false;
+      const root = owner.getRootNode?.();
       return !isShadowRoot(root) || !isExcludedAcrossShadowHosts(owner, composedExcludedSelectors);
     };
 
@@ -982,6 +998,21 @@ export class PageTranslationBridge extends ResourceTracker {
       }
     };
 
+    // Mirrors DOMTranslator.translate() for a single primitive node, without its
+    // filter call. Discovery validates every node with `filter` in the same
+    // synchronous step, so re-running the exclusion rules there only doubles
+    // the selector work for every discovered node.
+    const translateValidatedPrimitive = (node, callback) => {
+      const scheduler = currentSession.intersectionScheduler;
+      if (scheduler && node.getRootNode() !== node) {
+        scheduler.add(node, (target) => {
+          nodesTranslator.translate(target, callback);
+        });
+        return;
+      }
+      nodesTranslator.translate(node, callback);
+    };
+
     const translateDiscoveredPrimitive = (node, callbacks) => {
       if (currentSession.viewportFirstDiscoveryEnabled) return admitPrimitive(node, callbacks);
       const callback = callbacks instanceof Set
@@ -989,7 +1020,7 @@ export class PageTranslationBridge extends ResourceTracker {
           ? processedNode => callbacks.forEach(notify => notify?.(processedNode))
           : undefined)
         : callbacks;
-      return originalDomTranslate.call(currentSession.domTranslator, node, callback);
+      return translateValidatedPrimitive(node, callback);
     };
 
     if (currentSession.slicedDiscoveryEnabled) {
