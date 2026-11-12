@@ -865,11 +865,16 @@ describe('PageTranslationBridge stale settlement integration', () => {
       const lazySettings = { ...settings, lazyLoading: true };
       await bridge.initialize(lazySettings, translate);
       bridge.translate(document.body);
+      // Lazy targets are registered during discovery, so wait for them before
+      // reporting visibility.
+      await vi.waitFor(() => expect(observers[0].observe).toHaveBeenCalled());
       observers[0].callback([
         { target: acceptedOwner, isIntersecting: true }, { target: editedOwner, isIntersecting: true },
       ], observers[0]);
-      pending.forEach(item => item.resolve(settlement(`Translated ${item.text}`)));
-      await vi.waitFor(() => expect(editedOwner.textContent).toContain('Translated Initial source'));
+      await vi.waitFor(() => {
+        pending.forEach(item => item.resolve(settlement(`Translated ${item.text}`)));
+        expect(editedOwner.textContent).toContain('Translated Initial source');
+      });
       editedOwner.firstChild.nodeValue = 'Edited source';
       const later = document.createElement('p');
       later.textContent = 'New source';
@@ -881,16 +886,17 @@ describe('PageTranslationBridge stale settlement integration', () => {
       });
       bridge.translate(document.body);
 
-      expect(bridge.session.nodesTranslator.has(acceptedOwner.firstChild)).toBe(true);
+      await vi.waitFor(() => expect(bridge.session.nodesTranslator.has(acceptedOwner.firstChild)).toBe(true));
       expect(bridge.session.nodesTranslator.has(editedOwner.firstChild)).toBe(false);
       expect(bridge.session.nodesTranslator.has(later.firstChild)).toBe(false);
-      expect(retained).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(retained).toHaveBeenCalledOnce());
       expect(translate).toHaveBeenCalledTimes(2);
       const latest = observers.at(-1);
+      await vi.waitFor(() => expect(latest.observe).toHaveBeenCalled());
       latest.callback([
         { target: editedOwner, isIntersecting: true }, { target: later, isIntersecting: true },
       ], latest);
-      expect(pending.slice(2).map(item => item.text)).toEqual(['Edited source', 'New source']);
+      await vi.waitFor(() => expect(pending.slice(2).map(item => item.text)).toEqual(['Edited source', 'New source']));
       pending.slice(2).forEach(item => item.resolve(settlement(`Fresh ${item.text}`)));
       await vi.waitFor(() => expect(later.textContent).toContain('Fresh New source'));
       bridge.restore(document.body);

@@ -26,7 +26,6 @@ const harnessHash = sha256(await readFile(import.meta.filename));
 const fixtureHash = sha256(Buffer.from(fixtureSource));
 const originalConstants = constantsBytes.toString('utf8');
 const expectedDefaults = [
-  'export const PAGE_TRANSLATION_SLICED_DISCOVERY = false;',
   'export const PAGE_TRANSLATION_DISCOVERY_SLICE_MAX_STEPS = 100;',
   'export const PAGE_TRANSLATION_DISCOVERY_SLICE_BUDGET_MS = 8;',
 ];
@@ -41,12 +40,17 @@ for (const line of expectedDefaults) {
 for (const line of expectedWindowCaps) {
   if (!originalConstants.includes(line)) throw new Error(`Unexpected production window caps; required: ${line}`);
 }
+// The shipped defaults may change; each benchmark mode pins its own flags.
+const discoveryFlagPattern = name => new RegExp(`export const ${name} = (?:true|false);`);
+for (const name of ['PAGE_TRANSLATION_SLICED_DISCOVERY', 'PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY']) {
+  if (!discoveryFlagPattern(name).test(originalConstants)) throw new Error(`Unexpected production constants; required flag: ${name}`);
+}
 
 const modes = (process.env.BENCH_MODES ?? 'legacy,sliced,viewport').split(',');
 if (modes.length < 1 || modes.some(mode => !['legacy', 'sliced', 'viewport'].includes(mode)) || new Set(modes).size !== modes.length) {
   throw new Error('BENCH_MODES must be a unique comma-separated subset of legacy,sliced,viewport.');
 }
-if (modes.includes('viewport') && !originalConstants.includes('export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = false;')) {
+if (modes.includes('viewport') && !discoveryFlagPattern('PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY').test(originalConstants)) {
   throw new Error('Viewport-first production flag is not ready. Run the full benchmark after core reports readiness.');
 }
 
@@ -188,8 +192,10 @@ server = createServer(async (request, response) => {
 
     let source = bytes.toString('utf8');
     if (file === constantsPath) {
-      if (mode !== 'legacy') source = source.replace('export const PAGE_TRANSLATION_SLICED_DISCOVERY = false;', 'export const PAGE_TRANSLATION_SLICED_DISCOVERY = true;');
-      if (mode === 'viewport') source = source.replace('export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = false;', 'export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = true;');
+      // Each mode pins its own discovery flags, independent of the shipped defaults.
+      source = source
+        .replace(/export const PAGE_TRANSLATION_SLICED_DISCOVERY = (?:true|false);/, `export const PAGE_TRANSLATION_SLICED_DISCOVERY = ${mode !== 'legacy'};`)
+        .replace(/export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = (?:true|false);/, `export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = ${mode === 'viewport'};`);
     }
     response.writeHead(200, { 'content-type': mime(file), 'cache-control': 'no-store' });
     response.end(source);

@@ -31,6 +31,8 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
     artifactPath: path,
     requestedModes: ['legacy', 'sliced', 'viewport'],
     cancellationProbes: [],
+    staleSuccessProbes: [],
+    isolatedProbes: [],
     modes: ['legacy', 'sliced', 'viewport'],
     scenarios: ['small'],
     samples: 4,

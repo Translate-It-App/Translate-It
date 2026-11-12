@@ -102,13 +102,15 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
       transform(source, id) {
         if (!id.endsWith('/PageTranslationConstants.js')) return null;
         const [sliced, viewport] = flags[mode];
+        // The production default is irrelevant here: each benchmark mode pins
+        // its own discovery flags regardless of the shipped constant values.
         const patterns = [
-          [/export const PAGE_TRANSLATION_SLICED_DISCOVERY = false;/, `export const PAGE_TRANSLATION_SLICED_DISCOVERY = ${sliced};`],
-          [/export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = false;/, `export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = ${viewport};`],
+          [/export const PAGE_TRANSLATION_SLICED_DISCOVERY = (?:true|false);/, `export const PAGE_TRANSLATION_SLICED_DISCOVERY = ${sliced};`],
+          [/export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = (?:true|false);/, `export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = ${viewport};`],
         ];
         let transformed = source;
         for (const [pattern, replacement] of patterns) {
-          if (!pattern.test(transformed)) throw new Error(`Expected default-off page translation flag missing in ${id}`);
+          if (!pattern.test(transformed)) throw new Error(`Expected page translation discovery flag missing in ${id}`);
           transformed = transformed.replace(pattern, replacement);
         }
         return transformed;

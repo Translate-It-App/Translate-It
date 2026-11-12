@@ -53,7 +53,8 @@ export const DEFAULT_PAGE_TRANSLATION_SETTINGS = {
 };
 
 // Internal rollout switches; they change discovery only, not saved user settings.
-export const PAGE_TRANSLATION_SLICED_DISCOVERY = false;
+// Sliced discovery is temporarily enabled for manual testing only; revert it to false afterwards.
+export const PAGE_TRANSLATION_SLICED_DISCOVERY = true;
 export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = false;
 export const PAGE_TRANSLATION_DISCOVERY_SLICE_MAX_STEPS = 100;
 export const PAGE_TRANSLATION_DISCOVERY_SLICE_BUDGET_MS = 8;

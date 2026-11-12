@@ -207,6 +207,24 @@ describe('page translation benchmark build browser support', () => {
     expect(await readFile(constantsPath, 'utf8')).toBe(originalFile);
   });
 
+  it('pins every discovery mode regardless of the production flag defaults', async () => {
+    const constantsPath = resolve('src/features/page-translation/PageTranslationConstants.js');
+    const source = await readFile(constantsPath, 'utf8');
+
+    for (const [mode, [sliced, viewport]] of [['legacy', [false, false]], ['sliced', [true, false]], ['viewport', [true, true]]]) {
+      await buildBenchmarkExtension({ outputDir: await freshOutputDir(), mode });
+      const transform = baseConfigs.at(-1).options.extraPlugins[0].transform;
+      for (const shipped of ['true', 'false']) {
+        const variant = source
+          .replace(/export const PAGE_TRANSLATION_SLICED_DISCOVERY = (?:true|false);/, `export const PAGE_TRANSLATION_SLICED_DISCOVERY = ${shipped};`)
+          .replace(/export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = (?:true|false);/, 'export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = false;');
+        const transformed = transform(variant, constantsPath);
+        expect(transformed).toContain(`export const PAGE_TRANSLATION_SLICED_DISCOVERY = ${sliced};`);
+        expect(transformed).toContain(`export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = ${viewport};`);
+      }
+    }
+  });
+
   it('keeps bridge report credentials in worker output and public content config secret-free', async () => {
     const outputDir = await freshOutputDir();
     const bridge = {
