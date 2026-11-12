@@ -52,9 +52,13 @@ export const DEFAULT_PAGE_TRANSLATION_SETTINGS = {
   priorityThreshold: 1
 };
 
-// Internal rollout switches; they change discovery only, not saved user settings.
-// Sliced discovery is temporarily enabled for manual testing only; revert it to false afterwards.
+// Internal discovery switches; they change discovery only, not saved user settings.
+// Sliced discovery is the production default for the initial page traversal.
+// Legacy discovery (domtranslator's own whole-tree walk) remains available as an
+// internal fallback by setting this to false before a session starts.
 export const PAGE_TRANSLATION_SLICED_DISCOVERY = true;
+// Viewport-first discovery is an internal, default-off reorder window; it applies
+// only when sliced discovery is enabled.
 export const PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY = false;
 export const PAGE_TRANSLATION_DISCOVERY_SLICE_MAX_STEPS = 100;
 export const PAGE_TRANSLATION_DISCOVERY_SLICE_BUDGET_MS = 8;
