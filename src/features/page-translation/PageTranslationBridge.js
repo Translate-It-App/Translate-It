@@ -196,6 +196,10 @@ export class PageTranslationBridge extends ResourceTracker {
     // Reset lookup for a new session
     hoverPreviewLookup.clear();
 
+    // Single source of truth for translatable attribute names: the filter
+    // allow-list and the discovery walk must agree on it.
+    const translatableAttributeNames = new Set(settings.attributesToTranslate || ['title', 'alt', 'placeholder']);
+
     const currentSession = {
       intersectionScheduler: null,
       domTranslator: null,
@@ -217,8 +221,11 @@ export class PageTranslationBridge extends ResourceTracker {
       slicedDiscoveryEnabled: PAGE_TRANSLATION_SLICED_DISCOVERY,
       viewportFirstDiscoveryEnabled: PAGE_TRANSLATION_SLICED_DISCOVERY
         && PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY,
+      // Single source of truth for translatable attribute names: the filter
+      // allow-list and the discovery walk must agree on it.
+      translatableAttributeNames,
       viewportAttributeNames: PAGE_TRANSLATION_SLICED_DISCOVERY && PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY
-        ? new Set(settings.attributesToTranslate || ['title', 'alt', 'placeholder'])
+        ? translatableAttributeNames
         : null,
       viewportWindowRoot: null,
       viewportWindowStarted: false,
@@ -851,7 +858,7 @@ export class PageTranslationBridge extends ResourceTracker {
       // Eligibility by node type and attribute name only. The exclusion rules
       // are evaluated separately with a single ancestor walk per selector.
       ignoredSelectors: [],
-      attributesList: settings.attributesToTranslate || ['title', 'alt', 'placeholder'],
+      attributesList: currentSession.translatableAttributeNames,
     });
     const isExcludedElement = (element) => composedExcludedSelectors.some((selector) => {
       try {
@@ -1091,6 +1098,18 @@ export class PageTranslationBridge extends ResourceTracker {
         canonicalDone: false,
       });
 
+      // Only attributes that can become translation targets are enumerated:
+      // attributes outside the allow-list are rejected by the filter, so
+      // spending a discovery step on them only delays the walk.
+      const collectTranslatableAttributes = (element) => {
+        const allowed = currentSession.translatableAttributeNames;
+        const attributes = [];
+        for (const attribute of element.attributes) {
+          if (allowed.has(attribute.name)) attributes.push(attribute);
+        }
+        return attributes;
+      };
+
       const nextDiscoveryStep = (task) => {
         if (task.rootPrimitive && !task.rootPrimitiveDone) {
           task.rootPrimitiveDone = true;
@@ -1105,7 +1124,10 @@ export class PageTranslationBridge extends ResourceTracker {
               frame.attributeNames = null;
               frame.attributeOwner = null;
             } else {
-              return { node: frame.attributeOwner.getAttributeNode(name) };
+              const attribute = frame.attributeOwner.getAttributeNode(name);
+              // A missing attribute is not a discovery step.
+              if (attribute) return { node: attribute };
+              continue;
             }
           }
           if (frame.attributes) {
@@ -1135,7 +1157,7 @@ export class PageTranslationBridge extends ResourceTracker {
             frame.attributeNames = currentSession.viewportAttributeNames.values();
             frame.attributeOwner = node;
           } else {
-            frame.attributes = Array.from(node.attributes);
+            frame.attributes = collectTranslatableAttributes(node);
           }
           frame.attributeIndex = 0;
           if (node.shadowRoot && currentSession.autoTranslateOnDOMChanges

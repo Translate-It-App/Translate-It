@@ -865,9 +865,12 @@ describe('PageTranslationBridge stale settlement integration', () => {
       const lazySettings = { ...settings, lazyLoading: true };
       await bridge.initialize(lazySettings, translate);
       bridge.translate(document.body);
-      // Lazy targets are registered during discovery, so wait for them before
-      // reporting visibility.
-      await vi.waitFor(() => expect(observers[0].observe).toHaveBeenCalled());
+      // Lazy targets are registered during discovery, so wait for every target
+      // that the callback reports before reporting visibility.
+      await vi.waitFor(() => {
+        expect(observers[0].observe).toHaveBeenCalledWith(acceptedOwner);
+        expect(observers[0].observe).toHaveBeenCalledWith(editedOwner);
+      });
       observers[0].callback([
         { target: acceptedOwner, isIntersecting: true }, { target: editedOwner, isIntersecting: true },
       ], observers[0]);
@@ -892,7 +895,10 @@ describe('PageTranslationBridge stale settlement integration', () => {
       await vi.waitFor(() => expect(retained).toHaveBeenCalledOnce());
       expect(translate).toHaveBeenCalledTimes(2);
       const latest = observers.at(-1);
-      await vi.waitFor(() => expect(latest.observe).toHaveBeenCalled());
+      await vi.waitFor(() => {
+        expect(latest.observe).toHaveBeenCalledWith(editedOwner);
+        expect(latest.observe).toHaveBeenCalledWith(later);
+      });
       latest.callback([
         { target: editedOwner, isIntersecting: true }, { target: later, isIntersecting: true },
       ], latest);
