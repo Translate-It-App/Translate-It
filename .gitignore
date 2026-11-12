@@ -3,6 +3,7 @@ node_modules/
 .vscode/
 dist/chrome/*
 dist/firefox/*
+dist/dev/*
 # !dist/chrome/*.zip
 # !dist/firefox/*.zip
 dist/*.zip
