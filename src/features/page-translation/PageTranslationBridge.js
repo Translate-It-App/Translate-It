@@ -1110,12 +1110,25 @@ export class PageTranslationBridge extends ResourceTracker {
         return attributes;
       };
 
+      // A text node whose value is only whitespace can never become a
+      // translation target: NodesTranslator rejects it before any provider
+      // request. Skipping such nodes removes both discovery steps and
+      // IntersectionObserver registrations, but only when mutation handling is
+      // active, because that is what guarantees that a node which later gains
+      // text is rediscovered.
+      const MAX_WHITESPACE_SKIPS_PER_STEP = 32;
+      const isWhitespaceOnlyText = (node) => {
+        const value = node.nodeValue;
+        return value === null || !/\S/.test(value);
+      };
+
       const nextDiscoveryStep = (task) => {
         if (task.rootPrimitive && !task.rootPrimitiveDone) {
           task.rootPrimitiveDone = true;
           return { node: task.rootPrimitive };
         }
         if (task.rootPrimitiveDone) return { done: true };
+        let skippedWhitespace = 0;
         while (task.frames.length) {
           const frame = task.frames.at(-1);
           if (frame.attributeNames) {
@@ -1150,6 +1163,14 @@ export class PageTranslationBridge extends ResourceTracker {
             const isUnsupportedDirectShadowText = frame.shadowRoot
               && node.nodeType === Node.TEXT_NODE
               && node.parentNode === frame.root;
+            if (node.nodeType === Node.TEXT_NODE && !isUnsupportedDirectShadowText
+                && currentSession.autoTranslateOnDOMChanges && isWhitespaceOnlyText(node)) {
+              // The skip is bounded so a long run of whitespace nodes yields
+              // back to the slice budget instead of monopolizing the thread.
+              if (skippedWhitespace >= MAX_WHITESPACE_SKIPS_PER_STEP) return { node: null };
+              skippedWhitespace++;
+              continue;
+            }
             return { node: node.nodeType === Node.TEXT_NODE && !isUnsupportedDirectShadowText ? node : null };
           }
 
