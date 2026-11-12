@@ -24,7 +24,7 @@ src/features/iframe-support/
 
 ### Dual-Entry Architecture
 - **index-main.js**: Orchestrator for the top frame. Manages UI, Stores, and Coordination.
-- **index-iframe.js**: Lightweight proxy for all iframes. Tiny frames (ads) get a messaging-only core and handles text detection.
+- **index-iframe.js**: Lightweight proxy for all iframes. Tiny frames (ads) only initialize messaging and the Select Element fallback responders; text detection belongs to the normal iframe runtime.
 
 ### Cross-Frame Coordination
 - **Event Synchronization**: Coordinated `ESC` key, `Revert`, and `Deactivation` across all frames.

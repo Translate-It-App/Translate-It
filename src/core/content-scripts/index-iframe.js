@@ -16,8 +16,8 @@ if (!window.translateItContentScriptCore) {
   // 2. SMART FILTER: tiny iframes (ads, trackers, captcha widgets) get a
   //    messaging-only core: they must answer Select Element frame probes so
   //    the background can settle cleanup ownership, but load no features.
-  //    shortcut: the size is sampled once at load, a frame that grows later
-  //    stays messaging-only until it is re-injected.
+  // The size is sampled once at load. A tiny frame that grows later
+  // stays messaging-only until its document reloads or navigates.
   const MIN_FRAME_SIZE = 80;
   const isTinyFrame = window.innerWidth > 0 && window.innerHeight > 0 && 
                       (window.innerWidth < MIN_FRAME_SIZE || window.innerHeight < MIN_FRAME_SIZE);
