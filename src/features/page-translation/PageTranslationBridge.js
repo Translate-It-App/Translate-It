@@ -584,13 +584,19 @@ export class PageTranslationBridge extends ResourceTracker {
         const accepted = nodeData?.acceptedTranslation;
         retireAdmission(nodeData?.pageTranslationAdmission, { removeObserver: true });
         if (nodeData?.pageTranslationAdmission) delete nodeData.pageTranslationAdmission;
-        // Detached targets are retired by active shadow observers; only stopped owners require connectivity.
-        if ((!currentSession.active && !isConnectedTarget(node))
+        // The library restores the whole tree, so this runs for every text node
+        // and attribute in the document. Cheap storage, accepted-translation and
+        // generation checks therefore run first, and the DOM ownership checks
+        // (connectivity walk, attribute identity) only for nodes that can
+        // actually be restored.
+        if (!accepted
+            || nodeData.updateId !== accepted.updateId
             || node.ownerDocument !== document
-            || !accepted || nodeData.updateId !== accepted.updateId
+            || getCurrentNodeValue(node) !== accepted.text
             || (node.nodeType === Node.ATTRIBUTE_NODE
               && node.ownerElement?.getAttributeNode(node.name) !== node)
-            || getCurrentNodeValue(node) !== accepted.text) {
+            // Detached targets are retired by active shadow observers; only stopped owners require connectivity.
+            || (!currentSession.active && !isConnectedTarget(node))) {
           this.nodeStorage.delete(node);
           callback?.(node);
           return;
