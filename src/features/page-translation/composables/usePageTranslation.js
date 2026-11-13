@@ -505,11 +505,25 @@ export function usePageTranslation() {
     refreshStatus();
   };
 
-  const handleTabUpdate = (tabId, changeInfo) => {
-    if (changeInfo.status === 'complete') {
+  const handleTabUpdate = async (tabId, changeInfo) => {
+    if (changeInfo?.status !== 'complete') return;
+
+    // Only the UI's active tab may supersede the current request: a background
+    // tab completion must not hide a translation failure of the active tab.
+    const ownership = translateRequestOwnership;
+
+    try {
+      const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+      // A delayed lookup must not invalidate a newer request and must not
+      // refresh another tab's state.
+      if (activeTab?.id !== tabId) return;
+      if (ownership !== translateRequestOwnership) return;
+
       // A tab change supersedes a pending translate request.
       translateRequestOwnership++;
       refreshStatus();
+    } catch {
+      // Without the active tab the update cannot be attributed to it.
     }
   };
 

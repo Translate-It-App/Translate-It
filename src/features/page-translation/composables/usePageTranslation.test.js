@@ -8,6 +8,7 @@ vi.mock('webextension-polyfill', () => ({
       onMessage: { addListener: vi.fn(), removeListener: vi.fn() } 
     },
     tabs: {
+      query: vi.fn(),
       onActivated: { addListener: vi.fn(), removeListener: vi.fn() },
       onUpdated: { addListener: vi.fn(), removeListener: vi.fn() }
     }
@@ -68,6 +69,7 @@ import browser from 'webextension-polyfill';
 describe('usePageTranslation Composable', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    browser.tabs.query.mockResolvedValue([{ id: 1 }]);
     sendRegularMessage.mockImplementation(({ action }) => {
       if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) {
         return Promise.resolve({ success: false });
@@ -113,6 +115,19 @@ describe('usePageTranslation Composable', () => {
       return pending;
     });
     return { resolve: resolvePresentation, called };
+  }
+
+  function mockTranslateResponse() {
+    let resolveTranslate;
+    const translateResponse = new Promise((resolve) => {
+      resolveTranslate = resolve;
+    });
+    sendRegularMessage.mockImplementation(({ action }) => {
+      if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+      if (action === MessageActions.PAGE_TRANSLATE) return translateResponse;
+      return Promise.resolve({ success: true, restoredCount: 2 });
+    });
+    return resolveTranslate;
   }
 
   it('should initialize and register listeners in onMounted', () => {
@@ -670,19 +685,6 @@ describe('usePageTranslation Composable', () => {
   });
 
   describe('Translate request ownership', () => {
-    function mockTranslateResponse() {
-      let resolveTranslate;
-      const translateResponse = new Promise((resolve) => {
-        resolveTranslate = resolve;
-      });
-      sendRegularMessage.mockImplementation(({ action }) => {
-        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
-        if (action === MessageActions.PAGE_TRANSLATE) return translateResponse;
-        return Promise.resolve({ success: true, restoredCount: 2 });
-      });
-      return resolveTranslate;
-    }
-
     it('drops a late translate failure after Restore superseded the request', async () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
@@ -801,6 +803,94 @@ describe('usePageTranslation Composable', () => {
 
       expect(pageTranslation.error.value).toBeNull();
       expect(pageTranslation.message.value).not.toContain('Error:');
+    });
+  });
+
+  describe('Tab update ownership', () => {
+    function getTabUpdateListener() {
+      return browser.tabs.onUpdated.addListener.mock.calls.at(-1)[0];
+    }
+
+    it('keeps the active request valid when a background tab completes', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pending = pageTranslation.translatePage();
+      await getTabUpdateListener()(2, { status: 'complete' });
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toContain('Error:');
+    });
+
+    it('keeps a pending error presentation after a background tab completes', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+
+      const pending = getErrorListener()(errorEvent);
+      await getTabUpdateListener()(2, { status: 'complete' });
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
+    });
+
+    it('refreshes the state and invalidates the request when the active tab completes', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pending = pageTranslation.translatePage();
+      await getTabUpdateListener()(1, { status: 'complete' });
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(sendRegularMessage).toHaveBeenCalledWith(expect.objectContaining({
+        action: MessageActions.PAGE_TRANSLATE_GET_STATUS,
+      }));
+    });
+
+    it('does not invalidate a newer request when the active-tab lookup resolves late', async () => {
+      let resolveQuery;
+      browser.tabs.query.mockImplementation(() => new Promise((resolve) => {
+        resolveQuery = resolve;
+      }));
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pendingOldRequest = pageTranslation.translatePage();
+      const pendingTabUpdate = getTabUpdateListener()(1, { status: 'complete' });
+
+      const pendingNewRequest = pageTranslation.translatePage();
+      resolveQuery([{ id: 1 }]);
+      await pendingTabUpdate;
+
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pendingOldRequest;
+      await pendingNewRequest;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toContain('Error:');
+    });
+
+    it('keeps an active translation failure visible after unrelated background-tab updates', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pending = pageTranslation.translatePage();
+      await getTabUpdateListener()(7, { status: 'complete' });
+      await getTabUpdateListener()(9, { status: 'complete' });
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toContain('Error:');
     });
   });
 
