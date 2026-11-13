@@ -41,7 +41,7 @@ const baseArtifact = {
   commands: ['unshare --user --map-root-user --net', 'ip link set lo up', `node ${script} --inside`],
   networkScope: 'Must be verified in the process namespace before launching Firefox.',
   mode: pageTranslationReplacementE2E ? 'opt-in loopback TLS Firefox page-translation replacement proof' : pageTranslationStaleSuccessE2E ? 'opt-in loopback TLS Firefox page-translation stale-success proof' : pageTranslationStopE2E ? 'opt-in loopback TLS Firefox page-translation stop-auto proof' : pageTranslationE2E ? 'opt-in loopback TLS Firefox page-translation E2E' : loopbackTlsProxy ? 'opt-in loopback TLS provider-only prototype' : 'default Firefox capability probe',
-  flags: { sourceDefaults: { slicedDiscovery: false, viewportFirstDiscovery: false }, benchmarkBuild: { slicedDiscovery: true, viewportFirstDiscovery: false }, loopbackTlsProxy, pageTranslationE2E, pageTranslationStopE2E, pageTranslationReplacementE2E, pageTranslationStaleSuccessE2E },
+  flags: { sourceDefaults: { slicedDiscovery: true, viewportFirstDiscovery: false }, benchmarkBuild: { slicedDiscovery: true, viewportFirstDiscovery: false }, loopbackTlsProxy, pageTranslationE2E, pageTranslationStopE2E, pageTranslationReplacementE2E, pageTranslationStaleSuccessE2E },
   capabilities: Object.fromEntries(requiredCapabilities.map(name => [name, { status: 'NOT_TESTED', reason: 'Setup did not reach this capability.' }])),
 };
 

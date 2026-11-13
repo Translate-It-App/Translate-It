@@ -4,7 +4,7 @@ import { Buffer } from 'node:buffer';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { classifyTransportRequest, mapEdgeResponse } from './page-translation-e2e-benchmark/metrics.mjs';
 import { BiDi, applyRuntimeBridgeFailure, applyRuntimeBridgeReportedError, classifyProtocolFailure, createRequestDispatcher, decodeEdgeRequestBody, latestRealmObservations, providerProbeArtifact, providerProbeRequiresImmediateTeardown, reconcileFinalPageTranslationStop, reconcileFinalProviderOperation, reconcileFinalRuntimeBridge, recordUnattemptedRuntimeBridge, removeProviderNetworkControls, runEdgeFrenchProviderProbe, runFirefoxProbe, runRuntimeBridgeSequence, setupProviderDataCollector, validateEdgeBodyAgainstNative, validateEdgeProviderCorrelation, validatePageTranslationStopOperation, validateProviderOperationReport, validateProviderOperationSnapshot, validateProviderReleaseReceipt, validateRuntimeBridgeErrorReport, validateRuntimeBridgeReport, validateRuntimeBridgeSnapshot, validEdgePageTranslateUrl } from './page-translation-e2e-firefox/driver.mjs';
 import { launchIsolatedWorker } from './page-translation-e2e-firefox/launcher.mjs';
@@ -1899,6 +1899,29 @@ describe('isolated launcher completion', () => {
     await expect(result).resolves.toBe(1);
     expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
     expect(failure).toMatch(/bounded deadline/);
+  });
+
+  it('accepts a clean exit before the outer deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = fakeChild();
+      const result = launchIsolatedWorker({ command: 'unshare', args: [], env: {}, artifactPath: '/tmp/result.json', runId: 'before', spawnProcess: () => child, readArtifact: async () => JSON.stringify({ runId: 'before', status: 'SUPPORTED' }), writeFailure: async () => {} });
+      child.emit('close', 0, null);
+      await expect(result).resolves.toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('fails a clean exit that lands after the outer deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = fakeChild(); const signals = []; let failure;
+      const result = launchIsolatedWorker({ command: 'unshare', args: [], env: {}, artifactPath: '/tmp/result.json', runId: 'after', timeoutMs: 1000, killGraceMs: 100, finalGraceMs: 100, spawnProcess: () => child, processRef: { kill: (_pid, signal) => signals.push(signal) }, readArtifact: async () => JSON.stringify({ runId: 'after', status: 'SUPPORTED' }), writeFailure: async reason => { failure = reason; } });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(signals).toEqual(['SIGTERM']);
+      child.emit('close', 0, null);
+      await expect(result).resolves.toBe(1);
+      expect(failure).toMatch(/bounded deadline/);
+    } finally { vi.useRealTimers(); }
   });
 });
 

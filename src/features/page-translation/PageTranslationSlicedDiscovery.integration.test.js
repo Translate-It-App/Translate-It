@@ -69,6 +69,34 @@ describe('Page Translation sliced discovery integration', () => {
     bridge.translate(document.body);
   };
 
+  const bridgeGroupSize = () => bridge.memoryManager.groups.get('page-translation-bridge')?.size ?? 0;
+
+  // Starts discovery and returns while a slice timer is still pending, so
+  // cleanup assertions observe a real registered timer.
+  const startWithPendingTimer = async (count = 40) => {
+    const fixture = document.createDocumentFragment();
+    for (let index = 0; index < count; index++) appendElement(fixture, 'p', `Text ${index}`, { title: `Title ${index}` });
+    setBody(...Array.from(fixture.childNodes));
+    bridge = new PageTranslationBridgeClass();
+    await bridge.initialize(settings, (text) => Promise.resolve(acceptedTranslation(text)));
+    bridge.translate(document.body);
+  };
+
+  // Runs the queued scheduled callbacks one at a time until the expected number
+  // of primitives has been admitted, with a bounded iteration guard.
+  const advanceToAdmissions = async (seen, scheduledSlices, target) => {
+    for (let step = 0; step < 20 && seen.length < target; step++) {
+      const next = scheduledSlices.shift();
+      // No scheduled slice left means the walk ended before the target.
+      if (!next) return;
+      next();
+      const admitted = seen.length;
+      for (let attempt = 0; attempt < 10 && seen.length === admitted; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+  };
+
   it('discovers eligible text, attributes, controls, and nested open shadow roots in slices', async () => {
     const fixture = document.createDocumentFragment();
     appendElement(fixture, 'p', 'First text', { title: 'First title' });
@@ -707,5 +735,191 @@ describe('Page Translation sliced discovery integration', () => {
     expect(second.textContent).toBe('Never admitted');
     bridge.restore(document.body);
     expect(node.nodeValue).toBe('Accepted before failure');
+  });
+
+  it('unregisters completed slice timers across repeated slices', async () => {
+    const fixture = document.createDocumentFragment();
+    for (let index = 0; index < 25; index++) appendElement(fixture, 'p', `Text ${index}`, { title: `Title ${index}` });
+    setBody(...Array.from(fixture.childNodes));
+    const states = [];
+    await start((text) => Promise.resolve(acceptedTranslation(text)), {
+      callbacks: { onDiscoveryStateChange: pending => states.push(pending) },
+    });
+
+    await vi.waitFor(() => expect(states.at(-1)).toBe(false));
+    expect(bridgeGroupSize()).toBe(0);
+  });
+
+  it('releases a pending slice timer on stopPersistence', async () => {
+    await startWithPendingTimer();
+
+    expect(bridgeGroupSize()).toBeGreaterThan(0);
+    bridge.stopPersistence();
+    expect(bridgeGroupSize()).toBe(0);
+  });
+
+  it('releases timer resources on restore', async () => {
+    await startWithPendingTimer();
+
+    expect(bridgeGroupSize()).toBeGreaterThan(0);
+    bridge.restore(document.body);
+    expect(bridgeGroupSize()).toBe(0);
+  });
+
+  it('releases timer resources when a replacement session starts', async () => {
+    await startWithPendingTimer();
+
+    expect(bridgeGroupSize()).toBeGreaterThan(0);
+    await bridge.initialize(settings, (text) => Promise.resolve(acceptedTranslation(text)));
+    expect(bridgeGroupSize()).toBe(0);
+  });
+
+  it('enumerates an attribute-heavy element within the slice budget without viewport-first discovery', async () => {
+    const fixture = document.createDocumentFragment();
+    const heavy = appendElement(fixture, 'div', 'Heavy text', { title: 'Heavy title' });
+    for (let attrIndex = 0; attrIndex < 60; attrIndex++) heavy.setAttribute(`data-unrelated-${attrIndex}`, `value-${attrIndex}`);
+    setBody(heavy);
+    const seen = [];
+    const states = [];
+    const nativeAttributes = Array.from(heavy.attributes);
+    let enumeratedAttributes = 0;
+    Object.defineProperty(heavy, 'attributes', {
+      configurable: true,
+      get: () => new Proxy({ length: nativeAttributes.length }, {
+        get(target, property, receiver) {
+          if (property === 'length') return nativeAttributes.length;
+          const index = Number(property);
+          if (Number.isInteger(index) && index >= 0 && index < nativeAttributes.length) {
+            enumeratedAttributes++;
+            return nativeAttributes[index];
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      }),
+    });
+
+    vi.useFakeTimers();
+    try {
+      await start(async (text, _context, _score, node) => {
+        seen.push({ text, node });
+        return Promise.resolve(acceptedTranslation(text));
+      }, { callbacks: { onDiscoveryStateChange: pending => states.push(pending) } });
+
+      // Bounded enumeration: one eligible attribute per slice, no unrelated
+      // primitive admitted, and the final sequence is exactly the eligible set.
+      await vi.waitFor(() => expect(seen).toHaveLength(2));
+      expect(seen.map(({ text }) => text)).toEqual(['Heavy title', 'Heavy text']);
+      expect(seen.every(({ text }) => !text.startsWith('data-unrelated'))).toBe(true);
+      await vi.waitFor(() => expect(heavy.textContent).toContain('Translated Heavy text'));
+      expect(states).toEqual([true, false]);
+      // Bounded enumeration: the configured allow-list drives discovery instead
+      // of scanning the live attribute collection.
+      expect(enumeratedAttributes).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('requires multiple discovery slices for an attribute-heavy element', async () => {
+    const fixture = document.createDocumentFragment();
+    const heavy = appendElement(fixture, 'div', 'Heavy text', { title: 'Heavy title', alt: 'Heavy alt', placeholder: 'Heavy placeholder' });
+    for (let attrIndex = 0; attrIndex < 60; attrIndex++) heavy.setAttribute(`data-unrelated-${attrIndex}`, `value-${attrIndex}`);
+    setBody(heavy);
+    const seen = [];
+    const states = [];
+    const expectedTexts = ['Heavy title', 'Heavy alt', 'Heavy placeholder', 'Heavy text'];
+
+    bridge = new PageTranslationBridgeClass();
+    await bridge.initialize({ ...settings, attributesToTranslate: ['title', 'alt', 'placeholder'] }, async (text, _context, _score, node) => {
+      seen.push({ text, node });
+      return Promise.resolve(acceptedTranslation(text));
+    }, undefined, { onDiscoveryStateChange: pending => states.push(pending) });
+
+    // Collect the scheduled slice callbacks instead of letting timers fire.
+    const scheduledSlices = [];
+    vi.spyOn(bridge, 'trackTimeout').mockImplementation(callback => {
+      scheduledSlices.push(callback);
+      return scheduledSlices.length;
+    });
+    bridge.translate(document.body);
+
+    // Only the first eligible attribute is admitted so far and the next slice is
+    // still pending.
+    await advanceToAdmissions(seen, scheduledSlices, 1);
+    expect(seen.map(({ text }) => text)).toEqual(expectedTexts.slice(0, 1));
+    expect(scheduledSlices.length).toBeGreaterThan(0);
+
+    // Advance one scheduled slice at a time and verify the ordered sequence.
+    for (let admitted = 2; admitted <= expectedTexts.length; admitted++) {
+      await advanceToAdmissions(seen, scheduledSlices, admitted);
+      expect(seen.map(({ text }) => text)).toEqual(expectedTexts.slice(0, admitted));
+    }
+    expect(seen.length).toBe(expectedTexts.length);
+  });
+
+  it('translates each eligible attribute exactly once', async () => {
+    const fixture = document.createDocumentFragment();
+    appendElement(fixture, 'p', 'First text', { title: 'First title', alt: 'First alt' });
+    appendElement(fixture, 'p', 'Second text', { title: 'Second title' });
+    setBody(...Array.from(fixture.childNodes));
+    const seen = [];
+    const states = [];
+    await start((text, _context, _score, node) => {
+      seen.push({ text, node });
+      return Promise.resolve(acceptedTranslation(text));
+    }, {
+      settings: { ...settings, attributesToTranslate: ['title', 'alt'] },
+      callbacks: { onDiscoveryStateChange: pending => states.push(pending) },
+    });
+
+    await vi.waitFor(() => expect(states).toEqual([true, false]));
+    expect(seen.map(({ text }) => text)).toEqual(['First title', 'First alt', 'First text', 'Second title', 'Second text']);
+    expect(new Set(seen.map(({ text }) => text)).size).toBe(seen.length);
+  });
+
+  it('does not skip eligible attributes when an earlier attribute is removed between slices', async () => {
+    const fixture = document.createDocumentFragment();
+    const heavy = document.createElement('div');
+    heavy.textContent = 'Heavy text';
+    heavy.setAttribute('data-unrelated-0', 'value-0');
+    heavy.setAttribute('title', 'Heavy title');
+    heavy.setAttribute('alt', 'Heavy alt');
+    fixture.appendChild(heavy);
+    setBody(heavy);
+    const seen = [];
+    const states = [];
+    const expectedTexts = ['Heavy title', 'Heavy alt', 'Heavy text'];
+
+    bridge = new PageTranslationBridgeClass();
+    await bridge.initialize({ ...settings, attributesToTranslate: ['title', 'alt'] }, async (text, _context, _score, node) => {
+      seen.push({ text, node });
+      return Promise.resolve(acceptedTranslation(text));
+    }, undefined, { onDiscoveryStateChange: pending => states.push(pending) });
+
+    // Collect the scheduled slice callbacks instead of letting timers fire.
+    const scheduledSlices = [];
+    vi.spyOn(bridge, 'trackTimeout').mockImplementation(callback => {
+      scheduledSlices.push(callback);
+      return scheduledSlices.length;
+    });
+    bridge.translate(document.body);
+
+    // Advance until the first eligible attribute is admitted.
+    await advanceToAdmissions(seen, scheduledSlices, 1);
+    expect(seen.map(({ text }) => text)).toEqual(expectedTexts.slice(0, 1));
+    // The next eligible attribute has not been admitted yet and a continuation
+    // is pending.
+    expect(seen.map(({ text }) => text)).not.toContain('Heavy alt');
+    expect(scheduledSlices.length).toBeGreaterThan(0);
+
+    // Remove the earlier unrelated attribute while the continuation is pending.
+    heavy.removeAttribute('data-unrelated-0');
+
+    // Resume the remaining slices and verify nothing was skipped or duplicated.
+    await advanceToAdmissions(seen, scheduledSlices, 2);
+    await advanceToAdmissions(seen, scheduledSlices, 3);
+    expect(seen.map(({ text }) => text)).toEqual(expectedTexts);
+    expect(seen.length).toBe(expectedTexts.length);
+    expect(seen.filter(({ text }) => text === 'Heavy alt')).toHaveLength(1);
   });
 });

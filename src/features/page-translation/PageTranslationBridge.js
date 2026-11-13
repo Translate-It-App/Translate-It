@@ -1085,10 +1085,8 @@ export class PageTranslationBridge extends ResourceTracker {
         root,
         shadowRoot: isShadowRoot(root),
         iterator: document.createNodeIterator(root, NodeFilter.SHOW_ALL),
-        attributes: null,
         attributeNames: null,
         attributeOwner: null,
-        attributeIndex: 0,
       });
 
       const createViewportWindow = () => ({
@@ -1103,18 +1101,6 @@ export class PageTranslationBridge extends ResourceTracker {
         otherAdmissionIndex: 0,
         canonicalDone: false,
       });
-
-      // Only attributes that can become translation targets are enumerated:
-      // attributes outside the allow-list are rejected by the filter, so
-      // spending a discovery step on them only delays the walk.
-      const collectTranslatableAttributes = (element) => {
-        const allowed = currentSession.translatableAttributeNames;
-        const attributes = [];
-        for (const attribute of element.attributes) {
-          if (allowed.has(attribute.name)) attributes.push(attribute);
-        }
-        return attributes;
-      };
 
       // A text node whose value is only whitespace can never become a
       // translation target: NodesTranslator rejects it before any provider
@@ -1149,17 +1135,6 @@ export class PageTranslationBridge extends ResourceTracker {
               continue;
             }
           }
-          if (frame.attributes) {
-            if (frame.attributeIndex < frame.attributes.length) {
-              const attribute = frame.attributes[frame.attributeIndex++];
-              if (attribute.ownerElement?.getAttributeNode(attribute.name) === attribute) {
-                return { node: attribute };
-              }
-              return { node: null };
-            }
-            frame.attributes = null;
-          }
-
           const node = frame.iterator.nextNode();
           if (!node) {
             task.frames.pop();
@@ -1180,13 +1155,10 @@ export class PageTranslationBridge extends ResourceTracker {
             return { node: node.nodeType === Node.TEXT_NODE && !isUnsupportedDirectShadowText ? node : null };
           }
 
-          if (currentSession.viewportFirstDiscoveryEnabled) {
-            frame.attributeNames = currentSession.viewportAttributeNames.values();
-            frame.attributeOwner = node;
-          } else {
-            frame.attributes = collectTranslatableAttributes(node);
-          }
-          frame.attributeIndex = 0;
+          frame.attributeNames = currentSession.viewportFirstDiscoveryEnabled
+            ? currentSession.viewportAttributeNames.values()
+            : currentSession.translatableAttributeNames.values();
+          frame.attributeOwner = node;
           if (node.shadowRoot && currentSession.autoTranslateOnDOMChanges
               && isCurrentDiscoverySession()) {
             registerShadowRoot(node.shadowRoot, node);
@@ -1772,6 +1744,7 @@ export class PageTranslationBridge extends ResourceTracker {
     const currentSession = this.session;
     currentSession.active = false;
     currentSession.cancelDiscovery?.();
+    this.clearAllTimers();
 
     try {
       currentSession.stopShadowPersistence?.();

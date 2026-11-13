@@ -937,6 +937,19 @@ describe('PageTranslationManager', () => {
       expect(manager.acceptedLifecycleSessionId).toBe(result.messageId);
       expect(manager.abortController).toBeNull();
       expect(pageEventBus.emit.mock.calls.filter(([action]) => action === MessageActions.PAGE_TRANSLATE_ERROR)).toHaveLength(1);
+      const errorBroadcast = pageEventBus.emit.mock.calls
+        .filter(([action]) => action === MessageActions.PAGE_TRANSLATE_ERROR)
+        .at(-1);
+      expect(errorBroadcast?.[0]).toBe(MessageActions.PAGE_TRANSLATE_ERROR);
+      expect(errorBroadcast?.[1]).toEqual(expect.objectContaining({
+        error: 'enumeration failed',
+        translatedCount: 2,
+        failedCount: 1,
+        totalCount: 3,
+        isTranslated: true,
+        isTranslating: false,
+        isAutoTranslating: false,
+      }));
       expect(document.getElementById('ti-translation-layout-fix')).not.toBeNull();
 
       await manager.restorePage();

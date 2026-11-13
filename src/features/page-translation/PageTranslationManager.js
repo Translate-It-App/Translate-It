@@ -455,6 +455,12 @@ export class PageTranslationManager extends ResourceTracker {
     this._broadcastEvent(MessageActions.PAGE_TRANSLATE_ERROR, {
       error: error?.message || String(error),
       errorDetails: MessageFormat.serializeTranslationError(error),
+      translatedCount: this.scheduler.translatedCount || 0,
+      failedCount: this.scheduler.failedCount || 0,
+      totalCount: this.scheduler.totalTasks || 0,
+      isTranslated: this.isTranslated,
+      isTranslating: false,
+      isAutoTranslating: false,
     }, attempt.messageId);
     return true;
   }

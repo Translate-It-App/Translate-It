@@ -441,6 +441,31 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.isTranslating.value).toBe(false);
     });
 
+    it('applies stopped-state counts from a fatal discovery error event', async () => {
+      const pageTranslation = usePageTranslation();
+
+      const errorListener = pageEventBus.on.mock.calls.find(c => c[0] === 'page-translation-error')[1];
+      await errorListener({
+        error: 'enumeration failed',
+        errorDetails: { type: 'TRANSLATION_FAILED', message: 'enumeration failed' },
+        translatedCount: 2,
+        failedCount: 1,
+        totalCount: 3,
+        isTranslated: true,
+        isTranslating: false,
+        isAutoTranslating: false,
+      });
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isAutoTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(2);
+      expect(pageTranslation.failedCount.value).toBe(1);
+      expect(pageTranslation.totalNodes.value).toBe(3);
+      expect(pageTranslation.canRestore.value).toBe(true);
+    });
+
     it('should update progress when pageEventBus emits', () => {
       // Manual trigger of the listener if we were testing the live component
       // But we can test the internal updateProgress logic by getting the listener

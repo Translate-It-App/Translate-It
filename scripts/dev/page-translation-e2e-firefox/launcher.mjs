@@ -4,12 +4,12 @@ import process from 'node:process';
 
 export function launchIsolatedWorker({ command, args, env, artifactPath, runId, writeFailure, spawnProcess = spawn, readArtifact = path => readFile(path, 'utf8'), processRef = process, timeoutMs = 210_000, killGraceMs = 1000, finalGraceMs = 3000 }) {
   return new Promise(resolve => {
-    let child; let spawnError = null; let settled = false; let deadline; let killDeadline;
+    let child; let spawnError = null; let settled = false; let deadlineExpired = false; let deadline; let killDeadline;
     const finish = async (code, signal, timedOut = false) => {
       if (settled) return;
       settled = true; clearTimeout(deadline); clearTimeout(killDeadline);
-      if (spawnError || timedOut || code === null) {
-        const reason = spawnError ? `Isolated worker spawn failed: ${spawnError.message}` : timedOut ? 'Isolated worker exceeded its bounded deadline.' : `Isolated worker closed without an exit code (${signal ?? 'unknown signal'}).`;
+      if (spawnError || timedOut || deadlineExpired || code === null) {
+        const reason = spawnError ? `Isolated worker spawn failed: ${spawnError.message}` : (timedOut || deadlineExpired) ? 'Isolated worker exceeded its bounded deadline.' : `Isolated worker closed without an exit code (${signal ?? 'unknown signal'}).`;
         try { await writeFailure(reason, spawnError ?? new Error(reason)); } catch { /* Exit remains failure if artifact storage also fails. */ }
         resolve(1); return;
       }
@@ -37,6 +37,7 @@ export function launchIsolatedWorker({ command, args, env, artifactPath, runId, 
       child.once('error', error => { spawnError = error; void finish(null, null); });
       child.once('close', (code, signal) => { void finish(code, signal); });
       deadline = setTimeout(() => {
+        deadlineExpired = true;
         try { processRef.kill(-child.pid, 'SIGTERM'); } catch { child.kill?.('SIGTERM'); }
         killDeadline = setTimeout(() => {
           try { processRef.kill(-child.pid, 'SIGKILL'); } catch { child.kill?.('SIGKILL'); }

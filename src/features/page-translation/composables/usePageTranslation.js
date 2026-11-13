@@ -352,6 +352,19 @@ export function usePageTranslation() {
 
     isTranslating.value = false;
     isAutoTranslating.value = false;
+
+    // Apply the stopped-state counts published by the error event so the UI
+    // reflects partial translations without waiting for a status refresh.
+    if (data.isTranslated !== undefined) {
+      isTranslated.value = !!data.isTranslated;
+    } else if (data.translatedCount !== undefined) {
+      isTranslated.value = data.translatedCount > 0;
+    }
+
+    if (data.translatedCount !== undefined) translatedCount.value = data.translatedCount;
+    if (data.failedCount !== undefined) failedCount.value = data.failedCount;
+    if (data.totalCount !== undefined) totalNodes.value = data.totalCount;
+
     error.value = displayError;
     message.value = `Error: ${displayError.message}`;
   }

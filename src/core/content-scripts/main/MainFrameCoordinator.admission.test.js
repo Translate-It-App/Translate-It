@@ -439,6 +439,62 @@ describe('MainFrameCoordinator per-frame admission', () => {
     emitSpy.mockRestore();
   });
 
+  it('emits a fatal discovery error aggregate with stopped and partial translation counts', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    coordinator.handleTrustedPageLifecycle({ frameId: 0, action: MessageActions.PAGE_TRANSLATE_START, data: { sessionId: 'A0', isAutoTranslating: true } });
+    aggregator.updateFrameData(0, {
+      isTranslated: true,
+      isTranslating: true,
+      isAutoTranslating: true,
+      translatedCount: 2,
+      failedCount: 1,
+      totalCount: 3,
+      status: 'translating',
+    });
+
+    const emitSpy = vi.spyOn(pageEventBus, 'emit');
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 0,
+      action: MessageActions.PAGE_TRANSLATE_ERROR,
+      data: {
+        sessionId: 'A0',
+        error: 'enumeration failed',
+        errorDetails: { type: 'TRANSLATION_FAILED', message: 'enumeration failed' },
+        translatedCount: 2,
+        failedCount: 1,
+        totalCount: 3,
+        isTranslated: true,
+        isTranslating: false,
+        isAutoTranslating: false,
+      },
+    });
+
+    const errorAggregate = emitSpy.mock.calls
+      .filter(([action]) => action === MessageActions.PAGE_TRANSLATE_ERROR)
+      .at(-1)?.[1];
+    expect(errorAggregate).toMatchObject({
+      isAggregated: true,
+      error: 'enumeration failed',
+      translatedCount: 2,
+      failedCount: 1,
+      totalCount: 3,
+      isTranslating: false,
+      isAutoTranslating: false,
+      isTranslated: true,
+    });
+    emitSpy.mockRestore();
+
+    const status = aggregator.getGlobalPageTranslationStatus();
+    expect(status.isTranslating).toBe(false);
+    expect(status.isAutoTranslating).toBe(false);
+    expect(status.isTranslated).toBe(true);
+    expect(status.translatedCount).toBe(2);
+    expect(status.failedCount).toBe(1);
+    expect(status.totalCount).toBe(3);
+    // Restore stays available while the retained partial translation is kept.
+    expect(status.isTranslated && !status.isTranslating).toBe(true);
+  });
+
   it('keeps main committed output in an iframe fatal aggregate error', () => {
     const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
     coordinator.handleTrustedPageLifecycle({ frameId: 1, action: MessageActions.PAGE_TRANSLATE_START, data: { sessionId: 'child-session' } });
