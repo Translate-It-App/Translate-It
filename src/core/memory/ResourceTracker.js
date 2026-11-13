@@ -48,9 +48,11 @@ class ResourceTracker {
    */
   trackTimeout(callback, delay) {
     const timerId = setTimeout(() => {
-      callback();
-      if (shouldEnableDebugging()) {
-        this.resources.delete(`timer_${timerId}`);
+      try {
+        callback();
+      } finally {
+        // A completed timer must not linger in the memory manager's group.
+        this.clearTimer(timerId);
       }
     }, delay);
 
@@ -177,7 +179,7 @@ class ResourceTracker {
   clearTimer(timerId) {
     clearTimeout(timerId);
     clearInterval(timerId);
-    this.memoryManager.timers.delete(timerId);
+    this.memoryManager.clearTimer(timerId, this.groupId);
     if (shouldEnableDebugging()) {
       this.resources.delete(`timer_${timerId}`);
       this.resources.delete(`interval_${timerId}`);
