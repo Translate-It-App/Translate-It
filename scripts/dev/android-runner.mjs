@@ -6,6 +6,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { logStep, logSuccess, logError, logInfo } from '../shared/logger.mjs'
 import projectNaming from '../shared/project-names.cjs'
+import buildOutputPaths from '../shared/build-output-paths.cjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '../..')
@@ -93,7 +94,13 @@ export async function runAndroid({ args = process.argv.slice(2), env = process.e
 
     logStep(`Starting Android deployment on device: ${deviceId}...`)
     
-    const firefoxBuildDir = `dist/firefox/${artifactPrefix}-v${packageInfo.version}`
+    // The runner deploys a development build, which lives outside the release output.
+    const firefoxBuildDir = buildOutputPaths.getBuildOutputDir({
+      browser: 'firefox',
+      version: packageInfo.version,
+      artifactPrefix,
+      production: false,
+    })
     const buildPath = path.join(root, firefoxBuildDir)
     if (!exists(buildPath)) {
       logError(`Build directory not found: ${firefoxBuildDir}`)

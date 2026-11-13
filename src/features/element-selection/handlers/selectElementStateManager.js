@@ -115,6 +115,9 @@ function isValidDocumentId(value) {
 const FrameStateKind = {
   ACTIVE: 'ACTIVE',
   INACTIVE: 'INACTIVE',
+  // The frame has no Select Element UI activity but still owns an
+  // unconfirmed cleanup, so it is neither clean nor a restorable session.
+  CLEANUP_PENDING: 'CLEANUP_PENDING',
   NO_RECEIVER: 'NO_RECEIVER',
   UNKNOWN: 'UNKNOWN',
 };
@@ -633,6 +636,11 @@ async function queryFrameStateWithKind(tabId, frameId, documentId = null) {
     if (resp && typeof resp === 'object' && 'active' in resp) state = resp;
     else if (resp && resp.data && typeof resp.data === 'object' && 'active' in resp.data) state = resp.data;
     if (state && typeof state === 'object' && 'active' in state) {
+      if (state.cleanupUnconfirmed === true) {
+        // The frame owns an unconfirmed cleanup: it is not clean even though no
+        // Select Element UI activity remains, so it requires reconciliation.
+        return { kind: FrameStateKind.CLEANUP_PENDING, state };
+      }
       return { kind: state.active === true ? FrameStateKind.ACTIVE : FrameStateKind.INACTIVE, state };
     }
     return { kind: FrameStateKind.UNKNOWN, error: new Error('malformed state response') };
@@ -751,6 +759,15 @@ async function discoverAndReconcileActiveFrames(tabId, { deadlineAt = null } = {
     const reason = res.reason;
     if (kind === FrameStateKind.ACTIVE) {
       results.push({ frameId, documentId: isValidDocumentId(documentId) ? documentId : (state?.documentId || null), state });
+    } else if (kind === FrameStateKind.CLEANUP_PENDING) {
+      // The frame owns an unconfirmed cleanup: it is not an active session to
+      // restore, and it is not clean either, so it requires reconciliation.
+      results.push({
+        frameId,
+        documentId: isValidDocumentId(documentId) ? documentId : null,
+        state,
+        kind: FrameStateKind.CLEANUP_PENDING,
+      });
     } else if (kind === FrameStateKind.UNKNOWN) {
       let safeNoReceiver = false;
       if (reason === 'no-receiver') {
@@ -764,10 +781,13 @@ async function discoverAndReconcileActiveFrames(tabId, { deadlineAt = null } = {
       results.push({ frameId, documentId: isValidDocumentId(documentId) ? documentId : null, state: null, kind: FrameStateKind.UNKNOWN });
     }
   }
+  const requiresReconciliation = result => (
+    result.kind === FrameStateKind.UNKNOWN || result.kind === FrameStateKind.CLEANUP_PENDING
+  );
   return {
-    status: results.some(result => result.kind === FrameStateKind.UNKNOWN) ? 'unknown' : 'known',
+    status: results.some(requiresReconciliation) ? 'unknown' : 'known',
     discoveredCount: results.length,
-    fullyCleaned: results.every(result => result.kind !== FrameStateKind.UNKNOWN),
+    fullyCleaned: results.every(result => !requiresReconciliation(result)),
     activeFrames: results.filter(result => result.kind === FrameStateKind.ACTIVE),
   };
 }

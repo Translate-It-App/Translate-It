@@ -92,6 +92,11 @@ class SelectElementManager extends ResourceTracker {
     this.isProcessingClick = false;
     this.isCancellationInProgress = false;
     this.isInitialized = false;
+    // True while a deactivation cleanup is outstanding: it is set when the
+    // cleanup starts and cleared only once the cleanup is confirmed. The
+    // manager clears isActive before cleanup completes, so an inactive manager
+    // alone does not prove that cleanup finished.
+    this._cleanupUnconfirmed = false;
     this.selectElementLifecycleQueue = Promise.resolve();
     this.instanceId = Math.random().toString(36).substring(7);
     this.isTopFrame = window === window.top;
@@ -219,6 +224,17 @@ class SelectElementManager extends ResourceTracker {
 
   async _activateSelectElementMode(options = {}) {
     if (this.isActive) return { isActive: this.isActive, instanceId: this.instanceId };
+
+    // A previous cleanup was never confirmed. Activation must not start a new
+    // session while the frame still owns cleanup work: resolve the outstanding
+    // cleanup first and only continue once it is confirmed.
+    if (this._cleanupUnconfirmed) {
+      const cleanup = await this._deactivateSelectElementMode({ reason: 'cancel', fromBackground: true, silent: true });
+      if (cleanup?.success !== true || cleanup?.cleanupCompleted !== true) {
+        this.logger.warn('Select Element activation refused: a previous cleanup is still unconfirmed');
+        return { isActive: false, cleanupUnconfirmed: true };
+      }
+    }
 
     await this._ensureStylesInjected();
     
@@ -350,7 +366,10 @@ class SelectElementManager extends ResourceTracker {
   }
 
   async _deactivateSelectElementMode(options = {}) {
-    if (!this.isActive) {
+    // The already-inactive shortcut is only valid when no cleanup is
+    // outstanding. A failed cleanup was never confirmed, so it must be
+    // retried instead of acknowledged as a successful cleanup.
+    if (!this.isActive && !this._cleanupUnconfirmed) {
       return { success: true, cleanupCompleted: true, alreadyInactive: true };
     }
 
@@ -368,6 +387,8 @@ class SelectElementManager extends ResourceTracker {
       this.logger.debug(`Deactivating SelectElementManager (Reason: ${reason})`, { ...options, preserveTranslations });
 
       this.isActive = false;
+      // The cleanup is outstanding from here until it is confirmed.
+      this._cleanupUnconfirmed = true;
       this.activationTime = 0;
       
       // STOP watchdog and REMOVE interaction-blocking attribute immediately (Safety first)
@@ -400,18 +421,22 @@ class SelectElementManager extends ResourceTracker {
         }
       }
       pageEventBus.emit('select-mode-deactivated');
+      this._cleanupUnconfirmed = false;
       return { success: true, cleanupCompleted: true };
 
     } catch (error) {
       this.logger.error('Critical error deactivating SelectElementManager:', error);
-      
+
       // Integrate with the centralized error system for unexpected manager failures
       if (!ExtensionContextManager.isContextError(error)) {
         // Log correctly
       } else {
         ExtensionContextManager.handleContextError(error, 'element-selection-deactivate');
       }
-      
+
+      // The cleanup was not confirmed: the outstanding-cleanup flag stays set
+      // so an inactive manager is never acknowledged as a successful cleanup
+      // until a retry confirms it.
       this.emergencyCleanup();
       return {
         success: false,
@@ -977,6 +1002,15 @@ class SelectElementManager extends ResourceTracker {
   }
 
   isSelectElementActive() { return this.isActive; }
+
+  /**
+   * Whether the manager still owns an unconfirmed cleanup. It is true from the
+   * start of a deactivation cleanup until that cleanup is confirmed, so a
+   * background that lost its own ownership can still tell that the frame owns
+   * cleanup work.
+   * @returns {boolean}
+   */
+  isSelectElementCleanupUnconfirmed() { return this._cleanupUnconfirmed === true; }
   getStatus() { return { serviceActive: this.isActive, isProcessingClick: this.isProcessingClick, isInitialized: this.isInitialized, instanceId: this.instanceId, isTopFrame: this.isTopFrame }; }
   forceCleanup() {
     try {

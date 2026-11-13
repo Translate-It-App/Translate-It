@@ -6,9 +6,16 @@ import { resolve } from 'path'
 import { generateValidatedManifest } from '../manifest-generator.js'
 import pkg from '../../package.json' with { type: 'json' };
 import projectNaming from '../../scripts/shared/project-names.cjs'
+import buildOutputPaths from '../../scripts/shared/build-output-paths.cjs'
 
 const { artifactPrefix } = projectNaming.getProjectNames(pkg.name)
-const baseOutDir = `dist/chrome/${artifactPrefix}-v${pkg.version}`;
+// Production and development builds write to separate directories so an
+// unminified development build can never overwrite the release bundle.
+const baseOutDir = buildOutputPaths.getBuildOutputDir({
+  browser: 'chrome',
+  version: pkg.version,
+  artifactPrefix,
+});
 const watchDelay = Number(process.env.VITE_WATCH_DELAY || 0)
 
 // Import production config for production builds
