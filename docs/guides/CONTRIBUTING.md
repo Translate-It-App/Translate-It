@@ -38,7 +38,7 @@ pnpm run watch:chrome
 pnpm run watch:firefox
 ```
 
-Builds are written to `dist/chrome/Translate-It-v<version>/` and `dist/firefox/Translate-It-v<version>/`.
+Development and watch builds are written to `dist/dev/chrome/Translate-It-v<version>/` and `dist/dev/firefox/Translate-It-v<version>/`. Production builds are written separately to `dist/chrome/Translate-It-v<version>/` and `dist/firefox/Translate-It-v<version>/`, so a development build never overwrites a release bundle.
 
 Load the Chrome build from `chrome://extensions` with Developer mode and **Load unpacked**. In Firefox, use `about:debugging` → **This Firefox** → **Load Temporary Add-on** and select the build's `manifest.json`. After a watch rebuild, reload the extension and refresh pages to reload content scripts. For logging setup and browser-specific DevTools instructions, see the [Logging System Guide](../technical/LOGGING_SYSTEM.md).
 

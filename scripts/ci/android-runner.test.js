@@ -78,7 +78,7 @@ describe('Firefox Android development runner', () => {
     expect(calls).toEqual([
       'pnpm run dev:firefox',
       'adb -s cli-device shell pm list packages org.mozilla',
-      'web-ext run -t firefox-android --source-dir "dist/firefox/Translate-It-v1.22.0" --android-device "cli-device" --firefox-apk="org.mozilla.fenix"',
+      'web-ext run -t firefox-android --source-dir "dist/dev/firefox/Translate-It-v1.22.0" --android-device "cli-device" --firefox-apk="org.mozilla.fenix"',
     ]);
     expect(log.mock.calls.flat().join(' ')).toContain('Building Firefox extension for Android...');
     expect(log.mock.calls.flat().join(' ')).toContain('Firefox build completed');
@@ -107,7 +107,7 @@ describe('Firefox Android development runner', () => {
     expect(calls.some(command => command === 'pnpm run dev:firefox')).toBe(false);
     expect(calls).toEqual([
       'adb -s cli-device shell pm list packages org.mozilla',
-      'web-ext run -t firefox-android --source-dir "dist/firefox/Translate-It-v1.22.0" --android-device "cli-device" --firefox-apk="org.mozilla.fenix"',
+      'web-ext run -t firefox-android --source-dir "dist/dev/firefox/Translate-It-v1.22.0" --android-device "cli-device" --firefox-apk="org.mozilla.fenix"',
     ]);
     expect(log.mock.calls.flat().join(' ')).toContain('Starting Android deployment on device: cli-device...');
     expect(log.mock.calls.flat().join(' ')).not.toContain('Building Firefox extension for Android...');
