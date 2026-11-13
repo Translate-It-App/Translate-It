@@ -22,7 +22,12 @@ export default defineConfig({
     clearMocks: false,
     environment: 'jsdom',
     setupFiles: [resolve(__dirname, './tests/setup.js')],
-    include: ['src/**/*.{test,spec}.{js,ts}', 'scripts/ci/*.test.js', 'scripts/dev/*.test.js'],
+    include: [
+      'src/**/*.{test,spec}.{js,ts}',
+      'scripts/ci/*.test.js',
+      'scripts/dev/*.test.js',
+      'scripts/dev/page-translation/*.test.js',
+    ],
     root: resolve(__dirname),
     coverage: {
       provider: 'v8',
