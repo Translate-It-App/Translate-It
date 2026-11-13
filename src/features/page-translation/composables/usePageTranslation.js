@@ -44,6 +44,16 @@ export function usePageTranslation() {
   let cancelledListener = null;
   let resetErrorListener = null;
 
+  // Monotonic revision for asynchronous error presentation. A newer lifecycle
+  // update invalidates an in-flight presentation so a stale error cannot revive
+  // state that was already cleared.
+  let errorPresentationRevision = 0;
+
+  // Ownership token of the translate request that is awaiting its response.
+  // Restore, a tab change, or a newer request supersedes it; the request's own
+  // START lifecycle does not.
+  let translateRequestOwnership = 0;
+
   function applyRestrictedPageState(response) {
     const restrictedMessage = response?.message || 'Feature not available on this page';
 
@@ -61,6 +71,7 @@ export function usePageTranslation() {
    * Fetch current translation status from the active tab
    */
   async function refreshStatus() {
+    errorPresentationRevision++;
     try {
       const result = await sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE_GET_STATUS,
@@ -107,6 +118,12 @@ export function usePageTranslation() {
       return;
     }
 
+    // A new translation session invalidates any pending error presentation and
+    // supersedes an older request that is still awaiting its response.
+    errorPresentationRevision++;
+    translateRequestOwnership++;
+    const ownership = translateRequestOwnership;
+
     try {
       // Determine synced provider if any
       const syncedProvider = translationStore.ephemeralSync.page && translationStore.selectedProvider
@@ -124,6 +141,11 @@ export function usePageTranslation() {
         returnFailureResponse: true,
       });
 
+      // Verify ownership right after the response: a superseded request must not
+      // change UI state and must not cancel a pending error of the current
+      // session.
+      if (ownership !== translateRequestOwnership) return;
+
       if (result?.isRestrictedPage) {
         applyRestrictedPageState(result);
         return;
@@ -139,11 +161,17 @@ export function usePageTranslation() {
           return;
         }
 
+        // The failure belongs to the current request: capture the revision now so
+        // the request's own START lifecycle cannot suppress it.
+        const revision = ++errorPresentationRevision;
         const displayError = await getPageTranslationErrorPresentation({
           error: result.error || result.message,
           errorDetails: result.errorDetails,
           errorType: result.errorType,
         });
+        // The request must still own the lifecycle across the presentation await.
+        if (ownership !== translateRequestOwnership) return;
+        if (revision !== errorPresentationRevision) return;
         if (!displayError) return;
 
         error.value = displayError;
@@ -153,9 +181,19 @@ export function usePageTranslation() {
 
       if (!result?.success) throw new Error(result?.reason || 'Translation failed');
     } catch (e) {
+      // A superseded request must not change UI state and must not cancel a
+      // pending error of the current session.
+      if (ownership !== translateRequestOwnership) return;
+
       // Preserve lifecycle state; only update presentation for real failures.
       if (e.message !== 'silent_error') {
+        // The failure belongs to the current request: capture the revision now so
+        // the request's own START lifecycle cannot suppress it.
+        const revision = ++errorPresentationRevision;
         const displayError = await getPageTranslationErrorPresentation({ error: e });
+        // The request must still own the lifecycle across the presentation await.
+        if (ownership !== translateRequestOwnership) return;
+        if (revision !== errorPresentationRevision) return;
         if (!displayError) return;
 
         error.value = displayError;
@@ -170,6 +208,8 @@ export function usePageTranslation() {
   async function restorePage() {
     // We don't set isTranslating = true here to avoid showing the loading spinner 
     // during the fast restoration process.
+    errorPresentationRevision++;
+    translateRequestOwnership++;
     isAutoTranslating.value = false;
     message.value = 'Restoring original content...';
     error.value = null;
@@ -205,6 +245,10 @@ export function usePageTranslation() {
    * Stop auto-translation (persistence)
    */
   async function stopAutoTranslation() {
+    // Stopping the session is a terminal lifecycle state: it supersedes a
+    // still-pending request failure and invalidates a pending error presentation.
+    translateRequestOwnership++;
+    errorPresentationRevision++;
     try {
       const result = await sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
@@ -244,6 +288,11 @@ export function usePageTranslation() {
    */
   function cancelTranslation() {
     if (isTranslating.value) {
+      // A direct cancellation is a terminal lifecycle state: it supersedes a
+      // still-pending request failure and invalidates a pending error
+      // presentation.
+      translateRequestOwnership++;
+      errorPresentationRevision++;
       sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE,
         data: { cancel: true },
@@ -261,6 +310,13 @@ export function usePageTranslation() {
    * Update progress
    */
   function updateProgress(data) {
+    // A newer accepted lifecycle update supersedes a pending error presentation.
+    // Internal state-sync updates belong to the current error flow and must not
+    // suppress their own error.
+    if (!data?.isInternal) {
+      errorPresentationRevision++;
+    }
+
     if (data.status === 'error') {
       isTranslating.value = false;
       isAutoTranslating.value = false;
@@ -310,6 +366,10 @@ export function usePageTranslation() {
    * Handle translation complete
    */
   function handleComplete(data) {
+    errorPresentationRevision++;
+    // An accepted completion is a terminal lifecycle state: it supersedes a
+    // still-pending request failure.
+    translateRequestOwnership++;
     isTranslating.value = false;
     const isMainFrame = typeof window !== 'undefined' && window.self === window.top;
 
@@ -347,7 +407,9 @@ export function usePageTranslation() {
    * Handle translation error
    */
   async function handleError(data) {
+    const revision = ++errorPresentationRevision;
     const displayError = await getPageTranslationErrorPresentation(data);
+    if (revision !== errorPresentationRevision) return;
     if (!displayError) return;
 
     isTranslating.value = false;
@@ -373,6 +435,8 @@ export function usePageTranslation() {
    * Handle restore complete
    */
   function handleRestoreComplete(data) {
+    errorPresentationRevision++;
+    translateRequestOwnership++;
     isTranslating.value = false;
     isTranslated.value = false;
     isAutoTranslating.value = false;
@@ -386,6 +450,7 @@ export function usePageTranslation() {
    * Handle auto-restore complete (just stopped auto-translation)
    */
   function handleAutoRestoreComplete(data) {
+    errorPresentationRevision++;
     isAutoTranslating.value = false;
     isTranslating.value = false;
     const isMainFrame = typeof window !== 'undefined' && window.self === window.top;
@@ -414,6 +479,8 @@ export function usePageTranslation() {
    * Handle translation cancelled
    */
   function handleCancelled() {
+    errorPresentationRevision++;
+    translateRequestOwnership++;
     isTranslating.value = false;
     isAutoTranslating.value = false;
     isTranslated.value = false; // Cancel usually implies restore
@@ -424,6 +491,7 @@ export function usePageTranslation() {
    * Handle error reset
    */
   function handleResetError() {
+    errorPresentationRevision++;
     error.value = null;
     if (message.value && message.value.includes('Error:')) {
       message.value = '';
@@ -432,11 +500,15 @@ export function usePageTranslation() {
 
   // Tab change handlers for Sidepanel sync
   const handleTabChange = () => {
+    // A tab change supersedes a pending translate request.
+    translateRequestOwnership++;
     refreshStatus();
   };
 
   const handleTabUpdate = (tabId, changeInfo) => {
     if (changeInfo.status === 'complete') {
+      // A tab change supersedes a pending translate request.
+      translateRequestOwnership++;
       refreshStatus();
     }
   };
@@ -450,6 +522,7 @@ export function usePageTranslation() {
     // We only care about page translation events
     switch (runtimeMessage.action) {
       case MessageActions.PAGE_TRANSLATE_START:
+        errorPresentationRevision++;
         isTranslating.value = true;
         isTranslated.value = false;
         if (runtimeMessage.data?.isAutoTranslating !== undefined) {

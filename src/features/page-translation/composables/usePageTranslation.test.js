@@ -46,12 +46,22 @@ vi.mock('vue', async (importOriginal) => {
   };
 });
 
+// 6. Keep the real error presentation but allow tests to control its timing.
+vi.mock('@/features/page-translation/utils/PageTranslationErrorPresenter.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    getPageTranslationErrorPresentation: vi.fn(actual.getPageTranslationErrorPresentation),
+  };
+});
+
 import { usePageTranslation } from './usePageTranslation.js';
 import { sendRegularMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
 import { pageEventBus } from '@/core/PageEventBus.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { ActionReasons } from '@/shared/messaging/core/MessagingConstants.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
+import { getPageTranslationErrorPresentation } from '@/features/page-translation/utils/PageTranslationErrorPresenter.js';
 import { onMounted } from 'vue';
 import browser from 'webextension-polyfill';
 
@@ -74,6 +84,35 @@ describe('usePageTranslation Composable', () => {
 
   function getRuntimeMessageListener() {
     return browser.runtime.onMessage.addListener.mock.calls.at(-1)[0];
+  }
+
+  const errorEvent = {
+    error: 'boom',
+    errorDetails: { type: 'TRANSLATION_FAILED', message: 'boom' },
+  };
+
+  function getErrorListener() {
+    return pageEventBus.on.mock.calls.find(c => c[0] === 'page-translation-error')[1];
+  }
+
+  function getRestoreListener() {
+    return pageEventBus.on.mock.calls.find(c => c[0] === 'page-restore-complete')[1];
+  }
+
+  function deferPresentation() {
+    let resolvePresentation;
+    let markCalled;
+    const pending = new Promise((resolve) => {
+      resolvePresentation = resolve;
+    });
+    const called = new Promise((resolve) => {
+      markCalled = resolve;
+    });
+    getPageTranslationErrorPresentation.mockImplementationOnce(() => {
+      markCalled();
+      return pending;
+    });
+    return { resolve: resolvePresentation, called };
   }
 
   it('should initialize and register listeners in onMounted', () => {
@@ -478,6 +517,290 @@ describe('usePageTranslation Composable', () => {
       
       // To keep it simple, let's verify that listeners are registered on mount
       // and then manually call the stored listener.
+    });
+  });
+
+  describe('Stale error presentation', () => {
+    it('presents the error when no newer lifecycle update arrived', async () => {
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+
+      const pending = getErrorListener()(errorEvent);
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
+    });
+
+    it('drops an error that resolves after Restore cleared the state', async () => {
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+
+      const pending = getErrorListener()(errorEvent);
+      getRestoreListener()({ restoredCount: 3 });
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).toBe('Restore complete! 3 elements restored');
+    });
+
+    it('drops an error that resolves after a new translation session started', async () => {
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+
+      const pending = getErrorListener()(errorEvent);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { isAutoTranslating: false },
+      });
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).toBe('Starting translation...');
+    });
+
+    it('drops an error that resolves after a tab change', async () => {
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+
+      const pending = getErrorListener()(errorEvent);
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]();
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+    });
+
+    it('drops an error that resolves after a newer progress update', async () => {
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+
+      const pending = getErrorListener()(errorEvent);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { status: 'translating', isTranslating: true, translatedCount: 5, totalCount: 10 },
+      });
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).not.toContain('Error:');
+    });
+
+    it('drops an error that resolves after a newer idle update', async () => {
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+
+      const pending = getErrorListener()(errorEvent);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_IDLE,
+        data: { translatedCount: 5, totalCount: 10, isTranslating: false },
+      });
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).not.toContain('Error:');
+    });
+
+    it('drops an error that resolves after a direct cancellation', async () => {
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+      pageTranslation.isTranslating.value = true;
+
+      const pending = getErrorListener()(errorEvent);
+      pageTranslation.cancelTranslation();
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).toBe('Translation cancelled');
+    });
+
+    it('drops an error that resolves after stopping auto-translation', async () => {
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+
+      const pending = getErrorListener()(errorEvent);
+      await pageTranslation.stopAutoTranslation();
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).toBe('Auto-translation stopped');
+    });
+
+    it('keeps an internal state-sync progress update from suppressing its own error', async () => {
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+
+      const pending = getErrorListener()(errorEvent);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { status: 'idle', isTranslating: false, isInternal: true },
+      });
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
+    });
+
+    it('keeps Restore available when an aggregated iframe error follows main-frame translations', async () => {
+      const pageTranslation = await createPageTranslation();
+
+      await getErrorListener()({
+        isAggregated: true,
+        error: 'iframe failure',
+        errorDetails: { type: 'NETWORK_ERROR', message: 'iframe failure' },
+        translatedCount: 5,
+        failedCount: 0,
+        totalCount: 5,
+        isTranslated: true,
+        isTranslating: false,
+        isAutoTranslating: false,
+      });
+
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.canRestore.value).toBe(true);
+    });
+  });
+
+  describe('Translate request ownership', () => {
+    function mockTranslateResponse() {
+      let resolveTranslate;
+      const translateResponse = new Promise((resolve) => {
+        resolveTranslate = resolve;
+      });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) return translateResponse;
+        return Promise.resolve({ success: true, restoredCount: 2 });
+      });
+      return resolveTranslate;
+    }
+
+    it('drops a late translate failure after Restore superseded the request', async () => {
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pending = pageTranslation.translatePage();
+      await pageTranslation.restorePage();
+
+      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).toBe('Restored 2 elements');
+    });
+
+    it('drops a late translate failure after a tab change superseded the request', async () => {
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pending = pageTranslation.translatePage();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]();
+
+      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+    });
+
+    it('keeps the current request failure visible when its own START lifecycle arrives', async () => {
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { isAutoTranslating: false },
+      });
+
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toContain('Error:');
+    });
+
+    it('does not let a superseded request cancel a newer session pending error', async () => {
+      const presentation = deferPresentation();
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pendingRequest = pageTranslation.translatePage();
+      await pageTranslation.restorePage();
+
+      const pendingError = getErrorListener()(errorEvent);
+      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      await pendingRequest;
+
+      presentation.resolve(new Error('boom'));
+      await pendingError;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
+    });
+
+    it('discards a request failure presentation that resolves after newer progress', async () => {
+      const presentation = deferPresentation();
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pending = pageTranslation.translatePage();
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await presentation.called;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { status: 'translating', isTranslating: true, translatedCount: 5, totalCount: 10 },
+      });
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).not.toContain('Error:');
+    });
+
+    it('discards a request failure presentation that resolves after a newer completion', async () => {
+      const presentation = deferPresentation();
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pending = pageTranslation.translatePage();
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await presentation.called;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).not.toContain('Error:');
+    });
+
+    it('discards a late request failure after a successful completion', async () => {
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+
+      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).not.toContain('Error:');
     });
   });
 

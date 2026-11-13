@@ -148,6 +148,11 @@ export class MainFrameAggregator {
             if (terminalCause) payload.errorDetails = terminalCause;
           }
         }
+      } else if (action === this.MessageActions.PAGE_TRANSLATE_ERROR) {
+        // A failing frame must not hide the page-wide translation state: the
+        // aggregated error keeps the accepted translations of the other frames
+        // so Restore stays available while translated content is retained.
+        payload.isTranslated = status.translatedCount > 0;
       } else if (action === this.MessageActions.PAGE_RESTORE_COMPLETE) {
         // For restore complete, force clean state regardless of frame data
         payload.isTranslated = false;

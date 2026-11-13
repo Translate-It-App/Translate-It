@@ -89,7 +89,7 @@ const withTimeout = (promise, ms, label) => Promise.race([
 ]);
 
 const mocks = {
-  '/mock/resource.js': `export default class ResourceTracker { constructor(){this.t=new Set()} trackTimeout(f,n){const id=setTimeout(()=>{this.t.delete(id);f()},n);this.t.add(id);return id} clearTimer(id){clearTimeout(id);this.t.delete(id)} cleanup(){for(const id of this.t)clearTimeout(id);this.t.clear()} }`,
+  '/mock/resource.js': `export default class ResourceTracker { constructor(){this.t=new Set()} trackTimeout(f,n){const id=setTimeout(()=>{this.t.delete(id);f()},n);this.t.add(id);return id} clearTimer(id){clearTimeout(id);this.t.delete(id)} clearAllTimers(){for(const id of this.t)clearTimeout(id);this.t.clear()} cleanup(){for(const id of this.t)clearTimeout(id);this.t.clear()} }`,
   '/mock/logger.js': `export const getScopedLogger=()=>({debug(){},info(){},warn(){},error(){}});`,
   '/mock/logConstants.js': `export const LOG_COMPONENTS={PAGE_TRANSLATION:'page-translation'};`,
   '/mock/direction.js': `export const applyNodeDirection=()=>{};export const isRTL=()=>false;export const restoreElementDirection=()=>{};export const BIDI_MARKS={RLM:'\\u200f',LRM:'\\u200e'};`,
