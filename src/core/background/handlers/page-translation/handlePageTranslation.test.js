@@ -387,6 +387,22 @@ describe('handlePageTranslation response projection', () => {
     expect(result.reason).toBeUndefined();
   });
 
+  it('propagates the settled session id of a failed frame response', async () => {
+    const mainResponse = { success: false, reason: 'silent_error', messageId: 'page-translate-1700000000000-42' };
+    setupFrames([{ frameId: 0, response: mainResponse }]);
+
+    const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+
+    expect(result).toEqual({
+      success: false,
+      reason: 'silent_error',
+      messageId: 'page-translate-1700000000000-42',
+      responses: [mainResponse],
+      frames: [{ frameId: 0, success: true }],
+      targetTabId: 42,
+    });
+  });
+
   it('preserves restricted-page response without frame aggregation', async () => {
     const restrictedResponse = {
       isAccessible: false,
@@ -669,7 +685,7 @@ describe('handlePageTranslation target tab ownership', () => {
 
     const result = await handlePageTranslation({
       action: MessageActions.PAGE_TRANSLATE_COMPLETE,
-      data: { tabId: 999, translatedCount: 1, totalCount: 1, isTranslated: true, isAutoTranslating: false },
+      data: { tabId: 999, translatedCount: 1, totalCount: 1, isTranslated: true, isAutoTranslating: false, aggregateScope: 'opaque-document-scope', aggregateRevision: 17 },
     }, sender);
 
     expect(result).toEqual({ success: true });
@@ -680,6 +696,8 @@ describe('handlePageTranslation target tab ownership', () => {
       totalCount: 1,
       isTranslated: true,
       isAutoTranslating: false,
+      aggregateScope: 'opaque-document-scope',
+      aggregateRevision: 17,
     });
   });
 

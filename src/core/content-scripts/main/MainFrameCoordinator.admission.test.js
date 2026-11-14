@@ -81,6 +81,27 @@ describe('MainFrameCoordinator per-frame admission', () => {
     });
   });
 
+  it('assigns an increasing document-scoped revision that frame data cannot override', () => {
+    const first = aggregator.emitAggregateProgress(MessageActions.PAGE_TRANSLATE_PROGRESS, {
+      aggregateScope: 'frame-spoof',
+      aggregateRevision: -1,
+      url: 'https://frame.example/child',
+      topLevelUrl: 'https://spoof.example/',
+    });
+    aggregator.clearAll();
+    const second = aggregator.emitAggregateProgress(MessageActions.PAGE_TRANSLATE_IDLE, {
+      aggregateScope: 'frame-spoof',
+      aggregateRevision: -1,
+    });
+
+    expect(first.aggregateScope).not.toBe('frame-spoof');
+    expect(first.url).toBe('https://frame.example/child');
+    expect(first.topLevelUrl).toBe(window.location.href);
+    expect(second.aggregateScope).toBe(first.aggregateScope);
+    expect(first.aggregateRevision).toBeGreaterThan(0);
+    expect(second.aggregateRevision).toBeGreaterThan(first.aggregateRevision);
+  });
+
   it('preserves main state when iframe accepts after main rejection', () => {
     aggregator.updateFrameData(0, {
       isTranslated: true,
@@ -385,6 +406,119 @@ describe('MainFrameCoordinator per-frame admission', () => {
       isTranslating: false,
       translatedCount: 3
     });
+  });
+
+  it('keeps a translating frame active through a nonfatal error until its session completes', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    const emitSpy = vi.spyOn(pageEventBus, 'emit');
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_START,
+      data: { sessionId: 'child-session' },
+    });
+
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_ERROR,
+      data: { sessionId: 'child-session', error: 'batch failed', isFatal: false, failedCount: 1, totalCount: 3 },
+    });
+
+    const errorAggregate = emitSpy.mock.calls
+      .filter(([action]) => action === MessageActions.PAGE_TRANSLATE_ERROR)
+      .at(-1)?.[1];
+    expect(errorAggregate).toMatchObject({
+      isAggregated: true,
+      isTranslating: true,
+      failedCount: 1,
+      totalCount: 3,
+      isFatal: false,
+    });
+    expect(aggregator.frameProgressMap.get(7)).toMatchObject({ isTranslating: true, status: 'translating' });
+
+    expect(coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+      data: { sessionId: 'child-session', translatedCount: 1, failedCount: 1, totalCount: 3 },
+    })).toMatchObject({ success: true, aggregated: true });
+    expect(aggregator.getGlobalPageTranslationStatus().isTranslating).toBe(true);
+
+    expect(coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+      data: { sessionId: 'child-session', translatedCount: 2, failedCount: 1, totalCount: 3 },
+    })).toMatchObject({ success: true, aggregated: true });
+    expect(aggregator.frameProgressMap.get(7)).toMatchObject({ isTranslating: false, status: 'idle', translatedCount: 2 });
+    expect(aggregator.getGlobalPageTranslationStatus().isTranslating).toBe(false);
+    emitSpy.mockRestore();
+  });
+
+  it('stops only the fatal frame when another frame is still translating', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    coordinator.handleTrustedPageLifecycle({ frameId: 7, action: MessageActions.PAGE_TRANSLATE_START, data: { sessionId: 'failed-session' } });
+    coordinator.handleTrustedPageLifecycle({ frameId: 8, action: MessageActions.PAGE_TRANSLATE_START, data: { sessionId: 'active-session' } });
+
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_ERROR,
+      data: { sessionId: 'failed-session', error: 'fatal failure', isFatal: true },
+    });
+
+    expect(aggregator.frameProgressMap.get(7)).toMatchObject({ isTranslating: false, status: 'error' });
+    expect(aggregator.frameProgressMap.get(8)).toMatchObject({ isTranslating: true, status: 'translating' });
+    expect(aggregator.getGlobalPageTranslationStatus().isTranslating).toBe(true);
+  });
+
+  it('clears auto-translating only on the fatal frame when another frame is idle and auto-translating', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_START,
+      data: { sessionId: 'failed-auto-session', isAutoTranslating: true },
+    });
+    aggregator.updateFrameData(8, { isTranslating: false, isAutoTranslating: true, status: 'idle' });
+
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_ERROR,
+      data: { sessionId: 'failed-auto-session', error: 'fatal failure', isFatal: true },
+    });
+
+    expect(aggregator.frameProgressMap.get(7)).toMatchObject({ isTranslating: false, isAutoTranslating: false });
+    expect(aggregator.frameProgressMap.get(8)).toMatchObject({ isTranslating: false, isAutoTranslating: true, status: 'idle' });
+    expect(aggregator.getGlobalPageTranslationStatus()).toMatchObject({ isTranslating: false, isAutoTranslating: true });
+  });
+
+  it('clears aggregate auto-translating when the sole auto-translating frame fails fatally', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_START,
+      data: { sessionId: 'sole-auto-session', isAutoTranslating: true },
+    });
+
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_ERROR,
+      data: { sessionId: 'sole-auto-session', error: 'fatal failure', isFatal: true },
+    });
+
+    expect(aggregator.frameProgressMap.get(7)).toMatchObject({ isTranslating: false, isAutoTranslating: false });
+    expect(aggregator.getGlobalPageTranslationStatus()).toMatchObject({ isTranslating: false, isAutoTranslating: false });
+  });
+
+  it('does not reactivate an explicitly idle frame for a nonfatal error', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    coordinator.handleTrustedPageLifecycle({ frameId: 7, action: MessageActions.PAGE_TRANSLATE_START, data: { sessionId: 'idle-session' } });
+    coordinator.handleTrustedPageLifecycle({ frameId: 7, action: MessageActions.PAGE_TRANSLATE_IDLE, data: { sessionId: 'idle-session' } });
+
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 7,
+      action: MessageActions.PAGE_TRANSLATE_ERROR,
+      data: { sessionId: 'idle-session', error: 'late batch failure', isFatal: false },
+    });
+
+    expect(aggregator.frameProgressMap.get(7)).toMatchObject({ isTranslating: false, status: 'idle' });
+    expect(aggregator.getGlobalPageTranslationStatus().isTranslating).toBe(false);
   });
 
   it('emits main fatal errors with aggregate counts and frame error identity', () => {
@@ -839,11 +973,21 @@ describe('MainFrameCoordinator per-frame admission', () => {
     coordinator.handleTrustedPageLifecycle({ frameId: 7, action: MessageActions.PAGE_TRANSLATE_START, data: { sessionId: 'A7' } });
     coordinator.handleTrustedPageLifecycle({ frameId: 0, action: MessageActions.PAGE_TRANSLATE_IDLE, data: { sessionId: 'A0' } });
     coordinator.handleTrustedPageLifecycle({ frameId: 7, action: MessageActions.PAGE_TRANSLATE_IDLE, data: { sessionId: 'A7' } });
+    aggregator.updateFrameData(0, { translatedCount: 2, failedCount: 1, totalCount: 4 });
+    aggregator.updateFrameData(7, { translatedCount: 5, failedCount: 3, totalCount: 9 });
     emitSpy.mockClear();
 
     coordinator.handleTrustedPageLifecycle({ frameId: 0, action: MessageActions.PAGE_RESTORE_COMPLETE, data: { sessionId: 'A0' } });
     expect(coordinator.frameSessionOwners).toEqual(new Map([[7, 'A7']]));
     expect(aggregator.frameProgressMap.has(0)).toBe(false);
+    const partialRestoreProgress = emitSpy.mock.calls.find(([action]) => action === MessageActions.PAGE_TRANSLATE_PROGRESS)?.[1];
+    expect(partialRestoreProgress).toMatchObject({
+      isAggregated: true,
+      translatedCount: 5,
+      failedCount: 3,
+      totalCount: 9,
+    });
+    expect(partialRestoreProgress.sessionId).toBeUndefined();
     expect(emitSpy).not.toHaveBeenCalledWith(MessageActions.PAGE_RESTORE_COMPLETE, expect.anything());
 
     coordinator.handleTrustedPageLifecycle({ frameId: 7, action: MessageActions.PAGE_RESTORE_COMPLETE, data: { sessionId: 'A7' } });

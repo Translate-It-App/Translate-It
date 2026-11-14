@@ -59,6 +59,9 @@ const PAGE_TRANSLATION_FAILURE_FIELDS = [
   'isRestrictedPage',
   'tabId',
   'tabUrl',
+  // The settled session of a failed request. It lets the UI reject delayed
+  // lifecycle events of that session.
+  'messageId',
 ];
 
 function projectPageTranslationFailure(response, responses) {

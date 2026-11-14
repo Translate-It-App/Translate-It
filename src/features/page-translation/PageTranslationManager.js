@@ -353,11 +353,13 @@ export class PageTranslationManager extends ResourceTracker {
         this.logger.debug('translatePage: Silent error caught', error.message);
         if (hasAcceptedStart) {
           this._settleSilentPostStart();
-        } else {
-          this._cleanupFailedPreStartAttempt(attempt, {
-            restorePreviousState: this._canRestorePreStartState(attempt),
-          });
+          // Propagate the settled session so the UI can reject a delayed START
+          // for it even when the IDLE never reaches the UI.
+          return { success: false, reason: ActionReasons.SILENT_ERROR, messageId: attempt.messageId };
         }
+        this._cleanupFailedPreStartAttempt(attempt, {
+          restorePreviousState: this._canRestorePreStartState(attempt),
+        });
         return { success: false, reason: ActionReasons.SILENT_ERROR };
       }
       
@@ -653,8 +655,12 @@ export class PageTranslationManager extends ResourceTracker {
    * Stop auto-translation (persistence) or current pass without restoring
    * @param {Object} [options] - Stop provenance options
    * @param {string} [options.cancellationReason] - Remote cancellation reason
+   * @param {boolean} [options.fatalErrorAutoRestore] - Marks the stop preceding a fatal error
    */
-  async stopAutoTranslation({ cancellationReason = ActionReasons.USER_STOPPED_PAGE_TRANSLATION } = {}) {
+  async stopAutoTranslation({
+    cancellationReason = ActionReasons.USER_STOPPED_PAGE_TRANSLATION,
+    fatalErrorAutoRestore = false,
+  } = {}) {
     if (cancellationReason === ActionReasons.USER_STOPPED_PAGE_TRANSLATION) this.userRestoredOverride = true;
     // Lazy nodes can still own a live session after presentation becomes idle.
     if (!this.isAutoTranslating && !this.isTranslating
@@ -684,6 +690,7 @@ export class PageTranslationManager extends ResourceTracker {
         translatedCount: this.scheduler.translatedCount,
         isTranslated: this.isTranslated,
         isAutoTranslating: false,
+        ...(fatalErrorAutoRestore && { fatalErrorAutoRestore: true }),
         ...(stoppingSessionId && { sessionId: stoppingSessionId }),
       };
 
@@ -837,7 +844,10 @@ export class PageTranslationManager extends ResourceTracker {
 
     // CRITICAL: Stop further translation without restoring the page.
     // We call this BEFORE resetting local flags to ensure its internal guards pass.
-    this.stopAutoTranslation({ cancellationReason: INTERNAL_CANCELLATION_REASON }).catch(err => {
+    this.stopAutoTranslation({
+      cancellationReason: INTERNAL_CANCELLATION_REASON,
+      fatalErrorAutoRestore: true,
+    }).catch(err => {
       this.logger.debug('stopAutoTranslation failed in fatal handler (expected if already stopped):', err);
     });
 

@@ -1211,6 +1211,8 @@ describe('PageTranslationManager', () => {
           }),
         }),
       }), { silent: true });
+      const stopEvent = pageEventBus.emit.mock.calls.find(([action]) => action === MessageActions.PAGE_AUTO_RESTORE_COMPLETE)[1];
+      expect(stopEvent).not.toHaveProperty('fatalErrorAutoRestore');
       expect(manager.acceptedLifecycleSessionId).toBe('stop-session');
 
       await manager.restorePage();
@@ -1385,7 +1387,13 @@ describe('PageTranslationManager', () => {
       await manager.activate();
       const result = await manager.translatePage();
 
-      expect(result).toEqual({ success: false, reason: 'silent_error' });
+      expect(result).toEqual({
+        success: false,
+        reason: 'silent_error',
+        // The settled session is propagated so the UI can reject a delayed
+        // START for it.
+        messageId: expect.stringMatching(/^page-translate-\d+-\d+$/),
+      });
       expect(manager.isTranslating).toBe(false);
       expect(manager.isAutoTranslating).toBe(false);
       expect(manager.scheduler.setTranslationState).toHaveBeenCalledWith(
@@ -1478,7 +1486,13 @@ describe('PageTranslationManager', () => {
       await manager.activate();
       const result = await manager.translatePage();
 
-      expect(result).toEqual({ success: false, reason: 'silent_error' });
+      expect(result).toEqual({
+        success: false,
+        reason: 'silent_error',
+        // The settled session is propagated so the UI can reject a delayed
+        // START for it.
+        messageId: expect.stringMatching(/^page-translate-\d+-\d+$/),
+      });
       expect(manager.isTranslating).toBe(false);
       expect(manager.scheduler.setTranslationState).toHaveBeenCalledWith(
         false,
@@ -1644,6 +1658,8 @@ describe('PageTranslationManager', () => {
       });
       manager.isTranslating = true;
       manager.isAutoTranslating = true;
+      manager.translationMessageId = 'fatal-session';
+      manager.acceptedLifecycleSessionId = 'fatal-session';
       manager._handleFatalError(error, ErrorTypes.API_ERROR);
       
       expect(manager.isTranslating).toBe(false);
@@ -1673,6 +1689,15 @@ describe('PageTranslationManager', () => {
       const errorEvent = pageEventBus.emit.mock.calls.find(([action]) => action === MessageActions.PAGE_TRANSLATE_ERROR)[1];
       expect(errorEvent.errorDetails).not.toHaveProperty('cause');
       expect(errorEvent.errorDetails).not.toHaveProperty('arbitrary');
+      const eventActions = pageEventBus.emit.mock.calls.map(([action]) => action);
+      const autoRestoreIndex = eventActions.indexOf(MessageActions.PAGE_AUTO_RESTORE_COMPLETE);
+      const fatalErrorIndex = eventActions.indexOf(MessageActions.PAGE_TRANSLATE_ERROR);
+      expect(autoRestoreIndex).toBeGreaterThanOrEqual(0);
+      expect(autoRestoreIndex).toBeLessThan(fatalErrorIndex);
+      expect(pageEventBus.emit.mock.calls[autoRestoreIndex][1]).toEqual(expect.objectContaining({
+        fatalErrorAutoRestore: true,
+        sessionId: 'fatal-session',
+      }));
 
       await vi.waitFor(
         () => expect(ErrorHandler.getInstance().handle).toHaveBeenCalledTimes(1),

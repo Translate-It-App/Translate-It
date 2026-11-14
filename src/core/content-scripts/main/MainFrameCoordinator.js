@@ -388,10 +388,14 @@ export class MainFrameCoordinator {
         this.aggregator.emitAggregateProgress();
       }
     } else if (action === this.MessageActions.PAGE_TRANSLATE_ERROR) {
+      const frameProgress = this.aggregator.frameProgressMap.get(frameId) || {};
+      const isNonFatal = data.isFatal === false;
+      const wasTranslating = frameProgress.isTranslating === true;
       this.aggregator.updateFrameData(frameId, {
         ...aggregateData,
-        isTranslating: false,
-        status: 'error',
+        ...(!isNonFatal ? { isAutoTranslating: false } : {}),
+        isTranslating: isNonFatal ? wasTranslating : false,
+        status: isNonFatal ? frameProgress.status || (wasTranslating ? 'translating' : 'error') : 'error',
       });
       if (frameId !== 0 || data.isFatal !== false) {
         this.aggregator.emitAggregateProgress(action, data);
