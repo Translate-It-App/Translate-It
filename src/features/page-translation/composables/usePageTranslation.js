@@ -120,8 +120,7 @@ export function usePageTranslation() {
     message.value = TRANSLATING_START_MESSAGE;
   }
 
-  // Session ids terminated by completion, error, cancel, restore, stop, or
-  // supersession. Delayed events for these sessions must not restore state.
+  // Explicitly terminated or superseded sessions cannot restore UI state.
   const suppressedSessionIds = new Set();
   function suppressSession(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return;
@@ -131,9 +130,8 @@ export function usePageTranslation() {
     }
   }
 
-  // Session ids that ended silently. A delayed START for such a session must
-  // not re-enter the Translating state, while later lifecycle updates (IDLE)
-  // for the same session stay valid.
+  // A delayed START for a settled session must not re-enter Translating, while
+  // later lifecycle updates for that session may still carry final state.
   const settledSessionIds = new Set();
   function markSessionSettled(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return;
@@ -141,6 +139,66 @@ export function usePageTranslation() {
     while (settledSessionIds.size > 20) {
       settledSessionIds.delete(settledSessionIds.values().next().value);
     }
+  }
+
+  // Completed sessions can keep publishing lazy progress until explicitly superseded.
+  const completedSessionIds = new Set();
+  function supersedeCompletedSessions() {
+    for (const sessionId of completedSessionIds) suppressSession(sessionId);
+    completedSessionIds.clear();
+  }
+
+  let owningWindowId = null;
+  let windowResolution = null;
+  const queuedActivations = [];
+  const MAX_QUEUED_ACTIVATIONS = 20;
+
+  function applyTabChange(activeInfo) {
+    translateRequestOwnership++;
+    if (Number.isInteger(activeInfo?.tabId)) {
+      activeTabId = activeInfo.tabId;
+      activeTabVersion++;
+    }
+    supersedeCompletedSessions();
+    if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+    for (const event of pendingLifecycleEvents) {
+      const id = event?.data?.sessionId;
+      if (typeof id === 'string' && id) suppressSession(id);
+    }
+    lastTranslateTabId = null;
+    pendingRequestSessionId = null;
+    hasPendingRequest = false;
+    pendingLifecycleEvents = [];
+    commandResponseReceived = false;
+    refreshStatus();
+  }
+
+  function resolveOwningWindow() {
+    if (Number.isInteger(owningWindowId)) return Promise.resolve(owningWindowId);
+    if (windowResolution) return windowResolution;
+    windowResolution = browser.windows.getCurrent().then((currentWindow) => {
+      if (!Number.isInteger(currentWindow?.id)) return null;
+      owningWindowId = currentWindow.id;
+      const latest = queuedActivations
+        .filter(({ info }) => info.windowId === owningWindowId)
+        .at(-1);
+      queuedActivations.length = 0;
+      if (latest?.ownership === translateRequestOwnership) {
+        applyTabChange(latest.info);
+      } else if (
+        latest
+        && activeTabVersion === latest.activeTabVersion
+        && activeTabId === latest.priorActiveTabId
+        && Number.isInteger(latest.info.tabId)
+      ) {
+        activeTabId = latest.info.tabId;
+        activeTabVersion++;
+      }
+      return owningWindowId;
+    }).catch(() => null).finally(() => {
+      windowResolution = null;
+    });
+    return windowResolution;
   }
 
   async function resolveActiveTabId() {
@@ -278,6 +336,7 @@ export function usePageTranslation() {
     // A new translation session invalidates any pending error presentation and
     // supersedes an older request that is still awaiting its response.
     errorPresentationRevision++;
+    supersedeCompletedSessions();
     translateRequestOwnership++;
     const ownership = translateRequestOwnership;
     // A superseded request must not overwrite a newer request's tab identity or dispatch.
@@ -517,6 +576,7 @@ export function usePageTranslation() {
     // during the fast restoration process.
     errorPresentationRevision++;
     translateRequestOwnership++;
+    supersedeCompletedSessions();
     if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
     lastTranslateTabId = null;
     pendingRequestSessionId = null;
@@ -562,6 +622,7 @@ export function usePageTranslation() {
     // still-pending request failure and invalidates a pending error presentation.
     translateRequestOwnership++;
     errorPresentationRevision++;
+    supersedeCompletedSessions();
     if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
     lastTranslateTabId = null;
     pendingRequestSessionId = null;
@@ -612,6 +673,7 @@ export function usePageTranslation() {
       // presentation.
       translateRequestOwnership++;
       errorPresentationRevision++;
+      supersedeCompletedSessions();
       if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
       for (const event of pendingLifecycleEvents) {
         const id = event?.data?.sessionId;
@@ -703,7 +765,13 @@ export function usePageTranslation() {
     const sessionId = typeof data?.sessionId === 'string'
       ? data.sessionId
       : (data?.isAggregated ? null : pendingRequestSessionId);
-    if (sessionId) suppressSession(sessionId);
+    if (sessionId) {
+      markSessionSettled(sessionId);
+      completedSessionIds.add(sessionId);
+      while (completedSessionIds.size > 20) {
+        completedSessionIds.delete(completedSessionIds.values().next().value);
+      }
+    }
 
     if (isActiveAggregate) {
       // A frame completed, but the aggregate still owns the page-wide request.
@@ -828,6 +896,7 @@ export function usePageTranslation() {
   function handleRestoreComplete(data) {
     errorPresentationRevision++;
     translateRequestOwnership++;
+    supersedeCompletedSessions();
     if (typeof data?.sessionId === 'string') suppressSession(data.sessionId);
     isTranslating.value = false;
     isTranslated.value = false;
@@ -862,6 +931,7 @@ export function usePageTranslation() {
 
       if (data.isAutoTranslating === false && data.isTranslating === false) {
         translateRequestOwnership++;
+        if (!followsFatalError) supersedeCompletedSessions();
         lastTranslateTabId = null;
         pendingRequestSessionId = null;
         hasPendingRequest = false;
@@ -902,6 +972,7 @@ export function usePageTranslation() {
   function handleCancelled(data) {
     errorPresentationRevision++;
     translateRequestOwnership++;
+    supersedeCompletedSessions();
     const sessionId = typeof data?.sessionId === 'string' ? data.sessionId : pendingRequestSessionId;
     if (sessionId) suppressSession(sessionId);
     lastTranslateTabId = null;
@@ -928,23 +999,19 @@ export function usePageTranslation() {
 
   // Tab change handlers for Sidepanel sync
   const handleTabChange = (activeInfo) => {
-    // A tab change supersedes a pending translate request and invalidates its identity.
-    translateRequestOwnership++;
-    if (Number.isInteger(activeInfo?.tabId)) {
-      activeTabId = activeInfo.tabId;
-      activeTabVersion++;
+    if (!Number.isInteger(owningWindowId)) {
+      queuedActivations.push({
+        info: activeInfo,
+        ownership: translateRequestOwnership,
+        activeTabVersion,
+        priorActiveTabId: activeTabId,
+      });
+      if (queuedActivations.length > MAX_QUEUED_ACTIVATIONS) queuedActivations.shift();
+      void resolveOwningWindow();
+      return;
     }
-    if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
-    for (const event of pendingLifecycleEvents) {
-      const id = event?.data?.sessionId;
-      if (typeof id === 'string' && id) suppressSession(id);
-    }
-    lastTranslateTabId = null;
-    pendingRequestSessionId = null;
-    hasPendingRequest = false;
-    pendingLifecycleEvents = [];
-    commandResponseReceived = false;
-    refreshStatus();
+    if (activeInfo?.windowId !== owningWindowId) return;
+    applyTabChange(activeInfo);
   };
 
   const handleTabUpdate = async (tabId, changeInfo, tab) => {
@@ -976,6 +1043,7 @@ export function usePageTranslation() {
 
       // A tab change supersedes a pending translate request.
       translateRequestOwnership++;
+      supersedeCompletedSessions();
       if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
       for (const event of pendingLifecycleEvents) {
         const id = event?.data?.sessionId;
@@ -1218,6 +1286,7 @@ export function usePageTranslation() {
   // Setup event listeners
   onMounted(() => {
     void resolveActiveTabId();
+    void resolveOwningWindow();
     // Initial status fetch
     refreshStatus();
 

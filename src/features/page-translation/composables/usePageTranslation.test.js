@@ -11,7 +11,8 @@ vi.mock('webextension-polyfill', () => ({
       query: vi.fn(),
       onActivated: { addListener: vi.fn(), removeListener: vi.fn() },
       onUpdated: { addListener: vi.fn(), removeListener: vi.fn() }
-    }
+    },
+    windows: { getCurrent: vi.fn() }
   }
 }));
 
@@ -70,6 +71,7 @@ describe('usePageTranslation Composable', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+    browser.windows.getCurrent.mockResolvedValue({ id: 10 });
     sendRegularMessage.mockImplementation(({ action }) => {
       if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) {
         return Promise.resolve({ success: false });
@@ -80,7 +82,7 @@ describe('usePageTranslation Composable', () => {
 
   async function createPageTranslation() {
     const pageTranslation = usePageTranslation();
-    await Promise.resolve();
+    for (let i = 0; i < 5; i++) await Promise.resolve();
     return pageTranslation;
   }
 
@@ -601,7 +603,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
 
       const pending = getErrorListener()(errorEvent);
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       presentation.resolve(new Error('boom'));
       await pending;
 
@@ -669,7 +671,7 @@ describe('usePageTranslation Composable', () => {
 
     it('rejects stale same-session lifecycle events after a manual Auto stop', async () => {
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
       pageTranslation.isTranslating.value = true;
       pageTranslation.isAutoTranslating.value = true;
@@ -756,7 +758,7 @@ describe('usePageTranslation Composable', () => {
     it('drops a late translate failure after Restore superseded the request', async () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await pageTranslation.restorePage();
@@ -771,10 +773,10 @@ describe('usePageTranslation Composable', () => {
     it('drops a late translate failure after a tab change superseded the request', async () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR, targetTabId: 1, messageId: 'session-new' });
       await pending;
@@ -785,7 +787,7 @@ describe('usePageTranslation Composable', () => {
     it('keeps the current request failure visible when its own START lifecycle arrives', async () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
@@ -823,7 +825,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
@@ -844,7 +846,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
@@ -864,7 +866,7 @@ describe('usePageTranslation Composable', () => {
     it('discards a late request failure after a successful completion', async () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
@@ -889,7 +891,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await getTabUpdateListener()(2, { status: 'complete' });
@@ -918,7 +920,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await getTabUpdateListener()(1, { status: 'complete' });
@@ -959,7 +961,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await getTabUpdateListener()(7, { status: 'complete' });
@@ -989,7 +991,7 @@ describe('usePageTranslation Composable', () => {
         return Promise.resolve({ success: true, restoredCount: 2 });
       });
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1016,7 +1018,7 @@ describe('usePageTranslation Composable', () => {
         return Promise.resolve({ success: true, restoredCount: 2 });
       });
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1043,7 +1045,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
@@ -1075,7 +1077,7 @@ describe('usePageTranslation Composable', () => {
         return Promise.resolve({ success: true, restoredCount: 2 });
       });
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1095,7 +1097,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockImplementation(() => activeTabDeferred);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
@@ -1141,7 +1143,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
@@ -1190,7 +1192,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
@@ -1210,6 +1212,286 @@ describe('usePageTranslation Composable', () => {
     function getTabUpdateListener() {
       return browser.tabs.onUpdated.addListener.mock.calls.at(-1)[0];
     }
+
+    it('accepts only higher-revision same-scope lazy progress after completion and accepts its Restore', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      let call = 0;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        call++;
+        return Promise.resolve({ success: true, targetTabId: 1, messageId: call === 1 ? 'session-done' : 'session-next' });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      await pageTranslation.translatePage();
+
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_COMPLETE, data: {
+        tabId: 1, sessionId: 'session-done', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 1,
+        translatedCount: 1, totalCount: 2, isTranslated: false, isTranslating: false,
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'session-done', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 2,
+        translatedCount: 2, totalCount: 2, isTranslated: true, isTranslating: false,
+      } });
+      expect(pageTranslation.translatedCount.value).toBe(2);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: {
+        tabId: 1, sessionId: 'session-done', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 3,
+        isTranslating: true,
+      } });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'session-done', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 2,
+        translatedCount: 0, totalCount: 2, isTranslated: false, isTranslating: true,
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'session-done', isAggregated: true, aggregateScope: 'other-doc', aggregateRevision: 3,
+        translatedCount: 0, totalCount: 2, isTranslated: false, isTranslating: true,
+      } });
+      expect(pageTranslation.translatedCount.value).toBe(2);
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'session-done', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 3,
+        translatedCount: 3, totalCount: 3, isTranslated: true, isTranslating: false,
+      } });
+      expect(pageTranslation.translatedCount.value).toBe(3);
+
+      listener({ action: MessageActions.PAGE_RESTORE_COMPLETE, data: {
+        tabId: 1, sessionId: 'session-done', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 4,
+        restoredCount: 2,
+      } });
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.message.value).toContain('Restore complete!');
+    });
+
+    it('suppresses a completed session only after a newer request completes', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      let call = 0;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        call++;
+        return Promise.resolve({ success: true, targetTabId: 1, messageId: call === 1 ? 'session-old' : 'session-new' });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      await pageTranslation.translatePage();
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_COMPLETE, data: {
+        tabId: 1, sessionId: 'session-old', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 1,
+        translatedCount: 1, totalCount: 2, isTranslated: false, isTranslating: false,
+      } });
+      await pageTranslation.translatePage();
+      listener({ action: MessageActions.PAGE_TRANSLATE_COMPLETE, data: {
+        tabId: 1, sessionId: 'session-new', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 2,
+        translatedCount: 1, totalCount: 2, isTranslated: false, isTranslating: false,
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'session-old', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 3,
+        translatedCount: 0, totalCount: 2, isTranslated: false, isTranslating: true,
+      } });
+      expect(pageTranslation.translatedCount.value).toBe(1);
+      expect(pageTranslation.isTranslated.value).toBe(false);
+    });
+
+    it('suppresses completed sessions after Stop', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      await pageTranslation.translatePage();
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_COMPLETE, data: {
+        tabId: 1, sessionId: 'session-new', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 1,
+        translatedCount: 2, totalCount: 2, isTranslated: true, isTranslating: false,
+      } });
+      await pageTranslation.stopAutoTranslation();
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'session-new', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 2,
+        translatedCount: 0, totalCount: 2, isTranslated: false, isTranslating: true,
+      } });
+      expect(pageTranslation.translatedCount.value).toBe(2);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+    });
+
+    it('suppresses a completed frame session after cancellation', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({ action: MessageActions.PAGE_TRANSLATE_START, data: {
+        tabId: 1, sessionId: 'frame-a', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 1,
+        isTranslating: true,
+      } });
+      await pending;
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_COMPLETE, data: {
+        tabId: 1, sessionId: 'frame-a', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 2,
+        translatedCount: 1, totalCount: 2, isTranslated: false, isTranslating: true,
+      } });
+      pageTranslation.cancelTranslation();
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'frame-a', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 3,
+        translatedCount: 2, totalCount: 2, isTranslated: true, isTranslating: true,
+      } });
+      expect(pageTranslation.message.value).toBe('Translation cancelled');
+      expect(pageTranslation.translatedCount.value).toBe(0);
+      expect(pageTranslation.isTranslated.value).toBe(false);
+    });
+
+    it('suppresses completed sessions after owned-tab navigation', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      await pageTranslation.translatePage();
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_COMPLETE, data: {
+        tabId: 1, sessionId: 'session-new', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 1,
+        translatedCount: 2, totalCount: 2, isTranslated: true, isTranslating: false,
+      } });
+      await getTabUpdateListener()(1, { status: 'complete' });
+      for (let i = 0; i < 3; i++) await Promise.resolve();
+      pageTranslation.translatedCount.value = 2;
+      pageTranslation.isTranslated.value = true;
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'session-new', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 2,
+        translatedCount: 0, totalCount: 2, isTranslated: false, isTranslating: true,
+      } });
+      expect(pageTranslation.translatedCount.value).toBe(2);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+    });
+
+    it('keeps the fatal ERROR eligible after its completed session auto-restores', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const pageTranslation = await createPageTranslation();
+      const presentation = deferPresentation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      await pageTranslation.translatePage();
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_COMPLETE, data: {
+        tabId: 1, sessionId: 'session-new', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 1,
+        translatedCount: 2, totalCount: 3, isTranslated: true, isTranslating: false,
+      } });
+      listener({ action: MessageActions.PAGE_AUTO_RESTORE_COMPLETE, data: {
+        tabId: 1, sessionId: 'session-new', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 2,
+        fatalErrorAutoRestore: true, isTranslated: true, isTranslating: false, isAutoTranslating: false,
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_ERROR, data: {
+        tabId: 1, sessionId: 'session-new', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 3,
+        ...errorEvent, isFatal: true, isTranslated: true, isTranslating: false, isAutoTranslating: false,
+      } });
+
+      await presentation.called;
+      presentation.resolve(new Error('fatal failure'));
+      for (let i = 0; i < 3; i++) await Promise.resolve();
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: fatal failure');
+    });
+
+    it('accepts lazy progress after a completed frame while sibling frames remain active', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({ action: MessageActions.PAGE_TRANSLATE_START, data: {
+        tabId: 1, sessionId: 'frame-a', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 1,
+        isTranslating: true,
+      } });
+      await pending;
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_COMPLETE, data: {
+        tabId: 1, sessionId: 'frame-a', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 2,
+        translatedCount: 1, totalCount: 2, isTranslated: false, isTranslating: true,
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'frame-a', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 3,
+        translatedCount: 2, totalCount: 2, isTranslated: true, isTranslating: true,
+      } });
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(2);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+    });
+
+    it('does not let foreign-window activation supersede the request or displayed tab', async () => {
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      const pending = pageTranslation.translatePage();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 7, windowId: 99 });
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toContain('Error:');
+    });
+
+    it('does not replay an activation queued before a newer request', async () => {
+      let resolveWindow;
+      browser.windows.getCurrent.mockImplementation(() => new Promise((resolve) => { resolveWindow = resolve; }));
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = usePageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2, windowId: 10 });
+      const pending = pageTranslation.translatePage();
+      resolveWindow({ id: 10 });
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toContain('Error:');
+    });
+
+    it('reconciles a stale queued activation without superseding the newer request', async () => {
+      let resolveWindow;
+      browser.windows.getCurrent.mockImplementation(() => new Promise((resolve) => { resolveWindow = resolve; }));
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = usePageTranslation();
+      const listener = getRuntimeMessageListener();
+
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: { tabId: 1, sessionId: 'old-tab' } });
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2, windowId: 10 });
+      const pending = pageTranslation.translatePage();
+
+      resolveWindow({ id: 10 });
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      resolveTranslate({ success: true, targetTabId: 2, messageId: 'session-new' });
+      await pending;
+
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: {
+        tabId: 1, sessionId: 'session-new',
+      } });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: {
+        tabId: 2, sessionId: 'session-new',
+      } });
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 1, sessionId: 'session-new', translated: 8, total: 10,
+      } });
+      expect(pageTranslation.translatedCount.value).toBe(0);
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 2, sessionId: 'session-new', translated: 3, total: 10,
+      } });
+      expect(pageTranslation.translatedCount.value).toBe(3);
+    });
+
+    it('uses the latest queued same-window activation despite a foreign activation', async () => {
+      let resolveWindow;
+      browser.windows.getCurrent.mockImplementation(() => new Promise((resolve) => { resolveWindow = resolve; }));
+      const pageTranslation = usePageTranslation();
+      const getActivation = () => browser.tabs.onActivated.addListener.mock.calls.at(-1)[0];
+      getActivation()({ tabId: 2, windowId: 10 });
+      getActivation()({ tabId: 8, windowId: 99 });
+      getActivation()({ tabId: 3, windowId: 10 });
+      resolveWindow({ id: 10 });
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: { tabId: 2, sessionId: 'old-tab' } });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: { tabId: 3, sessionId: 'current-tab' } });
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.error.value).toBeNull();
+    });
 
     it('foreign broadcast before initial displayed-tab identity resolution is ignored', async () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
@@ -1238,7 +1520,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
@@ -1266,7 +1548,7 @@ describe('usePageTranslation Composable', () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
 
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2, windowId: 10 });
       resolveMountQuery([{ id: 1 }]);
       await Promise.resolve();
       await Promise.resolve();
@@ -1295,7 +1577,7 @@ describe('usePageTranslation Composable', () => {
         return Promise.resolve({ success: true });
       });
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await presentation.called;
@@ -1330,7 +1612,7 @@ describe('usePageTranslation Composable', () => {
         return Promise.resolve({ success: true });
       });
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await presentation.called;
@@ -1365,7 +1647,7 @@ describe('usePageTranslation Composable', () => {
         return Promise.resolve({ success: true });
       });
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1404,7 +1686,7 @@ describe('usePageTranslation Composable', () => {
       });
       const pageTranslation = await createPageTranslation();
       await pageTranslation.refreshStatus();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       getRuntimeMessageListener()({
         action: MessageActions.PAGE_TRANSLATE_START,
@@ -1428,7 +1710,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
@@ -1451,7 +1733,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
@@ -1481,7 +1763,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
@@ -1517,7 +1799,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       pageTranslation.cancelTranslation();
@@ -1540,7 +1822,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
@@ -1577,7 +1859,7 @@ describe('usePageTranslation Composable', () => {
         return Promise.resolve({ success: true });
       });
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1652,7 +1934,7 @@ describe('usePageTranslation Composable', () => {
         return Promise.reject(transportError);
       });
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
@@ -1676,7 +1958,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1701,7 +1983,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1728,7 +2010,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1755,7 +2037,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1779,7 +2061,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1802,7 +2084,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1839,7 +2121,7 @@ describe('usePageTranslation Composable', () => {
     it('applies a same-tab restore completion for the displayed tab', async () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       getRuntimeMessageListener()({
         action: MessageActions.PAGE_RESTORE_COMPLETE,
@@ -1854,7 +2136,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1876,7 +2158,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1899,7 +2181,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -1921,7 +2203,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       const pending = pageTranslation.translatePage();
       await sentGate;
@@ -2016,7 +2298,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: TAB_ID }]);
       const deferred = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: TAB_ID });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: TAB_ID, windowId: 10 });
       return { ...deferred, pageTranslation };
     }
 
@@ -2321,8 +2603,8 @@ describe('usePageTranslation Composable', () => {
       sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
         ? Promise.resolve({ success: true, isAggregated: true, aggregateScope: 'document-b', aggregateRevision: 0 })
         : Promise.resolve({ success: true }));
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2 });
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: TAB_ID });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2, windowId: 10 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: TAB_ID, windowId: 10 });
       await Promise.resolve();
       await Promise.resolve();
       getRuntimeMessageListener()(startEvent(SESSION_ID));
@@ -2373,8 +2655,8 @@ describe('usePageTranslation Composable', () => {
       getRuntimeMessageListener()(staleOldStart);
       expect(pageTranslation.isTranslating.value).toBe(true);
 
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2 });
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: TAB_ID });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2, windowId: 10 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: TAB_ID, windowId: 10 });
       await Promise.resolve();
       const anotherNewStart = startEvent(NEXT_SESSION_ID);
       anotherNewStart.data.aggregateScope = 'document-b';
@@ -2479,7 +2761,7 @@ describe('usePageTranslation Composable', () => {
       });
 
       const oldRefresh = pageTranslation.refreshStatus();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2, windowId: 10 });
       await Promise.resolve();
       resolveOldStatus({
         success: true,
@@ -2787,7 +3069,7 @@ describe('usePageTranslation Composable', () => {
 
     it('applies page-wide state from a direct aggregate START', async () => {
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
 
       emitAggregate(MessageActions.PAGE_TRANSLATE_START, 'command-session', {
         isTranslated: true,
@@ -2808,7 +3090,7 @@ describe('usePageTranslation Composable', () => {
     it('applies page-wide state from an aggregate START buffered before the response', async () => {
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       const pending = pageTranslation.translatePage();
       await sentGate;
       emitAggregate(MessageActions.PAGE_TRANSLATE_START, 'frame-other-tab', {
@@ -2836,7 +3118,7 @@ describe('usePageTranslation Composable', () => {
 
     it('continues resetting page state for a non-aggregated START', async () => {
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       emitAggregate(MessageActions.PAGE_TRANSLATE_PROGRESS, 'frame-a', {
         isTranslating: false,
         translatedCount: 3,
@@ -2858,7 +3140,7 @@ describe('usePageTranslation Composable', () => {
 
     it('keeps request and cancellation ownership through frame completion until page settlement', async () => {
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       const pending = pageTranslation.translatePage();
       await pending;
 
@@ -2913,7 +3195,7 @@ describe('usePageTranslation Composable', () => {
     it('keeps a fatal frame error visible without ending another active frame', async () => {
       const pageTranslation = await createPageTranslation();
       const presentation = deferPresentation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_TRANSLATE_ERROR, 'frame-a', {
@@ -2950,7 +3232,7 @@ describe('usePageTranslation Composable', () => {
     it('keeps auto request ownership after a fatal frame error while another frame remains in Auto mode', async () => {
       const pageTranslation = await createPageTranslation();
       const presentation = deferPresentation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_TRANSLATE_ERROR, 'frame-a', {
@@ -3010,7 +3292,7 @@ describe('usePageTranslation Composable', () => {
     it('accepts a fatal error after its marked auto-restore while another frame remains active', async () => {
       const pageTranslation = await createPageTranslation();
       const presentation = deferPresentation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_AUTO_RESTORE_COMPLETE, 'frame-a', {
@@ -3055,7 +3337,7 @@ describe('usePageTranslation Composable', () => {
     it('accepts a fatal error after its marked terminal auto-restore', async () => {
       const pageTranslation = await createPageTranslation();
       const presentation = deferPresentation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_AUTO_RESTORE_COMPLETE, 'frame-a', {
@@ -3089,7 +3371,7 @@ describe('usePageTranslation Composable', () => {
     it('does not let a reverse-delivered fatal auto-restore erase the error presentation', async () => {
       const pageTranslation = await createPageTranslation();
       const presentation = deferPresentation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_TRANSLATE_ERROR, 'frame-a', {
@@ -3114,7 +3396,7 @@ describe('usePageTranslation Composable', () => {
 
     it('preserves Auto ownership after a frame completes while another frame remains in Auto mode', async () => {
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_TRANSLATE_COMPLETE, 'frame-a', {
@@ -3157,7 +3439,7 @@ describe('usePageTranslation Composable', () => {
 
     it('preserves Auto ownership and aggregate state when one frame stops Auto', async () => {
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_AUTO_RESTORE_COMPLETE, 'frame-a', {
@@ -3190,7 +3472,7 @@ describe('usePageTranslation Composable', () => {
 
     it('preserves translation ownership when one frame stops while another is translating', async () => {
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_AUTO_RESTORE_COMPLETE, 'frame-a', {
@@ -3220,7 +3502,7 @@ describe('usePageTranslation Composable', () => {
 
     it('settles ownership when the aggregate reports that both Auto and translation stopped', async () => {
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_AUTO_RESTORE_COMPLETE, 'frame-a', {
@@ -3259,7 +3541,7 @@ describe('usePageTranslation Composable', () => {
     it('does not suppress a nonfatal frame session that continues with progress and completion', async () => {
       const pageTranslation = await createPageTranslation();
       const presentation = deferPresentation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
 
       emitAggregate(MessageActions.PAGE_TRANSLATE_ERROR, 'frame-a', {
@@ -3331,7 +3613,7 @@ describe('usePageTranslation Composable', () => {
     it('replays an active frame completion buffered before the command response', async () => {
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       const pending = pageTranslation.translatePage();
       await sentGate;
       emitAggregate(MessageActions.PAGE_TRANSLATE_COMPLETE, 'frame-a', {
@@ -3362,7 +3644,7 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const { resolveTranslate, sentGate } = createDeferredTranslate();
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       const pending = pageTranslation.translatePage();
       await sentGate;
       emitAggregate(MessageActions.PAGE_TRANSLATE_ERROR, 'frame-a', {
@@ -3389,7 +3671,7 @@ describe('usePageTranslation Composable', () => {
 
     it('clears request ownership only on the page-wide terminal aggregate event', async () => {
       const pageTranslation = await createPageTranslation();
-      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
       await pageTranslation.translatePage();
       emitAggregate(MessageActions.PAGE_TRANSLATE_COMPLETE, 'frame-a', {
         isTranslating: true,

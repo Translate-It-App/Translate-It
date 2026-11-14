@@ -62,10 +62,14 @@ describe('MainFrameCoordinator trusted hover relay', () => {
     vi.clearAllMocks();
     browser.runtime.sendMessage.mockResolvedValue({ success: true });
     emitSpy = vi.spyOn(pageEventBus, 'emit');
+    const frameProgressMap = new Map();
     aggregator = {
-      clearAll: vi.fn(),
-      removeFrame: vi.fn(),
-      updateFrameData: vi.fn(),
+      frameProgressMap,
+      clearAll: vi.fn(() => frameProgressMap.clear()),
+      removeFrame: vi.fn(frameId => frameProgressMap.delete(frameId)),
+      updateFrameData: vi.fn((frameId, newData) => {
+        frameProgressMap.set(frameId, { ...frameProgressMap.get(frameId), ...newData });
+      }),
       recordTerminalCause: vi.fn(),
       emitAggregateProgress: vi.fn()
     };
@@ -606,8 +610,8 @@ describe('MainFrameCoordinator trusted hover relay', () => {
     });
 
     expect(aggregator.updateFrameData).toHaveBeenCalledWith(0, expect.objectContaining({
-      isTranslating: false,
-      status: 'error'
+      isTranslating: true,
+      status: 'translating'
     }));
     expect(aggregator.emitAggregateProgress).not.toHaveBeenCalledWith(
       MessageActions.PAGE_TRANSLATE_ERROR,
