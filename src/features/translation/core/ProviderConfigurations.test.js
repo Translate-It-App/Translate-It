@@ -72,7 +72,7 @@ describe('ProviderConfigurations optimization scaling', () => {
     const levels = [1, 2, 3, 4, 5];
     const expected = [1, 2, 2, 3, 4];
 
-    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Requesty', 'Custom']) {
+    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Requesty', 'CheaperInference', 'Custom']) {
       const actual = levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent);
       expect(actual).toEqual(expected);
     }

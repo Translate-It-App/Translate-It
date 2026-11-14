@@ -64,6 +64,9 @@ describe('getPersistedDefaultSettings', () => {
     expect(defaults.REQUESTY_API_MODEL).toBe(CONFIG.REQUESTY_API_MODEL);
     expect(defaults.REQUESTY_MODELS).toEqual(CONFIG.REQUESTY_MODELS);
     expect(defaults).not.toHaveProperty('REQUESTY_API_URL');
+    expect(defaults.CHEAPERINFERENCE_API_MODEL).toBe(CONFIG.CHEAPERINFERENCE_API_MODEL);
+    expect(defaults.CHEAPERINFERENCE_MODELS).toEqual(CONFIG.CHEAPERINFERENCE_MODELS);
+    expect(defaults).not.toHaveProperty('CHEAPERINFERENCE_API_URL');
     expect(defaults.WEBAI_API_MODEL).toBe(CONFIG.WEBAI_API_MODEL);
     expect(defaults.WEBAI_MODELS).toEqual(CONFIG.WEBAI_MODELS);
     expect(defaults.GEMINI_THINKING_MODE).toBe('default');
