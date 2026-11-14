@@ -11,6 +11,17 @@ import browser from 'webextension-polyfill';
 import { useTranslationStore } from '@/features/translation/stores/translation.js';
 import { getPageTranslationErrorPresentation } from '@/features/page-translation/utils/PageTranslationErrorPresenter.js';
 
+// Broadcast lifecycle events that must carry the pending session id before
+// they may mutate the UI of a pending request. The other lifecycle events
+// (cancel, restore, auto-restore, error reset) may omit the session id and
+// are correlated by tab identity and by the session id when they carry one.
+const SESSION_BOUND_EVENTS = new Set([
+  MessageActions.PAGE_TRANSLATE_PROGRESS,
+  MessageActions.PAGE_TRANSLATE_IDLE,
+  MessageActions.PAGE_TRANSLATE_COMPLETE,
+  MessageActions.PAGE_TRANSLATE_ERROR,
+]);
+
 /**
  * Composable for page translation UI
  * @returns {Object} Page translation state and actions
@@ -49,10 +60,65 @@ export function usePageTranslation() {
   // state that was already cleared.
   let errorPresentationRevision = 0;
 
+  // The tab id that the most recent translatePage() request was issued against.
+  // Completions and errors from other tabs must not supersede or suppress the
+  // pending failure of this request.
+  let lastTranslateTabId = null;
+
+  // Session id of the translation request currently awaiting its terminal event.
+  let pendingRequestSessionId = null;
+
+  // Whether the current command response has resolved.
+  let commandResponseReceived = false;
+
+  // Whether a UI-initiated request is awaiting its terminal lifecycle event.
+  let hasPendingRequest = false;
+
+  // Lifecycle events that arrive before the command reply for a pending request.
+  // They are correlated against the background's authoritative identity before
+  // being applied.
+  let pendingLifecycleEvents = [];
+
   // Ownership token of the translate request that is awaiting its response.
   // Restore, a tab change, or a newer request supersedes it; the request's own
   // START lifecycle does not.
   let translateRequestOwnership = 0;
+
+  // Displayed UI tab, resolved from authoritative browser tab context.
+  let activeTabId = null;
+  let activeTabResolution = null;
+  let activeTabVersion = 0;
+
+  // Session ids terminated by completion, error, cancel, restore, stop, or
+  // supersession. Delayed events for these sessions must not restore state.
+  const suppressedSessionIds = new Set();
+  function suppressSession(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) return;
+    suppressedSessionIds.add(sessionId);
+    while (suppressedSessionIds.size > 20) {
+      suppressedSessionIds.delete(suppressedSessionIds.values().next().value);
+    }
+  }
+
+  async function resolveActiveTabId() {
+    if (activeTabId !== null) return activeTabId;
+    if (activeTabResolution) return activeTabResolution;
+    const version = activeTabVersion;
+    activeTabResolution = (async () => {
+      try {
+        const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+        if (version === activeTabVersion && activeTabId === null && Number.isInteger(activeTab?.id)) {
+          activeTabId = activeTab.id;
+        }
+      } catch {
+        // Ignore; tab switches/mount resolution may retry.
+      } finally {
+        activeTabResolution = null;
+      }
+      return activeTabId;
+    })();
+    return activeTabResolution;
+  }
 
   function applyRestrictedPageState(response) {
     const restrictedMessage = response?.message || 'Feature not available on this page';
@@ -66,6 +132,7 @@ export function usePageTranslation() {
     error.value = null;
     message.value = restrictedMessage;
   }
+
 
   /**
    * Fetch current translation status from the active tab
@@ -123,6 +190,14 @@ export function usePageTranslation() {
     errorPresentationRevision++;
     translateRequestOwnership++;
     const ownership = translateRequestOwnership;
+    // A superseded request must not overwrite a newer request's tab identity or dispatch.
+    if (ownership !== translateRequestOwnership) return;
+    if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+    lastTranslateTabId = null;
+    pendingRequestSessionId = null;
+    commandResponseReceived = false;
+    hasPendingRequest = true;
+    pendingLifecycleEvents = [];
 
     try {
       // Determine synced provider if any
@@ -146,7 +221,70 @@ export function usePageTranslation() {
       // session.
       if (ownership !== translateRequestOwnership) return;
 
+      commandResponseReceived = true;
+
+      if (Number.isInteger(result?.targetTabId)) {
+        lastTranslateTabId = result.targetTabId;
+      }
+      const responseSessionId = typeof result?.messageId === 'string' && result.messageId.length > 0
+        ? result.messageId
+        : (typeof result?.sessionId === 'string' && result.sessionId.length > 0
+          ? result.sessionId
+          : (typeof result?.responses?.[0]?.messageId === 'string' && result.responses[0].messageId.length > 0
+            ? result.responses[0].messageId
+            : (typeof result?.responses?.[0]?.sessionId === 'string' && result.responses[0].sessionId.length > 0
+              ? result.responses[0].sessionId
+              : null)));
+      if (responseSessionId) {
+        if (pendingRequestSessionId && pendingRequestSessionId !== responseSessionId) {
+          suppressSession(pendingRequestSessionId);
+        }
+        pendingRequestSessionId = responseSessionId;
+      }
+
+      const events = pendingLifecycleEvents;
+      pendingLifecycleEvents = [];
+      for (const event of events) {
+        const eventData = event.data || {};
+        const eventSessionId = typeof eventData.sessionId === 'string' && eventData.sessionId.length > 0 ? eventData.sessionId : null;
+        const suppressed = eventSessionId && suppressedSessionIds.has(eventSessionId);
+        // Without an authoritative identity from the command response the
+        // buffered events cannot be correlated with the pending request.
+        const hasAuthoritativeIdentity = lastTranslateTabId !== null || pendingRequestSessionId !== null;
+        if (suppressed || !hasAuthoritativeIdentity) continue;
+
+        if (event.action === MessageActions.PAGE_TRANSLATE_START) {
+          // START only changes translating state; terminal correlation is not
+          // required for it.
+          const eventTabId = Number.isInteger(eventData.tabId) ? eventData.tabId : null;
+          const tabMatches = !Number.isInteger(eventTabId) || !lastTranslateTabId || eventTabId === lastTranslateTabId;
+          const sessionMatches = !pendingRequestSessionId || (eventSessionId !== null && eventSessionId === pendingRequestSessionId);
+          if (!tabMatches || !sessionMatches) continue;
+          errorPresentationRevision++;
+          isTranslating.value = true;
+          isTranslated.value = false;
+          if (eventData?.isAutoTranslating !== undefined) {
+            isAutoTranslating.value = !!eventData.isAutoTranslating;
+          }
+          translatedCount.value = 0;
+          failedCount.value = 0;
+          totalNodes.value = 0;
+          error.value = null;
+          message.value = 'Starting translation...';
+          continue;
+        }
+
+        if (evaluateEventOwnership(eventData, event.action) !== EVENT_APPLY) continue;
+        applyLifecycleEvent(event.action, eventData);
+      }
+
       if (result?.isRestrictedPage) {
+        if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+        lastTranslateTabId = null;
+        pendingRequestSessionId = null;
+        hasPendingRequest = false;
+        pendingLifecycleEvents = [];
+        commandResponseReceived = false;
         applyRestrictedPageState(result);
         return;
       }
@@ -158,6 +296,12 @@ export function usePageTranslation() {
           ActionReasons.BUSY_OR_DONE,
           ActionReasons.NOT_SUITABLE,
         ].includes(result.reason)) {
+          if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+          lastTranslateTabId = null;
+          pendingRequestSessionId = null;
+          hasPendingRequest = false;
+          pendingLifecycleEvents = [];
+          commandResponseReceived = false;
           return;
         }
 
@@ -172,10 +316,20 @@ export function usePageTranslation() {
         // The request must still own the lifecycle across the presentation await.
         if (ownership !== translateRequestOwnership) return;
         if (revision !== errorPresentationRevision) return;
-        if (!displayError) return;
-
-        error.value = displayError;
-        message.value = `Error: ${displayError.message}`;
+        if (displayError) {
+          error.value = displayError;
+          message.value = `Error: ${displayError.message}`;
+        }
+        // Terminal after presentation (or silent path): keep ownership until the
+        // async presentation boundary so foreign events cannot suppress it.
+        if (ownership === translateRequestOwnership) {
+          if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+          lastTranslateTabId = null;
+          pendingRequestSessionId = null;
+          hasPendingRequest = false;
+          pendingLifecycleEvents = [];
+          commandResponseReceived = false;
+        }
         return;
       }
 
@@ -185,6 +339,38 @@ export function usePageTranslation() {
       // pending error of the current session.
       if (ownership !== translateRequestOwnership) return;
 
+      commandResponseReceived = true;
+      if (Number.isInteger(e?.targetTabId)) {
+        lastTranslateTabId = e.targetTabId;
+      }
+      // Replay buffered events if transport failure provided authoritative
+      // target identity; a thrown transport failure does not mean the command
+      // completed successfully.
+      const events = pendingLifecycleEvents;
+      pendingLifecycleEvents = [];
+      for (const event of events) {
+        const eventTabId = event.data?.tabId;
+        const eventSessionId = event.data?.sessionId;
+        const hasAuthoritativeIdentity = lastTranslateTabId !== null || pendingRequestSessionId !== null;
+        const tabMatches = event.action === MessageActions.PAGE_TRANSLATE_START
+          ? (!Number.isInteger(eventTabId) || !lastTranslateTabId || eventTabId === lastTranslateTabId)
+          : (!lastTranslateTabId || (Number.isInteger(eventTabId) && eventTabId === lastTranslateTabId));
+        const suppressed = typeof eventSessionId === 'string' && suppressedSessionIds.has(eventSessionId);
+        if (!suppressed && hasAuthoritativeIdentity && tabMatches && event.action === MessageActions.PAGE_TRANSLATE_START) {
+          // START only changes translating state.
+          errorPresentationRevision++;
+          isTranslating.value = true;
+          isTranslated.value = false;
+          if (event.data?.isAutoTranslating !== undefined) {
+            isAutoTranslating.value = !!event.data.isAutoTranslating;
+          }
+          translatedCount.value = 0;
+          failedCount.value = 0;
+          totalNodes.value = 0;
+          error.value = null;
+          message.value = 'Starting translation...';
+        }
+      }
       // Preserve lifecycle state; only update presentation for real failures.
       if (e.message !== 'silent_error') {
         // The failure belongs to the current request: capture the revision now so
@@ -194,10 +380,20 @@ export function usePageTranslation() {
         // The request must still own the lifecycle across the presentation await.
         if (ownership !== translateRequestOwnership) return;
         if (revision !== errorPresentationRevision) return;
-        if (!displayError) return;
-
-        error.value = displayError;
-        message.value = `Error: ${displayError.message}`;
+        if (displayError) {
+          error.value = displayError;
+          message.value = `Error: ${displayError.message}`;
+        }
+      }
+      // Terminal after presentation (or silent path): do not replay terminal
+      // success ownership on transport failure.
+      if (ownership === translateRequestOwnership) {
+        if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+        lastTranslateTabId = null;
+        pendingRequestSessionId = null;
+        hasPendingRequest = false;
+        pendingLifecycleEvents = [];
+        commandResponseReceived = false;
       }
     }
   }
@@ -210,6 +406,12 @@ export function usePageTranslation() {
     // during the fast restoration process.
     errorPresentationRevision++;
     translateRequestOwnership++;
+    if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+    lastTranslateTabId = null;
+    pendingRequestSessionId = null;
+    hasPendingRequest = false;
+    pendingLifecycleEvents = [];
+    commandResponseReceived = false;
     isAutoTranslating.value = false;
     message.value = 'Restoring original content...';
     error.value = null;
@@ -249,6 +451,12 @@ export function usePageTranslation() {
     // still-pending request failure and invalidates a pending error presentation.
     translateRequestOwnership++;
     errorPresentationRevision++;
+    if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+    lastTranslateTabId = null;
+    pendingRequestSessionId = null;
+    hasPendingRequest = false;
+    pendingLifecycleEvents = [];
+    commandResponseReceived = false;
     try {
       const result = await sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
@@ -287,12 +495,22 @@ export function usePageTranslation() {
    * Cancel ongoing translation
    */
   function cancelTranslation() {
-    if (isTranslating.value) {
+    if (isTranslating.value || hasPendingRequest) {
       // A direct cancellation is a terminal lifecycle state: it supersedes a
       // still-pending request failure and invalidates a pending error
       // presentation.
       translateRequestOwnership++;
       errorPresentationRevision++;
+      if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+      for (const event of pendingLifecycleEvents) {
+        const id = event?.data?.sessionId;
+        if (typeof id === 'string' && id) suppressSession(id);
+      }
+      lastTranslateTabId = null;
+      pendingRequestSessionId = null;
+      hasPendingRequest = false;
+      pendingLifecycleEvents = [];
+      commandResponseReceived = false;
       sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE,
         data: { cancel: true },
@@ -326,6 +544,7 @@ export function usePageTranslation() {
     // IDLE means active processing stopped, but we might still be in Auto mode
     if (data.status === 'idle') {
       isTranslating.value = false;
+      pendingRequestSessionId = null;
     }
 
     if (data.translated !== undefined) {
@@ -370,6 +589,13 @@ export function usePageTranslation() {
     // An accepted completion is a terminal lifecycle state: it supersedes a
     // still-pending request failure.
     translateRequestOwnership++;
+    const sessionId = typeof data?.sessionId === 'string' ? data.sessionId : pendingRequestSessionId;
+    if (sessionId) suppressSession(sessionId);
+    lastTranslateTabId = null;
+    pendingRequestSessionId = null;
+    hasPendingRequest = false;
+    pendingLifecycleEvents = [];
+    commandResponseReceived = false;
     isTranslating.value = false;
     const isMainFrame = typeof window !== 'undefined' && window.self === window.top;
 
@@ -408,9 +634,18 @@ export function usePageTranslation() {
    */
   async function handleError(data) {
     const revision = ++errorPresentationRevision;
+    const sessionId = typeof data?.sessionId === 'string' ? data.sessionId : pendingRequestSessionId;
     const displayError = await getPageTranslationErrorPresentation(data);
     if (revision !== errorPresentationRevision) return;
     if (!displayError) return;
+
+    // The error resolves the pending request: no pending identity remains.
+    if (sessionId) suppressSession(sessionId);
+    lastTranslateTabId = null;
+    pendingRequestSessionId = null;
+    hasPendingRequest = false;
+    pendingLifecycleEvents = [];
+    commandResponseReceived = false;
 
     isTranslating.value = false;
     isAutoTranslating.value = false;
@@ -437,6 +672,7 @@ export function usePageTranslation() {
   function handleRestoreComplete(data) {
     errorPresentationRevision++;
     translateRequestOwnership++;
+    if (typeof data?.sessionId === 'string') suppressSession(data.sessionId);
     isTranslating.value = false;
     isTranslated.value = false;
     isAutoTranslating.value = false;
@@ -451,6 +687,7 @@ export function usePageTranslation() {
    */
   function handleAutoRestoreComplete(data) {
     errorPresentationRevision++;
+    if (typeof data?.sessionId === 'string') suppressSession(data.sessionId);
     isAutoTranslating.value = false;
     isTranslating.value = false;
     const isMainFrame = typeof window !== 'undefined' && window.self === window.top;
@@ -478,9 +715,16 @@ export function usePageTranslation() {
   /**
    * Handle translation cancelled
    */
-  function handleCancelled() {
+  function handleCancelled(data) {
     errorPresentationRevision++;
     translateRequestOwnership++;
+    const sessionId = typeof data?.sessionId === 'string' ? data.sessionId : pendingRequestSessionId;
+    if (sessionId) suppressSession(sessionId);
+    lastTranslateTabId = null;
+    pendingRequestSessionId = null;
+    hasPendingRequest = false;
+    pendingLifecycleEvents = [];
+    commandResponseReceived = false;
     isTranslating.value = false;
     isAutoTranslating.value = false;
     isTranslated.value = false; // Cancel usually implies restore
@@ -499,9 +743,23 @@ export function usePageTranslation() {
   }
 
   // Tab change handlers for Sidepanel sync
-  const handleTabChange = () => {
-    // A tab change supersedes a pending translate request.
+  const handleTabChange = (activeInfo) => {
+    // A tab change supersedes a pending translate request and invalidates its identity.
     translateRequestOwnership++;
+    if (Number.isInteger(activeInfo?.tabId)) {
+      activeTabId = activeInfo.tabId;
+      activeTabVersion++;
+    }
+    if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+    for (const event of pendingLifecycleEvents) {
+      const id = event?.data?.sessionId;
+      if (typeof id === 'string' && id) suppressSession(id);
+    }
+    lastTranslateTabId = null;
+    pendingRequestSessionId = null;
+    hasPendingRequest = false;
+    pendingLifecycleEvents = [];
+    commandResponseReceived = false;
     refreshStatus();
   };
 
@@ -514,18 +772,109 @@ export function usePageTranslation() {
 
     try {
       const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+      const currentActiveTabId = Number.isInteger(activeTab?.id) ? activeTab.id : activeTabId;
       // A delayed lookup must not invalidate a newer request and must not
       // refresh another tab's state.
-      if (activeTab?.id !== tabId) return;
+      if (currentActiveTabId !== tabId) return;
       if (ownership !== translateRequestOwnership) return;
+      if (activeTabId !== tabId) {
+        activeTabId = tabId;
+        activeTabVersion++;
+      }
 
       // A tab change supersedes a pending translate request.
       translateRequestOwnership++;
+      if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
+      for (const event of pendingLifecycleEvents) {
+        const id = event?.data?.sessionId;
+        if (typeof id === 'string' && id) suppressSession(id);
+      }
+      lastTranslateTabId = null;
+      pendingRequestSessionId = null;
+      hasPendingRequest = false;
+      pendingLifecycleEvents = [];
+      commandResponseReceived = false;
       refreshStatus();
     } catch {
       // Without the active tab the update cannot be attributed to it.
     }
   };
+
+  const EVENT_APPLY = 'apply';
+  const EVENT_BUFFER = 'buffer';
+  const EVENT_IGNORE = 'ignore';
+
+  /**
+   * Ownership decision for a broadcast lifecycle event.
+   * - ignore: the event cannot be attributed to the pending request.
+   * - buffer: the pending request has no authoritative identity yet, so the
+   *   event is replayed once the command response resolves that identity.
+   * - apply: the event may mutate the UI.
+   */
+  function evaluateEventOwnership(data, action) {
+    const eventTabId = Number.isInteger(data?.tabId) ? data.tabId : null;
+    const eventSessionId = typeof data?.sessionId === 'string' && data.sessionId.length > 0 ? data.sessionId : null;
+    const eventTabKnown = eventTabId !== null;
+    const eventSessionKnown = eventSessionId !== null;
+    const pendingTabKnown = lastTranslateTabId !== null;
+    const pendingSessionKnown = typeof pendingRequestSessionId === 'string' && pendingRequestSessionId.length > 0;
+
+    if (!hasPendingRequest) {
+      if (activeTabId === null) {
+        void resolveActiveTabId();
+        return EVENT_IGNORE;
+      }
+      if (eventTabId !== null && eventTabId !== activeTabId) return EVENT_IGNORE;
+      if (eventSessionId && suppressedSessionIds.has(eventSessionId)) return EVENT_IGNORE;
+      return EVENT_APPLY;
+    }
+
+    // The authoritative target/session of the pending request is unknown until
+    // the command response arrives: the event cannot be attributed yet.
+    if (!commandResponseReceived) return EVENT_BUFFER;
+
+    // The command response carried no authoritative tab or session identity
+    // (e.g. a pre-fanout failure): the event cannot be attributed to this
+    // request and must not mutate its state.
+    if (!pendingTabKnown && !pendingSessionKnown) return EVENT_IGNORE;
+
+    if (pendingTabKnown && eventTabKnown && eventTabId !== lastTranslateTabId) return EVENT_IGNORE;
+    if (eventSessionKnown && suppressedSessionIds.has(eventSessionId)) return EVENT_IGNORE;
+    if (pendingSessionKnown && eventSessionKnown && eventSessionId !== pendingRequestSessionId) return EVENT_IGNORE;
+    if (SESSION_BOUND_EVENTS.has(action) && pendingSessionKnown && !eventSessionKnown) return EVENT_IGNORE;
+    if (pendingTabKnown && !eventTabKnown && !eventSessionKnown) return EVENT_IGNORE;
+    return EVENT_APPLY;
+  }
+
+  /**
+   * Apply a correlated broadcast lifecycle event to the UI state.
+   */
+  function applyLifecycleEvent(action, data) {
+    switch (action) {
+      case MessageActions.PAGE_TRANSLATE_PROGRESS:
+      case MessageActions.PAGE_TRANSLATE_IDLE:
+        updateProgress(data);
+        break;
+      case MessageActions.PAGE_TRANSLATE_COMPLETE:
+        handleComplete(data);
+        break;
+      case MessageActions.PAGE_TRANSLATE_ERROR:
+        handleError(data);
+        break;
+      case MessageActions.PAGE_TRANSLATE_CANCELLED:
+        handleCancelled(data);
+        break;
+      case MessageActions.PAGE_RESTORE_COMPLETE:
+        handleRestoreComplete(data);
+        break;
+      case MessageActions.PAGE_AUTO_RESTORE_COMPLETE:
+        handleAutoRestoreComplete(data);
+        break;
+      case MessageActions.PAGE_TRANSLATE_RESET_ERROR:
+        handleResetError();
+        break;
+    }
+  }
 
   /**
    * Handle incoming messages from other extension components (broadcasting)
@@ -535,12 +884,23 @@ export function usePageTranslation() {
 
     // We only care about page translation events
     switch (runtimeMessage.action) {
-      case MessageActions.PAGE_TRANSLATE_START:
+      case MessageActions.PAGE_TRANSLATE_START: {
+        const data = runtimeMessage.data || {};
+        const eventTabId = Number.isInteger(data.tabId) ? data.tabId : null;
+        const decision = evaluateEventOwnership(data, runtimeMessage.action);
+        if (decision === EVENT_IGNORE) break;
+        // A pending request without a resolved identity cannot attribute the
+        // event yet: it is replayed once the command response resolves it.
+        if (decision === EVENT_BUFFER) {
+          pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
+          break;
+        }
+        if (eventTabId !== null) activeTabId = eventTabId;
         errorPresentationRevision++;
         isTranslating.value = true;
         isTranslated.value = false;
-        if (runtimeMessage.data?.isAutoTranslating !== undefined) {
-          isAutoTranslating.value = !!runtimeMessage.data.isAutoTranslating;
+        if (data.isAutoTranslating !== undefined) {
+          isAutoTranslating.value = !!data.isAutoTranslating;
         }
         translatedCount.value = 0;
         failedCount.value = 0;
@@ -548,33 +908,63 @@ export function usePageTranslation() {
         error.value = null;
         message.value = 'Starting translation...';
         break;
+      }
       case MessageActions.PAGE_TRANSLATE_PROGRESS:
-      case MessageActions.PAGE_TRANSLATE_IDLE:
-        updateProgress(runtimeMessage.data || {});
+      case MessageActions.PAGE_TRANSLATE_IDLE: {
+        const data = runtimeMessage.data || {};
+        const decision = evaluateEventOwnership(data, runtimeMessage.action);
+        if (decision === EVENT_IGNORE) break;
+        // A pending request without a resolved identity cannot attribute the
+        // event yet: it is replayed once the command response resolves it.
+        if (decision === EVENT_BUFFER) {
+          pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
+          break;
+        }
+        updateProgress(data);
         break;
-      case MessageActions.PAGE_TRANSLATE_COMPLETE:
-        handleComplete(runtimeMessage.data || {});
+      }
+      case MessageActions.PAGE_TRANSLATE_COMPLETE: {
+        const data = runtimeMessage.data || {};
+        const decision = evaluateEventOwnership(data, runtimeMessage.action);
+        if (decision === EVENT_IGNORE) break;
+        if (decision === EVENT_BUFFER) {
+          pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
+          break;
+        }
+        handleComplete(data);
         break;
-      case MessageActions.PAGE_TRANSLATE_ERROR:
-        handleError(runtimeMessage.data || {});
+      }
+      case MessageActions.PAGE_TRANSLATE_ERROR: {
+        const data = runtimeMessage.data || {};
+        const decision = evaluateEventOwnership(data, runtimeMessage.action);
+        if (decision === EVENT_IGNORE) break;
+        if (decision === EVENT_BUFFER) {
+          pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
+          break;
+        }
+        handleError(data);
         break;
-      case MessageActions.PAGE_RESTORE_COMPLETE:
-        handleRestoreComplete(runtimeMessage.data || {});
-        break;
-      case MessageActions.PAGE_AUTO_RESTORE_COMPLETE:
-        handleAutoRestoreComplete(runtimeMessage.data || {});
-        break;
+      }
       case MessageActions.PAGE_TRANSLATE_CANCELLED:
-        handleCancelled();
+      case MessageActions.PAGE_RESTORE_COMPLETE:
+      case MessageActions.PAGE_AUTO_RESTORE_COMPLETE:
+      case MessageActions.PAGE_TRANSLATE_RESET_ERROR: {
+        const data = runtimeMessage.data || {};
+        const decision = evaluateEventOwnership(data, runtimeMessage.action);
+        if (decision === EVENT_IGNORE) break;
+        if (decision === EVENT_BUFFER) {
+          pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
+          break;
+        }
+        applyLifecycleEvent(runtimeMessage.action, data);
         break;
-      case MessageActions.PAGE_TRANSLATE_RESET_ERROR:
-        handleResetError();
-        break;
+      }
     }
   };
 
   // Setup event listeners
   onMounted(() => {
+    void resolveActiveTabId();
     // Initial status fetch
     refreshStatus();
 

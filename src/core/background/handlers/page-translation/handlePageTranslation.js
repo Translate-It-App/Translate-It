@@ -376,7 +376,19 @@ export async function handlePageTranslation(message, sender) {
         });
       }
 
-      browser.runtime.sendMessage(message).catch(() => {});
+      // The originating content script's tab is the authoritative identity of
+      // the event. A tab id carried by the payload is never trusted, because
+      // the event is broadcast to every extension page.
+      const eventData = { ...(message.data || {}) };
+      if (Number.isInteger(senderTabId)) {
+        eventData.tabId = senderTabId;
+      } else {
+        delete eventData.tabId;
+      }
+      browser.runtime.sendMessage({
+        ...message,
+        data: eventData,
+      }).catch(() => {});
       return { success: true };
     }
 
@@ -497,11 +509,12 @@ export async function handlePageTranslation(message, sender) {
           isTransportFailure: true,
           responses,
           frames,
+          targetTabId,
         };
       }
 
       if (message.action !== MessageActions.PAGE_TRANSLATE || success) {
-        return { success, responses, frames };
+        return { success, responses, frames, targetTabId };
       }
 
       const canonicalFailure = frameResults.find(({ frameId, response }) => (
@@ -509,7 +522,7 @@ export async function handlePageTranslation(message, sender) {
       ))?.response || frameResults.find(({ response }) => response != null)?.response;
 
       if (canonicalFailure) {
-        return { ...projectPageTranslationFailure(canonicalFailure, responses), frames };
+        return { ...projectPageTranslationFailure(canonicalFailure, responses), frames, targetTabId };
       }
 
       return {
@@ -518,6 +531,7 @@ export async function handlePageTranslation(message, sender) {
         isTransportFailure: true,
         responses,
         frames,
+        targetTabId,
       };
     } catch (sendError) {
       if (ExtensionContextManager.isContextError(sendError)) {

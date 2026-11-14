@@ -214,12 +214,18 @@ function reconstructResponseError(response) {
     ? response.errorDetails
     : responseError;
   const message = getFailureMessage(response, canonicalError);
+  const attachTargetTabId = (error) => {
+    if (Number.isInteger(response?.targetTabId)) {
+      error.targetTabId = response.targetTabId;
+    }
+    return error;
+  };
 
   if (!canonicalError || typeof canonicalError !== 'object') {
-    return reconstructTranslationError(message);
+    return attachTargetTabId(reconstructTranslationError(message));
   }
 
-  return reconstructTranslationError({
+  const reconstructed = reconstructTranslationError({
     message,
     type: canonicalError.type,
     originalType: canonicalError.originalType,
@@ -233,6 +239,8 @@ function reconstructResponseError(response) {
     cancellationReason: canonicalError.cancellationReason,
     translationOutcome: canonicalError.translationOutcome
   });
+  attachTargetTabId(reconstructed);
+  return reconstructed;
 }
 
 function getLifecycleTerminalError(messageId) {

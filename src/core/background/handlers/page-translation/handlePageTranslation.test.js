@@ -249,6 +249,7 @@ describe('handlePageTranslation response projection', () => {
       reason,
       responses: [mainResponse],
       frames: [{ frameId: 0, success: true }],
+      targetTabId: 42,
     });
   });
 
@@ -287,6 +288,7 @@ describe('handlePageTranslation response projection', () => {
         { frameId: 0, success: false },
         { frameId: 1, success: true },
       ],
+      targetTabId: 42,
     });
     expect(result.isTransportFailure).toBeUndefined();
   });
@@ -343,6 +345,7 @@ describe('handlePageTranslation response projection', () => {
         { frameId: 0, success: true },
         { frameId: 1, success: true },
       ],
+      targetTabId: 42,
     });
     expect(result).not.toHaveProperty('reason');
     expect(result.isTransportFailure).toBeUndefined();
@@ -379,6 +382,7 @@ describe('handlePageTranslation response projection', () => {
         { frameId: 0, success: false },
         { frameId: 1, success: false },
       ],
+      targetTabId: 42,
     });
     expect(result.reason).toBeUndefined();
   });
@@ -415,6 +419,7 @@ describe('handlePageTranslation response projection', () => {
       success: false,
       responses: [mainResponse],
       frames: [{ frameId: 0, success: true }],
+      targetTabId: 42,
     });
     expect(result.reason).toBeUndefined();
   });
@@ -485,6 +490,7 @@ describe('handlePageTranslation target tab ownership', () => {
         { frameId: 1, success: false },
         { frameId: 2, success: true },
       ],
+      targetTabId: 42,
     });
   });
 
@@ -656,6 +662,41 @@ describe('handlePageTranslation target tab ownership', () => {
       expect.objectContaining({ action: MessageActions.PAGE_TRANSLATE_GET_STATUS }),
       { frameId: 0 }
     );
+  });
+
+  it('broadcasts completions with the authoritative sender tab and drops untrusted payload tab ids', async () => {
+    browser.runtime.sendMessage.mockResolvedValue({ success: true });
+
+    const result = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+      data: { tabId: 999, translatedCount: 1, totalCount: 1, isTranslated: true, isAutoTranslating: false },
+    }, sender);
+
+    expect(result).toEqual({ success: true });
+    expect(browser.runtime.sendMessage).toHaveBeenCalledTimes(1);
+    expect(browser.runtime.sendMessage.mock.calls[0][0].data).toEqual({
+      tabId: 42,
+      translatedCount: 1,
+      totalCount: 1,
+      isTranslated: true,
+      isAutoTranslating: false,
+    });
+  });
+
+  it('omits the tab id from broadcasts when sender identity is unavailable', async () => {
+    browser.runtime.sendMessage.mockResolvedValue({ success: true });
+
+    const result = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_ERROR,
+      data: { tabId: 999, error: 'boom', errorDetails: { type: 'TRANSLATION_FAILED', message: 'boom' } },
+    }, { tab: undefined });
+
+    expect(result).toEqual({ success: true });
+    expect(browser.runtime.sendMessage).toHaveBeenCalledTimes(1);
+    expect(browser.runtime.sendMessage.mock.calls[0][0].data).toEqual({
+      error: 'boom',
+      errorDetails: { type: 'TRANSLATION_FAILED', message: 'boom' },
+    });
   });
 });
 
@@ -1074,6 +1115,7 @@ describe('bounded frame command response deadline', () => {
         { frameId: 0, success: false, isResponseTimeout: true, reason: 'frame_command_response_timeout' },
         { frameId: 7, success: false, isResponseTimeout: true, reason: 'frame_command_response_timeout' },
       ],
+      targetTabId: 42,
     });
     // No lifecycle may be synthesized by response timeouts.
     expect(browser.runtime.sendMessage).not.toHaveBeenCalled();

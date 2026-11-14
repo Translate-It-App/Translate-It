@@ -74,7 +74,7 @@ describe('usePageTranslation Composable', () => {
       if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) {
         return Promise.resolve({ success: false });
       }
-      return Promise.resolve({ success: true });
+      return Promise.resolve({ success: true, targetTabId: 1, messageId: 'session-new' });
     });
   });
 
@@ -401,14 +401,14 @@ describe('usePageTranslation Composable', () => {
         action: MessageActions.PAGE_TRANSLATE_START,
         data: { isAutoTranslating: false },
       });
-      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isTranslating.value).toBe(false);
 
       rejectRequest(Object.assign(new Error('late transport failure'), {
         type: ErrorTypes.SERVER_ERROR,
       }));
       await pendingRequest;
 
-      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isTranslating.value).toBe(false);
     });
 
     it('does not refresh status to repair a rejected request', async () => {
@@ -688,11 +688,12 @@ describe('usePageTranslation Composable', () => {
     it('drops a late translate failure after Restore superseded the request', async () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
 
       const pending = pageTranslation.translatePage();
       await pageTranslation.restorePage();
 
-      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR, targetTabId: 1, messageId: 'session-new' });
       await pending;
 
       expect(pageTranslation.error.value).toBeNull();
@@ -702,11 +703,12 @@ describe('usePageTranslation Composable', () => {
     it('drops a late translate failure after a tab change superseded the request', async () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
 
       const pending = pageTranslation.translatePage();
       browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]();
 
-      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR, targetTabId: 1, messageId: 'session-new' });
       await pending;
 
       expect(pageTranslation.error.value).toBeNull();
@@ -715,6 +717,7 @@ describe('usePageTranslation Composable', () => {
     it('keeps the current request failure visible when its own START lifecycle arrives', async () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
@@ -738,7 +741,7 @@ describe('usePageTranslation Composable', () => {
       await pageTranslation.restorePage();
 
       const pendingError = getErrorListener()(errorEvent);
-      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR, targetTabId: 1, messageId: 'session-new' });
       await pendingRequest;
 
       presentation.resolve(new Error('boom'));
@@ -752,14 +755,15 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
 
       const pending = pageTranslation.translatePage();
-      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
       await presentation.called;
 
       getRuntimeMessageListener()({
         action: MessageActions.PAGE_TRANSLATE_PROGRESS,
-        data: { status: 'translating', isTranslating: true, translatedCount: 5, totalCount: 10 },
+        data: { tabId: 1, sessionId: 'session-new', status: 'translating', isTranslating: true, translatedCount: 5, totalCount: 10 },
       });
       presentation.resolve(new Error('boom'));
       await pending;
@@ -772,14 +776,15 @@ describe('usePageTranslation Composable', () => {
       const presentation = deferPresentation();
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
 
       const pending = pageTranslation.translatePage();
-      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
       await presentation.called;
 
       getRuntimeMessageListener()({
         action: MessageActions.PAGE_TRANSLATE_COMPLETE,
-        data: { translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
       });
       presentation.resolve(new Error('boom'));
       await pending;
@@ -791,14 +796,15 @@ describe('usePageTranslation Composable', () => {
     it('discards a late request failure after a successful completion', async () => {
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
 
       const pending = pageTranslation.translatePage();
       getRuntimeMessageListener()({
         action: MessageActions.PAGE_TRANSLATE_COMPLETE,
-        data: { translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
       });
 
-      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR, targetTabId: 1, messageId: 'session-new' });
       await pending;
 
       expect(pageTranslation.error.value).toBeNull();
@@ -815,6 +821,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
 
       const pending = pageTranslation.translatePage();
       await getTabUpdateListener()(2, { status: 'complete' });
@@ -843,6 +850,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
 
       const pending = pageTranslation.translatePage();
       await getTabUpdateListener()(1, { status: 'complete' });
@@ -856,9 +864,9 @@ describe('usePageTranslation Composable', () => {
     });
 
     it('does not invalidate a newer request when the active-tab lookup resolves late', async () => {
-      let resolveQuery;
+      const pendingQueries = [];
       browser.tabs.query.mockImplementation(() => new Promise((resolve) => {
-        resolveQuery = resolve;
+        pendingQueries.push(resolve);
       }));
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
@@ -867,7 +875,8 @@ describe('usePageTranslation Composable', () => {
       const pendingTabUpdate = getTabUpdateListener()(1, { status: 'complete' });
 
       const pendingNewRequest = pageTranslation.translatePage();
-      resolveQuery([{ id: 1 }]);
+
+      pendingQueries.forEach((resolve) => resolve([{ id: 1 }]));
       await pendingTabUpdate;
 
       resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
@@ -882,6 +891,7 @@ describe('usePageTranslation Composable', () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
       const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
 
       const pending = pageTranslation.translatePage();
       await getTabUpdateListener()(7, { status: 'complete' });
@@ -891,6 +901,989 @@ describe('usePageTranslation Composable', () => {
 
       expect(pageTranslation.error.value).toBeInstanceOf(Error);
       expect(pageTranslation.message.value).toContain('Error:');
+    });
+  });
+
+  describe('Tab identity ownership', () => {
+    function getTabUpdateListener() {
+      return browser.tabs.onUpdated.addListener.mock.calls.at(-1)[0];
+    }
+
+    it('keeps the active request failure visible when a completion arrives from another tab', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      let resolveTranslate;
+      const translateResponse = new Promise((resolve) => { resolveTranslate = resolve; });
+      let resolveSent;
+      const sentGate = new Promise((resolve) => { resolveSent = resolve; });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) { resolveSent(); return translateResponse; }
+        return Promise.resolve({ success: true, restoredCount: 2 });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 2, translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toContain('Error:');
+    });
+
+    it('rejects a foreign-tab start without mutating the pending request state', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      let resolveTranslate;
+      const translateResponse = new Promise((resolve) => { resolveTranslate = resolve; });
+      let resolveSent;
+      const sentGate = new Promise((resolve) => { resolveSent = resolve; });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) { resolveSent(); return translateResponse; }
+        return Promise.resolve({ success: true, restoredCount: 2 });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { sessionId: 'session-new', isAutoTranslating: false },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 2, sessionId: 'session-new', isAutoTranslating: false },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.error.value).toBeNull();
+
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+    });
+
+    it('rejects a stale-session start from the same tab', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { sessionId: 'session-new', isAutoTranslating: false },
+      });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-old', isAutoTranslating: false },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.error.value).toBeNull();
+
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+    });
+
+    it('does not accept a completion with missing identity during a pending request', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      let resolveTranslate;
+      const translateResponse = new Promise((resolve) => { resolveTranslate = resolve; });
+      let resolveSent;
+      const sentGate = new Promise((resolve) => { resolveSent = resolve; });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) { resolveSent(); return translateResponse; }
+        return Promise.resolve({ success: true, restoredCount: 2 });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+    });
+
+    it('drops a pending failure after cancellation following a delayed tab lookup', async () => {
+      let resolveActiveTab;
+      const activeTabDeferred = new Promise((resolve) => { resolveActiveTab = resolve; });
+      browser.tabs.query.mockImplementation(() => activeTabDeferred);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { sessionId: 'session-new', isAutoTranslating: false },
+      });
+      resolveActiveTab([{ id: 1 }]);
+      await activeTabDeferred;
+
+      pageTranslation.cancelTranslation();
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).toBe('Translation cancelled');
+    });
+
+    it('does not let an older session completion invalidate a newer pending request', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      const pendingNewRequest = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { sessionId: 'session-new', isAutoTranslating: false },
+      });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { sessionId: 'session-old', tabId: 1, translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.error.value).toBeNull();
+
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pendingNewRequest;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+    });
+
+    it('invalidates the pending request on a completion that matches tab and session', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { sessionId: 'session-new', isAutoTranslating: false },
+      });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { sessionId: 'session-new', tabId: 1, translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+
+      resolveTranslate({ success: false, error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR, targetTabId: 1, messageId: 'session-new' });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.isTranslating.value).toBe(false);
+    });
+
+    it('attributes a delayed tab update to the tab that was active when its lookup resolves', async () => {
+      const pendingQueries = [];
+      browser.tabs.query.mockImplementation(() => new Promise((resolve) => {
+        pendingQueries.push(resolve);
+      }));
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      // Mount resolves displayed-tab identity from authoritative browser context.
+      pendingQueries[0]([{ id: 1 }]);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const pending = pageTranslation.translatePage();
+      const pendingTabUpdate = getTabUpdateListener()(2, { status: 'complete' });
+
+      // Delayed tab-update lookup: active tab is 1, so update for tab 2 must not invalidate.
+      pendingQueries[1]([{ id: 1 }]);
+      await pendingTabUpdate;
+
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+    });
+
+    it('keeps a pending error presentation when an error arrives from another tab', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_ERROR,
+        data: { tabId: 2, error: 'other tab failure', errorDetails: { type: 'TRANSLATION_FAILED', message: 'other tab failure' } },
+      });
+      expect(pageTranslation.error.value).toBeNull();
+
+      resolveTranslate({ success: false, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+    });
+  });
+
+  describe('Regression: remaining lifecycle blockers', () => {
+    function getTabUpdateListener() {
+      return browser.tabs.onUpdated.addListener.mock.calls.at(-1)[0];
+    }
+
+    it('foreign broadcast before initial displayed-tab identity resolution is ignored', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) {
+          return Promise.resolve({ success: true, isTranslated: true, translatedCount: 3, failedCount: 0, totalCount: 3, isTranslating: false });
+        }
+        return Promise.resolve({ success: true });
+      });
+      const pageTranslation = await createPageTranslation();
+      await pageTranslation.refreshStatus();
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 2, sessionId: 'session-foreign', isAutoTranslating: false },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(3);
+      expect(pageTranslation.error.value).toBeNull();
+    });
+
+    it('foreign-tab COMPLETE during deferred error presentation cannot suppress error', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const presentation = deferPresentation();
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await presentation.called;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 2, sessionId: 'session-foreign', translatedCount: 9, totalCount: 9, isTranslated: true, isTranslating: false },
+      });
+
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.translatedCount.value).toBe(0);
+    });
+
+    it('deferred active-tab query does not overwrite newer tab activation', async () => {
+      let resolveMountQuery;
+      browser.tabs.query.mockImplementation(() => new Promise((resolve) => {
+        resolveMountQuery = resolve;
+      }));
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2 });
+      resolveMountQuery([{ id: 1 }]);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 2, sessionId: 'session-new', translatedCount: 4, totalCount: 4, isTranslated: true, isTranslating: false },
+      });
+      resolveTranslate({ success: false, targetTabId: 2, messageId: 'session-new', error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+    });
+
+    it('clears pending state when response-failure error presentation is null', async () => {
+      const presentation = deferPresentation();
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) {
+          return Promise.resolve({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+        }
+        return Promise.resolve({ success: true });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await presentation.called;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 2, sessionId: 'session-foreign', translatedCount: 9, totalCount: 9, isTranslated: true, isTranslating: false },
+      });
+      presentation.resolve(null);
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.isTranslated.value).toBe(false);
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 7, totalCount: 7, isTranslated: true, isTranslating: false },
+      });
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.translatedCount.value).toBe(0);
+    });
+
+    it('clears pending state when thrown-error presentation is null', async () => {
+      const presentation = deferPresentation();
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const transportError = Object.assign(new Error('transport failure'), {
+        type: ErrorTypes.SERVER_ERROR,
+        targetTabId: 1,
+      });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) return Promise.reject(transportError);
+        return Promise.resolve({ success: true });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await presentation.called;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 2, sessionId: 'session-foreign', translatedCount: 9, totalCount: 9, isTranslated: true, isTranslating: false },
+      });
+      presentation.resolve(null);
+      await pending;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.isTranslated.value).toBe(false);
+
+      // Pending identity/buffers cleared: subsequent passive event for displayed tab is handled normally.
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-next', isAutoTranslating: true },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isAutoTranslating.value).toBe(true);
+    });
+
+    it('ignores late same-tab START and COMPLETE after cancel before command response', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      let resolveTranslate;
+      const translateResponse = new Promise((resolve) => { resolveTranslate = resolve; });
+      let resolveSent;
+      const sentGate = new Promise((resolve) => { resolveSent = resolve; });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) { resolveSent(); return translateResponse; }
+        return Promise.resolve({ success: true });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-new', isAutoTranslating: false },
+      });
+      pageTranslation.cancelTranslation();
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-new', isAutoTranslating: false },
+      });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.message.value).toBe('Translation cancelled');
+
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
+      await pending;
+
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.message.value).toBe('Translation cancelled');
+    });
+
+    it('ignores foreign-tab START and ERROR while no UI request is pending', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) {
+          return Promise.resolve({ success: true, isTranslated: true, translatedCount: 3, failedCount: 0, totalCount: 3, isTranslating: false });
+        }
+        return Promise.resolve({ success: true });
+      });
+      const pageTranslation = await createPageTranslation();
+      await pageTranslation.refreshStatus();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 2, sessionId: 'session-foreign', isAutoTranslating: false },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(3);
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_ERROR,
+        data: { tabId: 2, sessionId: 'session-foreign', error: 'foreign failure', errorDetails: { type: 'TRANSLATION_FAILED', message: 'foreign failure' } },
+      });
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(3);
+    });
+
+    it('foreign-tab PROGRESS during deferred error presentation must not suppress active failure', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const presentation = deferPresentation();
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await presentation.called;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { tabId: 2, sessionId: 'session-foreign', translatedCount: 5, totalCount: 10, isTranslating: true },
+      });
+
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
+      expect(pageTranslation.translatedCount.value).toBe(0);
+    });
+
+    it('foreign-tab IDLE must not clear active request state or session identity', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
+      await pending;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-new', isAutoTranslating: false },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(true);
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_IDLE,
+        data: { tabId: 2, sessionId: 'session-foreign', status: 'idle', translatedCount: 0, totalCount: 0 },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 3, totalCount: 3, isTranslated: true, isTranslating: false },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(3);
+    });
+
+    it('valid same-tab progress and passive automatic translation continue working', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
+      await pending;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-new', isAutoTranslating: false },
+      });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 2, totalCount: 5, isTranslating: true },
+      });
+      expect(pageTranslation.translatedCount.value).toBe(2);
+      expect(pageTranslation.totalNodes.value).toBe(5);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-auto', isAutoTranslating: true },
+      });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { tabId: 1, sessionId: 'session-auto', translatedCount: 1, totalCount: 4, isTranslating: true },
+      });
+      expect(pageTranslation.isAutoTranslating.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(1);
+    });
+
+    it('preserves legitimate passive auto-translation after cancellation/navigation for displayed tab', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      pageTranslation.cancelTranslation();
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-cancelled', reason: ActionReasons.USER_CANCELLED });
+      await pending;
+
+      await getTabUpdateListener()(1, { status: 'complete' });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-auto', isAutoTranslating: true },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isAutoTranslating.value).toBe(true);
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.error.value).toBeNull();
+    });
+
+    it('applies a passive automatic START after a successful completion', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const resolveTranslate = mockTranslateResponse();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
+      await pending;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-auto', isAutoTranslating: true },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isAutoTranslating.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(0);
+    });
+
+    it('ignores delayed events after cancellation and preserves passive auto START across navigation', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      let resolveTranslate;
+      const translateResponse = new Promise((resolve) => { resolveTranslate = resolve; });
+      let resolveSent;
+      const sentGate = new Promise((resolve) => { resolveSent = resolve; });
+      let translateCalls = 0;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) {
+          translateCalls += 1;
+          if (translateCalls === 1) { resolveSent(); return translateResponse; }
+          return Promise.resolve({ success: true, targetTabId: 1, messageId: 'session-next' });
+        }
+        return Promise.resolve({ success: true });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      pageTranslation.cancelTranslation();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'late failure', errorType: ErrorTypes.NETWORK_ERROR });
+      await pending;
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.message.value).toBe('Translation cancelled');
+      expect(pageTranslation.error.value).toBeNull();
+
+      const next = pageTranslation.translatePage();
+      await next;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 1, sessionId: 'session-next', translatedCount: 3, totalCount: 3, isTranslated: true, isTranslating: false },
+      });
+
+      await getTabUpdateListener()(1, { status: 'complete' });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-auto', isAutoTranslating: true },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isAutoTranslating.value).toBe(true);
+      expect(pageTranslation.error.value).toBeNull();
+    });
+
+    it('drops an old request rejection after a newer request begins', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      let resolveFirst;
+      const firstResponse = new Promise((resolve) => { resolveFirst = resolve; });
+      let firstSent;
+      const firstGate = new Promise((resolve) => { firstSent = resolve; });
+      let call = 0;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) {
+          call += 1;
+          if (call === 1) { firstSent(); return firstResponse; }
+          return Promise.resolve({ success: true, targetTabId: 1, messageId: 'session-next' });
+        }
+        return Promise.resolve({ success: true, restoredCount: 2 });
+      });
+      const pageTranslation = await createPageTranslation();
+
+      const first = pageTranslation.translatePage();
+      await firstGate;
+      const second = pageTranslation.translatePage();
+      await second;
+
+      resolveFirst({ success: false, targetTabId: 1, messageId: 'session-old', error: 'old failure', errorType: ErrorTypes.NETWORK_ERROR });
+      await first;
+
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).not.toContain('Error:');
+    });
+
+    it('uses authoritative target identity on transport failure for buffered START replay', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const transportError = Object.assign(new Error('transport failure'), {
+        type: ErrorTypes.SERVER_ERROR,
+        targetTabId: 2,
+      });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        return Promise.reject(transportError);
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 2, sessionId: 'session-actual', isAutoTranslating: false },
+      });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 3, sessionId: 'session-foreign', isAutoTranslating: false },
+      });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isTranslated.value).toBe(false);
+    });
+  });
+
+  describe('Regression: cross-tab lifecycle isolation', () => {
+    function createDeferredTranslate() {
+      let resolveTranslate;
+      const translateResponse = new Promise((resolve) => { resolveTranslate = resolve; });
+      let resolveSent;
+      const sentGate = new Promise((resolve) => { resolveSent = resolve; });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) { resolveSent(); return translateResponse; }
+        return Promise.resolve({ success: true, restoredCount: 2 });
+      });
+      return { resolveTranslate, sentGate };
+    }
+
+    it('ignores foreign progress before the command response resolves the request identity', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { tabId: 2, sessionId: 'session-foreign', translatedCount: 5, totalCount: 10, isTranslating: true },
+      });
+
+      expect(pageTranslation.translatedCount.value).toBe(0);
+      expect(pageTranslation.totalNodes.value).toBe(0);
+      expect(pageTranslation.isTranslating.value).toBe(false);
+
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
+      await pending;
+
+      expect(pageTranslation.translatedCount.value).toBe(0);
+      expect(pageTranslation.totalNodes.value).toBe(0);
+      expect(pageTranslation.isTranslating.value).toBe(false);
+    });
+
+    it('ignores foreign idle events before the command response resolves the request identity', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-new', isAutoTranslating: false },
+      });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_IDLE,
+        data: { tabId: 2, sessionId: 'session-foreign', status: 'idle', translatedCount: 7, totalCount: 10 },
+      });
+
+      expect(pageTranslation.translatedCount.value).toBe(0);
+
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
+      await pending;
+
+      expect(pageTranslation.translatedCount.value).toBe(0);
+      expect(pageTranslation.totalNodes.value).toBe(0);
+      expect(pageTranslation.isTranslating.value).toBe(true);
+    });
+
+    it('ignores a foreign cancellation while a request is active', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
+      await pending;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-new', isAutoTranslating: false },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(true);
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_CANCELLED,
+        data: { tabId: 2 },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.message.value).not.toBe('Translation cancelled');
+    });
+
+    it('keeps the pending error presentation when a foreign restore completes', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const presentation = deferPresentation();
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await presentation.called;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_RESTORE_COMPLETE,
+        data: { tabId: 2, restoredCount: 3 },
+      });
+
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
+    });
+
+    it('keeps the pending error presentation when a foreign error reset arrives', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const presentation = deferPresentation();
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-new', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await presentation.called;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_RESET_ERROR,
+        data: { tabId: 2, isInternal: true },
+      });
+
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
+    });
+
+    it('applies same-tab lifecycle events of the pending request', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-new' });
+      await pending;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-new', isAutoTranslating: false },
+      });
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { tabId: 1, sessionId: 'session-new', translatedCount: 2, totalCount: 5, isTranslating: true },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(2);
+      expect(pageTranslation.totalNodes.value).toBe(5);
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_RESET_ERROR,
+        data: { tabId: 1, isInternal: true },
+      });
+      expect(pageTranslation.error.value).toBeNull();
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_CANCELLED,
+        data: { tabId: 1, sessionId: 'session-new' },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.message.value).toBe('Translation cancelled');
+    });
+
+    it('applies a same-tab restore completion for the displayed tab', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_RESTORE_COMPLETE,
+        data: { tabId: 1, restoredCount: 4 },
+      });
+
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.message.value).toBe('Restore complete! 4 elements restored');
+    });
+
+    it('ignores a delayed start for a different session of the same tab', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-a' });
+      await pending;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-b', isAutoTranslating: false },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.message.value).not.toBe('Starting translation...');
+      expect(pageTranslation.error.value).toBeNull();
+    });
+
+    it('keeps the active failure when a stale start arrives during deferred error presentation', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const presentation = deferPresentation();
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      resolveTranslate({ success: false, targetTabId: 1, messageId: 'session-a', error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await presentation.called;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-b', isAutoTranslating: false },
+      });
+
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
+    });
+
+    it('applies a matching start for the pending session', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'session-a' });
+      await pending;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: { tabId: 1, sessionId: 'session-a', isAutoTranslating: false },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.message.value).toBe('Starting translation...');
+      expect(pageTranslation.error.value).toBeNull();
+    });
+
+    it('keeps an unattributed command failure when a foreign completion arrives', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const presentation = deferPresentation();
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1 });
+
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      // A pre-fanout failure carries no authoritative tab or session identity.
+      resolveTranslate({ success: false, reason: 'pre_fanout_command_timeout', isTransportFailure: true, error: 'request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await presentation.called;
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { tabId: 2, sessionId: 'session-foreign', translatedCount: 5, totalCount: 5, isTranslated: true, isTranslating: false },
+      });
+
+      presentation.resolve(new Error('boom'));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: boom');
     });
   });
 
