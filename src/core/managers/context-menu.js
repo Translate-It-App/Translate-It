@@ -44,6 +44,18 @@ const TRANSLATORS_PARENT_ID = "translators-parent";
 const SETTINGS_PARENT_ID = "settings-parent";
 const API_PROVIDER_ITEM_ID_PREFIX = "api-provider-";
 
+// Page-level menus must only appear where page translation actions are possible:
+// real web documents (http/https) and local files. documentUrlPatterns is the
+// native browser filter for this and cannot match extension-owned pages
+// (chrome-extension://, moz-extension://) or restricted browser pages
+// (chrome://, edge://, about:), so those contexts are excluded automatically
+// in Chrome, Firefox, and Edge.
+const PAGE_MENU_DOCUMENT_URL_PATTERNS = [
+  'http://*/*',
+  'https://*/*',
+  'file:///*'
+];
+
 // Settings required to build context menus and filter available providers.
 const CONTEXT_MENU_SETTING_KEYS = [
   'EXTENSION_ENABLED',
@@ -490,6 +502,7 @@ export class ContextMenuManager extends ResourceTracker {
             id: PAGE_CONTEXT_MENU_ID,
             title: pageMenuTitle,
             contexts: ["page", "selection", "link", "image", "video", "audio"],
+            documentUrlPatterns: PAGE_MENU_DOCUMENT_URL_PATTERNS,
           });
           logger.debug(`Created page context menu: "${pageMenuTitle}"`);
         } catch (e) {
@@ -586,6 +599,7 @@ export class ContextMenuManager extends ResourceTracker {
                 id: `${SCREEN_CAPTURE_MENU_ID}-page`, // Unique ID for page context
                 title: captureMenuTitle,
                 contexts: ["page"],
+                documentUrlPatterns: PAGE_MENU_DOCUMENT_URL_PATTERNS,
               });
               logger.debug(`Created screen capture page menu: "${captureMenuTitle}"`);
             }
@@ -696,6 +710,7 @@ export class ContextMenuManager extends ResourceTracker {
             id: PAGE_CONTEXT_TRANSLATE_ID,
             title: (await getTranslationString("context_menu_translate_page", locale)) || "Translate This Page",
             contexts: ["page", "selection", "link", "image", "video", "audio"],
+            documentUrlPatterns: PAGE_MENU_DOCUMENT_URL_PATTERNS,
             visible: !needsRestore,
           });
         } catch (e) {
@@ -711,6 +726,7 @@ export class ContextMenuManager extends ResourceTracker {
             id: PAGE_CONTEXT_RESTORE_ID,
             title: (await getTranslationString("context_menu_restore_page", locale)) || "Restore Original Page",
             contexts: ["page", "selection", "link", "image", "video", "audio"],
+            documentUrlPatterns: PAGE_MENU_DOCUMENT_URL_PATTERNS,
             visible: needsRestore,
           });
         } catch (e) {

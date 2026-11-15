@@ -342,12 +342,14 @@ describe('ContextMenuManager keyed storage reads', () => {
       id: 'translate-page',
       title: 'context_menu_translate_page',
       contexts: ['page', 'selection', 'link', 'image', 'video', 'audio'],
+      documentUrlPatterns: ['http://*/*', 'https://*/*', 'file:///*'],
       visible: true
     });
     expect(getCreatedMenu('restore-page')).toEqual({
       id: 'restore-page',
       title: 'context_menu_restore_page',
       contexts: ['page', 'selection', 'link', 'image', 'video', 'audio'],
+      documentUrlPatterns: ['http://*/*', 'https://*/*', 'file:///*'],
       visible: false
     });
     expect(mocks.getTranslationString).toHaveBeenCalledWith('context_menu_translate_page', 'ja');
@@ -362,6 +364,29 @@ describe('ContextMenuManager keyed storage reads', () => {
       'translate-page',
       'restore-page'
     ]);
+  });
+
+  it('restricts page-level menus to supported document URLs without affecting action menus', async () => {
+    await manager._setupMenusInternal();
+
+    const pageUrlPatterns = ['http://*/*', 'https://*/*', 'file:///*'];
+
+    // Extension-owned (chrome-extension://, moz-extension://) and restricted
+    // browser pages (chrome://, edge://, about:) cannot match these patterns,
+    // so every page-level command is hidden there by the browser itself.
+    for (const id of ['translate-with-select-element', 'screen-capture-page', 'translate-page', 'restore-page']) {
+      expect(getCreatedMenu(id).documentUrlPatterns).toEqual(pageUrlPatterns);
+    }
+
+    // The PDF-link action remains target-URL filtered only: it is meaningful on
+    // any page that contains a link to a PDF file.
+    expect(getCreatedMenu('open-pdf-with-link').documentUrlPatterns).toBeUndefined();
+    expect(getCreatedMenu('open-pdf-with-link').targetUrlPatterns).toEqual(['*://*/*.pdf', '*://*/*.PDF']);
+
+    // Action menus only appear in the extension's own toolbar popup and must
+    // stay free of URL filtering.
+    expect(getActionMenus().map(menu => menu.documentUrlPatterns))
+      .toEqual(getActionMenus().map(() => undefined));
   });
 
   it.each([
