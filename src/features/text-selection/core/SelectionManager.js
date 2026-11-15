@@ -382,6 +382,8 @@ export class SelectionManager extends ResourceTracker {
         matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset);
       const containsNestedHost = this.rangeContainsNestedShadowHost(range, startRoot);
 
+      if (allowElementRange && this.isCollapsedHostComposedRange(range, selection, startRoot)) return true;
+
       if (anchorRoot === startRoot && focusRoot === startRoot && boundariesMatch &&
           !containsNestedHost) return true;
 
@@ -411,6 +413,45 @@ export class SelectionManager extends ResourceTracker {
 
     return matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
       matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset);
+  }
+
+  isCollapsedHostComposedRange(range, selection, startRoot) {
+    const startType = range.startContainer.nodeType;
+    const endType = range.endContainer.nodeType;
+    if (!((startType === Node.TEXT_NODE && endType === Node.ELEMENT_NODE) ||
+          (startType === Node.ELEMENT_NODE && endType === Node.TEXT_NODE))) return false;
+
+    const nativeRange = selection.getRangeAt(0);
+    if (!nativeRange.collapsed || nativeRange.startContainer !== nativeRange.endContainer ||
+        nativeRange.startContainer.nodeType !== Node.ELEMENT_NODE ||
+        nativeRange.startContainer.getRootNode() !== document) return false;
+    if (selection.anchorNode !== nativeRange.startContainer || selection.focusNode !== nativeRange.startContainer ||
+        selection.anchorOffset !== nativeRange.startOffset || selection.focusOffset !== nativeRange.startOffset) return false;
+
+    const host = nativeRange.startContainer.childNodes[nativeRange.startOffset];
+    if (!host?.shadowRoot || host.shadowRoot.mode !== 'open') return false;
+
+    let root = startRoot;
+    while (root instanceof ShadowRoot && root.mode === 'open' && root.host.shadowRoot === root) {
+      if (root === host.shadowRoot) break;
+      root = root.host.getRootNode();
+    }
+    if (root !== host.shadowRoot) return false;
+
+    const liveRange = this.createRangeFromStaticRange(range);
+    if (!liveRange || liveRange.collapsed || liveRange.startContainer !== range.startContainer ||
+        liveRange.startOffset !== range.startOffset || liveRange.endContainer !== range.endContainer ||
+        liveRange.endOffset !== range.endOffset) return false;
+
+    const uiHostIds = new Set(Object.values(UI_HOST_IDS));
+    for (const element of startRoot.querySelectorAll('*')) {
+      if ((uiHostIds.has(element.id) || element.shadowRoot?.mode === 'open') && liveRange.intersectsNode(element)) return false;
+    }
+
+    const normalize = (text) => text.replace(/\s+/g, ' ').trim();
+    const rangeText = normalize(liveRange.toString());
+    const selectedText = normalize(selection.toString());
+    return !!rangeText && !!selectedText && rangeText === selectedText;
   }
 
   hasNestedShadowHost(container, rangeRoot, roots) {
