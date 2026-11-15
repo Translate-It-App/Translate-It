@@ -163,6 +163,11 @@ export function usePageTranslation() {
     if (Number.isInteger(activeInfo?.tabId)) {
       activeTabId = activeInfo.tabId;
       activeTabVersion++;
+      const transition = pendingDocumentTransitions.get(activeInfo.tabId);
+      if (transition
+        && transition.priorScope === (aggregateStreamsByTab.get(activeInfo.tabId)?.scope ?? null)) {
+        transition.confirmed = true;
+      }
     }
     supersedeCompletedSessions();
     if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
@@ -1122,14 +1127,17 @@ export function usePageTranslation() {
       // A delayed lookup must not invalidate a newer request and must not
       // refresh another tab's state.
       if ((transition && pendingDocumentTransitions.get(tabId) !== transition)
-        || currentActiveTabId !== tabId || ownership !== translateRequestOwnership) {
-        if (transition && pendingDocumentTransitions.get(tabId) === transition) pendingDocumentTransitions.delete(tabId);
+        || currentActiveTabId !== tabId || ownership !== translateRequestOwnership
+        || (transition && transition.confirmed)) {
         return;
       }
       if (transition && (transition.ownership !== ownership
         || transition.tabVersion !== activeTabVersion
         || (aggregateStreamsByTab.get(tabId)?.scope ?? null) !== transition.priorScope)) {
-        pendingDocumentTransitions.delete(tabId);
+        if (pendingDocumentTransitions.get(tabId) === transition && !transition.confirmed) {
+          pendingDocumentTransitions.delete(tabId);
+        }
+        return;
       }
       activeTabId = tabId;
       // A completed navigation replaces this tab's document identity.

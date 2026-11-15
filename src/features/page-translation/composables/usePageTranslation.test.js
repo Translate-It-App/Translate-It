@@ -2943,6 +2943,77 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.message.value).toBe('Starting translation...');
     });
 
+    it('preserves a background same-URL reload transition across return activation and stale verification', async () => {
+      const { resolveTranslate, pageTranslation } = await createSilentScenario();
+      getRuntimeMessageListener()(startEvent());
+      getRuntimeMessageListener()(idleEvent());
+
+      const originalSend = sendRegularMessage.getMockImplementation();
+      let resolveTabs;
+      browser.tabs.query.mockReturnValue(new Promise((resolve) => { resolveTabs = resolve; }));
+      sendRegularMessage.mockImplementation((message) => message.action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : originalSend(message));
+
+      const pendingTabUpdate = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID,
+        url: 'https://example.com/article',
+      });
+
+      const earlyStart = startEvent('early-new-document');
+      earlyStart.data.aggregateScope = 'document-b';
+      earlyStart.data.aggregateRevision = 1;
+      getRuntimeMessageListener()(earlyStart);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { ...earlyStart.data, aggregateRevision: 2, translatedCount: 2, totalCount: 5 },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.translatedCount.value).toBe(0);
+
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2, windowId: 10 });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.translatedCount.value).toBe(0);
+      browser.tabs.query.mockResolvedValue([{ id: 2 }]);
+      const pendingRequest = pageTranslation.translatePage();
+      await getTabUpdateListener()(9, { status: 'complete' }, { id: 9, url: 'https://example.com/other' });
+      resolveTranslate({ success: false, error: 'active request failed', errorType: ErrorTypes.NETWORK_ERROR });
+      await pendingRequest;
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: TAB_ID, windowId: 10 });
+      resolveTabs([{ id: 2 }]);
+      await pendingTabUpdate;
+      await Promise.resolve();
+
+      const newStart = startEvent(NEXT_SESSION_ID);
+      newStart.data.aggregateScope = 'document-b';
+      newStart.data.aggregateRevision = 1;
+      getRuntimeMessageListener()(newStart);
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      const newProgress = {
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { ...newStart.data, aggregateRevision: 2, translatedCount: 3, totalCount: 5 },
+      };
+      getRuntimeMessageListener()(newProgress);
+      expect(pageTranslation.translatedCount.value).toBe(3);
+      const newComplete = {
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: { ...newStart.data, aggregateRevision: 3, translatedCount: 4, totalCount: 5, isTranslated: true, isTranslating: false },
+      };
+      getRuntimeMessageListener()(newComplete);
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(4);
+
+      const staleOldStart = startEvent('old-document-late-start');
+      staleOldStart.data.aggregateRevision = 101;
+      getRuntimeMessageListener()(staleOldStart);
+      getRuntimeMessageListener()(idleEvent(SESSION_ID, { aggregateRevision: 102 }));
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(4);
+    });
+
     it('replays a START received before the navigation callback after verification and failed refresh', async () => {
       const { pageTranslation } = await createSilentScenario();
       const oldStart = startEvent(SESSION_ID);
