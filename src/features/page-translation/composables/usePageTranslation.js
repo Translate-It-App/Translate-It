@@ -1144,7 +1144,6 @@ export function usePageTranslation() {
           transition.confirmed = true;
           activeTabId = tabId;
           activeTabVersion++;
-          lifecycleStateRevision++;
         }
         return;
       }

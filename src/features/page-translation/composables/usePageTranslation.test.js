@@ -1100,6 +1100,69 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.canRestore.value).toBe(true);
     });
 
+    it('applies a pending Stop after confirming a same-URL reload and rejects old-document events', async () => {
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      const listener = getRuntimeMessageListener();
+      const url = 'https://example.test/page';
+      listener({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'document-old', aggregateRevision: 1,
+          topLevelUrl: url, sessionId: 'old-session', isTranslating: false,
+          isAutoTranslating: true, isTranslated: true, translatedCount: 4, failedCount: 1, totalCount: 5,
+        },
+      });
+
+      let resolveQuery;
+      browser.tabs.query.mockImplementationOnce(() => new Promise((resolve) => { resolveQuery = resolve; }));
+      let resolveStop;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) return new Promise((resolve) => { resolveStop = resolve; });
+        return Promise.resolve({ success: true });
+      });
+
+      const pendingTabUpdate = getTabUpdateListener()(1, { status: 'complete' }, { url });
+      const pendingStop = pageTranslation.stopAutoTranslation();
+      resolveQuery([{ id: 1 }]);
+      await pendingTabUpdate;
+      resolveStop({ success: true, isTranslated: true, translatedCount: 4, failedCount: 1 });
+      await pendingStop;
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isAutoTranslating.value).toBe(false);
+      expect(pageTranslation.message.value).toBe('Auto-translation stopped');
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.canRestore.value).toBe(true);
+
+      listener({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'document-old', aggregateRevision: 2,
+          topLevelUrl: url, isTranslating: true, isAutoTranslating: true,
+          translatedCount: 99, failedCount: 8, totalCount: 100,
+        },
+      });
+      listener({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'document-old', aggregateRevision: 3,
+          topLevelUrl: url, isTranslating: false, isAutoTranslating: false,
+          isTranslated: false, translatedCount: 0, failedCount: 0, totalCount: 100,
+        },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isAutoTranslating.value).toBe(false);
+      expect(pageTranslation.message.value).toBe('Auto-translation stopped');
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(4);
+      expect(pageTranslation.failedCount.value).toBe(1);
+      expect(pageTranslation.totalNodes.value).toBe(5);
+      expect(pageTranslation.canRestore.value).toBe(true);
+    });
+
     it('keeps an active translation failure visible after unrelated background-tab updates', async () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();
