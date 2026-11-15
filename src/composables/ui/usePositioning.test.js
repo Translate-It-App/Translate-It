@@ -74,6 +74,175 @@ describe('usePositioning', () => {
       const { currentPosition } = createPositioning({ x: 620, y: 380 });
       expect(currentPosition.value).toEqual({ x: 120, y: 80 });
     });
+
+    it('places a toolbar-anchored window below or above the rendered toolbar without overlap', () => {
+      const anchor = { left: 300, top: 100, right: 380, bottom: 132, width: 80, height: 32 };
+      const below = createPositioning({ x: 340, y: 140, _isViewportRelative: true, _toolbarRect: anchor }, {
+        defaultWidth: 350, defaultHeight: 180,
+      });
+      expect(below.currentPosition.value).toEqual({ x: 165, y: 140 });
+
+      const nearBottom = createPositioning({
+        x: 340, y: 700, _isViewportRelative: true,
+        _toolbarRect: { ...anchor, top: 680, bottom: 712 },
+      }, { defaultWidth: 350, defaultHeight: 180 });
+      expect(nearBottom.currentPosition.value.y).toBe(492);
+    });
+
+    it.each([
+      ['left edge', { left: 0, top: 100, right: 50, bottom: 132, width: 50, height: 32 }, { x: 10, y: 140 }],
+      ['right edge', { left: 950, top: 100, right: 1000, bottom: 132, width: 50, height: 32 }, { x: 640, y: 140 }],
+      ['top edge', { left: 300, top: 0, right: 380, bottom: 32, width: 80, height: 32 }, { x: 165, y: 40 }],
+      ['bottom edge', { left: 300, top: 700, right: 380, bottom: 732, width: 80, height: 32 }, { x: 165, y: 512 }],
+    ])('keeps the rendered anchor on-screen near the %s', (_edge, anchor, expected) => {
+      const { currentPosition } = createPositioning({
+        x: anchor.left + anchor.width / 2,
+        y: anchor.bottom + 8,
+        _isViewportRelative: true,
+        _toolbarRect: anchor,
+      }, { defaultWidth: 350, defaultHeight: 180 });
+
+      expect(currentPosition.value).toEqual(expected);
+    });
+
+    it('does not subtract page scroll from iframe-adjusted toolbar bounds', () => {
+      Object.defineProperty(window, 'scrollX', { value: 500, configurable: true, writable: true });
+      Object.defineProperty(window, 'scrollY', { value: 300, configurable: true, writable: true });
+      const anchor = { left: 120, top: 40, right: 200, bottom: 72, width: 80, height: 32 };
+      const { currentPosition } = createPositioning({
+        x: 160, y: 80, _isViewportRelative: true, _toolbarRect: anchor,
+      }, { defaultWidth: 50, defaultHeight: 40 });
+
+      expect(currentPosition.value).toEqual({ x: 135, y: 80 });
+    });
+
+    it('clamps an anchored window to a narrow viewport while keeping it on-screen', () => {
+      Object.defineProperty(window, 'innerWidth', { value: 280, configurable: true, writable: true });
+      const anchor = { left: 100, top: 100, right: 180, bottom: 132, width: 80, height: 32 };
+      const { currentPosition } = createPositioning({
+        x: 140, y: 140, _isViewportRelative: true, _toolbarRect: anchor,
+      }, { defaultWidth: 260, defaultHeight: 180 });
+
+      expect(currentPosition.value).toEqual({ x: 10, y: 140 });
+    });
+
+    it('repositions a resized loading window around its rendered toolbar anchor', () => {
+      Object.defineProperty(window, 'innerHeight', { value: 400, configurable: true, writable: true });
+      const anchor = { left: 400, top: 250, right: 480, bottom: 282, width: 80, height: 32 };
+      const positioning = createPositioning({
+        x: 440, y: 290, _isViewportRelative: true, _toolbarRect: anchor,
+      }, { defaultWidth: 28, defaultHeight: 28 });
+
+      expect(positioning.currentPosition.value).toEqual({ x: 426, y: 290 });
+      positioning.updatePosition(positioning.currentPosition.value, { width: 350, height: 180 });
+
+      expect(positioning.currentPosition.value).toEqual({ x: 265, y: 62 });
+    });
+
+    it('clamps an anchored resize when neither side has enough vertical space', () => {
+      Object.defineProperty(window, 'innerHeight', { value: 400, configurable: true, writable: true });
+      const anchor = { left: 400, top: 250, right: 480, bottom: 282, width: 80, height: 32 };
+      const positioning = createPositioning({
+        x: 440, y: 290, _isViewportRelative: true, _toolbarRect: anchor,
+      }, { defaultWidth: 28, defaultHeight: 28 });
+
+      positioning.updatePosition(positioning.currentPosition.value, { width: 350, height: 260 });
+
+      expect(positioning.currentPosition.value).toEqual({ x: 265, y: 10 });
+    });
+
+    it('does not re-anchor a resized window after an explicit unanchored update', () => {
+      const anchor = { left: 400, top: 250, right: 480, bottom: 282, width: 80, height: 32 };
+      const positioning = createPositioning({
+        x: 440, y: 290, _isViewportRelative: true, _toolbarRect: anchor,
+      }, { defaultWidth: 28, defaultHeight: 28 });
+
+      positioning.updatePosition({ x: 100, y: 100 }, { width: 28, height: 28 });
+      positioning.updatePosition(positioning.currentPosition.value, { width: 350, height: 180 });
+
+      expect(positioning.currentPosition.value).toEqual({ x: 100, y: 100 });
+    });
+
+    it('keeps the anchor through a redundant undocked mode update before resize', () => {
+      Object.defineProperty(window, 'innerHeight', { value: 400, configurable: true, writable: true });
+      const anchor = { left: 400, top: 250, right: 480, bottom: 282, width: 80, height: 32 };
+      const positioning = createPositioning({
+        x: 440, y: 290, _isViewportRelative: true, _toolbarRect: anchor,
+      }, { defaultWidth: 28, defaultHeight: 28 });
+
+      positioning.updateDockMode('none');
+      positioning.updatePosition(positioning.currentPosition.value, { width: 350, height: 180 });
+
+      expect(positioning.currentPosition.value).toEqual({ x: 265, y: 62 });
+    });
+
+    it('does not resurrect the anchor after docking and undocking before resize', () => {
+      const anchor = { left: 400, top: 250, right: 480, bottom: 282, width: 80, height: 32 };
+      const positioning = createPositioning({
+        x: 440, y: 290, _isViewportRelative: true, _toolbarRect: anchor,
+      }, { defaultWidth: 28, defaultHeight: 28 });
+
+      positioning.updateDockMode('left');
+      positioning.updateDockMode('none');
+      positioning.updatePosition(positioning.currentPosition.value, { width: 350, height: 180 });
+
+      expect(positioning.currentPosition.value).toEqual({ x: 10, y: 10 });
+    });
+
+    it.each([
+      ['left', { x: 0, y: 0 }],
+      ['right', { x: VIEW_W - 350, y: 0 }],
+    ])('preserves %s dock placement through a size update', (mode, dockedPosition) => {
+      const anchor = { left: 400, top: 250, right: 480, bottom: 282, width: 80, height: 32 };
+      const positioning = createPositioning({
+        x: 440, y: 290, _isViewportRelative: true, _toolbarRect: anchor,
+      }, { defaultWidth: 28, defaultHeight: 28 });
+
+      positioning.updateDockMode(mode);
+      positioning.updatePosition(positioning.currentPosition.value, { width: 350, height: 180 });
+
+      expect(positioning.currentPosition.value).toEqual(dockedPosition);
+    });
+
+    it('does not re-anchor a resized window after dragging starts', () => {
+      const anchor = { left: 400, top: 100, right: 480, bottom: 132, width: 80, height: 32 };
+      const positioning = createPositioning({
+        x: 440, y: 140, _isViewportRelative: true, _toolbarRect: anchor,
+      }, { defaultWidth: 28, defaultHeight: 28, enableDragging: true });
+
+      positioning.startDrag(mouseEvent('mousedown', 440, 140));
+      dispatchOnDocument(mouseEvent('mousemove', 460, 160));
+      expect(positioning.currentPosition.value).toEqual({ x: 446, y: 160 });
+      positioning.updatePosition(positioning.currentPosition.value, { width: 350, height: 180 });
+
+      expect(positioning.currentPosition.value).toEqual({ x: 446, y: 160 });
+      positioning.stopDrag();
+    });
+
+    it.each([
+      ['missing bounds', undefined],
+      ['missing coordinates', { left: 20, top: 30, width: 80, height: 32 }],
+      ['NaN bounds', { left: Number.NaN, top: 30, right: 100, bottom: 62, width: 80, height: 32 }],
+      ['infinite bounds', { left: 20, top: 30, right: 100, bottom: 62, width: 80, height: Number.POSITIVE_INFINITY }],
+      ['zero dimensions', { left: 20, top: 30, right: 20, bottom: 30, width: 0, height: 0 }],
+    ])('keeps finite placement for %s', (_label, anchor) => {
+      const { currentPosition } = createPositioning({
+        x: 50, y: 60, _isViewportRelative: true, _toolbarRect: anchor,
+      });
+
+      expect(Number.isFinite(currentPosition.value.x)).toBe(true);
+      expect(Number.isFinite(currentPosition.value.y)).toBe(true);
+    });
+
+    it.each([
+      ['NaN x', { x: Number.NaN, y: 60, _isViewportRelative: true }],
+      ['infinite y', { x: 50, y: Number.POSITIVE_INFINITY, _isViewportRelative: true }],
+      ['missing coordinates', { _isViewportRelative: true }],
+    ])('keeps finite placement for %s original coordinates', (_label, position) => {
+      const { currentPosition } = createPositioning(position);
+      expect(Number.isFinite(currentPosition.value.x)).toBe(true);
+      expect(Number.isFinite(currentPosition.value.y)).toBe(true);
+    });
   });
 
   describe('mouse drag', () => {

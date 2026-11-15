@@ -25,7 +25,7 @@ describe('SelectionActionPill.vue', () => {
     expect(wrapper.find('.ti-icon-btn__svg').exists()).toBe(true)
   })
 
-  it('emits translate and TTS actions exactly once', async () => {
+  it('emits translate and TTS actions exactly once with the originating click event', async () => {
     const wrapper = mount(SelectionActionPill, {
       props: {
         showTranslate: true,
@@ -39,11 +39,26 @@ describe('SelectionActionPill.vue', () => {
     })
 
     const buttons = wrapper.findAll('button')
-    await buttons[0].trigger('click')
+    const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 })
+    buttons[0].element.dispatchEvent(clickEvent)
     await buttons[1].trigger('click')
 
-    expect(wrapper.emitted('translate')).toEqual([[]])
+    expect(wrapper.emitted('translate')).toHaveLength(1)
+    expect(wrapper.emitted('translate')[0]).toEqual([clickEvent])
     expect(wrapper.emitted('tts')).toEqual([[]])
+  })
+
+  it.each(['Enter', ' '])('emits the originating %s key event and prevents its default action', async (key) => {
+    const wrapper = mount(SelectionActionPill, {
+      props: { showTranslate: true, showTts: false }
+    })
+    const keyEvent = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+
+    wrapper.find('.ti-icon-btn--translate').element.dispatchEvent(keyEvent)
+
+    expect(keyEvent.defaultPrevented).toBe(true)
+    expect(wrapper.emitted('translate')).toHaveLength(1)
+    expect(wrapper.emitted('translate')[0]).toEqual([keyEvent])
   })
 
   it('renders only the Translate button when showTts is false', () => {

@@ -1,6 +1,7 @@
 <template>
   <SelectionActionPill
     v-if="isVisible && !isFullscreen"
+    ref="toolbarElement"
     :style="dynamicStyle"
     :class="{ 'dark': isDarkTheme }"
     :show-translate="showTranslate"
@@ -14,7 +15,6 @@
     role="toolbar"
     aria-label="Text selection tools"
     @translate="handleTranslateClick"
-    @translate-pointerdown="handleTranslatePointerDown"
     @tts="handleTTSClick"
   />
 </template>
@@ -75,6 +75,7 @@ const initialWidth = (() => {
 // Reactive state
 const isVisible = ref(false);
 const isFullscreen = computed(() => mobileStore.isFullscreen);
+const toolbarElement = ref(null);
 
 // Local state for the TTS play action
 const localTTSId = ref(null);
@@ -165,15 +166,22 @@ const ttsTitle = computed(() => {
 });
 
 // Actions
-const handleTranslateClick = () => {
+const handleTranslateClick = (event) => {
   if (props.disabled) return;
 
-  const clickData = { id: props.id, text: props.text, position: props.selectionPosition || props.position };
+  const rect = event?.type === 'click' && event.detail > 0
+    ? toolbarElement.value?.$el?.getBoundingClientRect()
+    : null;
+  const usableRect = rect && [rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height]
+    .every(Number.isFinite) && rect.width > 0 && rect.height > 0;
+  const clickData = {
+    id: props.id,
+    text: props.text,
+    position: usableRect
+      ? { x: rect.left + rect.width / 2, y: rect.bottom + 8, _isViewportRelative: true, _toolbarRect: rect }
+      : props.selectionPosition || props.position,
+  };
   emit('click', clickData);
-};
-
-const handleTranslatePointerDown = () => {
-  if (props.disabled) return;
 };
 
 const handleTTSClick = async () => {

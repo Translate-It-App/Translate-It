@@ -13,7 +13,7 @@
       :aria-label="translateAriaLabel || translateTitle"
       role="button"
       tabindex="0"
-      @click.stop.prevent="emit('translate')"
+      @click.stop.prevent="emit('translate', $event)"
       @pointerdown.stop.prevent="emit('translate-pointerdown', $event)"
       @mouseup.left.prevent.stop
       @contextmenu.stop
@@ -204,7 +204,7 @@ const ttsClasses = computed(() => [
 function onKeydownTranslate(event) {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
-    emit("translate");
+    emit("translate", event);
   }
 }
 

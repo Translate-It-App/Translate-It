@@ -18,6 +18,7 @@ export function usePositioning(initialPosition, options = {}) {
 
   // Reactive position state
   const currentPosition = ref({ x: 0, y: 0 });
+  const toolbarAnchor = ref(null);
   const dragStartOffset = ref({ x: 0, y: 0 });
   const isDragging = ref(false);
   const currentDockMode = ref(dockMode);
@@ -37,8 +38,28 @@ export function usePositioning(initialPosition, options = {}) {
       return { x: vw - width, y: 0 };
     }
 
-    let x = pos.x ?? pos.left ?? 0;
-    let y = pos.y ?? pos.top ?? 0;
+    let x = Number.isFinite(pos.x ?? pos.left) ? (pos.x ?? pos.left) : 0;
+    let y = Number.isFinite(pos.y ?? pos.top) ? (pos.y ?? pos.top) : 0;
+
+    const anchor = pos._toolbarRect;
+    const usableAnchor = anchor && ['left', 'top', 'right', 'bottom', 'width', 'height']
+      .every((key) => Number.isFinite(anchor[key])) && anchor.width > 0 && anchor.height > 0;
+    if (currentDockMode.value === 'none' && usableAnchor && width > 0 && height > 0) {
+      const gap = 8;
+      const below = anchor.bottom + gap;
+      const above = anchor.top - height - gap;
+      const belowSpace = vh - anchor.bottom - gap;
+      const aboveSpace = anchor.top - gap;
+      y = belowSpace >= height + margin
+        ? below
+        : aboveSpace >= height + margin || aboveSpace >= belowSpace ? above : below;
+      x = anchor.left + (anchor.width - width) / 2;
+      // Anchored placement clamps around the toolbar; cursor-side flipping would jump an extra window width.
+      return {
+        x: Math.max(margin, Math.min(x, vw - width - margin)),
+        y: Math.max(margin, Math.min(y, vh - height - margin)),
+      };
+    }
 
     // Smart horizontal positioning
     if (x + width + margin > vw) {
@@ -83,13 +104,21 @@ export function usePositioning(initialPosition, options = {}) {
    * Update position with viewport clamping
    */
   function updatePosition(newPosition, dimensions) {
-    currentPosition.value = clampToViewport(newPosition, dimensions?.width, dimensions?.height);
+    if (newPosition?._toolbarRect) toolbarAnchor.value = newPosition._toolbarRect;
+    const preserveInitialAnchor = newPosition === currentPosition.value && currentDockMode.value === 'none';
+    if (!newPosition?._toolbarRect && !preserveInitialAnchor) toolbarAnchor.value = null;
+    currentPosition.value = clampToViewport(
+      preserveInitialAnchor ? { ...newPosition, _toolbarRect: toolbarAnchor.value } : newPosition,
+      dimensions?.width,
+      dimensions?.height,
+    );
   }
 
   /**
    * Initialize position
    */
   function initializePosition(pos) {
+    toolbarAnchor.value = pos._toolbarRect || null;
     const originalX = pos.x ?? pos.left ?? 0;
     const originalY = pos.y ?? pos.top ?? 0;
     
@@ -100,7 +129,8 @@ export function usePositioning(initialPosition, options = {}) {
       // Position is already viewport-relative, don't subtract scroll
       viewportPosition = {
         x: originalX,
-        y: originalY
+        y: originalY,
+        _toolbarRect: pos._toolbarRect
       };
     } else {
       // Convert absolute coordinates to viewport-relative for fixed positioning
@@ -133,6 +163,7 @@ export function usePositioning(initialPosition, options = {}) {
    * Update dock mode and refresh position
    */
   function updateDockMode(mode) {
+    if (mode !== currentDockMode.value) toolbarAnchor.value = null;
     currentDockMode.value = mode;
     const width = (mode !== 'none') ? (currentDockedWidth.value || defaultWidth) : defaultWidth;
     currentPosition.value = findSmartPosition(currentPosition.value, width);
@@ -230,6 +261,7 @@ export function usePositioning(initialPosition, options = {}) {
   };
 
   const startDrag = (event) => {
+    toolbarAnchor.value = null;
     isDragging.value = true;
     
     // Prevent default on touchstart to avoid scrolling/gestures

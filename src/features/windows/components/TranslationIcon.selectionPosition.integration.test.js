@@ -178,6 +178,78 @@ describe('TranslationIcon selection-position event flow', () => {
     expect(facade.displayManager._showWindow).toHaveBeenCalledWith('selected', selectionPosition);
   });
 
+  it('uses the rendered toolbar bounds for pointer Translate activation', async () => {
+    const { selectionPosition, toolbarPosition, facade, mountIcon } = setupFlow();
+    WindowsManagerEvents.showIcon({ id: 'icon-pointer', text: 'selected', position: toolbarPosition, selectionPosition });
+    const wrapper = await mountIcon();
+    vi.spyOn(wrapper.findComponent(TranslationIcon).element, 'getBoundingClientRect').mockReturnValue({
+      left: 120, right: 200, top: 40, bottom: 72, width: 80, height: 32,
+    });
+
+    const click = new MouseEvent('click', { bubbles: true, detail: 1 });
+    wrapper.get('.ti-icon-btn--translate').element.dispatchEvent(click);
+    await Promise.resolve();
+
+    expect(facade.displayManager._showWindow).toHaveBeenCalledWith('selected', expect.objectContaining({
+      x: 160, y: 80, _isViewportRelative: true,
+      _toolbarRect: expect.objectContaining({ left: 120, bottom: 72 }),
+    }));
+  });
+
+  it.each([
+    ['zero width', { left: 120, right: 120, top: 40, bottom: 72, width: 0, height: 32 }],
+    ['zero height', { left: 120, right: 200, top: 40, bottom: 40, width: 80, height: 0 }],
+    ['NaN coordinate', { left: Number.NaN, right: 200, top: 40, bottom: 72, width: 80, height: 32 }],
+    ['infinite dimension', { left: 120, right: 200, top: 40, bottom: 72, width: 80, height: Number.POSITIVE_INFINITY }],
+    ['missing coordinate', { left: 120, right: 200, top: 40, width: 80, height: 32 }],
+  ])('uses the semantic selection anchor for a pointer click with %s toolbar bounds', async (_label, rect) => {
+    const { selectionPosition, toolbarPosition, facade, mountIcon } = setupFlow();
+    WindowsManagerEvents.showIcon({ id: 'icon-invalid-rect', text: 'selected', position: toolbarPosition, selectionPosition });
+    const wrapper = await mountIcon();
+    vi.spyOn(wrapper.findComponent(TranslationIcon).element, 'getBoundingClientRect').mockReturnValue(rect);
+
+    wrapper.get('.ti-icon-btn--translate').element.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+    await Promise.resolve();
+
+    expect(facade.displayManager._showWindow).toHaveBeenCalledWith('selected', selectionPosition);
+  });
+
+  it('uses semantic selection after a canceled pointer interaction and a detail-zero click', async () => {
+    const { selectionPosition, toolbarPosition, facade, mountIcon } = setupFlow();
+    WindowsManagerEvents.showIcon({ id: 'icon-canceled-pointer', text: 'selected', position: toolbarPosition, selectionPosition });
+    const wrapper = await mountIcon();
+    vi.spyOn(wrapper.findComponent(TranslationIcon).element, 'getBoundingClientRect').mockReturnValue({
+      left: 120, right: 200, top: 40, bottom: 72, width: 80, height: 32,
+    });
+
+    const button = wrapper.get('.ti-icon-btn--translate').element;
+    const pointerDown = new Event('pointerdown', { bubbles: true, cancelable: true });
+    pointerDown.preventDefault();
+    button.dispatchEvent(pointerDown);
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 }));
+    await Promise.resolve();
+
+    expect(facade.displayManager._showWindow).toHaveBeenCalledWith('selected', selectionPosition);
+  });
+
+  it('uses the rendered toolbar bounds when no original toolbar position exists', async () => {
+    const { selectionPosition, facade, mountIcon } = setupFlow();
+    WindowsManagerEvents.showIcon({
+      id: 'icon-no-toolbar-position', text: 'selected', position: selectionPosition, selectionPosition,
+    });
+    const wrapper = await mountIcon();
+    vi.spyOn(wrapper.findComponent(TranslationIcon).element, 'getBoundingClientRect').mockReturnValue({
+      left: 120, right: 200, top: 40, bottom: 72, width: 80, height: 32,
+    });
+
+    wrapper.get('.ti-icon-btn--translate').element.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+    await Promise.resolve();
+
+    expect(facade.displayManager._showWindow).toHaveBeenCalledWith('selected', expect.objectContaining({
+      x: 160, y: 80, _isViewportRelative: true,
+    }));
+  });
+
   it('falls back to the displayed position for icons without a selection position', async () => {
     const { toolbarPosition, facade, mountIcon } = setupFlow();
 
@@ -313,6 +385,27 @@ describe('TranslationIcon selection-position event flow', () => {
     expect(translateDetails.at(-1)).toMatchObject({
       id: 'stable-toolbar', text: 'full paragraph', position: { x: 55, y: 66 },
     });
+
+    vi.spyOn(updatedComponent.element, 'getBoundingClientRect').mockReturnValue({
+      left: 120, right: 200, top: 40, bottom: 72, width: 80, height: 32,
+    });
+    updatedComponent.find('.ti-icon-btn--translate').element.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, detail: 1 }),
+    );
+    await Promise.resolve();
+    expect(translateDetails.at(-1)).toMatchObject({
+      id: 'stable-toolbar', text: 'full paragraph', position: expect.objectContaining({
+      x: 160, y: 80, _isViewportRelative: true,
+      }),
+    });
+
+    const pointerPosition = translateDetails.at(-1).position;
+    await updatedComponent.find('.ti-icon-btn--translate').trigger('keydown', { key: 'Enter' });
+    await Promise.resolve();
+    expect(translateDetails.at(-1)).toMatchObject({
+      id: 'stable-toolbar', text: 'full paragraph', position: { x: 55, y: 66 },
+    });
+    expect(translateDetails.at(-1).position).not.toEqual(pointerPosition);
     pageEventBus.off(WINDOWS_MANAGER_EVENTS.ICON_CLICKED, captureTranslate);
 
     document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, button: 0 }));
