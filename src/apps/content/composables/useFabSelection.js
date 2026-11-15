@@ -34,6 +34,11 @@ export default function useFabSelection(options = {}) {
       return;
     }
 
+    if (detail.position == null) {
+      clearSelection();
+      return;
+    }
+
     pendingSelection.value = {
       hasSelection: true,
       text: detail.text,

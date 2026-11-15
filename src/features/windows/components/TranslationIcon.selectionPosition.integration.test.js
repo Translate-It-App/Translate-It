@@ -8,6 +8,7 @@ import TranslationIcon from './TranslationIcon.vue';
 import { usePositioning } from '@/composables/ui/usePositioning.js';
 import { ClickManager } from '../managers/interaction/ClickManager.js';
 import { SimpleTextSelectionHandler } from '@/features/text-selection/handlers/SimpleTextSelectionHandler.js';
+import { WindowsConfig } from '@/features/windows/managers/core/WindowsConfig.js';
 
 const testMocks = vi.hoisted(() => ({
   initializePosition: vi.fn(),
@@ -261,6 +262,84 @@ describe('TranslationIcon selection-position event flow', () => {
     await Promise.resolve();
 
     expect(facade.displayManager._showWindow).toHaveBeenCalledWith('selected', toolbarPosition);
+  });
+
+  it('uses a safe viewport position for keyboard activation without a selection anchor', async () => {
+    const { facade, mountIcon } = setupFlow();
+    const fragmentPoint = { x: 34, y: 56, _isViewportRelative: false };
+
+    WindowsManagerEvents.showIcon({
+      id: 'icon-fragment-only', text: 'full selected text', position: fragmentPoint,
+      selectionPosition: null,
+    });
+    expect(manager.translationIcons.value[0]).toMatchObject({
+      text: 'full selected text', position: fragmentPoint, selectionPosition: null,
+    });
+
+    const wrapper = await mountIcon();
+    expect(usePositioning).toHaveBeenCalledWith(fragmentPoint, expect.any(Object));
+    await wrapper.get('.ti-icon-btn--translate').trigger('keydown', { key: 'Enter' });
+    await Promise.resolve();
+
+    expect(facade.displayManager._showWindow).toHaveBeenCalledWith('full selected text', {
+      x: Math.max(WindowsConfig.POSITIONING.VIEWPORT_MARGIN,
+        (window.innerWidth - WindowsConfig.POSITIONING.POPUP_WIDTH) / 2),
+      y: Math.max(WindowsConfig.POSITIONING.VIEWPORT_MARGIN,
+        (window.innerHeight - WindowsConfig.POSITIONING.POPUP_HEIGHT) / 2),
+      _isViewportRelative: true,
+    });
+    expect(facade.displayManager._showWindow).not.toHaveBeenCalledWith('full selected text', fragmentPoint);
+  });
+
+  it('uses the rendered toolbar bounds for pointer activation with an explicit null anchor', async () => {
+    const { facade, mountIcon } = setupFlow();
+    const fragmentPoint = { x: 34, y: 56, _isViewportRelative: false };
+    WindowsManagerEvents.showIcon({
+      id: 'icon-pointer-null-anchor', text: 'selected', position: fragmentPoint,
+      selectionPosition: null,
+    });
+    const wrapper = await mountIcon();
+    vi.spyOn(wrapper.findComponent(TranslationIcon).element, 'getBoundingClientRect').mockReturnValue({
+      left: 120, right: 200, top: 40, bottom: 72, width: 80, height: 32,
+    });
+
+    wrapper.get('.ti-icon-btn--translate').element.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, detail: 1 }),
+    );
+    await Promise.resolve();
+
+    expect(facade.displayManager._showWindow).toHaveBeenCalledWith('selected', expect.objectContaining({
+      x: 160, y: 80, _isViewportRelative: true,
+      _toolbarRect: expect.objectContaining({ left: 120, bottom: 72 }),
+    }));
+    expect(facade.displayManager._showWindow).not.toHaveBeenCalledWith('selected', fragmentPoint);
+  });
+
+  it('uses a safe viewport position for pointer activation when toolbar bounds are invalid', async () => {
+    const { facade, mountIcon } = setupFlow();
+    const fragmentPoint = { x: 34, y: 56, _isViewportRelative: false };
+    WindowsManagerEvents.showIcon({
+      id: 'icon-pointer-invalid-bounds', text: 'full selected text', position: fragmentPoint,
+      selectionPosition: null,
+    });
+    const wrapper = await mountIcon();
+    vi.spyOn(wrapper.findComponent(TranslationIcon).element, 'getBoundingClientRect').mockReturnValue({
+      left: 120, right: 120, top: 40, bottom: 72, width: 0, height: 32,
+    });
+
+    wrapper.get('.ti-icon-btn--translate').element.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, detail: 1 }),
+    );
+    await Promise.resolve();
+
+    expect(facade.displayManager._showWindow).toHaveBeenCalledWith('full selected text', {
+      x: Math.max(WindowsConfig.POSITIONING.VIEWPORT_MARGIN,
+        (window.innerWidth - WindowsConfig.POSITIONING.POPUP_WIDTH) / 2),
+      y: Math.max(WindowsConfig.POSITIONING.VIEWPORT_MARGIN,
+        (window.innerHeight - WindowsConfig.POSITIONING.POPUP_HEIGHT) / 2),
+      _isViewportRelative: true,
+    });
+    expect(facade.displayManager._showWindow).not.toHaveBeenCalledWith('full selected text', fragmentPoint);
   });
 
   it('keeps the mounted Toolbar through a verified third-click continuation and dismisses on the next outside click', async () => {

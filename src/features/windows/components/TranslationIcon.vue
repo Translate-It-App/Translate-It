@@ -29,6 +29,7 @@ import { useSettingsStore } from '@/features/settings/stores/settings.js';
 import { useTTSSmart } from '@/features/tts/composables/useTTSSmart.js';
 import { useResourceTracker } from '@/composables/core/useResourceTracker.js';
 import { getLanguageNameFromCode } from '@/shared/config/languageConstants.js';
+import { WindowsConfig } from '@/features/windows/managers/core/WindowsConfig.js';
 import SelectionActionPill from '@/components/shared/SelectionActionPill.vue';
 
 const pageEventBus = window.pageEventBus;
@@ -40,7 +41,7 @@ const tracker = useResourceTracker('translation-icon');
 const props = defineProps({
   id: { type: String, required: true },
   position: { type: Object, required: true, default: () => ({ top: 0, left: 0 }) },
-  selectionPosition: { type: Object, default: null },
+  selectionPosition: { type: Object, default: undefined },
   text: { type: String, default: '' },
   disabled: { type: Boolean, default: false },
 });
@@ -174,12 +175,20 @@ const handleTranslateClick = (event) => {
     : null;
   const usableRect = rect && [rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height]
     .every(Number.isFinite) && rect.width > 0 && rect.height > 0;
+  const positioning = WindowsConfig.POSITIONING;
+  const viewportPosition = {
+    x: Math.max(positioning.VIEWPORT_MARGIN, (window.innerWidth - positioning.POPUP_WIDTH) / 2),
+    y: Math.max(positioning.VIEWPORT_MARGIN, (window.innerHeight - positioning.POPUP_HEIGHT) / 2),
+    _isViewportRelative: true,
+  };
   const clickData = {
     id: props.id,
     text: props.text,
     position: usableRect
       ? { x: rect.left + rect.width / 2, y: rect.bottom + 8, _isViewportRelative: true, _toolbarRect: rect }
-      : props.selectionPosition || props.position,
+      : props.selectionPosition === null
+        ? viewportPosition
+        : props.selectionPosition === undefined ? props.position : props.selectionPosition,
   };
   emit('click', clickData);
 };

@@ -224,6 +224,24 @@ describe("EventCoordinator cross-frame coordinate adjustment", () => {
     expect(facade.show.mock.calls[0][3]).toEqual({ x: 25, y: 35, _isViewportRelative: true });
   });
 
+  it("preserves null selection geometry and adjusts the fragment point", async () => {
+    stubIframes([{
+      contentWindow: sourceWindow,
+      getBoundingClientRect: () => ({ left: 150, top: 300 }),
+    }]);
+
+    await coordinator._handleTextSelectionWindowRequest({
+      position: null,
+      toolbarPosition: { x: 25, y: 35, _isViewportRelative: true },
+      selectedText: "full selected text",
+      options: { displayInteraction: "multi-click" },
+    }, sourceWindow);
+
+    expect(facade.show).toHaveBeenCalledWith("full selected text", null,
+      { displayInteraction: "multi-click" },
+      { x: 175, y: 335, _isViewportRelative: true, _isAbsolute: false });
+  });
+
   it("ignores the request when not running in the top frame", async () => {
     coordinator.crossFrameManager.isTopFrame = false;
 
@@ -936,6 +954,23 @@ describe("EventCoordinator PageEventBus listener ownership", () => {
 
     expect(old.facade.show).not.toHaveBeenCalled();
     expect(live.facade.show).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes fragment-only selection changes through with null position and full text", async () => {
+    const { coordinator, facade } = createCoordinator();
+    coordinator.setup();
+    const detail = {
+      text: "full selected text",
+      position: null,
+      toolbarPosition: { x: 40, y: 50 },
+      options: { displayInteraction: "multi-click" },
+    };
+
+    mockPageEventBus.emit(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, detail);
+
+    expect(facade.show).toHaveBeenCalledWith(
+      "full selected text", null, { displayInteraction: "multi-click" }, detail.toolbarPosition,
+    );
   });
 
   it("makes cleanup idempotent without removing replacement listeners", async () => {

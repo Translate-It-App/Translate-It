@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   },
   isFeatureAllowed: vi.fn(),
   getPresentation: vi.fn(),
+  getSetting: vi.fn((key, fallback) => fallback),
 }));
 
 vi.mock("@/shared/logging/logger.js", () => ({
@@ -43,7 +44,7 @@ vi.mock("@/core/PageEventBus.js", () => ({
 }));
 
 vi.mock("@/shared/managers/SettingsManager.js", () => ({
-  default: { get: vi.fn((key, fallback) => fallback) },
+  default: { get: mocks.getSetting },
 }));
 
 vi.mock("@/shared/config/config.js", () => ({
@@ -158,6 +159,7 @@ const safePresentation = (overrides = {}) => ({
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
+  mocks.getSetting.mockImplementation((key, fallback) => fallback);
   state = createState();
   facade = {
     _isIconToWindowTransition: false,
@@ -220,6 +222,93 @@ describe("DisplayManager Selection Window error boundary", () => {
       text: "selected text",
       position: selectionPosition,
     });
+  });
+
+  it("uses verified fragment coordinates only for icon placement and keeps selection position null", async () => {
+    const toolbarPosition = { x: 80, y: 110, _isViewportRelative: false };
+
+    await manager.show("full selected text", null, { displayInteraction: "multi-click" }, toolbarPosition);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(mocks.events.showIcon).toHaveBeenCalledWith(expect.objectContaining({
+      text: "full selected text",
+      position: toolbarPosition,
+      selectionPosition: null,
+    }));
+    expect(state.iconClickContext).toMatchObject({ text: "full selected text", position: null });
+    expect(mocks.events.showWindow).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing toolbar point", null, { displayInteraction: "multi-click" }],
+    ["invalid toolbar point", { x: 10, y: Number.NaN }, { displayInteraction: "multi-click" }],
+    ["immediate display", { x: 10, y: 20 }, { immediate: true }],
+  ])("rejects fragment-only requests with %s", async (_label, toolbarPosition, options) => {
+    await manager.show("selected text", null, options, toolbarPosition);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(mocks.events.showIcon).not.toHaveBeenCalled();
+    expect(mocks.events.showWindow).not.toHaveBeenCalled();
+  });
+
+  it("does not use fragment-only geometry to update an existing pinned window", async () => {
+    state.isVisible = true;
+    state.isPinned = true;
+
+    await manager.show("new selected text", null, { displayInteraction: "multi-click" }, { x: 10, y: 20 });
+
+    expect(translationHandler.cancelAllTranslations).not.toHaveBeenCalled();
+    expect(mocks.events.updateWindow).not.toHaveBeenCalled();
+    expect(mocks.events.showIcon).not.toHaveBeenCalled();
+  });
+
+  it.each(["immediate", "onFabClick"])(
+    "rejects null selection geometry when the configured mode is %s",
+    async (mode) => {
+      mocks.getSetting.mockImplementation((key, fallback) =>
+        key === "selectionTranslationMode" ? mode : fallback,
+      );
+
+      await manager.show("selected text", null, { displayInteraction: "multi-click" }, { x: 10, y: 20 });
+
+      expect(mocks.events.showIcon).not.toHaveBeenCalled();
+      expect(mocks.events.showWindow).not.toHaveBeenCalled();
+      expect(mocks.events.showMobileSheet).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects fragment-only geometry if the mode becomes immediate while permission is pending", async () => {
+    let resolvePermission;
+    mocks.isFeatureAllowed.mockReturnValueOnce(new Promise((resolve) => { resolvePermission = resolve; }));
+    const pending = manager.show("selected text", null, { displayInteraction: "multi-click" }, { x: 10, y: 20 });
+    mocks.getSetting.mockImplementation((key, fallback) =>
+      key === "selectionTranslationMode" ? "immediate" : fallback,
+    );
+
+    resolvePermission(true);
+    await pending;
+
+    expect(mocks.events.showIcon).not.toHaveBeenCalled();
+    expect(mocks.events.showWindow).not.toHaveBeenCalled();
+  });
+
+  it("keeps a continuation icon ID while updating text without selection geometry", async () => {
+    const token = { originFrameId: "frame-1", sequence: 23 };
+    state.isIconMode = true;
+    await manager._showIcon("word", { x: 5, y: 6 }, { x: 7, y: 8 }, token);
+    const originalId = mocks.events.showIcon.mock.calls[0][0].id;
+
+    await manager.show("full updated text", null, {
+      displayInteraction: "multi-click",
+      selectionContinuationToken: token,
+    }, { x: 10, y: 20 });
+    await vi.advanceTimersByTimeAsync(100);
+
+    const iconUpdate = mocks.events.showIcon.mock.calls[1][0];
+    expect(iconUpdate).toMatchObject({ id: originalId, text: "full updated text", selectionPosition: null });
+    expect(iconUpdate).not.toHaveProperty("position");
+    expect(state.iconClickContext).toMatchObject({ text: "full updated text", position: null });
+    expect(mocks.events.showWindow).not.toHaveBeenCalled();
   });
 
   it.each(["double-click selection", "triple-click drag selection"])(

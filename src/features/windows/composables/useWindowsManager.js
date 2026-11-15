@@ -98,7 +98,7 @@ export function useWindowsManager() {
       id: detail.id,
       text: detail.text,
       position,
-      selectionPosition: detail.selectionPosition ?? position,
+      selectionPosition: detail.selectionPosition === undefined ? position : detail.selectionPosition,
       selectionContinuationToken: continuationToken ?? null,
     };
     const existingIndex = translationIcons.value.findIndex(icon => icon.id === detail.id);

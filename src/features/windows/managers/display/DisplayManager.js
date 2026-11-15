@@ -133,7 +133,9 @@ export class DisplayManager {
       return;
     }
 
-    if (!selectedText || !position) {
+    const hasFragmentPosition = Number.isFinite(toolbarPosition?.x) &&
+      Number.isFinite(toolbarPosition?.y);
+    if (!selectedText || (!position && !(position === null && hasFragmentPosition))) {
       this.logger.debug("Aborting show(): Missing text or position");
       return;
     }
@@ -169,6 +171,12 @@ export class DisplayManager {
           "selectionTranslationMode",
           SelectionTranslationMode.ON_CLICK,
         );
+
+    // Fragment-only geometry can place the icon, but cannot anchor a window.
+    if (!position && (selectionTranslationMode !== SelectionTranslationMode.ON_CLICK || options.immediate)) {
+      this.logger.debug("Aborting show(): Fragment position is only valid for on-click icons");
+      return;
+    }
 
     // 2. Check for interaction conditions
     if (
@@ -237,6 +245,7 @@ export class DisplayManager {
       !this.state.isIconMode &&
       (this.state.isPinned || this.state.dockMode !== "none")
     ) {
+      if (!position) return;
       this.logger.info("Updating existing pinned/docked window");
 
       if (
@@ -272,6 +281,8 @@ export class DisplayManager {
 
   async _commitShow(selectedText, position, options, toolbarPosition, selectionTranslationMode, preserveSelection, requestVersion) {
     if (requestVersion !== this._showRequestVersion) return;
+    if (!position && (selectionTranslationMode !== SelectionTranslationMode.ON_CLICK ||
+        !Number.isFinite(toolbarPosition?.x) || !Number.isFinite(toolbarPosition?.y))) return;
     const continuationToken = options.selectionContinuationToken;
     const continuesVisibleIcon = !!(
       continuationToken && this.state.isIconMode && this.state.activeIconId && this.state.selectionContinuationToken &&

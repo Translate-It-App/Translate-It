@@ -119,7 +119,9 @@ export class TextSelectionWindowRelay {
       return;
     }
 
-    if (!data.selectedText || !data.position) {
+    const hasFragmentPosition = Number.isFinite(data.toolbarPosition?.x) &&
+      Number.isFinite(data.toolbarPosition?.y);
+    if (!data.selectedText || (!data.position && !(data.position === null && hasFragmentPosition))) {
       logger.warn('Invalid text selection window request', data);
       return;
     }
@@ -136,8 +138,10 @@ export class TextSelectionWindowRelay {
       return;
     }
 
-    const adjustedPosition = adjustForDirectChild(event.source, data.position);
-    if (!adjustedPosition) {
+    const adjustedPosition = data.position === null
+      ? null
+      : adjustForDirectChild(event.source, data.position);
+    if (data.position && !adjustedPosition) {
       logger.debug('Dropping text selection window request: unmatched child iframe source');
       return;
     }
@@ -145,6 +149,10 @@ export class TextSelectionWindowRelay {
     const adjustedToolbarPosition = data.toolbarPosition
       ? adjustForDirectChild(event.source, data.toolbarPosition)
       : null;
+    if (!data.position && !adjustedToolbarPosition) {
+      logger.debug('Dropping fragment-only request: unmatched child iframe source');
+      return;
+    }
     const forwarded = {
       ...data,
       position: adjustedPosition,

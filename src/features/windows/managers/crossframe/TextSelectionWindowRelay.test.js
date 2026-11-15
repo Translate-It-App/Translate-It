@@ -167,6 +167,43 @@ describe('TextSelectionWindowRelay', () => {
       relay.destroy();
     });
 
+    it('keeps null selection geometry while translating only fragment coordinates', () => {
+      const relay = new TextSelectionWindowRelay();
+      relay._isTopFrame = false;
+      const sourceWindow = { iframe: true };
+      stubIframes([{
+        contentWindow: sourceWindow,
+        getBoundingClientRect: () => ({ left: 50, top: 80 })
+      }]);
+
+      relay._handleMessage(requestMessage({
+        position: null,
+        toolbarPosition: { x: 15, y: 25, _isViewportRelative: true },
+        options: { displayInteraction: 'multi-click' }
+      }, sourceWindow));
+
+      const [forwarded] = parentPostMessage.mock.calls[0];
+      expect(forwarded.position).toBeNull();
+      expect(forwarded.toolbarPosition).toEqual({
+        x: 65, y: 105, _isViewportRelative: true, _isAbsolute: false
+      });
+      relay.destroy();
+    });
+
+    it('rejects fragment-only requests from an unmatched child source', () => {
+      const relay = new TextSelectionWindowRelay();
+      relay._isTopFrame = false;
+      stubIframes([]);
+
+      relay._handleMessage(requestMessage({
+        position: null,
+        toolbarPosition: { x: 15, y: 25 }
+      }, { notAChild: true }));
+
+      expect(parentPostMessage).not.toHaveBeenCalled();
+      relay.destroy();
+    });
+
     it('drops the request when the sender is not a direct child iframe', () => {
       const relay = new TextSelectionWindowRelay();
       relay._isTopFrame = false;
@@ -251,6 +288,38 @@ describe('TextSelectionWindowRelay', () => {
         y: 25 + 80 + 300,
         _isViewportRelative: true,
         _isAbsolute: false
+      });
+      intermediate.destroy();
+      top.destroy();
+    });
+
+    it('accumulates nested fragment offsets without inventing selection geometry', () => {
+      const intermediate = new TextSelectionWindowRelay();
+      intermediate._isTopFrame = false;
+      const child = { child: true };
+      stubIframes([{
+        contentWindow: child,
+        getBoundingClientRect: () => ({ left: 50, top: 80 })
+      }]);
+      intermediate._handleMessage(requestMessage({
+        position: null,
+        toolbarPosition: { x: 15, y: 25 }
+      }, child));
+      const [forwarded] = parentPostMessage.mock.calls[0];
+
+      const top = new TextSelectionWindowRelay();
+      top.setSink(vi.fn());
+      const parentChild = { parentChild: true };
+      document.querySelectorAll.mockImplementation((selector) => selector === 'iframe' ? [{
+        contentWindow: parentChild,
+        getBoundingClientRect: () => ({ left: 200, top: 300 })
+      }] : []);
+      top._handleMessage({ data: forwarded, source: parentChild });
+
+      expect(top._sink.mock.calls[0][0].position).toBeNull();
+      expect(top._sink.mock.calls[0][0].toolbarPosition).toEqual({
+        // The top relay delivers child-relative coordinates; its EventCoordinator adds the final iframe offset.
+        x: 65, y: 105, _isViewportRelative: true, _isAbsolute: false
       });
       intermediate.destroy();
       top.destroy();

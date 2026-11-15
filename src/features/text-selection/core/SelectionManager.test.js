@@ -5,8 +5,54 @@ import { ExtensionContextManager } from '@/core/extensionContext.js';
 import { pageEventBus } from '@/core/PageEventBus.js';
 import { SELECTION_EVENTS } from '@/features/text-selection/events/SelectionEvents.js';
 import settingsManager from '@/shared/managers/SettingsManager.js';
+import { SelectionTranslationMode } from '@/shared/config/config.js';
 
 const rect = (left, bottom, width, height) => ({ left, bottom, width, height });
+
+const createCrossRootSelection = () => {
+  const container = document.createElement('div');
+  container.append(document.createElement('i'), document.createElement('i'));
+  const host = document.createElement('shreddit-subreddit-header');
+  container.append(host);
+  document.body.append(container);
+  const root = host.attachShadow({ mode: 'open' });
+  const endingPhrase = 'Community Guide Insiders Updating their PC';
+  const fragment = `${'x'.repeat(226)} `;
+  const text = document.createTextNode(fragment);
+  root.append(text);
+  const tooltip = document.createElement('rpl-tooltip');
+  const endContainer = document.createElement('div');
+  tooltip.append(endContainer);
+  host.append(document.createTextNode(endingPhrase), tooltip);
+
+  const nativeRange = document.createRange();
+  nativeRange.setStart(container, 2);
+  nativeRange.collapse(true);
+  nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
+  const composedRange = { startContainer: text, startOffset: 0, endContainer, endOffset: 0, collapsed: false };
+  const selectedText = `${fragment}${endingPhrase}`;
+  const selection = {
+    rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
+    getRangeAt: () => nativeRange,
+    getComposedRanges: vi.fn(({ shadowRoots }) => shadowRoots.includes(root) ? [composedRange] : []),
+    toString: () => selectedText
+  };
+  return { container, host, root, text, tooltip, endContainer, nativeRange, composedRange, selection, fragment, endingPhrase, selectedText };
+};
+
+const mockFragmentGeometry = (geometry = rect(100, 135, 1008, 35)) => {
+  const measured = [];
+  const createRange = document.createRange.bind(document);
+  vi.spyOn(document, 'createRange').mockImplementation(() => {
+    const range = createRange();
+    range.getBoundingClientRect = () => {
+      measured.push({ startContainer: range.startContainer, startOffset: range.startOffset, endContainer: range.endContainer, endOffset: range.endOffset });
+      return geometry;
+    };
+    return range;
+  });
+  return measured;
+};
 
 const createCollapsedShadowSelection = () => {
   const container = document.createElement('div');
@@ -706,6 +752,156 @@ describe('SelectionManager selection geometry', () => {
     expect(emptySelection.getComposedRanges).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['a mismatched native boundary', (fixture) => {
+      fixture.nativeRange.setStart(fixture.container, 1);
+      fixture.nativeRange.collapse(true);
+    }],
+    ['a non-collapsed native range', (fixture) => { fixture.nativeRange.setEnd(fixture.container, 3); }],
+    ['a mismatched anchor node', (fixture) => { fixture.selection.anchorNode = fixture.container.childNodes[0]; }],
+    ['a mismatched focus node', (fixture) => { fixture.selection.focusNode = fixture.container.childNodes[0]; }],
+    ['a mismatched anchor boundary', (fixture) => { fixture.selection.anchorOffset += 1; }],
+    ['a mismatched focus boundary', (fixture) => { fixture.selection.focusOffset += 1; }],
+    ['an end outside the native host', (fixture) => {
+      fixture.endContainer = document.createElement('div');
+      fixture.container.append(fixture.endContainer);
+      fixture.composedRange.endContainer = fixture.endContainer;
+    }],
+    ['a wrong end root', (fixture) => {
+      const otherHost = document.createElement('div');
+      fixture.host.append(otherHost);
+      const otherRoot = otherHost.attachShadow({ mode: 'open' });
+      const end = document.createElement('div');
+      otherRoot.append(end);
+      fixture.composedRange.endContainer = end;
+    }],
+    ['an end offset other than zero', (fixture) => { fixture.composedRange.endOffset = 1; }],
+    ['the host itself as the end container', (fixture) => {
+      fixture.composedRange.endContainer = fixture.host;
+      fixture.composedRange.endOffset = 0;
+    }],
+    ['a nested start root', (fixture) => {
+      const nestedHost = document.createElement('div');
+      const nestedRoot = nestedHost.attachShadow({ mode: 'open' });
+      const nestedText = document.createTextNode(fixture.fragment);
+      nestedRoot.append(nestedText);
+      fixture.root.append(nestedHost);
+      fixture.composedRange.startContainer = nestedText;
+    }],
+    ['an invalid start offset', (fixture) => { fixture.composedRange.startOffset = fixture.text.length; }],
+    ['a negative start offset', (fixture) => { fixture.composedRange.startOffset = -1; }],
+    ['a noninteger start offset', (fixture) => { fixture.composedRange.startOffset = 0.5; }],
+    ['a wrong selected prefix', (fixture) => { fixture.selection.toString = () => `prefix ${fixture.fragment}${fixture.endingPhrase}`; }],
+    ['a colliding text prefix', (fixture) => { fixture.selection.toString = () => `${fixture.fragment.trimEnd()}suffix`; }],
+    ['a whitespace-only fragment and selection', (fixture) => {
+      fixture.text.textContent = ' \n\t';
+      fixture.selection.toString = () => ' \n\t';
+    }],
+    ['a collapsed composed candidate', (fixture) => { fixture.composedRange.collapsed = true; }],
+    ['a non-immediate start UI ancestor', (fixture) => {
+      const ancestor = document.createElement('section');
+      ancestor.id = UI_HOST_IDS.MAIN;
+      fixture.root.replaceChild(ancestor, fixture.text);
+      const wrapper = document.createElement('span');
+      wrapper.append(fixture.text);
+      ancestor.append(wrapper);
+    }],
+    ['a non-immediate end UI ancestor', (fixture) => {
+      const ancestor = document.createElement('section');
+      ancestor.id = UI_HOST_IDS.MAIN;
+      fixture.host.replaceChild(ancestor, fixture.tooltip);
+      ancestor.append(fixture.tooltip);
+    }],
+    ['a UI native boundary ancestor', (fixture) => { fixture.container.id = UI_HOST_IDS.MAIN; }],
+    ['a slot on the measured start path', (fixture) => {
+      const slot = document.createElement('slot');
+      fixture.root.replaceChild(slot, fixture.text);
+      slot.append(fixture.text);
+    }],
+    ['a shadow host on the measured start path', (fixture) => {
+      const nestedHost = document.createElement('div');
+      nestedHost.attachShadow({ mode: 'open' });
+      const wrapper = document.createElement('span');
+      wrapper.append(fixture.text);
+      nestedHost.append(wrapper);
+      fixture.root.append(nestedHost);
+    }],
+    ['an assigned start node', (fixture) => {
+      Object.defineProperty(fixture.text, 'assignedSlot', { configurable: true, value: document.createElement('slot') });
+    }]
+  ])('rejects a cross-root icon fragment for %s', (_label, alter) => {
+    const fixture = createCrossRootSelection();
+    alter(fixture);
+    mockFragmentGeometry();
+    try {
+      expect(manager.calculateSelectionPosition(fixture.selection)).toBeNull();
+      expect(manager.calculateSelectionIconFragmentPosition(fixture.selection)).toBeNull();
+    } finally {
+      fixture.container.remove();
+    }
+  });
+
+  it.each([
+    ['zero width', rect(100, 135, 0, 35)],
+    ['zero height', rect(100, 135, 1008, 0)],
+    ['nonfinite left', rect(Number.NaN, 135, 1008, 35)],
+    ['nonfinite bottom', rect(100, Number.NaN, 1008, 35)],
+    ['nonfinite width', rect(100, 135, Number.NaN, 35)],
+    ['nonfinite height', rect(100, 135, 1008, Number.NaN)]
+  ])('rejects cross-root icon fragment with %s', (_label, geometry) => {
+    const fixture = createCrossRootSelection();
+    mockFragmentGeometry(geometry);
+    try {
+      expect(manager.calculateSelectionIconFragmentPosition(fixture.selection)).toBeNull();
+    } finally {
+      fixture.container.remove();
+    }
+  });
+
+  it('measures only the selected suffix when its composed start offset is nonzero', () => {
+    const fixture = createCrossRootSelection();
+    const prefix = 'prefix123';
+    fixture.text.textContent = `${prefix}${fixture.fragment}`;
+    fixture.composedRange.startOffset = prefix.length;
+    const measured = mockFragmentGeometry();
+    try {
+      expect(manager.calculateSelectionIconFragmentPosition(fixture.selection)).not.toBeNull();
+      expect(measured).toEqual([{
+        startContainer: fixture.text,
+        startOffset: prefix.length,
+        endContainer: fixture.text,
+        endOffset: fixture.text.length
+      }]);
+    } finally {
+      fixture.container.remove();
+    }
+  });
+
+  it.each([
+    ['top frame', false, { x: 599, y: 149, _isViewportRelative: false }],
+    ['iframe', true, { x: 592, y: 138, _isViewportRelative: true }]
+  ])('measures only the selected text suffix for the cross-root icon in a %s', (_label, isIframe, expected) => {
+    const fixture = createCrossRootSelection();
+    vi.spyOn(window, 'scrollX', 'get').mockReturnValue(7);
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(11);
+    if (isIframe) vi.spyOn(window, 'top', 'get').mockReturnValue({});
+    const measured = mockFragmentGeometry();
+    try {
+      expect(fixture.selectedText).toHaveLength(269);
+      expect(fixture.fragment).toHaveLength(227);
+      expect(manager.calculateSelectionPosition(fixture.selection)).toBeNull();
+      expect(manager.calculateSelectionIconFragmentPosition(fixture.selection)).toEqual(expected);
+      expect(measured).toEqual([{
+        startContainer: fixture.text,
+        startOffset: 0,
+        endContainer: fixture.text,
+        endOffset: fixture.text.length
+      }]);
+    } finally {
+      fixture.container.remove();
+    }
+  });
+
   it('rejects collapsed and zero-geometry composed ranges', () => {
     const host = document.createElement('div');
     const root = host.attachShadow({ mode: 'open' });
@@ -883,6 +1079,100 @@ describe('SelectionManager duplicate selection events', () => {
       ]);
     } finally {
       clearTimeout(pendingShow);
+      manager.cleanup();
+    }
+  });
+});
+
+describe('SelectionManager cross-root multi-click icon fallback', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('emits complete selection text with null selection position and relays only fragment toolbar geometry', async () => {
+    const manager = new SelectionManager();
+    const fixture = createCrossRootSelection();
+    const events = vi.fn();
+    const normalPosition = { x: 9, y: 55, _isViewportRelative: false };
+    const mouseToolbarPosition = { x: 500, y: 500 };
+    vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+    vi.spyOn(settingsManager, 'get').mockImplementation((_key, fallback) => fallback);
+    vi.spyOn(manager, 'calculateSelectionPosition')
+      .mockReturnValueOnce(normalPosition)
+      .mockImplementationOnce((selection) => SelectionManager.prototype.calculateSelectionPosition.call(manager, selection));
+    vi.spyOn(manager, 'checkExclusion').mockResolvedValue(false);
+    vi.spyOn(manager, 'isWindowVisible').mockReturnValue(false);
+    vi.spyOn(manager, 'showTranslationUI').mockResolvedValue(undefined);
+    mockFragmentGeometry();
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+
+    try {
+      await manager.processSelection(fixture.selectedText, {}, {
+        displayInteraction: 'multi-click', selectionInteractionId: 1
+      });
+      await manager.processSelection(fixture.selectedText, fixture.selection, {
+        displayInteraction: 'multi-click', selectionInteractionId: 2,
+        toolbarPosition: mouseToolbarPosition
+      });
+
+      const first = events.mock.calls[0][0];
+      const second = events.mock.calls[1][0];
+      const fragmentPosition = { x: 592, y: 138, _isViewportRelative: false };
+      expect(first).toEqual(expect.objectContaining({ text: fixture.selectedText, position: normalPosition }));
+      expect(second).toEqual(expect.objectContaining({
+        text: fixture.selectedText,
+        position: null,
+        toolbarPosition: fragmentPosition
+      }));
+      expect(second.toolbarPosition).not.toEqual(mouseToolbarPosition);
+      expect(manager.showTranslationUI).toHaveBeenNthCalledWith(2, fixture.selectedText, null,
+        expect.objectContaining({ displayInteraction: 'multi-click', selectionInteractionId: 2 }), fragmentPosition);
+    } finally {
+      pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+      fixture.container.remove();
+      manager.cleanup();
+    }
+  });
+
+  it.each([
+    [SelectionTranslationMode.IMMEDIATE, 'multi-click'],
+    [SelectionTranslationMode.ON_CLICK, 'keyboard'],
+    [SelectionTranslationMode.ON_CLICK, 'single-click']
+  ])('does not use the icon fallback for mode %s and interaction %s', async (mode, displayInteraction) => {
+    const manager = new SelectionManager();
+    const events = vi.fn();
+    vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+    vi.spyOn(settingsManager, 'get').mockImplementation((key, fallback) =>
+      key === 'selectionTranslationMode' ? mode : fallback
+    );
+    vi.spyOn(manager, 'calculateSelectionPosition').mockReturnValue(null);
+    const fragmentFallback = vi.spyOn(manager, 'calculateSelectionIconFragmentPosition').mockReturnValue({ x: 1, y: 2 });
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+
+    try {
+      await manager.processSelection('selection', {}, { displayInteraction, toolbarPosition: { x: 9, y: 9 } });
+      expect(fragmentFallback).not.toHaveBeenCalled();
+      expect(events).not.toHaveBeenCalled();
+    } finally {
+      pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+      manager.cleanup();
+    }
+  });
+
+  it('does not fall back to the incoming mouse toolbar when fragment geometry fails', async () => {
+    const manager = new SelectionManager();
+    const events = vi.fn();
+    vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+    vi.spyOn(settingsManager, 'get').mockImplementation((_key, fallback) => fallback);
+    vi.spyOn(manager, 'calculateSelectionPosition').mockReturnValue(null);
+    const fragmentFallback = vi.spyOn(manager, 'calculateSelectionIconFragmentPosition').mockReturnValue(null);
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+    try {
+      await manager.processSelection('selection', {}, {
+        displayInteraction: 'multi-click', toolbarPosition: { x: 50, y: 60 }
+      });
+      expect(fragmentFallback).toHaveBeenCalledOnce();
+      expect(events).not.toHaveBeenCalled();
+    } finally {
+      pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
       manager.cleanup();
     }
   });

@@ -40,7 +40,8 @@ The system uses three primary events defined in `src/features/text-selection/eve
 
 *   **`GLOBAL_SELECTION_CHANGE`**: Broadcasted when new text is selected.
     *   *Payload*: `{ text, position, mode, options, context, toolbarPosition? }`
-    *   `position` remains the selection-derived position for subscribers and translation windows. `toolbarPosition` is an optional recent primary mouse-release position, used only to place the ON_CLICK icon; keyboard selections and other display modes fall back to `position`. Iframe requests carry it separately and accumulate direct-child iframe offsets like `position` while preserving viewport-relative coordinates.
+    *   `position` remains the selection-derived position for subscribers and translation windows. `toolbarPosition` is an optional icon-only anchor, normally a recent primary mouse-release position; keyboard selections and other display modes fall back to `position`. Iframe requests carry it separately and accumulate direct-child iframe offsets while preserving viewport-relative coordinates.
+    *   For ON_CLICK multi-click selections with unavailable full-selection geometry, a composed start-text suffix may supply `toolbarPosition` only after validating the collapsed native boundary, exact open-root host ownership, a document endpoint inside that host, unambiguous non-UI start ancestry, normalized selected-text prefix, and finite positive same-root geometry. The complete original text is retained and `position` stays `null`; mouse coordinates and host rectangles cannot rescue a failed fragment check. Immediate/FAB modes and pinned/docked window updates do not consume fragment-only requests.
 *   **`GLOBAL_SELECTION_CLEAR`**: Unified signal to hide selection-aware UI elements.
     *   *Payload*: `{ reason, mode }`
 *   **`GLOBAL_SELECTION_TRIGGER`**: Emitted by a UI (like FAB) to request a full translation display.
