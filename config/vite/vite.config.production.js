@@ -364,6 +364,7 @@ export default defineConfig({
       'src/features/translation/providers/BingTranslate.js',
       'src/features/translation/providers/OpenRouter.js',
       'src/features/translation/providers/Requesty.js',
+      'src/features/translation/providers/CheaperInference.js',
       'src/features/translation/providers/WebAI.js',
       'src/features/translation/providers/CustomProvider.js',
       'src/features/translation/providers/BrowserAPI.js',

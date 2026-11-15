@@ -1663,7 +1663,7 @@ const isProviderInverted = (providerId) => {
     effectiveId = settingsStore.settings?.TRANSLATION_API || "googlev2";
   }
 
-  const blackIcons = ["deepl", "openai", "openrouter", "requesty", "webai"];
+  const blackIcons = ["deepl", "openai", "openrouter", "requesty", "cheaperinference", "webai"];
   return blackIcons.includes(effectiveId);
 };
 

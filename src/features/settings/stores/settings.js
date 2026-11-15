@@ -94,13 +94,14 @@ export const useSettingsStore = defineStore('settings', () => {
   let windowShowOriginalSyncQueue = Promise.resolve()
   const apiKeySettingKeys = new Set([
     'API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'REQUESTY_API_KEY',
-    'DEEPSEEK_API_KEY', 'GEMINI_API_KEY', 'CUSTOM_API_KEY', 'DEEPL_API_KEY'
+    'CHEAPERINFERENCE_API_KEY', 'DEEPSEEK_API_KEY', 'GEMINI_API_KEY', 'CUSTOM_API_KEY', 'DEEPL_API_KEY'
   ])
   const settingDraftGroups = [
     ['GEMINI_MODEL', 'GEMINI_MODEL_SOURCE', 'GEMINI_API_URL'],
     ['OPENAI_API_MODEL', 'OPENAI_MODEL_SOURCE'],
     ['OPENROUTER_API_MODEL', 'OPENROUTER_MODEL_SOURCE'],
     ['REQUESTY_API_MODEL'],
+    ['CHEAPERINFERENCE_API_MODEL'],
     ['DEEPSEEK_API_MODEL', 'DEEPSEEK_MODEL_SOURCE'],
     ['WEBAI_API_MODEL']
   ]

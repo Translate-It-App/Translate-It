@@ -488,7 +488,7 @@ describe('Settings Store', () => {
       const onChange = await getStorageChangeListener(store);
       const modelKeys = [
         'GEMINI_MODEL', 'OPENAI_API_MODEL', 'OPENROUTER_API_MODEL',
-        'REQUESTY_API_MODEL', 'DEEPSEEK_API_MODEL', 'WEBAI_API_MODEL'
+        'REQUESTY_API_MODEL', 'CHEAPERINFERENCE_API_MODEL', 'DEEPSEEK_API_MODEL', 'WEBAI_API_MODEL'
       ];
 
       store.updateSettingLocally('OPENAI_API_MODEL', 'draft/openai');

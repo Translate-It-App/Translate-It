@@ -529,7 +529,7 @@ const showExamples = createSetting('DICTIONARY_SHOW_EXAMPLES', false)
 
 // --- Provider & Language Logic ---
 
-const isAIProvider = computed(() => ['gemini', 'openai', 'openrouter', 'requesty', 'deepseek', 'webai', 'custom'].includes(selectedProvider.value))
+const isAIProvider = computed(() => ['gemini', 'openai', 'openrouter', 'requesty', 'cheaperinference', 'deepseek', 'webai', 'custom'].includes(selectedProvider.value))
 const isAutoLanguageProvider = computed(() => selectedProviderInfo.value?.features?.includes('autoLanguage'))
 const selectedProviderInfo = computed(() => findProviderById(selectedProvider.value))
 const verifiedDeepLLanguageCatalog = computed(() => {

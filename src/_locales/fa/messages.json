@@ -86,6 +86,9 @@
   "api_provider_requesty": {
     "message": "Requesty"
   },
+  "api_provider_cheaperinference": {
+    "message": "Cheaper Inference"
+  },
   "api_provider_deepseek": {
     "message": "DeepSeek"
   },
@@ -233,11 +236,17 @@
   "provider_requesty_title": {
     "message": "Requesty"
   },
+  "provider_cheaperinference_title": {
+    "message": "Cheaper Inference"
+  },
   "provider_openrouter_description": {
     "message": "دسترسی به مجموعه‌ای از مدل‌های هوش مصنوعی از طریق OpenRouter. نیاز به کلید API دارد."
   },
   "provider_requesty_description": {
     "message": "دسترسی به مجموعه‌ای از مدل‌های هوش مصنوعی از طریق Requesty. نیاز به کلید API دارد."
+  },
+  "provider_cheaperinference_description": {
+    "message": "دسترسی به مجموعه‌ای از مدل‌های هوش مصنوعی از طریق Cheaper Inference. نیاز به کلید API دارد."
   },
   "provider_deepseek_title": {
     "message": "DeepSeek"
@@ -959,6 +968,9 @@
   "help_api_providers_requesty": {
     "message": "Requesty - دسترسی به چندین مدل از طریق [Requesty]({url})"
   },
+  "help_api_providers_cheaperinference": {
+    "message": "Cheaper Inference - دسترسی به چندین مدل از طریق [Cheaper Inference]({url})"
+  },
   "help_api_providers_deepseek": {
     "message": "DeepSeek - دریافت دسترسی API از [DeepSeek Platform]({url})"
   },
@@ -1397,6 +1409,9 @@
   "requesty_api_key_info": {
     "message": "شما می‌توانید کلید API خود را از وبسایت Requesty دریافت کنید."
   },
+  "cheaperinference_api_key_info": {
+    "message": "شما می‌توانید کلید API خود را از وبسایت Cheaper Inference دریافت کنید."
+  },
   "webai_api_key_info": {
     "message": "شما می‌توانید یک API Server شخصی در کامپیوتر خود اجرا کنید."
   },
@@ -1413,6 +1428,9 @@
     "message": "دریافت کلید API"
   },
   "requesty_api_key_link": {
+    "message": "دریافت کلید API"
+  },
+  "cheaperinference_api_key_link": {
     "message": "دریافت کلید API"
   },
   "webai_api_key_link": {
@@ -1583,6 +1601,9 @@
   "requesty_api_settings_title": {
     "message": "تنظیمات Requesty"
   },
+  "cheaperinference_api_settings_title": {
+    "message": "تنظیمات Cheaper Inference"
+  },
   "openrouter_api_settings_api_key_label": {
     "message": "کلید API"
   },
@@ -1592,34 +1613,67 @@
   "requesty_api_key_placeholder": {
     "message": "کلید API خود را اینجا وارد کنید"
   },
+  "cheaperinference_api_key_placeholder": {
+    "message": "کلید API خود را اینجا وارد کنید"
+  },
   "requesty_catalog_search_label": {
     "message": "جستجوی مدل‌های Requesty"
   },
+  "cheaperinference_catalog_search_label": {
+    "message": "جستجوی مدل‌های Cheaper Inference"
+  },
   "requesty_catalog_search_placeholder": {
+    "message": "جستجو بر اساس شناسه یا نام مدل"
+  },
+  "cheaperinference_catalog_search_placeholder": {
     "message": "جستجو بر اساس شناسه یا نام مدل"
   },
   "requesty_catalog_results_label": {
     "message": "مدل‌های موجود Requesty"
   },
+  "cheaperinference_catalog_results_label": {
+    "message": "مدل‌های موجود Cheaper Inference"
+  },
   "requesty_catalog_showing_count": {
+    "message": "نمایش {shown} از {total} مدل منطبق"
+  },
+  "cheaperinference_catalog_showing_count": {
     "message": "نمایش {shown} از {total} مدل منطبق"
   },
   "requesty_catalog_no_matches": {
     "message": "مدلی با جستجوی شما مطابقت ندارد."
   },
+  "cheaperinference_catalog_no_matches": {
+    "message": "مدلی با جستجوی شما مطابقت ندارد."
+  },
   "requesty_models_loading": {
+    "message": "در حال بارگذاری فهرست مدل‌ها…"
+  },
+  "cheaperinference_models_loading": {
     "message": "در حال بارگذاری فهرست مدل‌ها…"
   },
   "requesty_models_discovery_failed": {
     "message": "بارگذاری مدل‌های Requesty ممکن نشد."
   },
+  "cheaperinference_models_discovery_failed": {
+    "message": "بارگذاری مدل‌های Cheaper Inference ممکن نشد."
+  },
   "requesty_models_empty": {
     "message": "Requesty هیچ مدلی برنگرداند."
+  },
+  "cheaperinference_models_empty": {
+    "message": "Cheaper Inference هیچ مدلی برنگرداند."
   },
   "requesty_model_not_listed": {
     "message": "مدل ذخیره‌شده در فهرست Requesty نبود."
   },
+  "cheaperinference_model_not_listed": {
+    "message": "مدل ذخیره‌شده در فهرست Cheaper Inference نبود."
+  },
   "requesty_saved_model_label": {
+    "message": "مدل ذخیره‌شده"
+  },
+  "cheaperinference_saved_model_label": {
     "message": "مدل ذخیره‌شده"
   },
   "openrouter_api_settings_model_label": {
@@ -2518,10 +2572,16 @@
   "requesty_custom_model_placeholder": {
     "message": "نام مدل را وارد کنید (مثل: ارائه‌دهنده/نام-مدل)"
   },
+  "cheaperinference_custom_model_placeholder": {
+    "message": "نام مدل را وارد کنید (مثل: نام-مدل)"
+  },
   "openrouter_custom_model_label": {
     "message": "نام مدل"
   },
   "requesty_custom_model_label": {
+    "message": "نام مدل"
+  },
+  "cheaperinference_custom_model_label": {
     "message": "نام مدل"
   },
   "deepseek_custom_model_placeholder": {

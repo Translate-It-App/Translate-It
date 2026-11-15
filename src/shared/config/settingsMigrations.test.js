@@ -663,6 +663,18 @@ describe('Settings Migrations', () => {
     expect(current.updates.REQUESTY_API_MODEL).toBeUndefined();
   });
 
+  it.each(CONFIG.CHEAPERINFERENCE_MODELS
+    .filter(model => model.value !== 'custom')
+    .map(model => model.value))('preserves curated Cheaper Inference model ID %s during list synchronization', async (model) => {
+    const current = await runSettingsMigrations({
+      CHEAPERINFERENCE_MODELS: [{ value: 'legacy-model', label: 'Legacy' }],
+      CHEAPERINFERENCE_API_MODEL: model
+    });
+
+    expect(current.updates.CHEAPERINFERENCE_MODELS).toEqual(CONFIG.CHEAPERINFERENCE_MODELS);
+    expect(current.updates.CHEAPERINFERENCE_API_MODEL).toBeUndefined();
+  });
+
   it('preserves removed and arbitrary OpenRouter model IDs during list synchronization', async () => {
     const removed = await runSettingsMigrations({
       OPENROUTER_MODELS: [{ value: 'legacy-model', label: 'Legacy' }],
