@@ -877,6 +877,35 @@ describe('SelectionManager selection geometry', () => {
     }
   });
 
+  it('accepts the host-root fragment with unrelated roots present without scanning descendants', () => {
+    const fixture = createCrossRootSelection();
+    const unrelatedHost = document.createElement('section');
+    const unrelatedRoot = unrelatedHost.attachShadow({ mode: 'open' });
+    unrelatedRoot.append(document.createTextNode('unrelated selection'));
+    fixture.container.append(unrelatedHost);
+    const scanDescendants = vi.spyOn(manager, 'getDescendantSelectionShadowRoots');
+    mockFragmentGeometry();
+    try {
+      expect(manager.calculateSelectionIconFragmentPosition(fixture.selection)).not.toBeNull();
+      expect(fixture.selection.getComposedRanges).toHaveBeenCalledWith({ shadowRoots: [fixture.root] });
+      expect(scanDescendants).not.toHaveBeenCalled();
+    } finally {
+      fixture.container.remove();
+    }
+  });
+
+  it('keeps a Light DOM endpoint inside the host when its ancestor has a nested ShadowRoot', () => {
+    const fixture = createCrossRootSelection();
+    fixture.tooltip.attachShadow({ mode: 'open' }).append(document.createTextNode('tooltip shadow content'));
+    mockFragmentGeometry();
+    try {
+      expect(manager.calculateSelectionIconFragmentPosition(fixture.selection)).not.toBeNull();
+      expect(fixture.selection.getComposedRanges).toHaveBeenCalledWith({ shadowRoots: [fixture.root] });
+    } finally {
+      fixture.container.remove();
+    }
+  });
+
   it.each([
     ['top frame', false, { x: 599, y: 149, _isViewportRelative: false }],
     ['iframe', true, { x: 592, y: 138, _isViewportRelative: true }]
@@ -1093,6 +1122,7 @@ describe('SelectionManager cross-root multi-click icon fallback', () => {
     const events = vi.fn();
     const normalPosition = { x: 9, y: 55, _isViewportRelative: false };
     const mouseToolbarPosition = { x: 500, y: 500 };
+    const scanDescendants = vi.spyOn(manager, 'getDescendantSelectionShadowRoots');
     vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
     vi.spyOn(settingsManager, 'get').mockImplementation((_key, fallback) => fallback);
     vi.spyOn(manager, 'calculateSelectionPosition')
@@ -1123,6 +1153,7 @@ describe('SelectionManager cross-root multi-click icon fallback', () => {
         toolbarPosition: mouseToolbarPosition
       }));
       expect(manager.calculateSelectionIconFragmentPosition).toHaveBeenCalledWith(fixture.selection);
+      expect(scanDescendants).toHaveBeenCalledOnce();
       expect(manager.showTranslationUI).toHaveBeenNthCalledWith(2, fixture.selectedText, null,
         expect.objectContaining({ displayInteraction: 'multi-click', selectionInteractionId: 2 }), mouseToolbarPosition);
     } finally {

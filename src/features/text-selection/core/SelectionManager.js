@@ -230,12 +230,6 @@ export class SelectionManager extends ResourceTracker {
     if (host?.nodeType !== Node.ELEMENT_NODE || !host.shadowRoot || host.shadowRoot.mode !== 'open' ||
         host.shadowRoot.host !== host) return null;
 
-    const shadowRoots = new Set([
-      ...this.getSelectionShadowRoots(selection),
-      ...this.getDescendantSelectionShadowRoots(selection)
-    ]);
-    if (!shadowRoots.has(host.shadowRoot)) return null;
-
     const uiHostIds = new Set(Object.values(UI_HOST_IDS));
     const hasUiHostAncestor = (node) => {
       let current = node;
@@ -260,7 +254,7 @@ export class SelectionManager extends ResourceTracker {
 
     let composedRanges;
     try {
-      composedRanges = selection.getComposedRanges({ shadowRoots: [...shadowRoots] });
+      composedRanges = selection.getComposedRanges({ shadowRoots: [host.shadowRoot] });
     } catch {
       return null;
     }
