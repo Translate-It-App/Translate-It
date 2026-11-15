@@ -79,16 +79,16 @@
             class="error-actions"
           >
             <button
-              type="button"
               v-if="canRetry"
+              type="button"
               class="error-action retry-btn"
               @click="handleRetry"
             >
               🔄 {{ t("action_retry") }}
             </button>
             <button
-              type="button"
               v-if="canOpenSettings"
+              type="button"
               class="error-action settings-btn"
               @click="handleSettings"
             >
