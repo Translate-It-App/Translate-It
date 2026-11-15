@@ -315,6 +315,8 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
 
   cleanup() {
     this._clearSelectionContinuation();
+    this._primaryMouseDown = null;
+    this._toolbarReleaseCandidate = null;
     super.cleanup();
   }
 
@@ -736,6 +738,7 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
           currentRange,
           !!pendingDisplayRestore,
         );
+        const verifiedDragFragmentFallback = toolbarPosition?.verifiedDrag === true;
         const selectionUnchanged = selectedText === this._lastSelectionText && currentRange &&
           this._lastSelectionRange && this._isSameRange(currentRange, this._lastSelectionRange);
         const samePriorSelection = selectionUnchanged &&
@@ -752,7 +755,8 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
             ? { selectionInteractionId: this._lastSelectionInteractionId }
             : {}),
           ...(pendingDisplayRestore ? { pendingDisplayRestore } : {}),
-          ...(toolbarPosition ? { toolbarPosition } : {}),
+          ...(toolbarPosition?.position ? { toolbarPosition: toolbarPosition.position } : {}),
+          ...(verifiedDragFragmentFallback ? { verifiedDragFragmentFallback: true } : {}),
           ...(originToken ? { selectionContinuationToken: originToken } : {}),
           ...(displayInteraction ? { displayInteraction } : {})
         });
@@ -1223,7 +1227,11 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       restoreConsumed: false,
       restoreInProgress: false,
       selectionChangeVersion: this._selectionChangeVersion,
-      selectedText: currentSelection
+      selectedText: currentSelection,
+      trustedEligible: eligibleSelectionInteraction && this._classifyComposedPath(event) === false,
+      verifiedDragMovement: false,
+      startX: event.clientX,
+      startY: event.clientY
     } : null;
     this._toolbarReleaseCandidate = null;
 
@@ -1252,9 +1260,14 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
   /**
    * Handle mouse move - simple drag detection
    */
-  handleMouseMove() {
-    // Not needed for simplified triple-click + drag
-    // We only care about mouse up to end the drag
+  handleMouseMove(event) {
+    const down = this._primaryMouseDown;
+    if (!down?.trustedEligible || down.verifiedDragMovement || event?.isTrusted !== true ||
+        !(event.buttons & 1) || this._classifyComposedPath(event) !== false ||
+        !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY) ||
+        !Number.isFinite(down.startX) || !Number.isFinite(down.startY) ||
+        (event.clientX === down.startX && event.clientY === down.startY)) return;
+    down.verifiedDragMovement = true;
   }
 
   handleClick(event) {
@@ -1335,6 +1348,12 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
       ? mouseDown?.selectionInteractionId ?? null
       : null;
     const currentSelection = window.getSelection()?.toString().trim() || '';
+    const trustedDragRelease = event.isTrusted === true && event.button === 0 && mouseDown?.trustedEligible &&
+      mouseDown.verifiedDragMovement && this._classifyComposedPath(event) === false;
+    const releaseSelection = window.getSelection();
+    const currentRange = releaseSelection?.rangeCount && typeof releaseSelection.getRangeAt === 'function'
+      ? releaseSelection.getRangeAt(0)
+      : null;
     this._toolbarReleaseCandidate = event.button === 0 && mouseDown &&
       Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
       ? {
@@ -1345,7 +1364,14 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
           timestamp: Date.now(),
           selectionChangeVersion: mouseDown.selectionChangeVersion,
           selectedTextAtRelease: currentSelection,
-          selectedTextAtPress: mouseDown.selectedText
+          selectedTextAtPress: mouseDown.selectedText,
+          verifiedDrag: trustedDragRelease,
+          rangeAtRelease: trustedDragRelease && currentRange ? {
+            startContainer: currentRange.startContainer,
+            startOffset: currentRange.startOffset,
+            endContainer: currentRange.endContainer,
+            endOffset: currentRange.endOffset
+          } : null
         }
       : null;
     this._lastMouseUpDiagnostics = {
@@ -1540,10 +1566,20 @@ export class SimpleTextSelectionHandler extends ResourceTracker {
     const isTopFrame = window === window.top;
     const scrollX = isTopFrame ? window.scrollX : 0;
     const scrollY = isTopFrame ? window.scrollY : 0;
+    const verifiedDrag = candidate.verifiedDrag === true && candidate.rangeAtRelease &&
+      candidate.selectionChangeVersion !== this._selectionChangeVersion &&
+      candidate.selectedTextAtRelease === selectedText && currentRange &&
+      currentRange.startContainer === candidate.rangeAtRelease.startContainer &&
+      currentRange.startOffset === candidate.rangeAtRelease.startOffset &&
+      currentRange.endContainer === candidate.rangeAtRelease.endContainer &&
+      currentRange.endOffset === candidate.rangeAtRelease.endOffset;
     return {
-      x: candidate.x + scrollX,
-      y: candidate.y + 10 + scrollY,
-      _isViewportRelative: !isTopFrame
+      position: {
+        x: candidate.x + scrollX,
+        y: candidate.y + 10 + scrollY,
+        _isViewportRelative: !isTopFrame
+      },
+      verifiedDrag
     };
   }
 

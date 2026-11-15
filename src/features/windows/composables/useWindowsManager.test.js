@@ -135,4 +135,25 @@ describe('useWindowsManager toolbar continuation updates', () => {
     ]);
     manager.cleanupEventListeners();
   });
+
+  it('preserves an explicit null selection position for new and continuation icon events', () => {
+    const manager = useWindowsManager();
+    manager.setupEventListeners();
+    const token = { originFrameId: 'frame-a', sequence: 10 };
+
+    eventBus.emit(WINDOWS_MANAGER_EVENTS.SHOW_ICON, {
+      id: 'icon-null-anchor', text: 'selected', position: { x: 5, y: 6 },
+      selectionPosition: null, selectionContinuationToken: token,
+    });
+    expect(manager.translationIcons.value[0].selectionPosition).toBeNull();
+
+    eventBus.emit(WINDOWS_MANAGER_EVENTS.SHOW_ICON, {
+      id: 'icon-null-anchor', text: 'full selected text', position: { x: 7, y: 8 },
+      selectionPosition: null, selectionContinuationToken: token,
+    });
+    expect(manager.translationIcons.value).toMatchObject([{
+      id: 'icon-null-anchor', text: 'full selected text', selectionPosition: null,
+    }]);
+    manager.cleanupEventListeners();
+  });
 });

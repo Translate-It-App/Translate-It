@@ -98,27 +98,35 @@ export class SelectionManager extends ResourceTracker {
       return;
     }
 
-    // Calculate position for the translation UI
+    const selectionTranslationMode = settingsManager.get('selectionTranslationMode', SelectionTranslationMode.ON_CLICK);
+    const {
+      toolbarPosition: incomingToolbarPosition,
+      selectionContinuationToken,
+      displayInteraction,
+      selectionInteractionId,
+      verifiedDragFragmentFallback,
+      ...selectionOptions
+    } = options;
+
+    // Keep selection geometry and the click icon's fragment geometry separate.
     const position = this.calculateSelectionPosition(selection);
-    
-    // CRITICAL: If we can't calculate a valid position, it's almost certainly 
-    // a selection inside a Shadow DOM (our own UI) or an invalid range.
-    // In this case, we MUST NOT emit events or show any UI.
+    let toolbarPosition = incomingToolbarPosition;
     if (!position) {
-      this.logger.debug('Skipping selection: Invalid position (likely inside Shadow DOM)');
-      return;
+      const fragmentPosition = selectionTranslationMode === SelectionTranslationMode.ON_CLICK &&
+        (displayInteraction === 'multi-click' || verifiedDragFragmentFallback === true)
+        ? this.calculateSelectionIconFragmentPosition(selection)
+        : null;
+      if (!fragmentPosition) {
+        this.logger.debug('Skipping selection: Selection geometry unavailable');
+        return;
+      }
+      const hasValidIncomingToolbarPosition = Number.isFinite(incomingToolbarPosition?.x) &&
+        Number.isFinite(incomingToolbarPosition?.y);
+      toolbarPosition = hasValidIncomingToolbarPosition ? incomingToolbarPosition : fragmentPosition;
     }
 
     // 1. Emit global selection event (Coordinator Pattern)
     // This allows any module (like FAB or TTS) to react independently
-    const selectionTranslationMode = settingsManager.get('selectionTranslationMode', SelectionTranslationMode.ON_CLICK);
-    const {
-      toolbarPosition,
-      selectionContinuationToken,
-      displayInteraction,
-      selectionInteractionId,
-      ...selectionOptions
-    } = options;
     const suppressWindowsManagerDisplay = this.isDuplicateSelection(
       selectedText,
       Date.now(),
@@ -202,6 +210,104 @@ export class SelectionManager extends ResourceTracker {
     this.lastProcessedTime = currentTime;
     this.lastProcessedSelectionInteractionId = selectionInteractionId ?? null;
     return true;
+  }
+
+  calculateSelectionIconFragmentPosition(selection) {
+    if (!selection || selection.rangeCount === 0 || typeof selection.getComposedRanges !== 'function' ||
+        !selection.toString().trim()) return null;
+
+    let nativeRange;
+    try {
+      nativeRange = selection.getRangeAt(0);
+    } catch {
+      return null;
+    }
+    if (!nativeRange || !nativeRange.collapsed || nativeRange.startContainer !== nativeRange.endContainer ||
+        nativeRange.startContainer.nodeType !== Node.ELEMENT_NODE || nativeRange.startContainer.getRootNode() !== document ||
+        selection.anchorNode !== nativeRange.startContainer || selection.focusNode !== nativeRange.startContainer ||
+        selection.anchorOffset !== nativeRange.startOffset || selection.focusOffset !== nativeRange.startOffset) return null;
+
+    const host = nativeRange.startContainer.childNodes[nativeRange.startOffset];
+    if (host?.nodeType !== Node.ELEMENT_NODE || !host.shadowRoot || host.shadowRoot.mode !== 'open' ||
+        host.shadowRoot.host !== host) return null;
+
+    const uiHostIds = new Set(Object.values(UI_HOST_IDS));
+    const hasUiHostAncestor = (node) => {
+      let current = node;
+      while (current) {
+        if (current.nodeType === Node.ELEMENT_NODE && uiHostIds.has(current.id)) return true;
+        if (current.parentElement) {
+          current = current.parentElement;
+        } else {
+          const root = current.getRootNode?.();
+          current = root instanceof ShadowRoot ? root.host : null;
+        }
+      }
+      return false;
+    };
+    const hasUnmeasurableStartAncestor = (node) => {
+      if (node.assignedSlot) return true;
+      for (let element = node.parentElement; element; element = element.parentElement) {
+        if (element.tagName === 'SLOT' || element.assignedSlot || element.shadowRoot) return true;
+      }
+      return false;
+    };
+
+    let composedRanges;
+    try {
+      composedRanges = selection.getComposedRanges({ shadowRoots: [host.shadowRoot] });
+    } catch {
+      return null;
+    }
+    if (!composedRanges || typeof composedRanges[Symbol.iterator] !== 'function') return null;
+    for (const range of composedRanges) {
+      const startText = range?.startContainer;
+      const endContainer = range?.endContainer;
+      const validEndBoundary = endContainer?.nodeType === Node.ELEMENT_NODE
+        ? endContainer.getRootNode() === document && endContainer !== host && host.contains(endContainer) && range.endOffset === 0
+        : endContainer?.nodeType === Node.TEXT_NODE && endContainer.getRootNode() === document &&
+          endContainer !== host && host.contains(endContainer) && Number.isInteger(range.endOffset) &&
+          range.endOffset >= 0 && range.endOffset <= endContainer.length;
+      if (range?.collapsed !== false || startText?.nodeType !== Node.TEXT_NODE || startText.getRootNode() !== host.shadowRoot ||
+          !Number.isInteger(range.startOffset) || range.startOffset < 0 || range.startOffset > startText.length ||
+          !validEndBoundary ||
+          hasUiHostAncestor(startText) || hasUiHostAncestor(endContainer) ||
+          hasUiHostAncestor(nativeRange.startContainer) || hasUnmeasurableStartAncestor(startText)) continue;
+
+      const fragmentRange = this.createRangeFromStaticRange({
+        startContainer: startText,
+        startOffset: range.startOffset,
+        endContainer: startText,
+        endOffset: startText.length
+      });
+      if (!fragmentRange || fragmentRange.collapsed || fragmentRange.startContainer !== startText ||
+          fragmentRange.startOffset !== range.startOffset || fragmentRange.endContainer !== startText ||
+          fragmentRange.endOffset !== startText.length) continue;
+
+      const normalize = (text) => text.replace(/\s+/g, ' ').trim();
+      const fragmentText = normalize(fragmentRange.toString());
+      const selectedText = normalize(selection.toString());
+      if (!fragmentText || !selectedText ||
+          (selectedText !== fragmentText && !selectedText.startsWith(`${fragmentText} `))) continue;
+
+      let rect;
+      try {
+        rect = fragmentRange.getBoundingClientRect();
+      } catch {
+        continue;
+      }
+      if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.bottom) ||
+          !Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) continue;
+
+      const iconSize = WindowsConfig.POSITIONING.ICON_SIZE || 32;
+      const isTopFrame = window === window.top;
+      return {
+        x: rect.left + rect.width / 2 - (iconSize / 2) + (isTopFrame ? window.scrollX : 0),
+        y: rect.bottom + (WindowsConfig.POSITIONING.SELECTION_OFFSET || 10) + (isTopFrame ? window.scrollY : 0),
+        _isViewportRelative: !isTopFrame
+      };
+    }
+    return null;
   }
 
   /**

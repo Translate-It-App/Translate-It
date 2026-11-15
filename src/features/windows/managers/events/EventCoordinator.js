@@ -707,10 +707,9 @@ export class EventCoordinator {
     if (!this.crossFrameManager.isTopFrame) return;
 
     try {
-      const adjustedPosition = adjustForDirectChild(
-        sourceWindow,
-        data.position,
-      ) ?? { ...data.position };
+      const adjustedPosition = data.position === null
+        ? null
+        : adjustForDirectChild(sourceWindow, data.position) ?? { ...data.position };
       const adjustedToolbarPosition = data.toolbarPosition
         ? adjustForDirectChild(sourceWindow, data.toolbarPosition) ?? data.toolbarPosition
         : null;
