@@ -40,14 +40,14 @@ const translate = async (root, sourceText = 'Hello') => {
   const pending = [];
   const onTranslate = vi.fn((text, context, score, node) => new Promise(resolve => {
     pending.push({ text, node, resolve });
+    // Sliced discovery issues provider requests across slices, so every
+    // request is settled as soon as it arrives.
+    resolve(settlement(text === sourceText ? 'سلام' : 'عنوان'));
   }));
   const bridge = new PageTranslationBridge();
   await bridge.initialize(settings, onTranslate);
   bridge.translate(root);
   await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
-  pending.forEach(({ text, resolve }) => {
-    resolve(settlement(text === sourceText ? 'سلام' : 'عنوان'));
-  });
   return { bridge, onTranslate };
 };
 

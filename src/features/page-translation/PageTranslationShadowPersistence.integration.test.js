@@ -275,6 +275,26 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
     expect(onTranslate).not.toHaveBeenCalled();
   });
 
+  it.each(['text', 'title'])('preserves externally edited shadow %s during host retirement', async (kind) => {
+    const { shadow, host } = createHost();
+    const existing = document.createElement('span');
+    existing.textContent = 'Owned before detach';
+    existing.setAttribute('title', 'Original title');
+    shadow.appendChild(existing);
+    const { bridge } = await start();
+    track(bridge);
+    await vi.waitFor(() => expect(existing.textContent).toContain('Translated Owned before detach'));
+    await vi.waitFor(() => expect(existing.getAttribute('title')).toContain('Translated Original title'));
+
+    if (kind === 'title') existing.setAttribute('title', 'Host title edit');
+    else existing.firstChild.nodeValue = 'Host text edit';
+    host.remove();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(kind === 'title' ? existing.getAttribute('title') : existing.textContent)
+      .toBe(kind === 'title' ? 'Host title edit' : 'Host text edit');
+  });
+
   it('rejects late results after a registered host is removed', async () => {
     const { shadow } = createHost();
     const { bridge, pending } = await startDeferred();

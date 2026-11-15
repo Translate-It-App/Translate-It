@@ -114,20 +114,113 @@ export class UnifiedTranslationService {
   }
 
   async _handleTranslationRequest(message, sender) {
-    const { messageId, data, context } = message;
+    const { messageId, data, context } = message || {};
     logger.debug(`[UnifiedTranslationService] Received request: ${messageId}, context: ${context}, sessionId: ${data?.sessionId}`);
 
-    if (data) {
-      // --- Universal Dictionary Upgrade Detection ---
-      // We check for single words here to resolve the correct mode-specific provider
-      // before passing the request to the engine.
-      let effectiveMode = data.mode || TranslationMode.Selection;
-      if (await isEligibleForDictionaryUpgrade(data.text, effectiveMode, data)) {
-        logger.debug(`[UnifiedTranslationService] Detected single word, using dictionary mode for provider resolution.`);
-        effectiveMode = TranslationMode.Dictionary_Translation;
-      }
+    if (!MessageFormat.validate(message)) {
+      return MessageFormat.createErrorResponse(new Error('Invalid message format'), messageId);
+    }
 
-      data.provider = await this._resolveEffectiveProvider({ ...data, mode: effectiveMode }, context);
+    const existingRequest = this.requestTracker.getRequest(messageId);
+    if (existingRequest) {
+      return {
+        success: false,
+        error: this.requestTracker.isRequestActive(messageId)
+          ? 'Request already processing'
+          : 'Request messageId already exists'
+      };
+    }
+
+    this.translationEngine = this.translationEngine || globalThis.backgroundService?.translationEngine;
+    this.backgroundService = this.backgroundService || globalThis.backgroundService;
+
+    let request;
+    let operation;
+    let requestUnitManifest;
+    try {
+      request = this.requestTracker.createRequest({
+        messageId,
+        data,
+        sessionId: data?.sessionId || message.sessionId || messageId,
+        sender,
+        timestamp: Date.now(),
+        context
+      });
+      if (request) {
+        requestUnitManifest = createRequestUnitManifest(data?.text);
+        operation = createTranslationOperation(messageId, requestUnitManifest);
+        this._setOperation(request, operation);
+      }
+      if (!request || request.messageId !== messageId) {
+        throw new Error('Translation request registration failed');
+      }
+    } catch (error) {
+      logger.debug('Request setup failed:', error.message);
+      if (request && this.requestTracker.isRequestActive(messageId)) {
+        const transition = this.requestTracker.failRequest(messageId, error);
+        if (transition.accepted && operation) {
+          this._finalizeDiagnostics(request, { operation }, {
+            type: 'OPERATION_FAILED',
+            stage: 'service',
+            reason: error.message,
+            code: error.type,
+          });
+        }
+      }
+      return MessageFormat.createErrorResponse(error, messageId);
+    }
+
+    const suppressIfTerminal = () => {
+      if (this.requestTracker.isRequestActive(messageId) !== false) return null;
+      this.conversationAcceptanceCoordinator.remove(messageId);
+      return this._createSuppressedResponse(messageId, {
+        accepted: false,
+        status: this.requestTracker.getRequest(messageId)?.status || request.status,
+        reason: 'already_terminal',
+      });
+    };
+
+    const failPreparation = (error) => {
+      const suppressed = suppressIfTerminal();
+      if (suppressed) return suppressed;
+      const transition = this.requestTracker.failRequest(messageId, error);
+      if (!transition.accepted) {
+        this.conversationAcceptanceCoordinator.remove(messageId);
+        return this._createSuppressedResponse(messageId, transition);
+      }
+      this.conversationAcceptanceCoordinator.remove(messageId);
+      this._finalizeDiagnostics(request, { operation }, {
+        type: 'OPERATION_FAILED',
+        stage: 'service',
+        reason: error.message,
+        code: error.type,
+      });
+      return null;
+    };
+
+    // Preparation errors retain their historical rejection boundary, but the
+    // request is now owned by the tracker while asynchronous preparation runs.
+    try {
+      if (data) {
+        let effectiveMode = data.mode || TranslationMode.Selection;
+        if (await isEligibleForDictionaryUpgrade(data.text, effectiveMode, data)) {
+          logger.debug(`[UnifiedTranslationService] Detected single word, using dictionary mode for provider resolution.`);
+          effectiveMode = TranslationMode.Dictionary_Translation;
+        }
+        const suppressed = suppressIfTerminal();
+        if (suppressed) return suppressed;
+
+        const provider = await this._resolveEffectiveProvider({ ...data, mode: effectiveMode }, context);
+        const providerSuppressed = suppressIfTerminal();
+        if (providerSuppressed) return providerSuppressed;
+        data.provider = provider;
+        if (request.data) request.data.provider = provider;
+        if (request.metadata) request.metadata.provider = provider;
+      }
+    } catch (error) {
+      const suppressed = failPreparation(error);
+      if (suppressed) return suppressed;
+      throw error;
     }
 
     // Calculate estimated characters for limit validation
@@ -141,19 +234,28 @@ export class UnifiedTranslationService {
 
     // 1. Character Limit Validation
     let charLimit = 50000; // Default safety limit
-    if (context === MessageContexts.POPUP) {
-      charLimit = await getPopupMaxCharsAsync();
-    } else if (context === MessageContexts.SIDEPANEL) {
-      charLimit = await getSidepanelMaxCharsAsync();
-    } else if (mode === TranslationMode.Select_Element || mode === TranslationMode.PDF) {
-      charLimit = await getSelectElementMaxCharsAsync();
-    } else if (mode === TranslationMode.Selection || context === MessageContexts.SELECTION_MANAGER) {
-      charLimit = await getSelectionMaxCharsAsync();
+    try {
+      if (context === MessageContexts.POPUP) {
+        charLimit = await getPopupMaxCharsAsync();
+      } else if (context === MessageContexts.SIDEPANEL) {
+        charLimit = await getSidepanelMaxCharsAsync();
+      } else if (mode === TranslationMode.Select_Element || mode === TranslationMode.PDF) {
+        charLimit = await getSelectElementMaxCharsAsync();
+      } else if (mode === TranslationMode.Selection || context === MessageContexts.SELECTION_MANAGER) {
+        charLimit = await getSelectionMaxCharsAsync();
+      }
+    } catch (error) {
+      const suppressed = failPreparation(error);
+      if (suppressed) return suppressed;
+      throw error;
     }
+
+    const limitSuppressed = suppressIfTerminal();
+    if (limitSuppressed) return limitSuppressed;
 
     if (estimatedChars > charLimit) {
       logger.debug(`[UnifiedTranslationService] Text too long for context ${context}/mode ${mode}: ${estimatedChars} > ${charLimit}`);
-      return {
+      const tooLong = {
         success: false,
         error: {
           type: ErrorTypes.TEXT_TOO_LONG,
@@ -162,47 +264,28 @@ export class UnifiedTranslationService {
           timestamp: Date.now()
         }
       };
+      const suppressed = failPreparation(tooLong.error);
+      if (suppressed) return suppressed;
+      return tooLong;
     }
 
     logger.info(`Request: ${messageId} (${estimatedChars.toLocaleString()} chars, mode: ${mode}, provider: ${data?.provider || 'unknown'})`);
 
-    // Ensure dependencies are available
     if (!this.translationEngine || !this.backgroundService) {
       this.translationEngine = this.translationEngine || globalThis.backgroundService?.translationEngine;
       this.backgroundService = this.backgroundService || globalThis.backgroundService;
-      if (!this.translationEngine || !this.backgroundService) throw new Error('Translation service not initialized');
+      if (!this.translationEngine || !this.backgroundService) {
+        const error = new Error('Translation service not initialized');
+        const suppressed = failPreparation(error);
+        if (suppressed) return suppressed;
+        throw error;
+      }
     }
 
-    let tracked = false;
     try {
-      if (!MessageFormat.validate(message)) throw new Error('Invalid message format');
+      const suppressed = suppressIfTerminal();
+      if (suppressed) return suppressed;
 
-      const existingRequest = this.requestTracker.getRequest(messageId);
-      if (existingRequest) {
-        return {
-          success: false,
-          error: this.requestTracker.isRequestActive(messageId)
-            ? 'Request already processing'
-            : 'Request messageId already exists'
-        };
-      }
-
-      const request = this.requestTracker.createRequest({
-        messageId, 
-        data, 
-        sessionId: data?.sessionId || message.sessionId || messageId, 
-        sender, 
-        timestamp: Date.now(),
-        context
-      });
-      tracked = true;
-      if (!request || request.messageId !== messageId) {
-        throw new Error('Translation request registration failed');
-      }
-
-      const requestUnitManifest = createRequestUnitManifest(data?.text);
-      const operation = createTranslationOperation(messageId, requestUnitManifest);
-      this._setOperation(request, operation);
       const parentMetadata = Array.isArray(data?.conversationParents) ? data.conversationParents : [];
       const providerName = registryIdToName(data?.provider);
       const participates = await AIConversationHelper.getConversationParticipation({
@@ -227,7 +310,6 @@ export class UnifiedTranslationService {
       // Never register acceptance or start engine work after that terminal state.
       if (this.requestTracker.isRequestActive(messageId) === false) {
         this.conversationAcceptanceCoordinator.remove(messageId);
-        this._clearOperation(request);
         return this._createSuppressedResponse(messageId, {
           accepted: false,
           status: this.requestTracker.getRequest(messageId)?.status || request.status,
@@ -345,7 +427,7 @@ export class UnifiedTranslationService {
     } catch (error) {
       logger.debug('Request setup failed:', error.message);
       this.conversationAcceptanceCoordinator.remove(messageId);
-      if (tracked && this.requestTracker.isRequestActive(messageId)) {
+      if (this.requestTracker.isRequestActive(messageId)) {
         const transition = this.requestTracker.failRequest(messageId, error);
         if (!transition.accepted) return this._createSuppressedResponse(messageId, transition);
         const request = this.requestTracker.getRequest(messageId);

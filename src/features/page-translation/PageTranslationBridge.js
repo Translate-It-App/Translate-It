@@ -16,6 +16,15 @@ import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import ResourceTracker from '@/core/memory/ResourceTracker.js';
 import { walkOpenShadowTree } from '@/utils/dom/walkOpenShadowTree.js';
 import { getTranslationFontTarget } from '@/shared/fonts/TranslationFontPolicy.js';
+import {
+  PAGE_TRANSLATION_SLICED_DISCOVERY,
+  PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY,
+  PAGE_TRANSLATION_DISCOVERY_SLICE_MAX_STEPS,
+  PAGE_TRANSLATION_DISCOVERY_SLICE_BUDGET_MS,
+  PAGE_TRANSLATION_VIEWPORT_WINDOW_ENUMERATION_STEPS,
+  PAGE_TRANSLATION_VIEWPORT_WINDOW_MAX_CANDIDATES,
+  PAGE_TRANSLATION_VIEWPORT_WINDOW_MAX_GEOMETRY_CHECKS,
+} from './PageTranslationConstants.js';
 
 const FORM_VALUE_TAGS = new Set(['INPUT', 'TEXTAREA', 'BUTTON']);
 
@@ -79,13 +88,17 @@ const getEditableState = (element) => {
   let current = element;
 
   while (current) {
-    const value = current.getAttribute?.('contenteditable');
-    if (value !== null && value !== undefined) {
-      const normalized = value.trim().toLowerCase();
-      if (normalized === 'false') return false;
-      if (normalized === '' || normalized === 'true' || normalized === 'plaintext-only') return true;
-    }
-    current = current.parentElement;
+    // One ancestor walk instead of a getAttribute() call per level: the nearest
+    // ancestor that declares `contenteditable` decides the editable state.
+    const declared = current.closest?.('[contenteditable]');
+    if (!declared) return false;
+    const value = declared.getAttribute('contenteditable');
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'false') return false;
+    if (normalized === '' || normalized === 'true' || normalized === 'plaintext-only') return true;
+    // An unrecognized value (e.g. "inherit") does not decide the state, so the
+    // search continues with the next ancestor.
+    current = declared.parentElement;
   }
 
   return false;
@@ -159,6 +172,7 @@ export class PageTranslationBridge extends ResourceTracker {
 
   async initialize(settings, onTranslateCallback, sessionContext = null, {
     preserveAcceptedTranslations = false, onRetainedTranslation = null, settingsRevision = 0,
+    onDiscoveryStateChange = null, onDiscoveryError = null,
   } = {}) {
     const previous = preserveAcceptedTranslations && this.session ? {
       nodeStorage: this.session.nodesTranslator?.nodeStorage,
@@ -182,6 +196,10 @@ export class PageTranslationBridge extends ResourceTracker {
     // Reset lookup for a new session
     hoverPreviewLookup.clear();
 
+    // Single source of truth for translatable attribute names: the filter
+    // allow-list and the discovery walk must agree on it.
+    const translatableAttributeNames = new Set(settings.attributesToTranslate || ['title', 'alt', 'placeholder']);
+
     const currentSession = {
       intersectionScheduler: null,
       domTranslator: null,
@@ -200,6 +218,23 @@ export class PageTranslationBridge extends ResourceTracker {
       shadowPersistenceStarted: false,
       translationFontFamily: settings.translationFontFamily || null,
       fontOwnership: new Map(),
+      slicedDiscoveryEnabled: PAGE_TRANSLATION_SLICED_DISCOVERY,
+      viewportFirstDiscoveryEnabled: PAGE_TRANSLATION_SLICED_DISCOVERY
+        && PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY,
+      // Single source of truth for translatable attribute names: the filter
+      // allow-list and the discovery walk must agree on it.
+      translatableAttributeNames,
+      viewportAttributeNames: PAGE_TRANSLATION_SLICED_DISCOVERY && PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY
+        ? translatableAttributeNames
+        : null,
+      viewportWindowRoot: null,
+      viewportWindowStarted: false,
+      admissionContext: null,
+      admissionDisposers: PAGE_TRANSLATION_SLICED_DISCOVERY && PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY
+        ? new Set() : null,
+      discovery: null,
+      onDiscoveryStateChange,
+      onDiscoveryError,
     };
     const targetGenerations = new WeakMap();
     const applyDecisions = new WeakMap();
@@ -402,12 +437,18 @@ export class PageTranslationBridge extends ResourceTracker {
       translateNodeContent(node, callback) {
         const nodeData = this.nodeStorage.get(node);
         if (!nodeData) throw new Error('Node is not register');
-        if (node.nodeValue === null) return;
+        if (node.nodeValue === null) {
+          finishAdmission(node, nodeData, nodeData.pageTranslationAdmission);
+          return;
+        }
 
         const nodeId = nodeData.id;
         const nodeContext = nodeData.updateId;
         const taskGeneration = this.currentTaskGeneration;
-        return this.translateCallback(node.nodeValue, nodeData.importanceScore).then((text) => {
+        const admissionRecord = currentSession.admissionContext?.node === node
+          ? currentSession.admissionContext : nodeData.pageTranslationAdmission;
+        const providerResult = this.translateCallback(node.nodeValue, nodeData.importanceScore);
+        return providerResult.then((text) => {
           const actualNodeData = this.nodeStorage.get(node);
           const decision = getApplyDecision(node, taskGeneration);
           const isCurrentStorage = actualNodeData
@@ -425,6 +466,7 @@ export class PageTranslationBridge extends ResourceTracker {
               ? 'stale'
               : 'cancelled';
             forgetApplyDecision(node, taskGeneration);
+            finishAdmission(node, nodeData, admissionRecord);
             return;
           }
 
@@ -435,13 +477,22 @@ export class PageTranslationBridge extends ResourceTracker {
             && decision.settlement?.state === 'failed';
 
           if (canPreserveProviderFailure) {
-            actualNodeData.originalText = getCurrentNodeValue(node);
+            const failedSource = getCurrentNodeValue(node);
+            actualNodeData.originalText = failedSource;
             setCurrentNodeValue(node, text);
+            if (admissionRecord?.session === currentSession
+                && currentSession.viewportFirstDiscoveryEnabled) {
+              actualNodeData.pageTranslationFailure = {
+                sourceValue: admissionRecord.sourceValue,
+                updateId: actualNodeData.updateId,
+              };
+            }
             decision.outcome = 'failed-applied';
             try {
               if (callback) callback(node);
             } finally {
               forgetApplyDecision(node, taskGeneration);
+              finishAdmission(node, nodeData, admissionRecord);
             }
             return;
           }
@@ -476,12 +527,14 @@ export class PageTranslationBridge extends ResourceTracker {
               ? 'stale'
               : 'cancelled';
             forgetApplyDecision(node, taskGeneration);
+            finishAdmission(node, nodeData, admissionRecord);
             return;
           }
 
           try {
             actualNodeData.originalText = getCurrentNodeValue(node);
             setCurrentNodeValue(node, text);
+            delete actualNodeData.pageTranslationFailure;
             actualNodeData.acceptedTranslation = {
               originalText: actualNodeData.originalText,
               text: getCurrentNodeValue(node),
@@ -497,6 +550,7 @@ export class PageTranslationBridge extends ResourceTracker {
               ? 'stale'
               : 'cancelled';
             forgetApplyDecision(node, taskGeneration);
+            finishAdmission(node, nodeData, admissionRecord);
             throw error;
           }
           decision.outcome = 'applied';
@@ -505,18 +559,44 @@ export class PageTranslationBridge extends ResourceTracker {
             if (callback) callback(node);
           } finally {
             forgetApplyDecision(node, taskGeneration);
+            finishAdmission(node, nodeData, admissionRecord);
           }
+        }, error => {
+          const actualNodeData = this.nodeStorage.get(node);
+          if (admissionRecord?.session === currentSession
+              && currentSession.viewportFirstDiscoveryEnabled
+              && actualNodeData === nodeData
+              && actualNodeData.id === nodeId
+              && actualNodeData.updateId === nodeContext
+              && targetGenerations.get(node) === admissionRecord.generation) {
+            actualNodeData.pageTranslationFailure = {
+              sourceValue: admissionRecord.sourceValue,
+              updateId: actualNodeData.updateId,
+            };
+          }
+          finishAdmission(node, nodeData, admissionRecord);
+          throw error;
         });
       }
 
       restore(node, callback) {
         const nodeData = this.nodeStorage.get(node);
         const accepted = nodeData?.acceptedTranslation;
-        // A stopped SPA owner may outlive host edits while its replacement loads.
-        if (!currentSession.active && (!isConnectedTarget(node)
+        retireAdmission(nodeData?.pageTranslationAdmission, { removeObserver: true });
+        if (nodeData?.pageTranslationAdmission) delete nodeData.pageTranslationAdmission;
+        // The library restores the whole tree, so this runs for every text node
+        // and attribute in the document. Cheap storage, accepted-translation and
+        // generation checks therefore run first, and the DOM ownership checks
+        // (connectivity walk, attribute identity) only for nodes that can
+        // actually be restored.
+        if (!accepted
+            || nodeData.updateId !== accepted.updateId
             || node.ownerDocument !== document
-            || !accepted || nodeData.updateId !== accepted.updateId
-            || getCurrentNodeValue(node) !== accepted.text)) {
+            || getCurrentNodeValue(node) !== accepted.text
+            || (node.nodeType === Node.ATTRIBUTE_NODE
+              && node.ownerElement?.getAttributeNode(node.name) !== node)
+            // Detached targets are retired by active shadow observers; only stopped owners require connectivity.
+            || (!currentSession.active && !isConnectedTarget(node))) {
           this.nodeStorage.delete(node);
           callback?.(node);
           return;
@@ -550,12 +630,85 @@ export class PageTranslationBridge extends ResourceTracker {
       return true;
     };
 
+    const clearAdmissionCallbacks = (record) => {
+      if (!record) return;
+      record.retired = true;
+      record.phase = 'terminal';
+      record.callbackGroups.clear();
+      record.directCallbacks.clear();
+      if (record.nodeData?.pageTranslationAdmission === record) {
+        delete record.nodeData.pageTranslationAdmission;
+      }
+      record.nodeData = null;
+      record.node = null;
+      record.owner = null;
+      record.domAction = null;
+      if (record.dispose) currentSession.admissionDisposers?.delete(record.dispose);
+      record.dispose = null;
+    };
+
+    const removeLazyAdmission = (record) => {
+      if (!record) return;
+      const observer = currentSession.intersectionScheduler?.intersectionObserver;
+      if (!observer) return;
+      const action = observer.nodeCallbacksMap?.get(record.node);
+      if (action?.pageTranslationAdmission === record) observer.nodeCallbacksMap.delete(record.node);
+      const ownedNodes = observer.elementNodesMap?.get(record.owner);
+      if (!ownedNodes?.delete(record.node)) return;
+      if (ownedNodes.size === 0) {
+        observer.elementNodesMap.delete(record.owner);
+        observer.intersectionObserver?.unobserve(record.owner);
+      }
+    };
+
+    const retireAdmission = (record, { removeObserver = false } = {}) => {
+      if (!record) return;
+      if (removeObserver) removeLazyAdmission(record);
+      clearAdmissionCallbacks(record);
+    };
+
+    const finishAdmission = (node, nodeData, record) => {
+      if (nodeData?.pageTranslationAdmission === record) {
+        delete nodeData.pageTranslationAdmission;
+      }
+      retireAdmission(record);
+    };
+
     if (currentSession.intersectionScheduler) {
       const originalAdd = currentSession.intersectionScheduler.add;
       currentSession.intersectionScheduler.add = function(node, callback) {
         // Restore ownership must survive even when visibility defers translation.
         if (retainAcceptedTranslation(node)) return;
-        return originalAdd.call(this, node, callback);
+        if (!currentSession.slicedDiscoveryEnabled) return originalAdd.call(this, node, callback);
+        const record = currentSession.admissionContext?.node === node
+          ? currentSession.admissionContext : null;
+        const sourceValue = record?.sourceValue ?? getCurrentNodeValue(node);
+        const generation = record?.generation ?? targetGenerations.get(node);
+        const owner = getFilterElement(node);
+        if (record) {
+          record.owner = owner;
+          record.phase = 'intersection';
+          record.domAction = callback;
+        }
+        const action = (target) => {
+          if (record?.retired || !isFreshTarget(target, sourceValue, generation)
+              || targetGenerations.get(target) !== generation || !filter(target)) {
+            if (record) retireAdmission(record);
+            return;
+          }
+          const previousAdmission = currentSession.admissionContext;
+          if (record) {
+            record.phase = 'provider';
+            currentSession.admissionContext = record;
+          }
+          try {
+            callback(target);
+          } finally {
+            currentSession.admissionContext = previousAdmission;
+          }
+        };
+        if (record) action.pageTranslationAdmission = record;
+        return originalAdd.call(this, node, action);
       };
     }
 
@@ -568,18 +721,38 @@ export class PageTranslationBridge extends ResourceTracker {
     nodesTranslator.translate = function(node, callback) {
       retainAcceptedTranslation(node);
       if (this.has(node)) return originalTranslate.call(this, node, callback);
+      const admission = currentSession.admissionContext?.node === node
+        ? currentSession.admissionContext : null;
       this.currentNode = node;
-      this.currentTaskGeneration = nextTargetGeneration(node);
+      this.currentTaskGeneration = admission?.generation ?? nextTargetGeneration(node);
+      if (admission) admission.generation = this.currentTaskGeneration;
       this.currentTaskOwnsStorage = typeof this.has === 'function' ? !this.has(node) : true;
-      return originalTranslate.call(this, node, callback);
+      const result = originalTranslate.call(this, node, callback);
+      const nodeData = this.nodeStorage?.get?.(node);
+      if (admission && nodeData) {
+        nodeData.pageTranslationAdmission = admission;
+        admission.nodeData = nodeData;
+        admission.phase = 'provider';
+      }
+      return result;
     };
 
     const originalUpdate = nodesTranslator.update;
     nodesTranslator.update = function(node, callback) {
+      const admission = currentSession.admissionContext?.node === node
+        ? currentSession.admissionContext : null;
       this.currentNode = node;
-      this.currentTaskGeneration = nextTargetGeneration(node);
+      this.currentTaskGeneration = admission?.generation ?? nextTargetGeneration(node);
+      if (admission) admission.generation = this.currentTaskGeneration;
       this.currentTaskOwnsStorage = false;
-      return originalUpdate.call(this, node, callback);
+      const result = originalUpdate.call(this, node, callback);
+      const nodeData = this.nodeStorage?.get?.(node);
+      if (admission && nodeData) {
+        nodeData.pageTranslationAdmission = admission;
+        admission.nodeData = nodeData;
+        admission.phase = 'provider';
+      }
+      return result;
     };
 
     /**
@@ -687,15 +860,27 @@ export class PageTranslationBridge extends ResourceTracker {
       `.${PAGE_TRANSLATION_SELECTORS.STANDARD_NO_TRANSLATE_CLASS}`,
       `[translate='${PAGE_TRANSLATION_SELECTORS.TRANSLATE_NO_VALUE}']`
     ];
-    const domTranslatorFilter = createNodesFilter({
-      ignoredSelectors: composedExcludedSelectors,
-      attributesList: settings.attributesToTranslate || ['title', 'alt', 'placeholder'],
+    const nodeTypeFilter = createNodesFilter({
+      // Eligibility by node type and attribute name only. The exclusion rules
+      // are evaluated separately with a single ancestor walk per selector.
+      ignoredSelectors: [],
+      attributesList: currentSession.translatableAttributeNames,
+    });
+    const isExcludedElement = (element) => composedExcludedSelectors.some((selector) => {
+      try {
+        // `closest()` already matches the element itself, so no extra
+        // `matches()` call is needed for the same selector.
+        return Boolean(element.closest(selector));
+      } catch {
+        return false;
+      }
     });
     const filter = (node) => {
-      if (!domTranslatorFilter(node) || isMutableEditableNode(node)) return false;
+      if (!nodeTypeFilter(node) || isMutableEditableNode(node)) return false;
 
       const owner = getFilterElement(node);
-      const root = owner?.getRootNode?.();
+      if (!owner || isExcludedElement(owner)) return false;
+      const root = owner.getRootNode?.();
       return !isShadowRoot(root) || !isExcludedAcrossShadowHosts(owner, composedExcludedSelectors);
     };
 
@@ -714,6 +899,579 @@ export class PageTranslationBridge extends ResourceTracker {
       return restoreDomNode(node, callback);
     };
 
+    const originalDomTranslate = currentSession.domTranslator.translate;
+    const originalDomUpdate = currentSession.domTranslator.update;
+    const getPendingAdmission = (node) => {
+      const nodeData = nodesTranslator.nodeStorage.get(node);
+      if (nodeData?.pageTranslationAdmission) return nodeData.pageTranslationAdmission;
+      const observer = currentSession.intersectionScheduler?.intersectionObserver;
+      return observer?.nodeCallbacksMap?.get(node)?.pageTranslationAdmission || null;
+    };
+
+    const mergeAdmissionCallbacks = (record, callbacks) => {
+      if (callbacks instanceof Set) record.callbackGroups.add(callbacks);
+      else if (typeof callbacks === 'function') record.directCallbacks.add(callbacks);
+      else callbacks?.forEach?.(callback => {
+        if (typeof callback === 'function') record.directCallbacks.add(callback);
+      });
+    };
+
+    const makeAdmissionCallback = (record) => (node) => {
+      if (record.retired || !currentSession.active || this.session !== currentSession) return;
+      let firstError = null;
+      const callbacks = new Set(record.directCallbacks);
+      for (const group of record.callbackGroups) {
+        for (const callback of group) callbacks.add(callback);
+      }
+      for (const callback of callbacks) {
+        try {
+          callback(node);
+        } catch (error) {
+          firstError ||= error;
+        }
+      }
+      if (firstError) throw firstError;
+    };
+
+    const reobserveAdmission = (record, owner) => {
+      removeLazyAdmission(record);
+      record.owner = owner;
+      const previousAdmission = currentSession.admissionContext;
+      currentSession.admissionContext = record;
+      try {
+        currentSession.intersectionScheduler.add(record.node, record.domAction);
+      } finally {
+        currentSession.admissionContext = previousAdmission;
+      }
+    };
+
+    const admitPrimitive = (node, callbacks = null) => {
+      const owner = getFilterElement(node);
+      if (!currentSession.active || this.session !== currentSession
+          || window.location.href !== currentSession.url
+          || !isOwnedTarget(owner, currentSession.root)
+          || (node.nodeType === Node.ATTRIBUTE_NODE
+            && owner.getAttributeNode(node.name) !== node)
+          || (node.nodeType === Node.TEXT_NODE && !node.isConnected)
+          || !filter(node)) return;
+      retainAcceptedTranslation(node);
+      const sourceValue = getCurrentNodeValue(node);
+      if (!sourceValue.trim()) return;
+      const nodeData = nodesTranslator.nodeStorage.get(node);
+      const accepted = nodeData?.acceptedTranslation;
+      if (accepted && nodeData.updateId === accepted.updateId && accepted.text === sourceValue) return;
+      const failed = nodeData?.pageTranslationFailure;
+      if (failed && failed.updateId === nodeData.updateId && failed.sourceValue === sourceValue) return;
+      if (failed) delete nodeData.pageTranslationFailure;
+
+      let existing = getPendingAdmission(node);
+      if (existing && !existing.retired && existing.sourceValue === sourceValue
+          && existing.session === currentSession) {
+        mergeAdmissionCallbacks(existing, callbacks);
+        if (existing.owner !== owner) {
+          if (nodeData) existing.owner = owner;
+          else reobserveAdmission(existing, owner);
+        }
+        return;
+      }
+      if (existing) retireAdmission(existing, { removeObserver: existing.owner !== owner });
+
+      const record = {
+        node,
+        owner,
+        sourceValue,
+        generation: nextTargetGeneration(node),
+        session: currentSession,
+        phase: 'created',
+        callbackGroups: new Set(),
+        directCallbacks: new Set(),
+        retired: false,
+      };
+      mergeAdmissionCallbacks(record, callbacks);
+      record.dispose = () => {
+        if (record.phase === 'intersection') removeLazyAdmission(record);
+        retireAdmission(record);
+      };
+      record.dispose.record = record;
+      currentSession.admissionDisposers?.add(record.dispose);
+      const previousAdmission = currentSession.admissionContext;
+      currentSession.admissionContext = record;
+      try {
+        const completion = makeAdmissionCallback(record);
+        if (nodeData && nodesTranslator.has(node)) {
+          originalDomUpdate.call(currentSession.domTranslator, node, completion);
+        } else {
+          originalDomTranslate.call(currentSession.domTranslator, node, completion);
+        }
+      } catch (error) {
+        retireAdmission(record);
+        throw error;
+      } finally {
+        currentSession.admissionContext = previousAdmission;
+      }
+    };
+
+    // Mirrors DOMTranslator.translate() for a single primitive node, without its
+    // filter call. Discovery validates every node with `filter` in the same
+    // synchronous step, so re-running the exclusion rules there only doubles
+    // the selector work for every discovered node.
+    const translateValidatedPrimitive = (node, callback) => {
+      const scheduler = currentSession.intersectionScheduler;
+      if (scheduler && node.getRootNode() !== node) {
+        scheduler.add(node, (target) => {
+          nodesTranslator.translate(target, callback);
+        });
+        return;
+      }
+      nodesTranslator.translate(node, callback);
+    };
+
+    const translateDiscoveredPrimitive = (node, callbacks) => {
+      if (currentSession.viewportFirstDiscoveryEnabled) return admitPrimitive(node, callbacks);
+      const callback = callbacks instanceof Set
+        ? (callbacks.size
+          ? processedNode => callbacks.forEach(notify => notify?.(processedNode))
+          : undefined)
+        : callbacks;
+      return translateValidatedPrimitive(node, callback);
+    };
+
+    if (currentSession.slicedDiscoveryEnabled) {
+      if (currentSession.viewportFirstDiscoveryEnabled) {
+        currentSession.domTranslator.update = (node, callback) => admitPrimitive(node, callback);
+      }
+      const discovery = {
+        queue: [],
+        head: 0,
+        queuedRoots: new WeakMap(),
+        timer: null,
+        pending: false,
+        running: false,
+        starting: false,
+        cancelled: false,
+        failed: false,
+      };
+      currentSession.discovery = discovery;
+
+      const setDiscoveryPending = (pending) => {
+        if (discovery.pending === pending) return;
+        discovery.pending = pending;
+        if (this.session !== currentSession) return;
+        try {
+          currentSession.onDiscoveryStateChange?.(pending);
+        } catch (error) {
+          this.logger.warn('Page Translation discovery state callback failed', error);
+        }
+      };
+
+      const isCurrentDiscoveryTarget = (node) => {
+        if (discovery.cancelled || discovery.failed
+            || !currentSession.active || this.session !== currentSession
+            || window.location.href !== currentSession.url || !node) return false;
+        const owner = getFilterElement(node);
+        if (!isOwnedTarget(owner, currentSession.root)) return false;
+        if (node.nodeType === Node.ATTRIBUTE_NODE) {
+          return owner.getAttributeNode(node.name) === node;
+        }
+        return node.nodeType !== Node.TEXT_NODE || node.isConnected;
+      };
+
+      const isCurrentDiscoverySession = () => !discovery.cancelled && !discovery.failed
+        && currentSession.active
+        && this.session === currentSession
+        && window.location.href === currentSession.url;
+
+      const createFrame = (root) => ({
+        root,
+        shadowRoot: isShadowRoot(root),
+        iterator: document.createNodeIterator(root, NodeFilter.SHOW_ALL),
+        attributeNames: null,
+        attributeOwner: null,
+      });
+
+      const createViewportWindow = () => ({
+        phase: 'collect',
+        enumerationSteps: 0,
+        candidates: [],
+        geometryIndex: 0,
+        visibleCandidates: [],
+        otherCandidates: [],
+        partitionIndex: 0,
+        visibleAdmissionIndex: 0,
+        otherAdmissionIndex: 0,
+        canonicalDone: false,
+      });
+
+      // A text node whose value is only whitespace can never become a
+      // translation target: NodesTranslator rejects it before any provider
+      // request. Skipping such nodes removes both discovery steps and
+      // IntersectionObserver registrations, but only when mutation handling is
+      // active, because that is what guarantees that a node which later gains
+      // text is rediscovered.
+      const MAX_WHITESPACE_SKIPS_PER_STEP = 32;
+      const isWhitespaceOnlyText = (node) => {
+        const value = node.nodeValue;
+        return value === null || !/\S/.test(value);
+      };
+
+      const nextDiscoveryStep = (task) => {
+        if (task.rootPrimitive && !task.rootPrimitiveDone) {
+          task.rootPrimitiveDone = true;
+          return { node: task.rootPrimitive };
+        }
+        if (task.rootPrimitiveDone) return { done: true };
+        let skippedWhitespace = 0;
+        while (task.frames.length) {
+          const frame = task.frames.at(-1);
+          if (frame.attributeNames) {
+            const { value: name, done } = frame.attributeNames.next();
+            if (done) {
+              frame.attributeNames = null;
+              frame.attributeOwner = null;
+            } else {
+              const attribute = frame.attributeOwner.getAttributeNode(name);
+              // A missing attribute is not a discovery step.
+              if (attribute) return { node: attribute };
+              continue;
+            }
+          }
+          const node = frame.iterator.nextNode();
+          if (!node) {
+            task.frames.pop();
+            return { node: null };
+          }
+          if (node.nodeType !== Node.ELEMENT_NODE) {
+            const isUnsupportedDirectShadowText = frame.shadowRoot
+              && node.nodeType === Node.TEXT_NODE
+              && node.parentNode === frame.root;
+            if (node.nodeType === Node.TEXT_NODE && !isUnsupportedDirectShadowText
+                && currentSession.autoTranslateOnDOMChanges && isWhitespaceOnlyText(node)) {
+              // The skip is bounded so a long run of whitespace nodes yields
+              // back to the slice budget instead of monopolizing the thread.
+              if (skippedWhitespace >= MAX_WHITESPACE_SKIPS_PER_STEP) return { node: null };
+              skippedWhitespace++;
+              continue;
+            }
+            return { node: node.nodeType === Node.TEXT_NODE && !isUnsupportedDirectShadowText ? node : null };
+          }
+
+          frame.attributeNames = currentSession.viewportFirstDiscoveryEnabled
+            ? currentSession.viewportAttributeNames.values()
+            : currentSession.translatableAttributeNames.values();
+          frame.attributeOwner = node;
+          if (node.shadowRoot && currentSession.autoTranslateOnDOMChanges
+              && isCurrentDiscoverySession()) {
+            registerShadowRoot(node.shadowRoot, node);
+          }
+          if (node.shadowRoot) task.frames.push(createFrame(node.shadowRoot));
+          return { node: null };
+        }
+        return { done: true };
+      };
+
+      const notifyDiscoveryError = (error) => {
+        discovery.failed = true;
+        discovery.cancelled = true;
+        if (discovery.timer !== null) {
+          this.clearTimer(discovery.timer);
+          discovery.timer = null;
+        }
+        for (const dispose of currentSession.admissionDisposers || []) dispose();
+        for (const task of discovery.queue) {
+          if (!task) continue;
+          task.backlog.length = 0;
+          task.viewportWindow = null;
+        }
+        discovery.queue.length = 0;
+        discovery.head = 0;
+        discovery.queuedRoots = new WeakMap();
+        try {
+          currentSession.onDiscoveryError?.(error);
+        } catch (callbackError) {
+          this.logger.warn('Page Translation discovery error callback failed', callbackError);
+        }
+        discovery.pending = false;
+      };
+
+      const scheduleDiscoverySlice = () => {
+        if (discovery.timer !== null || discovery.cancelled || discovery.failed) return;
+        discovery.timer = this.trackTimeout(() => {
+          discovery.timer = null;
+          runDiscoverySlice();
+        }, 0);
+      };
+
+      const runDiscoverySlice = () => {
+        if (discovery.running || discovery.cancelled || discovery.failed) return;
+        if (!isCurrentDiscoverySession()) {
+          currentSession.cancelDiscovery();
+          return;
+        }
+        discovery.running = true;
+        const started = Date.now();
+        let steps = 0;
+        try {
+          while (discovery.head < discovery.queue.length
+              && steps < PAGE_TRANSLATION_DISCOVERY_SLICE_MAX_STEPS
+              && Date.now() - started < PAGE_TRANSLATION_DISCOVERY_SLICE_BUDGET_MS) {
+            if (!isCurrentDiscoverySession()) {
+              currentSession.cancelDiscovery();
+              break;
+            }
+            const task = discovery.queue[discovery.head];
+            if (!task) {
+              discovery.head++;
+              continue;
+            }
+            const viewportWindow = task.viewportWindow;
+            if (task.translateNodes && viewportWindow?.phase === 'collect') {
+              if (viewportWindow.enumerationSteps >= PAGE_TRANSLATION_VIEWPORT_WINDOW_ENUMERATION_STEPS
+                  || viewportWindow.candidates.length >= PAGE_TRANSLATION_VIEWPORT_WINDOW_MAX_CANDIDATES) {
+                viewportWindow.phase = 'geometry';
+                steps++;
+                continue;
+              }
+              const step = nextDiscoveryStep(task);
+              steps++;
+              viewportWindow.enumerationSteps++;
+              if (step.done) {
+                viewportWindow.canonicalDone = true;
+                viewportWindow.phase = 'geometry';
+              } else if (step.node && isCurrentDiscoveryTarget(step.node) && filter(step.node)) {
+                viewportWindow.candidates.push({ node: step.node, visible: false });
+              }
+              continue;
+            }
+
+            if (task.translateNodes && viewportWindow?.phase === 'geometry') {
+              if (viewportWindow.geometryIndex >= viewportWindow.candidates.length
+                  || viewportWindow.geometryIndex >= PAGE_TRANSLATION_VIEWPORT_WINDOW_MAX_GEOMETRY_CHECKS) {
+                viewportWindow.phase = 'partition';
+                steps++;
+                continue;
+              }
+              const candidate = viewportWindow.candidates[viewportWindow.geometryIndex++];
+              steps++;
+              const owner = candidate && getFilterElement(candidate.node);
+              if (candidate && isCurrentDiscoveryTarget(candidate.node) && filter(candidate.node) && owner) {
+                try {
+                  const rect = owner.getBoundingClientRect();
+                  candidate.visible = rect.bottom > 0 && rect.right > 0
+                    && rect.top < (window.innerHeight || document.documentElement.clientHeight)
+                    && rect.left < (window.innerWidth || document.documentElement.clientWidth);
+                } catch {
+                  candidate.visible = false;
+                }
+              }
+              continue;
+            }
+
+            if (task.translateNodes && viewportWindow?.phase === 'partition') {
+              if (viewportWindow.partitionIndex >= viewportWindow.candidates.length) {
+                viewportWindow.phase = 'admit';
+                steps++;
+                continue;
+              }
+              const candidate = viewportWindow.candidates[viewportWindow.partitionIndex++];
+              steps++;
+              if (candidate) {
+                (candidate.visible ? viewportWindow.visibleCandidates : viewportWindow.otherCandidates).push(candidate);
+              } else {
+                viewportWindow.visibleCandidates.push(null);
+              }
+              continue;
+            }
+
+            if (task.translateNodes && viewportWindow?.phase === 'admit') {
+              if (viewportWindow.visibleAdmissionIndex < viewportWindow.visibleCandidates.length) {
+                const candidate = viewportWindow.visibleCandidates[viewportWindow.visibleAdmissionIndex++];
+                steps++;
+                if (candidate && isCurrentDiscoveryTarget(candidate.node) && filter(candidate.node)) {
+                  translateDiscoveredPrimitive(candidate.node, task.callbacks);
+                }
+                continue;
+              }
+              viewportWindow.phase = 'admit-rest';
+              steps++;
+              continue;
+            }
+
+            if (task.translateNodes && viewportWindow?.phase === 'admit-rest') {
+              if (viewportWindow.otherAdmissionIndex >= viewportWindow.otherCandidates.length) {
+                task.viewportWindow = null;
+                steps++;
+                continue;
+              }
+              const candidate = viewportWindow.otherCandidates[viewportWindow.otherAdmissionIndex++];
+              steps++;
+              if (candidate && isCurrentDiscoveryTarget(candidate.node) && filter(candidate.node)) {
+                translateDiscoveredPrimitive(candidate.node, task.callbacks);
+              }
+              continue;
+            }
+
+            let step;
+            if (task.translateNodes && task.backlogIndex < task.backlog.length) {
+              step = { node: task.backlog[task.backlogIndex++] };
+            } else {
+              step = nextDiscoveryStep(task);
+            }
+            if (step.done) {
+              task.backlog.length = 0;
+              task.backlogIndex = 0;
+              task.viewportWindow = null;
+              discovery.queue[discovery.head++] = null;
+              discovery.queuedRoots.delete(task.root);
+              continue;
+            }
+            steps++;
+            const node = step.node;
+            if (!node || !isCurrentDiscoveryTarget(node) || !filter(node)) continue;
+            if (!task.translateNodes) {
+              task.backlog.push(node);
+              continue;
+            }
+            translateDiscoveredPrimitive(node, task.callbacks);
+          }
+        } catch (error) {
+          notifyDiscoveryError(error);
+        } finally {
+          discovery.running = false;
+        }
+
+        if (discovery.cancelled || discovery.failed) return;
+        if (!isCurrentDiscoverySession()) {
+          currentSession.cancelDiscovery();
+          return;
+        }
+        if (discovery.head < discovery.queue.length) scheduleDiscoverySlice();
+        else {
+          discovery.queue.length = 0;
+          discovery.head = 0;
+          setDiscoveryPending(false);
+        }
+      };
+
+      const enqueueDiscovery = (root, callback, { translateNodes = true } = {}) => {
+        if (!root || discovery.cancelled || discovery.failed
+            || !isCurrentDiscoverySession()) return;
+        if (translateNodes
+            && [Node.TEXT_NODE, Node.ATTRIBUTE_NODE].includes(root.nodeType)) {
+          try {
+            if (!isCurrentDiscoveryTarget(root) || !filter(root)) return;
+            translateDiscoveredPrimitive(root, callback);
+          } catch (error) {
+            notifyDiscoveryError(error);
+          }
+          return;
+        }
+        let task = discovery.queuedRoots.get(root);
+        if (task) {
+          task.translateNodes ||= translateNodes;
+          if (callback) task.callbacks.add(callback);
+          return;
+        }
+        try {
+          const isInitialViewportRoot = currentSession.viewportFirstDiscoveryEnabled
+            && currentSession.viewportWindowRoot === root
+            && !currentSession.viewportWindowStarted;
+          if (isInitialViewportRoot) {
+            currentSession.viewportWindowStarted = true;
+            currentSession.viewportWindowRoot = null;
+          }
+          task = {
+            root,
+            rootPrimitive: [Node.TEXT_NODE, Node.ATTRIBUTE_NODE].includes(root.nodeType) ? root : null,
+            rootPrimitiveDone: false,
+            frames: [Node.TEXT_NODE, Node.ATTRIBUTE_NODE].includes(root.nodeType) ? [] : [createFrame(root)],
+            translateNodes,
+            backlog: [],
+            backlogIndex: 0,
+            viewportWindow: isInitialViewportRoot ? createViewportWindow() : null,
+            callbacks: new Set(callback ? [callback] : []),
+          };
+        } catch (error) {
+          notifyDiscoveryError(error);
+          return;
+        }
+        discovery.queuedRoots.set(root, task);
+        discovery.queue.push(task);
+        if (!discovery.pending) {
+          discovery.starting = true;
+          setDiscoveryPending(true);
+          discovery.starting = false;
+        }
+        if (!discovery.running && !discovery.starting && discovery.timer === null) runDiscoverySlice();
+      };
+
+      currentSession.enqueueDiscovery = enqueueDiscovery;
+      currentSession.cancelDiscovery = () => {
+        if (discovery.cancelled) return;
+        discovery.cancelled = true;
+        if (discovery.timer !== null) {
+          this.clearTimer(discovery.timer);
+          discovery.timer = null;
+        }
+        for (const dispose of currentSession.admissionDisposers || []) dispose();
+        for (const task of discovery.queue) {
+          if (!task) continue;
+          task.backlog.length = 0;
+          task.viewportWindow = null;
+          task.callbacks.clear();
+        }
+        discovery.queue.length = 0;
+        discovery.head = 0;
+        discovery.queuedRoots = new WeakMap();
+        setDiscoveryPending(false);
+      };
+      currentSession.cancelDiscoveryUnder = (subtree) => {
+        let hasPendingTask = false;
+        for (const dispose of currentSession.admissionDisposers || []) {
+          if (isComposedDescendant(subtree, dispose.record?.owner)) dispose();
+        }
+        for (let index = discovery.head; index < discovery.queue.length; index++) {
+          const task = discovery.queue[index];
+          if (!task) continue;
+          if (!isComposedDescendant(subtree, task.root)) {
+            if (task.viewportWindow) {
+              const retireCandidatesUnderSubtree = (candidates) => {
+                for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+                  const candidate = candidates[candidateIndex];
+                  if (!candidate) continue;
+                  const owner = candidate.node.nodeType === Node.ATTRIBUTE_NODE
+                    ? candidate.node.ownerElement : getComposedParent(candidate.node);
+                  if (isComposedDescendant(subtree, owner)) candidates[candidateIndex] = null;
+                }
+              };
+              retireCandidatesUnderSubtree(task.viewportWindow.candidates);
+              retireCandidatesUnderSubtree(task.viewportWindow.visibleCandidates);
+              retireCandidatesUnderSubtree(task.viewportWindow.otherCandidates);
+            }
+            hasPendingTask = true;
+            continue;
+          }
+          task.backlog.length = 0;
+          task.backlogIndex = 0;
+          task.viewportWindow = null;
+          task.callbacks.clear();
+          discovery.queue[index] = null;
+          discovery.queuedRoots.delete(task.root);
+        }
+        if (!hasPendingTask) {
+          discovery.queue.length = 0;
+          discovery.head = 0;
+          if (discovery.timer !== null) {
+            this.clearTimer(discovery.timer);
+            discovery.timer = null;
+          }
+          setDiscoveryPending(false);
+        }
+      };
+      currentSession.domTranslator.translate = (node, callback) => {
+        enqueueDiscovery(node, callback);
+      };
+    }
+
     const markShadowMutation = (node) => currentSession.shadowMutatedNodes.add(node);
 
     const unregisterShadowRoot = (shadowRoot) => {
@@ -724,6 +1482,7 @@ export class PageTranslationBridge extends ResourceTracker {
     };
 
     const unregisterShadowRootsUnder = (subtree) => {
+      currentSession.cancelDiscoveryUnder?.(subtree);
       for (const [shadowRoot, registration] of currentSession.shadowRoots) {
         if (isComposedDescendant(subtree, registration.host)) {
           unregisterShadowRoot(shadowRoot);
@@ -732,6 +1491,10 @@ export class PageTranslationBridge extends ResourceTracker {
     };
 
     const discoverShadowRoots = (subtree) => {
+      if (currentSession.slicedDiscoveryEnabled) {
+        currentSession.enqueueDiscovery(subtree, null, { translateNodes: false });
+        return;
+      }
       walkOpenShadowTree(subtree, (element) => {
         if (element.shadowRoot) registerShadowRoot(element.shadowRoot, element);
       });
@@ -818,6 +1581,7 @@ export class PageTranslationBridge extends ResourceTracker {
       if (currentSession.shadowRoots.has(shadowRoot)
           || !currentSession.active
           || this.session !== currentSession
+          || window.location.href !== currentSession.url
           || !isOwnedTarget(host, currentSession.root)) return;
 
       const observer = new MutationObserver((mutations) => {
@@ -866,7 +1630,7 @@ export class PageTranslationBridge extends ResourceTracker {
       currentSession.shadowPersistenceStarted = true;
       currentSession.shadowDiscoveryObserver = new MutationObserver(processDiscoveryMutations);
       currentSession.shadowDiscoveryObserver.observe(root, { childList: true, subtree: true });
-      discoverShadowRoots(root);
+      if (!currentSession.slicedDiscoveryEnabled) discoverShadowRoots(root);
     };
 
     currentSession.stopShadowPersistence = () => {
@@ -895,9 +1659,15 @@ export class PageTranslationBridge extends ResourceTracker {
     if (this.session.autoTranslateOnDOMChanges && this.session.persistentTranslator) {
       this.logger.debug('Starting persistent translation (Auto-translate enabled)');
       this.session.startShadowPersistence?.(element);
+      if (this.session.viewportFirstDiscoveryEnabled && !this.session.viewportWindowStarted) {
+        this.session.viewportWindowRoot = element;
+      }
       this.session.persistentTranslator.translate(element);
     } else if (this.session.domTranslator) {
       this.logger.debug('Starting single-pass translation (Auto-translate disabled)');
+      if (this.session.viewportFirstDiscoveryEnabled && !this.session.viewportWindowStarted) {
+        this.session.viewportWindowRoot = element;
+      }
       this.session.domTranslator.translate(element);
     }
   }
@@ -908,7 +1678,10 @@ export class PageTranslationBridge extends ResourceTracker {
 
   stopPersistence() {
     // Retain restore storage, but invalidate pending writers and lazy callbacks.
-    if (this.session) this.session.active = false;
+    if (this.session) {
+      this.session.active = false;
+      this.session.cancelDiscovery?.();
+    }
     if (this.session && this.session.persistentTranslator) {
       try {
         this.session.stopShadowPersistence?.();
@@ -931,6 +1704,7 @@ export class PageTranslationBridge extends ResourceTracker {
     if (!this.session) return;
 
     const currentSession = this.session;
+    currentSession.cancelDiscovery?.();
     try {
       const ownedRoot = currentSession.root || element;
       restoreSessionFontOwnership(currentSession, this.logger);
@@ -969,6 +1743,8 @@ export class PageTranslationBridge extends ResourceTracker {
 
     const currentSession = this.session;
     currentSession.active = false;
+    currentSession.cancelDiscovery?.();
+    this.clearAllTimers();
 
     try {
       currentSession.stopShadowPersistence?.();

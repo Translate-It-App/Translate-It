@@ -299,6 +299,22 @@ class MemoryManager {
   }
 
   /**
+   * Stop tracking a timer and remove its group entry.
+   * @param {number} timerId - Timer ID from setTimeout/setInterval
+   * @param {string} groupId - Group identifier
+   */
+  clearTimer(timerId, groupId = 'default') {
+    this.timers.delete(timerId)
+
+    const resourceIds = this.groups.get(groupId)
+    if (!resourceIds) return
+
+    resourceIds.delete(`timer_${timerId}`)
+    resourceIds.delete(`interval_${timerId}`)
+    if (resourceIds.size === 0) this.groups.delete(groupId)
+  }
+
+  /**
    * Track an event listener (handles DOM, browser APIs, and custom event systems)
    * Enhanced with Map-based tracking for reliable handler management
    * @param {EventTarget|Object} element - Element, browser API, or custom event emitter

@@ -415,15 +415,17 @@ export class UnifiedModeCoordinator {
       };
     }
 
-    const providerInstance = await translationEngine.getProvider(provider);
-    if (!providerInstance) throw new Error(`Provider '${provider}' initialization failed`);
-
     let timeoutId;
     let onAbort;
     let sessionId = null;
     let sourceResolution = null;
+    let acquiringProvider = true;
 
     try {
+      const providerInstance = await translationEngine.getProvider(provider);
+      if (!providerInstance) throw new Error(`Provider '${provider}' initialization failed`);
+      acquiringProvider = false;
+
       sessionId = request.sessionId || data.sessionId || messageId;
       if (abortController.signal.aborted) throw createBatchAbortError(abortController.signal);
 
@@ -559,6 +561,7 @@ export class UnifiedModeCoordinator {
       if (sourceResolution?.isOwner) {
         this._failPageSourceResolution(sessionId, sourceResolution, error);
       }
+      if (acquiringProvider) throw error;
       if (error?.operationAborted === true) {
         logger.debug(`[UnifiedCoordinator] ${mode} batch stopped: operation abort`);
         return {

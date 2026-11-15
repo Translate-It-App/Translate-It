@@ -49,6 +49,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.isTranslated = false;
     this.translationSessionId = null;
     this.sessionContext = null;
+    this.discoveryPending = false;
     this.isScrolling = false;
     this.highPriorityCount = 0;
     this.isWaitingForVisibility = false; // flag to track idle state
@@ -112,6 +113,13 @@ export class PageTranslationScheduler extends ResourceTracker {
     }
   }
 
+  setDiscoveryPending(pending, sessionContext) {
+    if (sessionContext !== this.sessionContext || !this.isTranslated) return false;
+    this.discoveryPending = Boolean(pending);
+    if (!this.discoveryPending) this._checkCompletion();
+    return true;
+  }
+
   reset() {
     this.stop();
     this.translatedCount = 0;
@@ -122,6 +130,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.fatalErrorOccurred = false;
     this.translationSessionId = null;
     this.sessionContext = null;
+    this.discoveryPending = false;
     this._lastReportTime = 0;
     this._reportPending = false;
     this.contextMap = new WeakMap();
@@ -131,6 +140,7 @@ export class PageTranslationScheduler extends ResourceTracker {
   stop(settlementOutcome = 'cancelled', cancellationReason = INTERNAL_CANCELLATION_REASON) {
     const wasTranslating = this.isTranslated;
     this.isTranslated = false;
+    this.discoveryPending = false;
     this.lastNonFatalError = null;
     this.sessionContext = null;
     this._reportPending = false;
@@ -377,6 +387,7 @@ export class PageTranslationScheduler extends ResourceTracker {
           : standardDelay);
 
     if (this.batchTimer) {
+      if (this.isFirstBatch) return; // Preserve the deadline from the first enqueue.
       // If a high-priority item comes in, we might want to speed up the existing timer
       if (isHighPriority && this.batchTimerDelay > 100) {
         clearTimeout(this.batchTimer);
@@ -820,7 +831,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     // Small delay to ensure no more immediate tasks are coming
     this._completionTimer = this.trackTimeout(() => {
       this._completionTimer = null;
-      if (!this.isTranslated || this.activeFlushes > 0) return;
+      if (!this.isTranslated || this.discoveryPending || this.activeFlushes > 0) return;
 
       const processedCount = this.translatedCount + this.failedCount;
       const isAuto = !!this.settings.autoTranslateOnDOMChanges && this.isTranslated;

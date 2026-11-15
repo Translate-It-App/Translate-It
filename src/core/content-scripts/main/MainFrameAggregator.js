@@ -15,6 +15,8 @@ export class MainFrameAggregator {
     this.MessageActions = MessageActions;
     this.frameProgressMap = new Map();
     this.terminalCauseSequence = 0;
+    this.aggregateScope = globalThis.crypto?.randomUUID?.() || `${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    this.aggregateRevision = 0;
     
     // Bind methods to ensure correct 'this' context
     this.updateFrameData = this.updateFrameData.bind(this);
@@ -108,6 +110,8 @@ export class MainFrameAggregator {
       translatedCount: grandTotalTranslated,
       failedCount: grandTotalFailed,
       totalCount: grandTotalCount,
+      aggregateScope: this.aggregateScope,
+      aggregateRevision: this.aggregateRevision,
       currentUrl: window.location.href
     };
   }
@@ -126,13 +130,16 @@ export class MainFrameAggregator {
       const payload = {
         isAggregated: true,
         ...extraData,
+        topLevelUrl: status.currentUrl,
         // Override with aggregated values to ensure they are not overwritten by frame-specific data
         translatedCount: status.translatedCount,
         failedCount: status.failedCount,
         totalCount: status.totalCount,
         isAutoTranslating: status.isAutoTranslating,
         isTranslating: status.isTranslating,
-        status: status.isTranslating ? 'translating' : 'idle'
+        status: status.isTranslating ? 'translating' : 'idle',
+        aggregateScope: this.aggregateScope,
+        aggregateRevision: ++this.aggregateRevision,
       };
 
       // Special handling for completion events
@@ -148,6 +155,11 @@ export class MainFrameAggregator {
             if (terminalCause) payload.errorDetails = terminalCause;
           }
         }
+      } else if (action === this.MessageActions.PAGE_TRANSLATE_ERROR) {
+        // A failing frame must not hide the page-wide translation state: the
+        // aggregated error keeps the accepted translations of the other frames
+        // so Restore stays available while translated content is retained.
+        payload.isTranslated = status.translatedCount > 0;
       } else if (action === this.MessageActions.PAGE_RESTORE_COMPLETE) {
         // For restore complete, force clean state regardless of frame data
         payload.isTranslated = false;

@@ -59,6 +59,7 @@ export class PageTranslationManager extends ResourceTracker {
     this.autoStartCancelledUrls = new Set();
     this.translationSettingsRevision = 0;
     this.pendingSettingsAttempt = null;
+    this._layoutClassOwnership = null;
 
     
     this.scheduler = new PageTranslationScheduler({
@@ -125,6 +126,7 @@ export class PageTranslationManager extends ResourceTracker {
       || (this.featureManager && !this.featureManager.acceptPageNavigation?.(cursor))
     )) return { success: false, reason: ActionReasons.SILENT_ERROR };
     let hasAcceptedStart = false;
+    let discoveryLifecycleObserved = false;
     // 1. Check for URL change - ALWAYS reset for a clean slate in SPAs
     if (this.currentUrl !== window.location.href) {
       this.resetLocalState({ preserveAcceptedTranslations: !!options.isAuto && !!options.preserveAcceptedTranslations });
@@ -298,6 +300,15 @@ export class PageTranslationManager extends ResourceTracker {
               this.scheduler.recordRetainedTranslation(attempt.sessionContext);
             }
           },
+          onDiscoveryStateChange: (pending) => {
+            if (!this._ownsDiscoveryAttempt(attempt)) return;
+            discoveryLifecycleObserved = true;
+            this.scheduler.setDiscoveryPending(pending, attempt.sessionContext);
+            if (!pending) {
+              queueMicrotask(() => this._reconcileDiscoveredWork(attempt));
+            }
+          },
+          onDiscoveryError: (error) => this._handleDiscoveryError(attempt, error),
         }
       );
       if (!this._isCurrentPreStartAttempt(attempt)) return this._settleStalePreStartAttempt(attempt);
@@ -305,9 +316,18 @@ export class PageTranslationManager extends ResourceTracker {
       // CRITICAL: Translate only document.body to prevent scroll jumps and HEAD-tag interference.
       // Translating documentElement causes jumps to top on sites with complex scrollers (like Twitter).
       this.bridge.translate(document.body);
+      if (!this._ownsDiscoveryAttempt(attempt)) {
+        return {
+          success: true,
+          url: attempt.url,
+          messageId: attempt.messageId,
+          isAutoTranslating: !!this.settings.autoTranslateOnDOMChanges,
+        };
+      }
 
       // Non-lazy, non-auto translation has no future work when no task was scheduled.
-      if (!this.isAutoTranslating && !this.settings.lazyLoading && this.scheduler.totalTasks === 0) {
+      if (!discoveryLifecycleObserved && !this.scheduler.discoveryPending
+          && !this.isAutoTranslating && !this.settings.lazyLoading && this.scheduler.totalTasks === 0) {
         const result = {
           success: true,
           url: this.currentUrl,
@@ -333,11 +353,13 @@ export class PageTranslationManager extends ResourceTracker {
         this.logger.debug('translatePage: Silent error caught', error.message);
         if (hasAcceptedStart) {
           this._settleSilentPostStart();
-        } else {
-          this._cleanupFailedPreStartAttempt(attempt, {
-            restorePreviousState: this._canRestorePreStartState(attempt),
-          });
+          // Propagate the settled session so the UI can reject a delayed START
+          // for it even when the IDLE never reaches the UI.
+          return { success: false, reason: ActionReasons.SILENT_ERROR, messageId: attempt.messageId };
         }
+        this._cleanupFailedPreStartAttempt(attempt, {
+          restorePreviousState: this._canRestorePreStartState(attempt),
+        });
         return { success: false, reason: ActionReasons.SILENT_ERROR };
       }
       
@@ -358,6 +380,91 @@ export class PageTranslationManager extends ResourceTracker {
     } finally {
       if (this.pendingSettingsAttempt === attempt) this.pendingSettingsAttempt = null;
     }
+  }
+
+  _ownsDiscoveryAttempt(attempt) {
+    return this._isCurrentPreStartAttempt(attempt)
+      && this.scheduler.sessionContext === attempt.sessionContext;
+  }
+
+  _reconcileDiscoveredWork(attempt) {
+    if (!this._ownsDiscoveryAttempt(attempt) || this.scheduler.discoveryPending) return;
+    if (this.scheduler.totalTasks > 0) return;
+
+    if (!this.isAutoTranslating && !this.settings.lazyLoading) {
+      this._settleSilentPostStart();
+      return;
+    }
+
+    this.isTranslating = false;
+    this.isTranslated = this.scheduler.translatedCount > 0;
+    this._broadcastEvent(MessageActions.PAGE_TRANSLATE_IDLE, {
+      url: this.currentUrl,
+      messageId: attempt.messageId,
+      sessionId: attempt.messageId,
+      translatedCount: this.scheduler.translatedCount || 0,
+      failedCount: this.scheduler.failedCount || 0,
+      totalCount: this.scheduler.totalTasks || 0,
+      isTranslated: this.isTranslated,
+      isTranslating: false,
+      isAutoTranslating: this.isAutoTranslating,
+    }, attempt.messageId);
+  }
+
+  _handleDiscoveryError(attempt, error) {
+    if (!this._ownsDiscoveryAttempt(attempt)) return false;
+    if (isSilentError(error)) {
+      if (this.isTranslating) {
+        this._settleSilentPostStart();
+      } else {
+        this.bridge.stopPersistence();
+        this.scheduler.setTranslationState(false, undefined, undefined, INTERNAL_CANCELLATION_REASON);
+        this.scrollTracker.stop();
+        this.abortController?.abort();
+        this.abortController = null;
+        this._cleanupSession(attempt.messageId);
+        this.isAutoTranslating = false;
+        this.isTranslating = false;
+        this.isTranslated = (this.scheduler.translatedCount || 0) > 0;
+        this.sessionContext = null;
+        if (!this.isTranslated) this._removeLayoutFix();
+        this._broadcastEvent(MessageActions.PAGE_TRANSLATE_IDLE, {
+          url: attempt.url,
+          messageId: attempt.messageId,
+          sessionId: attempt.messageId,
+          translatedCount: this.scheduler.translatedCount || 0,
+          failedCount: this.scheduler.failedCount || 0,
+          totalCount: this.scheduler.totalTasks || 0,
+          isTranslated: this.isTranslated,
+          isTranslating: false,
+          isAutoTranslating: false,
+        }, attempt.messageId);
+      }
+      return true;
+    }
+
+    this.bridge.stopPersistence();
+    this.scheduler.setTranslationState(false, undefined, undefined, INTERNAL_CANCELLATION_REASON);
+    this.scrollTracker.stop();
+    this.abortController?.abort();
+    this.abortController = null;
+    this._cleanupSession(attempt.messageId);
+    this.isTranslating = false;
+    this.isAutoTranslating = false;
+    this.isTranslated = (this.scheduler.translatedCount || 0) > 0;
+    this.sessionContext = null;
+    if (!this.isTranslated) this._removeLayoutFix();
+    this._broadcastEvent(MessageActions.PAGE_TRANSLATE_ERROR, {
+      error: error?.message || String(error),
+      errorDetails: MessageFormat.serializeTranslationError(error),
+      translatedCount: this.scheduler.translatedCount || 0,
+      failedCount: this.scheduler.failedCount || 0,
+      totalCount: this.scheduler.totalTasks || 0,
+      isTranslated: this.isTranslated,
+      isTranslating: false,
+      isAutoTranslating: false,
+    }, attempt.messageId);
+    return true;
   }
 
   _isCurrentPreStartAttempt(attempt) {
@@ -548,8 +655,12 @@ export class PageTranslationManager extends ResourceTracker {
    * Stop auto-translation (persistence) or current pass without restoring
    * @param {Object} [options] - Stop provenance options
    * @param {string} [options.cancellationReason] - Remote cancellation reason
+   * @param {boolean} [options.fatalErrorAutoRestore] - Marks the stop preceding a fatal error
    */
-  async stopAutoTranslation({ cancellationReason = ActionReasons.USER_STOPPED_PAGE_TRANSLATION } = {}) {
+  async stopAutoTranslation({
+    cancellationReason = ActionReasons.USER_STOPPED_PAGE_TRANSLATION,
+    fatalErrorAutoRestore = false,
+  } = {}) {
     if (cancellationReason === ActionReasons.USER_STOPPED_PAGE_TRANSLATION) this.userRestoredOverride = true;
     // Lazy nodes can still own a live session after presentation becomes idle.
     if (!this.isAutoTranslating && !this.isTranslating
@@ -579,6 +690,7 @@ export class PageTranslationManager extends ResourceTracker {
         translatedCount: this.scheduler.translatedCount,
         isTranslated: this.isTranslated,
         isAutoTranslating: false,
+        ...(fatalErrorAutoRestore && { fatalErrorAutoRestore: true }),
         ...(stoppingSessionId && { sessionId: stoppingSessionId }),
       };
 
@@ -732,7 +844,10 @@ export class PageTranslationManager extends ResourceTracker {
 
     // CRITICAL: Stop further translation without restoring the page.
     // We call this BEFORE resetting local flags to ensure its internal guards pass.
-    this.stopAutoTranslation({ cancellationReason: INTERNAL_CANCELLATION_REASON }).catch(err => {
+    this.stopAutoTranslation({
+      cancellationReason: INTERNAL_CANCELLATION_REASON,
+      fatalErrorAutoRestore: true,
+    }).catch(err => {
       this.logger.debug('stopAutoTranslation failed in fatal handler (expected if already stopped):', err);
     });
 
@@ -816,8 +931,31 @@ export class PageTranslationManager extends ResourceTracker {
    */
   _injectLayoutFix() {
     try {
-      // Mark html for specificity and styling hooks
-      document.documentElement.classList.add('ti-translation-active');
+      const root = document.documentElement;
+      const currentClass = { present: root.hasAttribute('class'), value: root.getAttribute('class') };
+      let ownership = this._layoutClassOwnership;
+      if (!ownership) {
+        const addedToken = !root.classList.contains('ti-translation-active');
+        if (addedToken) root.classList.add('ti-translation-active');
+        ownership = this._layoutClassOwnership = {
+          originalPresent: currentClass.present,
+          originalValue: currentClass.value,
+          addedToken,
+          lastAppliedPresent: root.hasAttribute('class'),
+          lastAppliedValue: root.getAttribute('class'),
+          externalClassChangesObserved: false,
+        };
+      } else {
+        if (currentClass.present !== ownership.lastAppliedPresent || currentClass.value !== ownership.lastAppliedValue) {
+          ownership.externalClassChangesObserved = true;
+        }
+        if (!root.classList.contains('ti-translation-active')) {
+          root.classList.add('ti-translation-active');
+          ownership.addedToken = true;
+          ownership.lastAppliedPresent = root.hasAttribute('class');
+          ownership.lastAppliedValue = root.getAttribute('class');
+        }
+      }
 
       if (!document.getElementById('ti-translation-layout-fix')) {
         const style = document.createElement('style');
@@ -873,11 +1011,23 @@ export class PageTranslationManager extends ResourceTracker {
    */
   _removeLayoutFix() {
     try {
-      document.documentElement.classList.remove('ti-translation-active');
+      const root = document.documentElement;
+      const ownership = this._layoutClassOwnership;
+      if (ownership?.addedToken) {
+        const classUnchanged = root.hasAttribute('class') === ownership.lastAppliedPresent
+          && root.getAttribute('class') === ownership.lastAppliedValue;
+        if (root.classList.contains('ti-translation-active')) root.classList.remove('ti-translation-active');
+        if (classUnchanged && !ownership.externalClassChangesObserved) {
+          if (ownership.originalPresent) root.setAttribute('class', ownership.originalValue);
+          else root.removeAttribute('class');
+        }
+      }
       const style = document.getElementById('ti-translation-layout-fix');
       if (style) style.remove();
     } catch (e) {
       this.logger.debug('Failed to remove layout fix:', e);
+    } finally {
+      this._layoutClassOwnership = null;
     }
   }
 

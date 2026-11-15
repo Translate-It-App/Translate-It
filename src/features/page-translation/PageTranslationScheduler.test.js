@@ -145,6 +145,389 @@ describe('PageTranslationScheduler', () => {
     }
   });
 
+  describe('first-batch timer ownership', () => {
+    let handoffs;
+    let scheduleEvents;
+    let flushCalls;
+    let taskPromises;
+
+    const configureTimedQueue = ({ translateAfterScrollStop = false, chunkSize = 250 } = {}) => {
+      scheduler.setSettings({
+        translationApi: 'google', targetLanguage: 'en', lazyLoading: false,
+        translateAfterScrollStop, scrollStopDelay: 600, poolDelay: 150,
+        priorityThreshold: 1, chunkSize, maxConcurrentFlushes: 1,
+      });
+      vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({
+        providerRegistryId: 'google', targetLanguage: 'en', chunkSize,
+        maxChars: 1_000_000, parallelExecution: false, lazyLoading: false,
+      });
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => ({
+        batchItems: queue.slice(0, config.chunkSize),
+        remainingItems: queue.slice(config.chunkSize),
+      }));
+      PageTranslationQueueFilter.process.mockImplementation((queue, config) => ({
+        batchItems: queue.slice(0, config.chunkSize),
+        remainingItems: queue.slice(config.chunkSize),
+        purgedCount: 0,
+        ejectedItems: [],
+      }));
+
+      handoffs = [];
+      scheduleEvents = [];
+      flushCalls = [];
+      taskPromises = [];
+      safeSendMessage.mockImplementation(async message => {
+        const items = JSON.parse(message.data.text);
+        handoffs.push({ at: Date.now(), ids: items.map(item => item.id), texts: items.map(item => item.text) });
+        return {
+          success: true,
+          translatedText: JSON.stringify(items.map(item => ({ id: item.id, text: `translated:${item.text}` }))),
+        };
+      });
+
+      const originalSchedule = scheduler._scheduleFlush.bind(scheduler);
+      vi.spyOn(scheduler, '_scheduleFlush').mockImplementation(score => {
+        const previousTimer = scheduler.batchTimer;
+        originalSchedule(score);
+        if (scheduler.batchTimer && scheduler.batchTimer !== previousTimer) {
+          scheduleEvents.push({ at: Date.now(), delay: scheduler.batchTimerDelay, timer: scheduler.batchTimer });
+        }
+      });
+      const originalFlush = scheduler.flush.bind(scheduler);
+      vi.spyOn(scheduler, 'flush').mockImplementation((...args) => {
+        flushCalls.push(Date.now());
+        return originalFlush(...args);
+      });
+    };
+
+    const enqueueTimed = (text, score = 1) => {
+      const promise = scheduler.enqueue(text, scheduler.sessionContext, score, null)
+        .then(settlement => settlement?.settle?.('accepted'));
+      taskPromises.push(promise);
+      return promise;
+    };
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+    });
+
+    afterEach(async () => {
+      scheduler.stop();
+      await Promise.allSettled(taskPromises);
+      vi.useRealTimers();
+    });
+
+    it.each([false, true])('keeps a single first high-priority item at 800ms (on-stop=%s)', async onStop => {
+      configureTimedQueue({ translateAfterScrollStop: onStop });
+      scheduler.isScrolling = onStop;
+      const promise = enqueueTimed('single-high', 1);
+      const firstTimer = scheduler.batchTimer;
+
+      await vi.advanceTimersByTimeAsync(799);
+      expect(handoffs).toEqual([]);
+      expect(scheduler.batchTimer).toBe(firstTimer);
+      await vi.advanceTimersByTimeAsync(1);
+      await promise;
+
+      expect(flushCalls).toEqual([800]);
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([[800, ['single-high']]]);
+    });
+
+    it.each([false, true])('does not rearm for high arrivals at 0/200/400/600/799ms (on-stop=%s)', async onStop => {
+      configureTimedQueue({ translateAfterScrollStop: onStop });
+      scheduler.isScrolling = onStop;
+      enqueueTimed('high-0', 1);
+      const firstTimer = scheduler.batchTimer;
+      for (const at of [200, 400, 600, 799]) {
+        await vi.advanceTimersByTimeAsync(at - Date.now());
+        enqueueTimed(`high-${at}`, 1);
+        expect(scheduler.batchTimer).toBe(firstTimer);
+      }
+
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.all(taskPromises);
+
+      expect(scheduleEvents).toHaveLength(1);
+      expect(flushCalls[0]).toBe(800);
+      expect(handoffs.map(({ at, texts }) => [at, texts.length])).toEqual([[800, 5]]);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(handoffs).toHaveLength(1);
+    });
+
+    it.each([false, true])('does not let mixed high/low arrivals reset first-batch time (on-stop=%s)', async onStop => {
+      configureTimedQueue({ translateAfterScrollStop: onStop });
+      scheduler.isScrolling = onStop;
+      enqueueTimed('high-0', 1);
+      await vi.advanceTimersByTimeAsync(200);
+      enqueueTimed('low-200', 0);
+      await vi.advanceTimersByTimeAsync(200);
+      enqueueTimed('high-400', 1);
+      await vi.advanceTimersByTimeAsync(200);
+      enqueueTimed('low-600', 0);
+
+      await vi.advanceTimersByTimeAsync(199);
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.all(taskPromises);
+
+      expect(scheduleEvents).toHaveLength(1);
+      expect(flushCalls[0]).toBe(800);
+      expect(handoffs[0].texts).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(handoffs).toHaveLength(1);
+    });
+
+    it.each([false, true])('preserves the same-turn five-item first-batch deadline (on-stop=%s)', async onStop => {
+      configureTimedQueue({ translateAfterScrollStop: onStop });
+      scheduler.isScrolling = onStop;
+      for (let index = 0; index < 5; index++) enqueueTimed(`burst-${index}`, 1);
+
+      await vi.advanceTimersByTimeAsync(799);
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.all(taskPromises);
+
+      expect(scheduleEvents).toHaveLength(1);
+      expect(flushCalls[0]).toBe(800);
+      expect(handoffs[0].texts).toHaveLength(5);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(handoffs).toHaveLength(1);
+    });
+
+    it('flushes the first eight items at the anchored deadline during a continuous stream', async () => {
+      configureTimedQueue();
+      enqueueTimed('stream-0', 1);
+      for (const at of Array.from({ length: 19 }, (_, index) => (index + 1) * 100)) {
+        await vi.advanceTimersByTimeAsync(at - Date.now());
+        if (at === 800) {
+          expect(handoffs.map(({ at: flushAt, texts }) => [flushAt, texts.length])).toEqual([[800, 8]]);
+        }
+        enqueueTimed(`stream-${at}`, 1);
+      }
+
+      expect(handoffs.map(({ at, texts }) => [at, texts.length])).toEqual([[800, 8]]);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(handoffs).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.all(taskPromises);
+
+      expect(handoffs.map(({ at, texts }) => [at, texts.length])).toEqual([[800, 8], [2150, 12]]);
+      const handoffIds = handoffs.flatMap(({ ids }) => ids);
+      expect(handoffIds).toHaveLength(20);
+      expect(new Set(handoffIds).size).toBe(20);
+      expect(scheduleEvents.map(({ at }) => at)).toEqual([0, 800, ...Array.from({ length: 11 }, (_, index) => 900 + index * 100)]);
+    });
+
+    it.each([
+      [false, 600, 250, 1250],
+      [true, 150, 150, 1150],
+    ])('rearms an existing later-batch low-priority timer (on-stop=%s)', async (onStop, lowDelay, highDelay, expectedFlush) => {
+      configureTimedQueue({ translateAfterScrollStop: onStop });
+      const first = enqueueTimed('first-batch', 1);
+      await vi.advanceTimersByTimeAsync(800);
+      await first;
+      expect(flushCalls).toEqual([800]);
+
+      await vi.advanceTimersByTimeAsync(100);
+      enqueueTimed('later-low', 0);
+      await vi.advanceTimersByTimeAsync(100);
+      const laterHigh = enqueueTimed('later-high', 1);
+      expect(scheduleEvents.map(({ at, delay }) => [at, delay])).toEqual([
+        [0, 800], [900, lowDelay], [1000, highDelay],
+      ]);
+
+      await vi.advanceTimersByTimeAsync(expectedFlush - Date.now() - 1);
+      expect(handoffs).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await laterHigh;
+      await Promise.all(taskPromises);
+
+      expect(flushCalls).toEqual([800, expectedFlush]);
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([
+        [800, ['first-batch']], [expectedFlush, ['later-low', 'later-high']],
+      ]);
+    });
+
+    it('flushes On-Stop immediately on scroll stop after scroll-start cancelled the first timer', async () => {
+      configureTimedQueue({ translateAfterScrollStop: true });
+      enqueueTimed('before-scroll', 1);
+      await vi.advanceTimersByTimeAsync(50);
+      scheduler.signalScrollStart();
+      await vi.advanceTimersByTimeAsync(50);
+      enqueueTimed('during-scroll', 1);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(handoffs).toEqual([]);
+
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(scheduleEvents.map(({ at, delay }) => [at, delay])).toEqual([[0, 800], [100, 800]]);
+      expect(flushCalls).toEqual([200]);
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([[200, ['before-scroll', 'during-scroll']]]);
+    });
+
+    it('holds later On-Stop arrivals while scrolling and flushes them at scroll stop', async () => {
+      configureTimedQueue({ translateAfterScrollStop: true });
+      const first = enqueueTimed('first-visible', 1);
+      await vi.advanceTimersByTimeAsync(800);
+      await first;
+      expect(flushCalls).toEqual([800]);
+
+      scheduler.signalScrollStart();
+      await vi.advanceTimersByTimeAsync(50);
+      const later = enqueueTimed('after-first-batch', 1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(handoffs).toHaveLength(1);
+      expect(scheduleEvents).toHaveLength(1);
+
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+      await later;
+
+      expect(flushCalls).toEqual([800, 1850]);
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([
+        [800, ['first-visible']], [1850, ['after-first-batch']],
+      ]);
+    });
+
+    it('keeps flush invocation at 800ms distinct from the 200ms batch-config handoff delay', async () => {
+      configureTimedQueue();
+      const config = {
+        providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250,
+        maxChars: 1_000_000, parallelExecution: false, lazyLoading: false,
+      };
+      scheduler._getBatchConfig.mockImplementationOnce(() => new Promise(resolve => {
+        setTimeout(() => resolve(config), 200);
+      }));
+      const task = enqueueTimed('config-delay', 1);
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(flushCalls).toEqual([800]);
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(199);
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await task;
+
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([[1000, ['config-delay']]]);
+    });
+
+    it('flushes high-priority capacity immediately at 250 items', async () => {
+      configureTimedQueue({ chunkSize: 250 });
+      for (let index = 0; index < 250; index++) enqueueTimed(`capacity-${index}`, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.all(taskPromises);
+
+      expect(flushCalls).toEqual([0]);
+      expect(handoffs.map(({ at, texts }) => [at, texts.length])).toEqual([[0, 250]]);
+      expect(scheduleEvents).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(handoffs).toHaveLength(1);
+    });
+
+    it('emergency-flushes 1000 low-priority items immediately with a 250-item first batch', async () => {
+      configureTimedQueue({ chunkSize: 250 });
+      let releaseBatch;
+      safeSendMessage.mockImplementation(async message => {
+        const items = JSON.parse(message.data.text);
+        handoffs.push({ at: Date.now(), ids: items.map(item => item.id), texts: items.map(item => item.text) });
+        return new Promise(resolve => {
+          releaseBatch = () => resolve({
+            success: true,
+            translatedText: JSON.stringify(items.map(item => ({ id: item.id, text: `translated:${item.text}` }))),
+          });
+        });
+      });
+      for (let index = 0; index < 1000; index++) enqueueTimed(`emergency-${index}`, 0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(flushCalls[0]).toBe(0);
+      expect(handoffs[0]).toMatchObject({ at: 0 });
+      expect(handoffs[0].texts).toHaveLength(250);
+      scheduler.stop();
+      releaseBatch();
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.allSettled(taskPromises);
+    });
+
+    it('does not reschedule while an earlier real transport owns the concurrency slot', async () => {
+      configureTimedQueue({ chunkSize: 1, maxConcurrentFlushes: 1 });
+      let releaseFirst;
+      let activeTransports = 0;
+      let maxActiveTransports = 0;
+      safeSendMessage.mockImplementation(async message => {
+        const items = JSON.parse(message.data.text);
+        activeTransports++;
+        maxActiveTransports = Math.max(maxActiveTransports, activeTransports);
+        handoffs.push({ at: Date.now(), ids: items.map(item => item.id), texts: items.map(item => item.text) });
+        if (!releaseFirst) {
+          return new Promise(resolve => {
+            releaseFirst = () => {
+              activeTransports--;
+              resolve({
+                success: true,
+                translatedText: JSON.stringify(items.map(item => ({ id: item.id, text: `translated:${item.text}` }))),
+              });
+            };
+          });
+        }
+        activeTransports--;
+        return {
+          success: true,
+          translatedText: JSON.stringify(items.map(item => ({ id: item.id, text: `translated:${item.text}` }))),
+        };
+      });
+      enqueueTimed('active-low', 0);
+      await vi.advanceTimersByTimeAsync(800);
+      expect(handoffs.map(({ at }) => at)).toEqual([800]);
+
+      await vi.advanceTimersByTimeAsync(100);
+      enqueueTimed('queued-high', 1);
+      expect(scheduleEvents.map(({ at, delay }) => [at, delay])).toEqual([[0, 800]]);
+      expect(scheduler.activeFlushes).toBe(1);
+      expect(scheduler.batchTimer).toBeNull();
+      await vi.advanceTimersByTimeAsync(100);
+      releaseFirst();
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.all(taskPromises);
+
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([
+        [800, ['active-low']], [1000, ['queued-high']],
+      ]);
+      expect(maxActiveTransports).toBe(1);
+      expect(scheduleEvents.map(({ at, delay }) => [at, delay])).toEqual([[0, 800]]);
+    });
+
+    it('reset/replacement cancels the old deadline and starts a fresh first-batch timer', async () => {
+      configureTimedQueue();
+      enqueueTimed('old-session', 1);
+      await vi.advanceTimersByTimeAsync(200);
+      scheduler.reset();
+      scheduler.setTranslationState(true, 'replacement-session', { replacement: true });
+      const replacement = enqueueTimed('replacement', 1);
+      expect(scheduleEvents.map(({ at, delay }) => [at, delay])).toEqual([[0, 800], [200, 800]]);
+      await vi.advanceTimersByTimeAsync(799);
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await replacement;
+
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([[1000, ['replacement']]]);
+    });
+
+    it('stop cancels a pending first-batch timer without handoff', async () => {
+      configureTimedQueue();
+      enqueueTimed('stopped', 1);
+      await vi.advanceTimersByTimeAsync(200);
+      scheduler.stop();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(handoffs).toEqual([]);
+      expect(scheduler.batchTimer).toBeNull();
+    });
+  });
+
   describe('bounded independent AI batches', () => {
     it.each([[3, 25, 2], [5, 10, 4]])('enables Custom workers at level %i without changing its existing batch size', async (level, chunkSize, limit) => {
       const config = await import('@/shared/config/config.js');
@@ -258,6 +641,87 @@ describe('PageTranslationScheduler', () => {
   });
 
   describe('Initialization & State', () => {
+    it('holds completion while discovery is pending and rechecks when discovery drains', async () => {
+      vi.useFakeTimers();
+      try {
+        const onLifecycleEvent = vi.fn();
+        const context = {};
+        const discovered = new PageTranslationScheduler({ onLifecycleEvent });
+        discovered.setTranslationState(true, 'discovery-session', context);
+        discovered.totalTasks = 1;
+        discovered.translatedCount = 1;
+        discovered.setDiscoveryPending(true, context);
+        discovered._checkCompletion();
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).not.toHaveBeenCalled();
+
+        expect(discovered.setDiscoveryPending(false, {})).toBe(false);
+        expect(discovered.discoveryPending).toBe(true);
+        expect(discovered.setDiscoveryPending(false, context)).toBe(true);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_COMPLETE, expect.objectContaining({
+          totalCount: 1,
+          translatedCount: 1,
+        }));
+        discovered.reset();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('suppresses visibility idle while discovery is pending and clears the gate on stop/reset', async () => {
+      vi.useFakeTimers();
+      try {
+        const onLifecycleEvent = vi.fn();
+        const context = {};
+        const discovered = new PageTranslationScheduler({ onLifecycleEvent });
+        discovered.setTranslationState(true, 'visibility-session', context);
+        discovered.isWaitingForVisibility = true;
+        discovered.setDiscoveryPending(true, context);
+        discovered._checkCompletion();
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).not.toHaveBeenCalled();
+
+        discovered.stop();
+        expect(discovered.discoveryPending).toBe(false);
+        discovered.setTranslationState(true, 'replacement-session', context);
+        discovered.setDiscoveryPending(true, context);
+        discovered.reset();
+        expect(discovered.discoveryPending).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not complete when a provider finishes between discovery slices', async () => {
+      vi.useFakeTimers();
+      try {
+        const onLifecycleEvent = vi.fn();
+        const context = {};
+        const discovered = new PageTranslationScheduler({ onLifecycleEvent });
+        discovered.setTranslationState(true, 'provider-session', context);
+        discovered.setSettings({ autoTranslateOnDOMChanges: false });
+        discovered.setDiscoveryPending(true, context);
+        const item = { id: 'discovered-item', text: 'source', score: 1, resolve: vi.fn() };
+        discovered.queue.push(item);
+        discovered.totalTasks = 1;
+        PageTranslationFluidFilter.process.mockReturnValue({ batchItems: [item], remainingItems: [] });
+        vi.spyOn(discovered, '_getBatchConfig').mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'fa' });
+        safeSendMessage.mockResolvedValue({ success: true, translatedText: '["translated"]' });
+
+        await discovered.flush();
+        getSettlement(item.resolve).settle('accepted');
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).not.toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_COMPLETE, expect.anything());
+
+        discovered.setDiscoveryPending(false, context);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onLifecycleEvent).toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_COMPLETE, expect.objectContaining({ totalCount: 1 }));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('uses trusted lifecycle callback instead of aggregate PageEventBus transport', () => {
       const onLifecycleEvent = vi.fn();
       const directScheduler = new PageTranslationScheduler({ onLifecycleEvent });

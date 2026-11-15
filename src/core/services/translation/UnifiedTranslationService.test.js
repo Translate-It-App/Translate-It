@@ -186,6 +186,8 @@ import { AIConversationHelper } from '../../../features/translation/providers/ut
 import { ActionReasons } from '../../../shared/messaging/core/MessagingCore.js';
 import { statsManager } from '../../../features/translation/core/TranslationStatsManager.js';
 import { translationSessionManager } from '../../../features/translation/core/TranslationSessionManager.js';
+import * as configuration from '../../../shared/config/config.js';
+import { isEligibleForDictionaryUpgrade } from '../../../features/translation/utils/translationModeHelper.js';
 
 describe('UnifiedTranslationService', () => {
   let service;
@@ -194,12 +196,26 @@ describe('UnifiedTranslationService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    configuration.getModeProvidersAsync.mockReset().mockResolvedValue({});
+    configuration.getTranslationApiAsync.mockReset().mockResolvedValue('google');
+    configuration.getPopupMaxCharsAsync.mockReset().mockResolvedValue(5000);
+    configuration.getSidepanelMaxCharsAsync.mockReset().mockResolvedValue(10000);
+    configuration.getSelectionMaxCharsAsync.mockReset().mockResolvedValue(5000);
+    configuration.getSelectElementMaxCharsAsync.mockReset().mockResolvedValue(20000);
+    isEligibleForDictionaryUpgrade.mockReset().mockResolvedValue(false);
     backgroundLeaseMock.state.activeOperationCount = 0;
     backgroundLeaseMock.withBackgroundOperationLease
       .mockReset()
       .mockImplementation(backgroundLeaseMock.runWithLease);
     translationRequestTracker.getRequest.mockReset();
     translationRequestTracker.isRequestActive.mockReset();
+    translationRequestTracker.createRequest.mockReset().mockImplementation(({ messageId, data }) => ({
+      messageId,
+      data: { ...data, sessionId: data?.sessionId || messageId },
+      mode: data?.mode,
+      status: 'pending',
+      metadata: { provider: data?.provider },
+    }));
     streamingManagerMock.initializeStream.mockReset();
     streamingManagerMock.getStreamInfo.mockReset().mockReturnValue(null);
     streamingManagerMock.completeStream.mockReset().mockResolvedValue(undefined);
@@ -611,6 +627,8 @@ describe('UnifiedTranslationService', () => {
 
       expect(result.success).toBe(false);
       expect(result.error.type).toBe(ErrorTypes.TEXT_TOO_LONG);
+      expect(translationRequestTracker.failRequest).toHaveBeenCalledTimes(1);
+      expect(service.modeCoordinator.processRequest).not.toHaveBeenCalled();
     });
 
     it('should use context-specific character limits (Sidepanel)', async () => {
@@ -935,6 +953,127 @@ describe('UnifiedTranslationService', () => {
 
       expect(result).toMatchObject({ success: false, cancelled: true });
       expect(service.resultDispatcher.dispatchResult).not.toHaveBeenCalled();
+    });
+
+    it('rethrows ordinary preparation errors after failing and finalizing the early record', async () => {
+      const { getSelectionMaxCharsAsync } = await import('../../../shared/config/config.js');
+      const preparationError = new Error('settings unavailable');
+      getSelectionMaxCharsAsync.mockRejectedValueOnce(preparationError);
+      const request = { messageId: 'settings-error', data: { text: 'hello', mode: 'selection' }, status: 'pending' };
+      translationRequestTracker.createRequest.mockReturnValue(request);
+      translationRequestTracker.isRequestActive.mockReturnValue(true);
+
+      await expect(service.handleTranslationRequest({
+        messageId: request.messageId,
+        data: request.data,
+        context: 'content',
+      })).rejects.toBe(preparationError);
+
+      expect(translationRequestTracker.failRequest).toHaveBeenCalledWith(request.messageId, preparationError);
+      expect(finalizeTranslationOperation).toHaveBeenCalledTimes(1);
+      expect(service.modeCoordinator.processRequest).not.toHaveBeenCalled();
+    });
+
+    it('registers the request and operation before the first eligibility await', async () => {
+      let releaseEligibility;
+      let enteredEligibility;
+      const eligibilityStarted = new Promise(resolve => { enteredEligibility = resolve; });
+      isEligibleForDictionaryUpgrade.mockImplementationOnce(() => {
+        enteredEligibility();
+        return new Promise(resolve => { releaseEligibility = resolve; });
+      });
+      const message = { messageId: 'first-await-cancel', data: { text: 'hello', mode: 'selection' }, context: 'content' };
+      const request = { messageId: message.messageId, data: message.data, mode: 'selection', status: 'pending' };
+      let terminalStatus = null;
+      translationRequestTracker.createRequest.mockReturnValue(request);
+      translationRequestTracker.getRequest.mockReturnValueOnce(null).mockReturnValue(request);
+      translationRequestTracker.isRequestActive.mockImplementation(() => terminalStatus === null);
+      translationRequestTracker.cancelRequest.mockImplementation(() => {
+        terminalStatus = 'cancelled';
+        request.status = terminalStatus;
+        return { accepted: true, status: terminalStatus, request };
+      });
+      const providerResolution = vi.spyOn(service, '_resolveEffectiveProvider');
+
+      const pending = service.handleTranslationRequest(message);
+      await eligibilityStarted;
+      expect(translationRequestTracker.createRequest).toHaveBeenCalledTimes(1);
+      expect(service._getOperation(request)).not.toBeNull();
+      await service.cancelRequest(message.messageId);
+      releaseEligibility(false);
+
+      await expect(pending).resolves.toMatchObject({ success: false, cancelled: true });
+      expect(providerResolution).not.toHaveBeenCalled();
+      expect(configuration.getModeProvidersAsync).not.toHaveBeenCalled();
+      expect(service.modeCoordinator.processRequest).not.toHaveBeenCalled();
+      expect(finalizeTranslationOperation).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['resolve', 'reject'])('suppresses late character-limit lookup %s after cancellation', async settlement => {
+      const { getSelectionMaxCharsAsync } = await import('../../../shared/config/config.js');
+      let settleLimit;
+      getSelectionMaxCharsAsync.mockReturnValueOnce(new Promise((resolve, reject) => {
+        settleLimit = value => settlement === 'resolve' ? resolve(value) : reject(value);
+      }));
+      const message = { messageId: `limit-race-${settlement}`, data: { text: 'hello', mode: 'selection' }, context: 'content' };
+      const request = { messageId: message.messageId, data: message.data, mode: 'selection', status: 'pending' };
+      let terminalStatus = null;
+      translationRequestTracker.createRequest.mockReturnValue(request);
+      translationRequestTracker.getRequest.mockReturnValueOnce(null).mockReturnValue(request);
+      translationRequestTracker.isRequestActive.mockImplementation(() => terminalStatus === null);
+      translationRequestTracker.cancelRequest.mockImplementation(() => {
+        terminalStatus = 'cancelled';
+        request.status = terminalStatus;
+        return { accepted: true, status: terminalStatus, request };
+      });
+
+      const pending = service.handleTranslationRequest(message);
+      await vi.waitFor(() => expect(getSelectionMaxCharsAsync).toHaveBeenCalledTimes(1));
+      await service.cancelRequest(message.messageId);
+      settleLimit(settlement === 'reject' ? new Error('late limit failure') : 5000);
+
+      await expect(pending).resolves.toMatchObject({ success: false, cancelled: true });
+      expect(service.modeCoordinator.processRequest).not.toHaveBeenCalled();
+      expect(finalizeTranslationOperation).toHaveBeenCalledTimes(1);
+    });
+
+    it('copies resolved provider to the input, tracked data and metadata before execution', async () => {
+      const { getModeProvidersAsync } = await import('../../../shared/config/config.js');
+      getModeProvidersAsync.mockResolvedValueOnce({ selection: 'resolved-provider' });
+      const data = { text: 'hello', mode: 'selection' };
+      const request = { messageId: 'provider-copy', data: { ...data }, metadata: {}, mode: 'selection' };
+      translationRequestTracker.createRequest.mockReturnValue(request);
+      service.modeCoordinator.processRequest.mockResolvedValue({ success: true });
+
+      await service.handleTranslationRequest({ messageId: request.messageId, data, context: 'content' });
+
+      expect(data.provider).toBe('resolved-provider');
+      expect(request.data.provider).toBe('resolved-provider');
+      expect(request.metadata.provider).toBe('resolved-provider');
+    });
+
+    it('does not replace or finalize an admitted request on a duplicate during preparation', async () => {
+      const { getModeProvidersAsync } = await import('../../../shared/config/config.js');
+      let releaseProviderLookup;
+      getModeProvidersAsync.mockReturnValueOnce(new Promise(resolve => { releaseProviderLookup = resolve; }));
+      const message = { messageId: 'duplicate-during-preparation', data: { text: 'hello', mode: 'selection' }, context: 'content' };
+      const request = { messageId: message.messageId, data: message.data, status: 'pending' };
+      translationRequestTracker.getRequest.mockReturnValueOnce(null).mockReturnValue(request);
+      translationRequestTracker.isRequestActive.mockReturnValue(true);
+      translationRequestTracker.createRequest.mockReturnValue(request);
+      service.modeCoordinator.processRequest.mockResolvedValue({ success: true });
+
+      const first = service.handleTranslationRequest(message);
+      await vi.waitFor(() => expect(getModeProvidersAsync).toHaveBeenCalled());
+      const duplicate = await service.handleTranslationRequest(message);
+      expect(duplicate).toMatchObject({ success: false, error: 'Request already processing' });
+      expect(translationRequestTracker.createRequest).toHaveBeenCalledTimes(1);
+      expect(finalizeTranslationOperation).not.toHaveBeenCalled();
+
+      releaseProviderLookup({});
+      await expect(first).resolves.toMatchObject({ success: true });
+      expect(translationRequestTracker.createRequest).toHaveBeenCalledTimes(1);
+      expect(finalizeTranslationOperation).toHaveBeenCalledTimes(1);
     });
 
     it('marks a canonical provider timeout as TIMEOUT and records OPERATION_TIMEOUT', async () => {

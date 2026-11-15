@@ -45,8 +45,7 @@ const createShadowHost = (parent = document.body, options = {}) => {
 };
 
 const translate = async (root, options = {}) => {
-  const { bridge, onTranslate, pending } = await deferredTranslate(root, options);
-  pending.forEach(({ text, resolve }) => resolve(settlement(`Translated ${text}`)));
+  const { bridge, onTranslate } = await deferredTranslate(root, options, { autoSettle: true });
   return { bridge, onTranslate };
 };
 
@@ -58,10 +57,13 @@ const startTranslation = async (root, options = {}) => {
   return { bridge, onTranslate };
 };
 
-const deferredTranslate = async (root, options = {}) => {
+const deferredTranslate = async (root, options = {}, { autoSettle = false } = {}) => {
   const pending = [];
   const onTranslate = vi.fn((text, context, score, node) => new Promise(resolve => {
     pending.push({ text, node, resolve });
+    // Sliced discovery issues provider requests across slices, so the
+    // auto-settled path settles every request as soon as it arrives.
+    if (autoSettle) resolve(settlement(`Translated ${text}`));
   }));
   const bridge = new PageTranslationBridge();
   await bridge.initialize(settings(options), onTranslate);
@@ -106,15 +108,14 @@ describe('PageTranslationBridge Shadow DOM ownership', () => {
     span.textContent = 'Shadow text';
     shadow.appendChild(span);
 
-    const { bridge, onTranslate, pending } = await deferredTranslate(document.body);
+    const { bridge, onTranslate } = await deferredTranslate(document.body, {}, { autoSettle: true });
     track(bridge);
 
-    pending.forEach(({ text, resolve }) => resolve(settlement(`Translated ${text}`)));
     await vi.waitFor(() => expect(span.textContent).toContain('Translated Shadow text'));
-    expect(span.title).toContain('Translated Shadow title');
-    expect(onTranslate.mock.calls.map(([text]) => text)).toEqual(
+    await vi.waitFor(() => expect(onTranslate.mock.calls.map(([text]) => text)).toEqual(
       expect.arrayContaining(['Shadow text', 'Shadow title'])
-    );
+    ));
+    expect(span.title).toContain('Translated Shadow title');
   });
 
   it('translates nested open ShadowRoots', async () => {
@@ -156,6 +157,11 @@ describe('PageTranslationBridge Shadow DOM ownership', () => {
     });
     track(bridge);
 
+    // The allowed nodes come last in document order, so waiting for them means
+    // discovery already passed every excluded node.
+    await vi.waitFor(() => expect(onTranslate.mock.calls.map(([text]) => text)).toEqual(
+      expect.arrayContaining(['Allowed text', 'Allowed title'])
+    ));
     const translatedTexts = onTranslate.mock.calls.map(([text]) => text);
     expect(translatedTexts).not.toEqual(expect.arrayContaining([
       'Excluded class text',
@@ -165,7 +171,6 @@ describe('PageTranslationBridge Shadow DOM ownership', () => {
       'Configured text',
       'Configured title',
     ]));
-    expect(translatedTexts).toEqual(expect.arrayContaining(['Allowed text', 'Allowed title']));
   });
 
   it('translates visible BUTTON text while protecting its machine value', async () => {

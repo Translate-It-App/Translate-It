@@ -1013,6 +1013,50 @@ describe('UnifiedModeCoordinator', () => {
       };
     }
 
+    it('unregisters a request when provider acquisition rejects and propagates the original error', async () => {
+      const providerError = new Error('provider acquisition failed');
+      const handleError = vi.fn();
+      mockEngine.getProvider.mockRejectedValue(providerError);
+
+      await expect(coordinator._processGenericBatch(
+        batchRequest(), { translationEngine: mockEngine }, { ...batchOptions([{ text: 'source' }]), handleError }
+      )).rejects.toBe(providerError);
+
+      expect(mockEngine.lifecycleRegistry.registerRequest).toHaveBeenCalledTimes(1);
+      expect(mockEngine.lifecycleRegistry.registerRequest).toHaveBeenCalledWith('m-sub', 'source', 'subtitle-translation');
+      expect(mockEngine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledTimes(1);
+      expect(mockEngine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledWith('m-sub');
+      expect(handleError).not.toHaveBeenCalled();
+    });
+
+    it.each([null, undefined])('unregisters when provider acquisition returns %s', async missingProvider => {
+      const handleError = vi.fn();
+      mockEngine.getProvider.mockResolvedValue(missingProvider);
+
+      await expect(coordinator._processGenericBatch(
+        batchRequest(), { translationEngine: mockEngine }, { ...batchOptions([{ text: 'source' }]), handleError }
+      )).rejects.toThrow("Provider 'google' initialization failed");
+
+      expect(mockEngine.lifecycleRegistry.registerRequest).toHaveBeenCalledTimes(1);
+      expect(mockEngine.lifecycleRegistry.registerRequest).toHaveBeenCalledWith('m-sub', 'source', 'subtitle-translation');
+      expect(mockEngine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledTimes(1);
+      expect(mockEngine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledWith('m-sub');
+      expect(handleError).not.toHaveBeenCalled();
+    });
+
+    it('unregisters a successfully translated request exactly once', async () => {
+      const provider = { translate: vi.fn().mockResolvedValue(['translated']) };
+      mockEngine.getProvider.mockResolvedValue(provider);
+
+      await expect(coordinator._processGenericBatch(
+        batchRequest(), { translationEngine: mockEngine }, batchOptions([{ text: 'source' }])
+      )).resolves.toEqual([{ text: 'translated' }]);
+
+      expect(mockEngine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledTimes(1);
+      expect(mockEngine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledWith('m-sub');
+      expect(provider.translate).toHaveBeenCalledTimes(1);
+    });
+
     it('tags only under-returned items with isSkipped', async () => {
       mockEngine.getProvider.mockResolvedValue({
         translate: vi.fn().mockResolvedValue(['ترجمهٔ A'])
