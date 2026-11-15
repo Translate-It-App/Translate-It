@@ -81,6 +81,7 @@ export function usePageTranslation() {
   // They are correlated against the background's authoritative identity before
   // being applied.
   let pendingLifecycleEvents = [];
+  let replayingFatalSessionId = null;
 
   // Ownership token of the translate request that is awaiting its response.
   // Restore, a tab change, or a newer request supersedes it; the request's own
@@ -407,6 +408,7 @@ export function usePageTranslation() {
       // Translating state this request's own START admission introduces may be
       // settled by the command response.
       const translatingBeforeReplay = isTranslating.value;
+      let replayedFatalError = false;
       for (const event of events) {
         const eventData = event.data || {};
         const eventSessionId = typeof eventData.sessionId === 'string' && eventData.sessionId.length > 0 ? eventData.sessionId : null;
@@ -438,7 +440,15 @@ export function usePageTranslation() {
 
         if (evaluateEventOwnership(eventData, event.action) !== EVENT_APPLY) continue;
         if (!acceptAggregateRevision(eventData, event.action)) continue;
-        applyLifecycleEvent(event.action, eventData);
+        if (event.action === MessageActions.PAGE_TRANSLATE_ERROR && eventData.isFatal === true) {
+          replayedFatalError = true;
+        }
+        replayingFatalSessionId = eventSessionId;
+        try {
+          applyLifecycleEvent(event.action, eventData);
+        } finally {
+          replayingFatalSessionId = null;
+        }
       }
 
       if (result?.isRestrictedPage) {
@@ -453,6 +463,8 @@ export function usePageTranslation() {
       }
 
       if (result?.success === false) {
+        if (replayedFatalError) return;
+
         if ([
           ActionReasons.USER_CANCELLED,
           ActionReasons.SILENT_ERROR,
@@ -527,22 +539,43 @@ export function usePageTranslation() {
       // completed successfully.
       const events = pendingLifecycleEvents;
       pendingLifecycleEvents = [];
-      for (const event of events) {
-        const eventTabId = event.data?.tabId;
-        const eventSessionId = event.data?.sessionId;
-        const hasAuthoritativeIdentity = lastTranslateTabId !== null || pendingRequestSessionId !== null;
-        const tabMatches = event.action === MessageActions.PAGE_TRANSLATE_START
-          ? (!Number.isInteger(eventTabId) || !lastTranslateTabId || eventTabId === lastTranslateTabId)
-          : (!lastTranslateTabId || (Number.isInteger(eventTabId) && eventTabId === lastTranslateTabId));
-        const suppressed = typeof eventSessionId === 'string' && suppressedSessionIds.has(eventSessionId);
-        if (!suppressed && hasAuthoritativeIdentity && tabMatches && event.action === MessageActions.PAGE_TRANSLATE_START) {
-          if (!acceptAggregateRevision(event.data, event.action)) continue;
-          // START only changes translating state.
-          applyStartEvent(event.data);
+      const targetTabId = lastTranslateTabId;
+      const correlatedStarts = new Set(events
+        .filter(({ action, data }) => action === MessageActions.PAGE_TRANSLATE_START
+          && Number.isInteger(targetTabId)
+          && data?.tabId === targetTabId
+          && typeof data?.sessionId === 'string'
+          && !suppressedSessionIds.has(data.sessionId))
+        .map(({ data }) => data.sessionId));
+      let replayedError = false;
+      if (Number.isInteger(targetTabId)) {
+        try {
+          for (const event of events) {
+            const eventData = event.data || {};
+            if (event.action === MessageActions.PAGE_TRANSLATE_START
+              || eventData.tabId !== targetTabId
+              || !correlatedStarts.has(eventData.sessionId)
+              || suppressedSessionIds.has(eventData.sessionId)) continue;
+            // The matching START is correlation evidence only; transport failure
+            // must not admit a new translation session by itself.
+            if (pendingRequestSessionId && pendingRequestSessionId !== eventData.sessionId) continue;
+            pendingRequestSessionId = eventData.sessionId;
+            replayingFatalSessionId = eventData.sessionId;
+            if (evaluateEventOwnership(eventData, event.action) !== EVENT_APPLY) continue;
+            if (!acceptAggregateRevision(eventData, event.action)) continue;
+            if (event.action === MessageActions.PAGE_TRANSLATE_ERROR) {
+              replayedError = true;
+              await handleError(eventData);
+            } else {
+              applyLifecycleEvent(event.action, eventData);
+            }
+          }
+        } finally {
+          replayingFatalSessionId = null;
         }
       }
       // Preserve lifecycle state; only update presentation for real failures.
-      if (e.message !== 'silent_error') {
+      if (e.message !== 'silent_error' && !replayedError) {
         // The failure belongs to the current request: capture the revision now so
         // the request's own START lifecycle cannot suppress it.
         const revision = ++errorPresentationRevision;
@@ -629,35 +662,44 @@ export function usePageTranslation() {
     hasPendingRequest = false;
     pendingLifecycleEvents = [];
     commandResponseReceived = false;
+    const stopOwnership = translateRequestOwnership;
+    const lifecycleRevision = lifecycleStateRevision;
     try {
       const result = await sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
         context: MessageContexts.PAGE_TRANSLATION_UI,
       });
 
+      if (stopOwnership !== translateRequestOwnership || lifecycleRevision !== lifecycleStateRevision) return;
       if (result?.isRestrictedPage) {
         applyRestrictedPageState(result);
         return;
       }
 
       if (result.success) {
+        const frames = Array.isArray(result.responses) ? result.responses : [];
+        const aggregateValue = (field) => {
+          if (result[field] !== undefined) return result[field];
+          const values = frames.map((frame) => frame[field]).filter((value) => typeof value === 'number');
+          return values.length ? values.reduce((sum, value) => sum + value, 0) : undefined;
+        };
+        const frameTranslated = frames.some((frame) => frame.isTranslated === true)
+          || frames.some((frame) => typeof frame.translatedCount === 'number' && frame.translatedCount > 0);
+        const hasFrameTranslationState = frames.some((frame) => frame.isTranslated !== undefined || frame.translatedCount !== undefined);
         isAutoTranslating.value = false;
         isTranslating.value = false;
-        // If result contains isTranslated info, use it; otherwise assume current state
-        if (result.isTranslated !== undefined) {
-          isTranslated.value = result.isTranslated;
-        }
-        // If result has translatedCount, use it to determine isTranslated
-        if (result.translatedCount !== undefined) {
-          isTranslated.value = result.translatedCount > 0;
-          translatedCount.value = result.translatedCount;
-        }
-        if (result.failedCount !== undefined) {
-          failedCount.value = result.failedCount;
-        }
+        const translated = aggregateValue('translatedCount');
+        const failed = aggregateValue('failedCount');
+        const isStillTranslated = translated !== undefined
+          ? translated > 0
+          : (result.isTranslated ?? (hasFrameTranslationState ? frameTranslated : undefined));
+        if (isStillTranslated !== undefined) isTranslated.value = !!isStillTranslated;
+        if (translated !== undefined) translatedCount.value = translated;
+        if (failed !== undefined) failedCount.value = failed;
         message.value = 'Auto-translation stopped';
       }
     } catch {
+      if (stopOwnership !== translateRequestOwnership || lifecycleRevision !== lifecycleStateRevision) return;
       isAutoTranslating.value = false;
       isTranslating.value = false;
     }
@@ -932,11 +974,13 @@ export function usePageTranslation() {
       if (data.isAutoTranslating === false && data.isTranslating === false) {
         translateRequestOwnership++;
         if (!followsFatalError) supersedeCompletedSessions();
-        lastTranslateTabId = null;
-        pendingRequestSessionId = null;
-        hasPendingRequest = false;
-        pendingLifecycleEvents = [];
-        commandResponseReceived = false;
+        if (!(followsFatalError && replayingFatalSessionId === data.sessionId)) {
+          lastTranslateTabId = null;
+          pendingRequestSessionId = null;
+          hasPendingRequest = false;
+          pendingLifecycleEvents = [];
+          commandResponseReceived = false;
+        }
       }
     } else {
       isAutoTranslating.value = false;

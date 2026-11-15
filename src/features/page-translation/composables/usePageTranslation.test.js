@@ -165,6 +165,42 @@ describe('usePageTranslation Composable', () => {
   });
 
   describe('Actions', () => {
+    it('retains per-frame translation state when Stop returns a fanout response', async () => {
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : Promise.resolve({ success: true, responses: [
+          { success: true, isTranslated: true, translatedCount: 3, failedCount: 1 },
+          { success: true, isTranslated: true, translatedCount: 2, failedCount: 0 },
+        ] }));
+      const pageTranslation = await createPageTranslation();
+
+      await pageTranslation.stopAutoTranslation();
+
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(5);
+      expect(pageTranslation.failedCount.value).toBe(1);
+      expect(pageTranslation.message.value).toBe('Auto-translation stopped');
+    });
+
+    it('does not let an older Stop response overwrite a newer lifecycle update', async () => {
+      let resolveStop;
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : new Promise((resolve) => { resolveStop = resolve; }));
+      const pageTranslation = await createPageTranslation();
+      const pending = pageTranslation.stopAutoTranslation();
+      pageEventBus.on.mock.calls.find(([event]) => event === MessageActions.PAGE_AUTO_RESTORE_COMPLETE)[1](
+        { isAggregated: true, tabId: 1, aggregateScope: 'doc', aggregateRevision: 1,
+          isTranslated: true, translatedCount: 7, failedCount: 2 },
+      );
+      resolveStop({ success: true, responses: [{ success: true, isTranslated: false, translatedCount: 0 }] });
+      await pending;
+
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(7);
+      expect(pageTranslation.failedCount.value).toBe(2);
+    });
+
     it('refreshStatus should update state from background response', async () => {
       sendRegularMessage.mockResolvedValue({
         success: true,
@@ -1923,7 +1959,7 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.message.value).not.toContain('Error:');
     });
 
-    it('uses authoritative target identity on transport failure for buffered START replay', async () => {
+    it('does not apply buffered START alone on transport failure', async () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const transportError = Object.assign(new Error('transport failure'), {
         type: ErrorTypes.SERVER_ERROR,
@@ -1948,8 +1984,141 @@ describe('usePageTranslation Composable', () => {
       await pending;
 
       expect(pageTranslation.error.value).toBeInstanceOf(Error);
-      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isTranslating.value).toBe(false);
       expect(pageTranslation.isTranslated.value).toBe(false);
+    });
+
+    it('replays correlated terminal events on transport failure without losing fatal auto-restore correlation', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      getPageTranslationErrorPresentation.mockResolvedValueOnce(new Error('fatal translation failure'));
+      let rejectTranslate;
+      let markSent;
+      const sentGate = new Promise((resolve) => { markSent = resolve; });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) {
+          markSent();
+          return new Promise((_, reject) => { rejectTranslate = reject; });
+        }
+        return Promise.resolve({ success: true });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: {
+        tabId: 2, sessionId: 'fatal-session', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 1,
+      } });
+      listener({ action: MessageActions.PAGE_AUTO_RESTORE_COMPLETE, data: {
+        tabId: 2, sessionId: 'fatal-session', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 2,
+        fatalErrorAutoRestore: true, isTranslated: true, isTranslating: false, isAutoTranslating: false,
+        translatedCount: 4,
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_ERROR, data: {
+        tabId: 2, sessionId: 'fatal-session', isAggregated: true, aggregateScope: 'doc', aggregateRevision: 3,
+        isFatal: true, isTranslated: true, translatedCount: 4, error: 'fatal translation failure',
+        errorDetails: { type: 'TRANSLATION_FAILED', message: 'fatal translation failure' },
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_ERROR, data: {
+        tabId: 3, sessionId: 'foreign-session', isFatal: true, error: 'foreign failure',
+      } });
+
+      rejectTranslate(Object.assign(new Error('transport failure'), { targetTabId: 2 }));
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toContain('fatal translation failure');
+      expect(pageTranslation.message.value).not.toContain('foreign failure');
+      expect(pageTranslation.translatedCount.value).toBe(4);
+    });
+
+    it('keeps successful buffered fatal auto-restore and error correlated when active tab is unresolved', async () => {
+      browser.tabs.query.mockReturnValue(new Promise(() => {}));
+      getPageTranslationErrorPresentation.mockResolvedValueOnce(new Error('fatal translation failure'));
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: {
+        tabId: 2, sessionId: 'fatal-success-session', isAggregated: true,
+        aggregateScope: 'doc', aggregateRevision: 1,
+      } });
+      listener({ action: MessageActions.PAGE_AUTO_RESTORE_COMPLETE, data: {
+        tabId: 2, sessionId: 'fatal-success-session', isAggregated: true,
+        aggregateScope: 'doc', aggregateRevision: 2, fatalErrorAutoRestore: true,
+        isTranslated: true, isTranslating: false, isAutoTranslating: false, translatedCount: 4,
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_ERROR, data: {
+        tabId: 2, sessionId: 'unrelated-session', error: 'foreign same-tab failure',
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_ERROR, data: {
+        tabId: 2, sessionId: 'fatal-success-session', isAggregated: true,
+        aggregateScope: 'doc', aggregateRevision: 3, isFatal: true,
+        error: 'fatal translation failure', isTranslated: true, translatedCount: 4,
+      } });
+
+      resolveTranslate({ success: true, targetTabId: 2, messageId: 'fatal-success-session' });
+      await pending;
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toContain('fatal translation failure');
+      expect(pageTranslation.message.value).not.toContain('foreign same-tab failure');
+      expect(pageTranslation.translatedCount.value).toBe(4);
+    });
+
+    it('keeps a replayed fatal lifecycle error authoritative over a failed command response', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const presentation = deferPresentation();
+      const { resolveTranslate, sentGate } = createDeferredTranslate();
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: {
+        tabId: 2, sessionId: 'fatal-failed-response-session', isAggregated: true,
+        aggregateScope: 'doc', aggregateRevision: 1,
+      } });
+      listener({ action: MessageActions.PAGE_AUTO_RESTORE_COMPLETE, data: {
+        tabId: 2, sessionId: 'fatal-failed-response-session', isAggregated: true,
+        aggregateScope: 'doc', aggregateRevision: 2, fatalErrorAutoRestore: true,
+        isTranslated: true, isTranslating: false, isAutoTranslating: false,
+        translatedCount: 4, failedCount: 2, totalCount: 6,
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_ERROR, data: {
+        tabId: 2, sessionId: 'fatal-failed-response-session', isAggregated: true,
+        aggregateScope: 'doc', aggregateRevision: 3, isFatal: true,
+        error: 'fatal lifecycle failure', isTranslated: true,
+        translatedCount: 4, failedCount: 2, totalCount: 6,
+      } });
+
+      resolveTranslate({
+        success: false, targetTabId: 2, messageId: 'fatal-failed-response-session',
+        error: 'distinct command failure',
+      });
+      await pending;
+      await presentation.called;
+
+      expect(getPageTranslationErrorPresentation).toHaveBeenCalledTimes(1);
+      expect(pageTranslation.error.value).toBeNull();
+      expect(pageTranslation.message.value).not.toContain('distinct command failure');
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isAutoTranslating.value).toBe(false);
+      expect(pageTranslation.translatedCount.value).toBe(4);
+      expect(pageTranslation.failedCount.value).toBe(2);
+
+      presentation.resolve(new Error('fatal lifecycle failure'));
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+
+      expect(pageTranslation.error.value).toBeInstanceOf(Error);
+      expect(pageTranslation.message.value).toBe('Error: fatal lifecycle failure');
+      expect(pageTranslation.message.value).not.toContain('distinct command failure');
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isAutoTranslating.value).toBe(false);
+      expect(pageTranslation.translatedCount.value).toBe(4);
+      expect(pageTranslation.failedCount.value).toBe(2);
     });
   });
 
