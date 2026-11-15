@@ -271,7 +271,7 @@ export class SelectionManager extends ResourceTracker {
             if (expandedPosition) return expandedPosition;
           }
           if (shadowRoots.length === 0) {
-            const documentPosition = this.getComposedRangePosition(selection, shadowRoots, true, false, range.collapsed);
+            const documentPosition = this.getComposedRangePosition(selection, shadowRoots, true);
             if (documentPosition) return documentPosition;
           }
         }
@@ -340,11 +340,11 @@ export class SelectionManager extends ResourceTracker {
     return [...roots];
   }
 
-  getComposedRangePosition(selection, shadowRoots, allowDocumentRange = false, allowElementRange = false, allowCollapsedDocumentExpansion = false) {
+  getComposedRangePosition(selection, shadowRoots, allowDocumentRange = false, allowElementRange = false) {
     let elementPosition = null;
     for (const range of selection.getComposedRanges({ shadowRoots })) {
       if (!range || range.collapsed || this.isExtensionUiRange(range) ||
-          !this.isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange, allowElementRange, allowCollapsedDocumentExpansion)) continue;
+          !this.isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange, allowElementRange)) continue;
 
       const measurableRange = this.createRangeFromStaticRange(range);
       if (!measurableRange) continue;
@@ -367,7 +367,7 @@ export class SelectionManager extends ResourceTracker {
     return elementPosition;
   }
 
-  isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange, allowElementRange, allowCollapsedDocumentExpansion = false) {
+  isComposedRangeForSelection(range, selection, shadowRoots, allowDocumentRange, allowElementRange) {
     const roots = new Set(shadowRoots);
     const startRoot = range.startContainer.getRootNode();
     const endRoot = range.endContainer.getRootNode();
@@ -382,6 +382,8 @@ export class SelectionManager extends ResourceTracker {
       const boundariesMatch = matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
         matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset);
       const containsNestedHost = this.rangeContainsNestedShadowHost(range, startRoot);
+
+      if (allowElementRange && this.isCollapsedHostComposedRange(range, selection, startRoot)) return true;
 
       if (anchorRoot === startRoot && focusRoot === startRoot && boundariesMatch &&
           !containsNestedHost) return true;
@@ -410,29 +412,47 @@ export class SelectionManager extends ResourceTracker {
       range.startContainer === startNode && range.startOffset === startOffset &&
       range.endContainer === endNode && range.endOffset === endOffset;
 
-    if (matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
-        matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset)) return true;
+    return matchesBoundaries(selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset) ||
+      matchesBoundaries(selection.focusNode, selection.focusOffset, selection.anchorNode, selection.anchorOffset);
+  }
 
-    if (!allowCollapsedDocumentExpansion) return false;
+  isCollapsedHostComposedRange(range, selection, startRoot) {
+    const startType = range.startContainer.nodeType;
+    const endType = range.endContainer.nodeType;
+    if (!((startType === Node.TEXT_NODE && endType === Node.ELEMENT_NODE) ||
+          (startType === Node.ELEMENT_NODE && endType === Node.TEXT_NODE))) return false;
+
     const nativeRange = selection.getRangeAt(0);
-    if (!nativeRange.collapsed || range.startContainer !== nativeRange.startContainer ||
-        range.startOffset !== nativeRange.startOffset || range.endContainer !== range.startContainer ||
-        range.endOffset !== range.startOffset + 1 || range.startContainer.nodeType !== Node.ELEMENT_NODE) return false;
+    if (!nativeRange.collapsed || nativeRange.startContainer !== nativeRange.endContainer ||
+        nativeRange.startContainer.nodeType !== Node.ELEMENT_NODE ||
+        nativeRange.startContainer.getRootNode() !== document) return false;
+    if (selection.anchorNode !== nativeRange.startContainer || selection.focusNode !== nativeRange.startContainer ||
+        selection.anchorOffset !== nativeRange.startOffset || selection.focusOffset !== nativeRange.startOffset) return false;
 
-    const child = range.startContainer.childNodes[range.startOffset];
-    if (!child || this.rangeContainsNestedShadowHost(range, document)) return false;
+    const host = nativeRange.startContainer.childNodes[nativeRange.startOffset];
+    if (!host?.shadowRoot || host.shadowRoot.mode !== 'open') return false;
+
+    let root = startRoot;
+    while (root instanceof ShadowRoot && root.mode === 'open' && root.host.shadowRoot === root) {
+      if (root === host.shadowRoot) break;
+      root = root.host.getRootNode();
+    }
+    if (root !== host.shadowRoot) return false;
+
+    const liveRange = this.createRangeFromStaticRange(range);
+    if (!liveRange || liveRange.collapsed || liveRange.startContainer !== range.startContainer ||
+        liveRange.startOffset !== range.startOffset || liveRange.endContainer !== range.endContainer ||
+        liveRange.endOffset !== range.endOffset) return false;
+
     const uiHostIds = new Set(Object.values(UI_HOST_IDS));
-    const containsUiHost = (node) => node.nodeType === Node.ELEMENT_NODE &&
-      (uiHostIds.has(node.id) || [...node.children].some(containsUiHost));
-    if (containsUiHost(child)) return false;
+    for (const element of startRoot.querySelectorAll('*')) {
+      if ((uiHostIds.has(element.id) || element.shadowRoot?.mode === 'open') && liveRange.intersectsNode(element)) return false;
+    }
 
-    const reconstructedRange = this.createRangeFromStaticRange(range);
-    if (!reconstructedRange) return false;
-    const rangeText = reconstructedRange.toString();
-    const selectedText = selection.toString();
-    return rangeText === selectedText || (child.nodeType === Node.ELEMENT_NODE &&
-      child.textContent === rangeText && child.innerText === selectedText &&
-      child.innerText.replace(/[\r\n]/g, '') === rangeText);
+    const normalize = (text) => text.replace(/\s+/g, ' ').trim();
+    const rangeText = normalize(liveRange.toString());
+    const selectedText = normalize(selection.toString());
+    return !!rangeText && !!selectedText && rangeText === selectedText;
   }
 
   hasNestedShadowHost(container, rangeRoot, roots) {

@@ -8,6 +8,54 @@ import settingsManager from '@/shared/managers/SettingsManager.js';
 
 const rect = (left, bottom, width, height) => ({ left, bottom, width, height });
 
+const createCollapsedShadowSelection = () => {
+  const container = document.createElement('div');
+  container.append(document.createElement('i'), document.createElement('i'));
+  const host = document.createElement('shreddit-subreddit-header');
+  container.append(host);
+  document.body.append(container);
+  const root = host.attachShadow({ mode: 'open' });
+  const startText = document.createTextNode(`${'x'.repeat(3)}${'a'.repeat(100)}${' '.repeat(6)}`);
+  const span = document.createElement('span');
+  span.textContent = 'b'.repeat(126);
+  const nestedHost = document.createElement('div');
+  const nestedRoot = nestedHost.attachShadow({ mode: 'open' });
+  nestedRoot.append(document.createTextNode('outside range'));
+  root.append(startText, span, nestedHost);
+
+  const nativeRange = document.createRange();
+  nativeRange.setStart(container, 2);
+  nativeRange.collapse(true);
+  nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
+  const composedRange = { startContainer: startText, startOffset: 3, endContainer: span, endOffset: 1, collapsed: false };
+  const selection = {
+    rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
+    getRangeAt: () => nativeRange,
+    getComposedRanges: vi.fn(({ shadowRoots }) => shadowRoots.includes(root) ? [composedRange] : []),
+    toString: () => `${'a'.repeat(100)} ${'b'.repeat(126)}`
+  };
+  return { container, host, root, startText, span, nestedHost, nestedRoot, nativeRange, composedRange, selection };
+};
+
+const mockComposedRangeGeometry = (geometry = rect(30, 50, 20, 8)) => {
+  const measuredRanges = [];
+  const createRange = document.createRange.bind(document);
+  vi.spyOn(document, 'createRange').mockImplementation(() => {
+    const range = createRange();
+    range.getBoundingClientRect = () => {
+      measuredRanges.push({
+        startContainer: range.startContainer,
+        startOffset: range.startOffset,
+        endContainer: range.endContainer,
+        endOffset: range.endOffset
+      });
+      return geometry;
+    };
+    return range;
+  });
+  return measuredRanges;
+};
+
 describe('SelectionManager selection geometry', () => {
   const manager = new SelectionManager();
   afterEach(() => vi.restoreAllMocks());
@@ -57,142 +105,123 @@ describe('SelectionManager selection geometry', () => {
     expect(selection.getRangeAt(0).collapsed).toBeUndefined();
   });
 
-  it('recovers a document range expanded by one child from a collapsed native boundary', () => {
-    const container = document.createElement('div');
-    container.append(document.createElement('i'), document.createElement('i'));
-    const selected = document.createElement('span');
-    const selectedText = 'selected '.repeat(25);
-    selected.textContent = selectedText;
-    container.append(selected);
-    document.body.append(container);
+  it.each([
+    ['top frame', false, { x: 161, y: 184, _isViewportRelative: false }],
+    ['iframe', true, { x: 154, y: 173, _isViewportRelative: true }]
+  ])('recovers a mixed composed range owned by the collapsed boundary shadow host in a %s', (_label, isIframe, expected) => {
+    const fixture = createCollapsedShadowSelection();
+    vi.spyOn(window, 'scrollX', 'get').mockReturnValue(7);
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(11);
+    if (isIframe) vi.spyOn(window, 'top', 'get').mockReturnValue({});
+    const measuredRanges = mockComposedRangeGeometry(rect(30, 170, 272, 120));
     try {
-      const nativeRange = document.createRange();
-      nativeRange.setStart(container, 2);
-      nativeRange.collapse(true);
-      nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
-      const composedRange = { startContainer: container, startOffset: 2, endContainer: container, endOffset: 3, collapsed: false };
-      const selection = {
-        rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
-        getRangeAt: () => nativeRange, getComposedRanges: () => [composedRange], toString: () => selectedText
-      };
-      const createRange = document.createRange.bind(document);
-      vi.spyOn(document, 'createRange').mockImplementation(() => {
-        const range = createRange();
-        range.getBoundingClientRect = () => rect(30, 50, 20, 8);
-        return range;
-      });
-
-      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+      expect(fixture.selection.toString()).toHaveLength(227);
+      expect(fixture.startText.textContent.slice(fixture.composedRange.startOffset) + fixture.span.textContent).toHaveLength(232);
+      expect(manager.calculateSelectionPosition(fixture.selection)).toEqual(expected);
+      expect(measuredRanges).toEqual([{
+        startContainer: fixture.startText,
+        startOffset: 3,
+        endContainer: fixture.span,
+        endOffset: 1
+      }]);
+      expect(fixture.selection.getComposedRanges).toHaveBeenNthCalledWith(1, { shadowRoots: [] });
+      expect(fixture.selection.getComposedRanges).toHaveBeenNthCalledWith(2, { shadowRoots: [fixture.root, fixture.nestedRoot] });
     } finally {
-      container.remove();
-    }
-  });
-
-  it('matches multiline selection text using structural line breaks in the selected child', () => {
-    const container = document.createElement('div');
-    container.append(document.createElement('i'), document.createElement('i'));
-    const paragraph = document.createElement('p');
-    paragraph.append(document.createTextNode('first'), document.createElement('br'), document.createTextNode('second'));
-    Object.defineProperty(paragraph, 'innerText', { configurable: true, value: 'first\nsecond' });
-    container.append(paragraph);
-    document.body.append(container);
-    try {
-      const nativeRange = document.createRange();
-      nativeRange.setStart(container, 2);
-      nativeRange.collapse(true);
-      nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
-      const composedRange = { startContainer: container, startOffset: 2, endContainer: container, endOffset: 3, collapsed: false };
-      const selection = {
-        rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
-        getRangeAt: () => nativeRange, getComposedRanges: () => [composedRange], toString: () => 'first\nsecond'
-      };
-      const createRange = document.createRange.bind(document);
-      vi.spyOn(document, 'createRange').mockImplementation(() => {
-        const range = createRange();
-        range.getBoundingClientRect = () => rect(30, 50, 20, 8);
-        return range;
-      });
-
-      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
-    } finally {
-      container.remove();
-    }
-  });
-
-  it('tries document recovery after an unrelated descendant ShadowRoot yields no usable range', () => {
-    const container = document.createElement('div');
-    container.append(document.createElement('i'), document.createElement('i'));
-    const selected = document.createElement('span');
-    selected.textContent = 'selected text';
-    container.append(selected);
-    const unrelatedHost = document.createElement('div');
-    const unrelatedRoot = unrelatedHost.attachShadow({ mode: 'open' });
-    container.append(unrelatedHost);
-    document.body.append(container);
-    try {
-      const nativeRange = document.createRange();
-      nativeRange.setStart(container, 2);
-      nativeRange.collapse(true);
-      nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
-      const composedRange = { startContainer: container, startOffset: 2, endContainer: container, endOffset: 3, collapsed: false };
-      const getComposedRanges = vi.fn(() => [composedRange]);
-      const selection = {
-        rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
-        getRangeAt: () => nativeRange, getComposedRanges, toString: () => 'selected text'
-      };
-      const createRange = document.createRange.bind(document);
-      vi.spyOn(document, 'createRange').mockImplementation(() => {
-        const range = createRange();
-        range.getBoundingClientRect = () => rect(30, 50, 20, 8);
-        return range;
-      });
-
-      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
-      expect(getComposedRanges).toHaveBeenCalledTimes(3);
-      expect(getComposedRanges).toHaveBeenNthCalledWith(2, { shadowRoots: [unrelatedRoot] });
-      expect(getComposedRanges).toHaveBeenNthCalledWith(3, { shadowRoots: [] });
-    } finally {
-      container.remove();
+      fixture.container.remove();
     }
   });
 
   it.each([
-    ['mismatching selected text', 'different text', 3, false],
-    ['a literal line break that does not match selected text', 'first\nsecond', 3, 'line-break'],
-    ['an oversized range', 'selected text', 4, false],
-    ['an extension UI child', 'selected text', 3, 'ui'],
-    ['a nested shadow host', 'selected text', 3, 'shadow']
-  ])('rejects a collapsed-boundary expansion with %s', (_label, selectedText, endOffset, exclusion) => {
+    ['an unrelated shadow host', (fixture) => {
+      const unrelatedHost = document.createElement('div');
+      fixture.container.append(unrelatedHost);
+      const unrelatedRoot = unrelatedHost.attachShadow({ mode: 'open' });
+      const text = document.createTextNode(fixture.startText.textContent);
+      const span = document.createElement('span');
+      span.textContent = fixture.span.textContent;
+      unrelatedRoot.append(text, span);
+      fixture.selection.getComposedRanges.mockImplementation(({ shadowRoots }) => shadowRoots.includes(unrelatedRoot)
+        ? [{ startContainer: text, startOffset: 3, endContainer: span, endOffset: 1, collapsed: false }]
+        : []);
+    }],
+    ['a different native boundary child', (fixture) => {
+      fixture.nativeRange.setStart(fixture.container, 1);
+      fixture.nativeRange.collapse(true);
+    }],
+    ['a non-collapsed native range', (fixture) => { fixture.nativeRange.setEnd(fixture.container, 3); }],
+    ['an anchor node mismatch', (fixture) => { fixture.selection.anchorNode = fixture.container.childNodes[0]; }],
+    ['a focus node mismatch', (fixture) => { fixture.selection.focusNode = fixture.container.childNodes[0]; }],
+    ['an anchor offset mismatch', (fixture) => { fixture.selection.anchorOffset += 1; }],
+    ['a focus offset mismatch', (fixture) => { fixture.selection.focusOffset += 1; }],
+    ['additional nonwhitespace text', (fixture) => { fixture.selection.toString = () => 'not the same selection'; }],
+    ['additional nonwhitespace content inside the candidate', (fixture) => { fixture.span.textContent += 'extra'; }],
+    ['different nonwhitespace spacing', (fixture) => {
+      fixture.startText.textContent = 'xxx a b';
+      fixture.span.textContent = '';
+      fixture.selection.toString = () => 'ab';
+    }],
+    ['an intersecting nested open ShadowRoot', (fixture) => {
+      fixture.span.append(fixture.nestedHost);
+      fixture.composedRange.endOffset = 2;
+    }],
+    ['an intersecting extension UI sibling', (fixture) => {
+      const uiHost = document.createElement('div');
+      uiHost.id = UI_HOST_IDS.MAIN;
+      fixture.span.append(uiHost);
+      fixture.composedRange.endOffset = 2;
+    }],
+    ['an extension UI ancestor', (fixture) => { fixture.host.id = UI_HOST_IDS.MAIN; }],
+    ['an invalid endpoint offset', (fixture) => { fixture.composedRange.endOffset = 99; }],
+    ['reversed endpoints', (fixture) => {
+      fixture.composedRange.startContainer = fixture.span;
+      fixture.composedRange.startOffset = 1;
+      fixture.composedRange.endContainer = fixture.startText;
+      fixture.composedRange.endOffset = 0;
+    }],
+    ['a collapsed candidate', (fixture) => { fixture.composedRange.collapsed = true; }]
+  ])('rejects the collapsed-boundary recovery for %s', (_label, alter) => {
+    const fixture = createCollapsedShadowSelection();
+    alter(fixture);
+    mockComposedRangeGeometry();
+    try {
+      expect(manager.calculateSelectionPosition(fixture.selection)).toBeNull();
+    } finally {
+      fixture.container.remove();
+    }
+  });
+
+  it.each([
+    ['zero geometry', rect(30, 50, 0, 0)],
+    ['nonfinite geometry', rect(Number.NaN, 50, 20, 8)]
+  ])('rejects a valid mixed range with %s', (_label, geometry) => {
+    const fixture = createCollapsedShadowSelection();
+    mockComposedRangeGeometry(geometry);
+    try {
+      expect(manager.calculateSelectionPosition(fixture.selection)).toBeNull();
+    } finally {
+      fixture.container.remove();
+    }
+  });
+
+  it('does not accept a mismatched one-child range in the document fallback', () => {
     const container = document.createElement('div');
     container.append(document.createElement('i'), document.createElement('i'));
     const selected = document.createElement('span');
-    if (exclusion === 'ui') selected.id = Object.values(UI_HOST_IDS)[0];
-    selected.textContent = selectedText;
-    if (exclusion === 'line-break') {
-      Object.defineProperty(selected, 'innerText', { configurable: true, value: selectedText });
-    }
-    if (exclusion === 'shadow') selected.attachShadow({ mode: 'open' });
+    selected.textContent = 'selected';
     container.append(selected);
-    if (endOffset === 4) container.append(document.createElement('b'));
     document.body.append(container);
     try {
       const nativeRange = document.createRange();
       nativeRange.setStart(container, 2);
       nativeRange.collapse(true);
       nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
-      const composedRange = { startContainer: container, startOffset: 2, endContainer: container, endOffset, collapsed: false };
       const selection = {
         rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
-        getRangeAt: () => nativeRange, getComposedRanges: () => [composedRange],
-        toString: () => exclusion === 'line-break' ? 'firstsecond' : 'selected text'
+        getRangeAt: () => nativeRange,
+        getComposedRanges: () => [{ startContainer: container, startOffset: 2, endContainer: container, endOffset: 3, collapsed: false }],
+        toString: () => 'selected'
       };
-      const createRange = document.createRange.bind(document);
-      vi.spyOn(document, 'createRange').mockImplementation(() => {
-        const range = createRange();
-        range.getBoundingClientRect = () => rect(30, 50, 20, 8);
-        return range;
-      });
-
+      mockComposedRangeGeometry();
       expect(manager.calculateSelectionPosition(selection)).toBeNull();
     } finally {
       container.remove();
