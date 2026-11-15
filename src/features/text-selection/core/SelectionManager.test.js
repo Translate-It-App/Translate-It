@@ -1087,7 +1087,7 @@ describe('SelectionManager duplicate selection events', () => {
 describe('SelectionManager cross-root multi-click icon fallback', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('emits complete selection text with null selection position and relays only fragment toolbar geometry', async () => {
+  it('prefers the verified mouse position after verifying fragment geometry and preserves complete text', async () => {
     const manager = new SelectionManager();
     const fixture = createCrossRootSelection();
     const events = vi.fn();
@@ -1098,6 +1098,7 @@ describe('SelectionManager cross-root multi-click icon fallback', () => {
     vi.spyOn(manager, 'calculateSelectionPosition')
       .mockReturnValueOnce(normalPosition)
       .mockImplementationOnce((selection) => SelectionManager.prototype.calculateSelectionPosition.call(manager, selection));
+    vi.spyOn(manager, 'calculateSelectionIconFragmentPosition');
     vi.spyOn(manager, 'checkExclusion').mockResolvedValue(false);
     vi.spyOn(manager, 'isWindowVisible').mockReturnValue(false);
     vi.spyOn(manager, 'showTranslationUI').mockResolvedValue(undefined);
@@ -1115,16 +1116,52 @@ describe('SelectionManager cross-root multi-click icon fallback', () => {
 
       const first = events.mock.calls[0][0];
       const second = events.mock.calls[1][0];
-      const fragmentPosition = { x: 592, y: 138, _isViewportRelative: false };
       expect(first).toEqual(expect.objectContaining({ text: fixture.selectedText, position: normalPosition }));
       expect(second).toEqual(expect.objectContaining({
         text: fixture.selectedText,
         position: null,
+        toolbarPosition: mouseToolbarPosition
+      }));
+      expect(manager.calculateSelectionIconFragmentPosition).toHaveBeenCalledWith(fixture.selection);
+      expect(manager.showTranslationUI).toHaveBeenNthCalledWith(2, fixture.selectedText, null,
+        expect.objectContaining({ displayInteraction: 'multi-click', selectionInteractionId: 2 }), mouseToolbarPosition);
+    } finally {
+      pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+      fixture.container.remove();
+      manager.cleanup();
+    }
+  });
+
+  it.each([
+    ['a missing mouse position', undefined],
+    ['an invalid mouse position', { x: Number.NaN, y: 60 }],
+  ])('uses verified fragment geometry for %s', async (_label, toolbarPosition) => {
+    const manager = new SelectionManager();
+    const fixture = createCrossRootSelection();
+    const events = vi.fn();
+    const fragmentPosition = { x: 592, y: 138, _isViewportRelative: false };
+    vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+    vi.spyOn(settingsManager, 'get').mockImplementation((_key, fallback) => fallback);
+    vi.spyOn(manager, 'calculateSelectionPosition').mockReturnValue(null);
+    const verifyFragment = vi.spyOn(manager, 'calculateSelectionIconFragmentPosition').mockReturnValue(fragmentPosition);
+    vi.spyOn(manager, 'checkExclusion').mockResolvedValue(false);
+    vi.spyOn(manager, 'isWindowVisible').mockReturnValue(false);
+    vi.spyOn(manager, 'showTranslationUI').mockResolvedValue(undefined);
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+
+    try {
+      await manager.processSelection(fixture.selectedText, fixture.selection, {
+        displayInteraction: 'multi-click', selectionInteractionId: 3, toolbarPosition
+      });
+
+      expect(verifyFragment).toHaveBeenCalledWith(fixture.selection);
+      expect(events.mock.calls[0][0]).toEqual(expect.objectContaining({
+        text: fixture.selectedText,
+        position: null,
         toolbarPosition: fragmentPosition
       }));
-      expect(second.toolbarPosition).not.toEqual(mouseToolbarPosition);
-      expect(manager.showTranslationUI).toHaveBeenNthCalledWith(2, fixture.selectedText, null,
-        expect.objectContaining({ displayInteraction: 'multi-click', selectionInteractionId: 2 }), fragmentPosition);
+      expect(manager.showTranslationUI).toHaveBeenCalledWith(fixture.selectedText, null,
+        expect.objectContaining({ selectionInteractionId: 3 }), fragmentPosition);
     } finally {
       pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
       fixture.container.remove();

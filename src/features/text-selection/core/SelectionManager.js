@@ -119,7 +119,9 @@ export class SelectionManager extends ResourceTracker {
         this.logger.debug('Skipping selection: Selection geometry unavailable');
         return;
       }
-      toolbarPosition = fragmentPosition;
+      const hasValidIncomingToolbarPosition = Number.isFinite(incomingToolbarPosition?.x) &&
+        Number.isFinite(incomingToolbarPosition?.y);
+      toolbarPosition = hasValidIncomingToolbarPosition ? incomingToolbarPosition : fragmentPosition;
     }
 
     // 1. Emit global selection event (Coordinator Pattern)
