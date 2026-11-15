@@ -104,6 +104,7 @@ export class SelectionManager extends ResourceTracker {
       selectionContinuationToken,
       displayInteraction,
       selectionInteractionId,
+      verifiedDragFragmentFallback,
       ...selectionOptions
     } = options;
 
@@ -112,7 +113,7 @@ export class SelectionManager extends ResourceTracker {
     let toolbarPosition = incomingToolbarPosition;
     if (!position) {
       const fragmentPosition = selectionTranslationMode === SelectionTranslationMode.ON_CLICK &&
-        displayInteraction === 'multi-click'
+        (displayInteraction === 'multi-click' || verifiedDragFragmentFallback === true)
         ? this.calculateSelectionIconFragmentPosition(selection)
         : null;
       if (!fragmentPosition) {
@@ -262,10 +263,14 @@ export class SelectionManager extends ResourceTracker {
     for (const range of composedRanges) {
       const startText = range?.startContainer;
       const endContainer = range?.endContainer;
+      const validEndBoundary = endContainer?.nodeType === Node.ELEMENT_NODE
+        ? endContainer.getRootNode() === document && endContainer !== host && host.contains(endContainer) && range.endOffset === 0
+        : endContainer?.nodeType === Node.TEXT_NODE && endContainer.getRootNode() === document &&
+          endContainer !== host && host.contains(endContainer) && Number.isInteger(range.endOffset) &&
+          range.endOffset >= 0 && range.endOffset <= endContainer.length;
       if (range?.collapsed !== false || startText?.nodeType !== Node.TEXT_NODE || startText.getRootNode() !== host.shadowRoot ||
-          !Number.isInteger(range.startOffset) || range.startOffset < 0 || range.startOffset >= startText.length ||
-          endContainer?.nodeType !== Node.ELEMENT_NODE || endContainer.getRootNode() !== document ||
-          endContainer === host || !host.contains(endContainer) || range.endOffset !== 0 ||
+          !Number.isInteger(range.startOffset) || range.startOffset < 0 || range.startOffset > startText.length ||
+          !validEndBoundary ||
           hasUiHostAncestor(startText) || hasUiHostAncestor(endContainer) ||
           hasUiHostAncestor(nativeRange.startContainer) || hasUnmeasurableStartAncestor(startText)) continue;
 

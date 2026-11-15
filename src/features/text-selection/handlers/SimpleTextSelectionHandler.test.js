@@ -1,9 +1,14 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import ElementDetectionService from '@/shared/services/ElementDetectionService.js';
 import { settingsManager } from '@/shared/managers/SettingsManager.js';
 import { SimpleTextSelectionHandler } from './SimpleTextSelectionHandler.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { sendMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
+import { SelectionManager } from '@/features/text-selection/core/SelectionManager.js';
+import { createCrossRootSelection, mockFragmentGeometry, rect } from '@/features/text-selection/core/SelectionManager.testUtils.js';
+import { ExtensionContextManager } from '@/core/extensionContext.js';
+import { pageEventBus } from '@/core/PageEventBus.js';
+import { SELECTION_EVENTS } from '@/features/text-selection/events/SelectionEvents.js';
 
 vi.mock('@/shared/messaging/core/UnifiedMessaging.js', () => ({
   sendMessage: vi.fn().mockResolvedValue({ success: true }),
@@ -122,6 +127,284 @@ describe('SimpleTextSelectionHandler diagnostic capture', () => {
   });
 });
 
+describe('verified cross-root drag fallback authorization', () => {
+  const resetHandlerSingleton = () => {
+    const handler = SimpleTextSelectionHandler.getInstance();
+    handler._clearAllTimers();
+    SimpleTextSelectionHandler.resetInstance();
+  };
+
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    document.activeElement?.blur?.();
+    delete window.translateItNewSelectManager;
+    delete window.selectElementManagerInstance;
+    ElementDetectionService.isUIElement.mockReset().mockReturnValue(false);
+    ElementDetectionService.getClickedUIElement.mockReset().mockReturnValue(null);
+    resetHandlerSingleton();
+  });
+  afterEach(() => {
+    resetHandlerSingleton();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const pointerEvent = (type, values = {}) => ({
+    type, button: 0, buttons: 1, clientX: 10, clientY: 10, isTrusted: true,
+    composedPath: () => [document.body], ...values
+  });
+
+  it.each([0, 1300])('authorizes only a changed, trusted drag range regardless of %s ms duration', (duration) => {
+    vi.useFakeTimers();
+    const handler = new SimpleTextSelectionHandler();
+    const node = document.createTextNode('selected text');
+    document.body.append(node);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    let text = '';
+    vi.spyOn(window, 'getSelection').mockImplementation(() => ({
+      rangeCount: 1, getRangeAt: () => range, toString: () => text
+    }));
+    handler.handleMouseDown(pointerEvent('mousedown'));
+    if (duration) vi.advanceTimersByTime(duration);
+    handler.handleMouseMove(pointerEvent('mousemove', { clientX: 20 }));
+    text = 'selected text';
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(pointerEvent('mouseup', { buttons: 0, clientX: 20 }));
+    expect(handler._consumeToolbarReleasePosition(text, null, range)?.verifiedDrag).toBe(true);
+    expect(handler._toolbarReleaseCandidate).toBeNull();
+    node.remove();
+    handler.cleanup();
+    vi.useRealTimers();
+  });
+
+  it('passes verified drag authorization separately from display interaction', async () => {
+    const handler = new SimpleTextSelectionHandler();
+    const node = document.createTextNode('selected text');
+    document.body.append(node);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    let text = '';
+    const selection = { rangeCount: 1, anchorNode: node, focusNode: node, getRangeAt: () => range, toString: () => text };
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection);
+    const manager = { processSelection: vi.fn().mockResolvedValue(false) };
+    handler.isActive = true;
+    handler.selectionManager = manager;
+    handler.isSelectionInTextField = () => false;
+    handler.isSelectionInsideUI = () => false;
+    handler.isSelectElementModeActive = () => false;
+    handler._detectSelectionType = () => 'regular-drag';
+    handler._startSelectionPreservation = vi.fn();
+    handler.handleMouseDown(pointerEvent('mousedown'));
+    handler.handleMouseMove(pointerEvent('mousemove', { clientX: 20 }));
+    text = 'selected text';
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(pointerEvent('mouseup', { buttons: 0, clientX: 20 }));
+    await handler.processSelection();
+    expect(manager.processSelection).toHaveBeenCalledWith(text, selection, expect.objectContaining({
+      verifiedDragFragmentFallback: true
+    }));
+    expect(manager.processSelection.mock.calls[0][2]).not.toHaveProperty('displayInteraction', 'multi-click');
+    node.remove();
+    handler.cleanup();
+  });
+
+  it.each([
+    ['positive geometry', 8, rect(100, 135, 1008, 35), true],
+    ['invalid geometry', 21, rect(100, 135, 0, 0), false]
+  ])('runs the complete cross-root drag pipeline with %s', async (_label, endOffset, geometry, shouldDisplay) => {
+    vi.useFakeTimers();
+    const fixture = createCrossRootSelection({ textEndpoint: true, endOffset, fragmentLength: 260 });
+    const handler = new SimpleTextSelectionHandler();
+    const manager = new SelectionManager();
+    const eventListener = vi.fn();
+    let selectedText = '';
+    fixture.selection.toString = () => selectedText;
+    vi.spyOn(window, 'getSelection').mockReturnValue(fixture.selection);
+    vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+    vi.stubGlobal('requestAnimationFrame', (callback) => { callback(Date.now()); return 0; });
+    vi.spyOn(settingsManager, 'get').mockImplementation((_key, fallback) => fallback);
+    vi.spyOn(manager, 'checkExclusion').mockResolvedValue(false);
+    vi.spyOn(manager, 'isWindowVisible').mockReturnValue(false);
+    mockFragmentGeometry(geometry);
+    handler.isActive = true;
+    handler.selectionManager = manager;
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, eventListener);
+
+    const trustedPointer = (type, overrides = {}) => ({
+      type,
+      target: fixture.container,
+      button: 0,
+      buttons: 1,
+      clientX: 70,
+      clientY: 70,
+      isTrusted: true,
+      composedPath: () => [fixture.container, document.body, document, window],
+      ...overrides
+    });
+    try {
+      handler.handleMouseDown(trustedPointer('mousedown'));
+      handler.handleMouseMove(trustedPointer('mousemove', { clientX: 90 }));
+      selectedText = fixture.selectedText;
+      handler.handleSelectionChange();
+      expect(handler._selectionChangeVersion).toBe(1);
+      clearTimeout(handler.selectionTimeout);
+      handler.selectionTimeout = null;
+      handler.handleMouseUp(trustedPointer('mouseup', { buttons: 0, clientX: 70, clientY: 70 }));
+      expect(handler._toolbarReleaseCandidate).toEqual(expect.objectContaining({ verifiedDrag: true, selectedTextAtRelease: fixture.selectedText }));
+      expect(handler.isSelectElementModeActive()).toBeFalsy();
+      expect(handler.isSelectionInTextField()).toBe(false);
+      expect(handler.isSelectionInsideUI(fixture.selection)).toBe(false);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(handler._mouseUpTimeout).toBeNull();
+      expect(handler._toolbarReleaseCandidate).toBeNull();
+
+      if (shouldDisplay) {
+        expect(fixture.selectedText).toHaveLength(268);
+        expect(eventListener).toHaveBeenCalledOnce();
+        const payload = eventListener.mock.calls[0][0];
+        expect(payload).toEqual(expect.objectContaining({
+          text: fixture.selectedText,
+          position: null,
+          toolbarPosition: { x: 70, y: 80, _isViewportRelative: false }
+        }));
+        expect(payload).not.toHaveProperty('verifiedDragFragmentFallback');
+        expect(payload.options).not.toHaveProperty('verifiedDragFragmentFallback');
+      } else {
+        expect(eventListener).not.toHaveBeenCalled();
+      }
+    } finally {
+      pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, eventListener);
+      handler._clearAllTimers();
+      handler.cleanup();
+      manager.cleanup();
+      fixture.container.remove();
+    }
+  });
+
+  it.each([
+    ['synthetic press', { down: { isTrusted: false } }],
+    ['synthetic move', { move: { isTrusted: false } }],
+    ['synthetic release', { up: { isTrusted: false } }],
+    ['missing held primary button', { move: { buttons: 0 } }],
+    ['zero movement', { move: { clientX: 10 } }],
+    ['UI path', { move: { composedPath: () => [Object.assign(document.createElement('div'), { className: 'translation-window' })] } }],
+    ['unknown move path', { move: { composedPath: undefined } }],
+    ['UI press path', { down: { composedPath: () => [Object.assign(document.createElement('div'), { className: 'translation-window' })] } }],
+    ['unknown press path', { down: { composedPath: undefined } }],
+    ['UI release path', { up: { composedPath: () => [Object.assign(document.createElement('div'), { className: 'translation-window' })] } }],
+    ['unknown release path', { up: { composedPath: undefined } }]
+  ])('does not authorize %s', (_label, overrides) => {
+    const handler = new SimpleTextSelectionHandler();
+    const node = document.createTextNode('selected text');
+    document.body.append(node);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    let text = '';
+    vi.spyOn(window, 'getSelection').mockImplementation(() => ({ rangeCount: 1, getRangeAt: () => range, toString: () => text }));
+    handler.handleMouseDown(pointerEvent('mousedown', overrides.down));
+    handler.handleMouseMove(pointerEvent('mousemove', { clientX: 20, ...overrides.move }));
+    text = 'selected text';
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(pointerEvent('mouseup', { buttons: 0, clientX: 20, ...overrides.up }));
+    expect(handler._consumeToolbarReleasePosition(text, null, range)?.verifiedDrag).not.toBe(true);
+    node.remove();
+    handler.cleanup();
+  });
+
+  it('does not authorize when selectionchange version did not advance', () => {
+    const handler = new SimpleTextSelectionHandler();
+    const node = document.createTextNode('selected text');
+    document.body.append(node);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    vi.spyOn(window, 'getSelection').mockReturnValue({ rangeCount: 1, getRangeAt: () => range, toString: () => 'selected text' });
+    handler.handleMouseDown(pointerEvent('mousedown'));
+    handler.handleMouseMove(pointerEvent('mousemove', { clientX: 20 }));
+    handler.handleMouseUp(pointerEvent('mouseup', { buttons: 0, clientX: 20 }));
+    expect(handler._consumeToolbarReleasePosition('selected text', null, range)?.verifiedDrag).not.toBe(true);
+    node.remove();
+    handler.cleanup();
+  });
+
+  it.each(['text', 'range'])('rejects a %s changed after trusted release', (change) => {
+    const handler = new SimpleTextSelectionHandler();
+    const node = document.createTextNode('selected text');
+    document.body.append(node);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const replacementRange = range.cloneRange();
+    replacementRange.setStart(node, 1);
+    let text = 'selected text';
+    let currentRange = range;
+    vi.spyOn(window, 'getSelection').mockImplementation(() => ({ rangeCount: 1, getRangeAt: () => currentRange, toString: () => text }));
+    handler.handleMouseDown(pointerEvent('mousedown'));
+    handler.handleMouseMove(pointerEvent('mousemove', { clientX: 20 }));
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(pointerEvent('mouseup', { buttons: 0, clientX: 20 }));
+    if (change === 'text') text = 'replaced text';
+    else currentRange = replacementRange;
+    expect(handler._consumeToolbarReleasePosition(text, null, currentRange)?.verifiedDrag).not.toBe(true);
+    node.remove();
+    handler.cleanup();
+  });
+
+  it('invalidates an earlier drag candidate when a newer press replaces it', () => {
+    const handler = new SimpleTextSelectionHandler();
+    const node = document.createTextNode('selected text');
+    document.body.append(node);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    vi.spyOn(window, 'getSelection').mockReturnValue({ rangeCount: 1, getRangeAt: () => range, toString: () => 'selected text' });
+    handler.handleMouseDown(pointerEvent('mousedown'));
+    handler.handleMouseMove(pointerEvent('mousemove', { clientX: 20 }));
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(pointerEvent('mouseup', { buttons: 0, clientX: 20 }));
+    handler.handleMouseDown(pointerEvent('mousedown', { clientX: 30 }));
+    expect(handler._toolbarReleaseCandidate).toBeNull();
+    expect(handler._consumeToolbarReleasePosition('selected text', null, range)).toBeNull();
+    node.remove();
+    handler.cleanup();
+  });
+
+  it('clears drag authorization on keyboard interaction and cleanup', () => {
+    const handler = new SimpleTextSelectionHandler();
+    handler._toolbarReleaseCandidate = { verifiedDrag: true };
+    handler._primaryMouseDown = { verifiedDragMovement: true };
+    handler.handleKeyDown({ key: 'a', ctrlKey: false, metaKey: false, shiftKey: false, target: document.body });
+    expect(handler._toolbarReleaseCandidate).toBeNull();
+    expect(handler._primaryMouseDown).toBeNull();
+    handler._toolbarReleaseCandidate = { verifiedDrag: true };
+    handler._primaryMouseDown = { verifiedDragMovement: true };
+    handler.cleanup();
+    expect(handler._toolbarReleaseCandidate).toBeNull();
+    expect(handler._primaryMouseDown).toBeNull();
+  });
+
+  it('rejects a release range whose boundaries mutate with the DOM after release', () => {
+    const handler = new SimpleTextSelectionHandler();
+    const node = document.createTextNode('selected text');
+    document.body.append(node);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    vi.spyOn(window, 'getSelection').mockReturnValue({ rangeCount: 1, getRangeAt: () => range, toString: () => 'selected text' });
+    handler.handleMouseDown(pointerEvent('mousedown'));
+    handler.handleMouseMove(pointerEvent('mousemove', { clientX: 20 }));
+    handler._selectionChangeVersion += 1;
+    handler.handleMouseUp(pointerEvent('mouseup', { buttons: 0, clientX: 20 }));
+    expect(handler._toolbarReleaseCandidate.rangeAtRelease).toEqual({
+      startContainer: node, startOffset: 0, endContainer: node, endOffset: 'selected text'.length
+    });
+    node.data = 's';
+    expect(handler._consumeToolbarReleasePosition('selected text', null, range)?.verifiedDrag).not.toBe(true);
+    node.remove();
+    handler.cleanup();
+  });
+});
+
 describe('SimpleTextSelectionHandler toolbar release position', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -144,11 +427,11 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     handler.handleSelectionChange();
     clearTimeout(handler.selectionTimeout);
 
-    expect(handler._consumeToolbarReleasePosition(selectedText)).toEqual({
+    expect(handler._consumeToolbarReleasePosition(selectedText)).toEqual({ position: {
       x: 25,
       y: 45,
       _isViewportRelative: true
-    });
+    }, verifiedDrag: false });
     expect(handler._toolbarReleaseCandidate).toBeNull();
   });
 
@@ -504,11 +787,11 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     handler._selectionChangeVersion = 2;
     handler._lastMouseUpInteractionId = 1;
 
-    expect(handler._consumeToolbarReleasePosition('selected')).toEqual({
+    expect(handler._consumeToolbarReleasePosition('selected')).toEqual({ position: {
       x: 65,
       y: 115,
       _isViewportRelative: false
-    });
+    }, verifiedDrag: false });
   });
 
   it.each([2, 3])('accepts a current selection release from a %s-click sequence', (clickCount) => {
@@ -520,11 +803,11 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     handler._selectionChangeVersion += 1;
     handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, detail: clickCount, clientX: 8, clientY: 9 }));
 
-    expect(handler._consumeToolbarReleasePosition(selectedText)).toEqual({
+    expect(handler._consumeToolbarReleasePosition(selectedText)).toEqual({ position: {
       x: 8,
       y: 19,
       _isViewportRelative: false
-    });
+    }, verifiedDrag: false });
   });
 
   it('uses release coordinates after a primary drag lasting longer than 1200ms', () => {
@@ -539,11 +822,11 @@ describe('SimpleTextSelectionHandler toolbar release position', () => {
     handler._selectionChangeVersion += 1;
     handler.handleMouseUp(new MouseEvent('mouseup', { button: 0, clientX: 18, clientY: 24 }));
 
-    expect(handler._consumeToolbarReleasePosition(selectedText)).toEqual({
+    expect(handler._consumeToolbarReleasePosition(selectedText)).toEqual({ position: {
       x: 18,
       y: 34,
       _isViewportRelative: false
-    });
+    }, verifiedDrag: false });
   });
 
   it('expires a release candidate before delayed processing', () => {

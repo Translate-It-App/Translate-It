@@ -427,7 +427,8 @@ describe('TranslationIcon selection-position event flow', () => {
     expect(selectionHandler._consumeToolbarReleasePosition(
       'word then rest', selectionHandler._selectionContinuationToken,
     )).toEqual({
-      x: 70, y: 80, _isViewportRelative: false,
+      position: { x: 70, y: 80, _isViewportRelative: false },
+      verifiedDrag: false,
     });
 
     const positioningCallsBeforeContinuation = testMocks.initializePosition.mock.calls.length;

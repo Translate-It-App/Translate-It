@@ -6,53 +6,7 @@ import { pageEventBus } from '@/core/PageEventBus.js';
 import { SELECTION_EVENTS } from '@/features/text-selection/events/SelectionEvents.js';
 import settingsManager from '@/shared/managers/SettingsManager.js';
 import { SelectionTranslationMode } from '@/shared/config/config.js';
-
-const rect = (left, bottom, width, height) => ({ left, bottom, width, height });
-
-const createCrossRootSelection = () => {
-  const container = document.createElement('div');
-  container.append(document.createElement('i'), document.createElement('i'));
-  const host = document.createElement('shreddit-subreddit-header');
-  container.append(host);
-  document.body.append(container);
-  const root = host.attachShadow({ mode: 'open' });
-  const endingPhrase = 'Community Guide Insiders Updating their PC';
-  const fragment = `${'x'.repeat(226)} `;
-  const text = document.createTextNode(fragment);
-  root.append(text);
-  const tooltip = document.createElement('rpl-tooltip');
-  const endContainer = document.createElement('div');
-  tooltip.append(endContainer);
-  host.append(document.createTextNode(endingPhrase), tooltip);
-
-  const nativeRange = document.createRange();
-  nativeRange.setStart(container, 2);
-  nativeRange.collapse(true);
-  nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
-  const composedRange = { startContainer: text, startOffset: 0, endContainer, endOffset: 0, collapsed: false };
-  const selectedText = `${fragment}${endingPhrase}`;
-  const selection = {
-    rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
-    getRangeAt: () => nativeRange,
-    getComposedRanges: vi.fn(({ shadowRoots }) => shadowRoots.includes(root) ? [composedRange] : []),
-    toString: () => selectedText
-  };
-  return { container, host, root, text, tooltip, endContainer, nativeRange, composedRange, selection, fragment, endingPhrase, selectedText };
-};
-
-const mockFragmentGeometry = (geometry = rect(100, 135, 1008, 35)) => {
-  const measured = [];
-  const createRange = document.createRange.bind(document);
-  vi.spyOn(document, 'createRange').mockImplementation(() => {
-    const range = createRange();
-    range.getBoundingClientRect = () => {
-      measured.push({ startContainer: range.startContainer, startOffset: range.startOffset, endContainer: range.endContainer, endOffset: range.endOffset });
-      return geometry;
-    };
-    return range;
-  });
-  return measured;
-};
+import { createCrossRootSelection, mockFragmentGeometry, rect } from './SelectionManager.testUtils.js';
 
 const createCollapsedShadowSelection = () => {
   const container = document.createElement('div');
@@ -1116,6 +1070,74 @@ describe('SelectionManager duplicate selection events', () => {
 describe('SelectionManager cross-root multi-click icon fallback', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it.each([0, 8, 21, 'length'])('accepts a document-root TEXT endpoint at offset %s', (offset) => {
+    const manager = new SelectionManager();
+    const fixture = createCrossRootSelection({ textEndpoint: true, endOffset: offset === 'length' ? 'Community Guide Insiders Updating their PC'.length : offset });
+    mockFragmentGeometry();
+    try {
+      expect(manager.calculateSelectionIconFragmentPosition(fixture.selection)).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+    } finally {
+      fixture.container.remove();
+      manager.cleanup();
+    }
+  });
+
+  it.each([-1, 'length+1', 1.5, Number.NaN])('rejects invalid document-root TEXT endpoint offset %s', (offset) => {
+    const manager = new SelectionManager();
+    const endOffset = offset === 'length+1' ? 'Community Guide Insiders Updating their PC'.length + 1 : offset;
+    const fixture = createCrossRootSelection({ textEndpoint: true, endOffset });
+    try {
+      expect(manager.calculateSelectionIconFragmentPosition(fixture.selection)).toBeNull();
+    } finally {
+      fixture.container.remove();
+      manager.cleanup();
+    }
+  });
+
+  it.each([
+    ['foreign ShadowRoot text', (fixture) => {
+      const foreignHost = document.createElement('span');
+      fixture.container.append(foreignHost);
+      const foreignText = document.createTextNode('foreign');
+      foreignHost.attachShadow({ mode: 'open' }).append(foreignText);
+      fixture.composedRange.endContainer = foreignText;
+      fixture.composedRange.endOffset = 3;
+    }],
+    ['document text outside host', (fixture) => {
+      const outside = document.createTextNode('outside');
+      fixture.container.append(outside);
+      fixture.composedRange.endContainer = outside;
+      fixture.composedRange.endOffset = 3;
+    }],
+    ['text beneath extension UI', (fixture) => {
+      const ui = document.createElement('div');
+      ui.id = Object.values(UI_HOST_IDS)[0];
+      const uiText = document.createTextNode('ui text');
+      ui.append(uiText);
+      fixture.host.append(ui);
+      fixture.composedRange.endContainer = uiText;
+      fixture.composedRange.endOffset = 2;
+    }],
+    ['mismatched selected-text prefix', (fixture) => {
+      fixture.selection.toString = () => 'unrelated selected text';
+    }],
+    ['unmeasurable fragment geometry', (fixture) => {
+      fixture.selection.toString = () => `${fixture.fragment}suffix`;
+    }]
+  ])('rejects TEXT endpoint with %s', (_label, mutate) => {
+    const manager = new SelectionManager();
+    const fixture = createCrossRootSelection({ textEndpoint: true, endOffset: 8 });
+    mutate(fixture);
+    if (_label === 'unmeasurable fragment geometry') mockFragmentGeometry(rect(1, 2, 0, 0));
+    else mockFragmentGeometry();
+    try {
+      expect(manager.calculateSelectionIconFragmentPosition(fixture.selection)).toBeNull();
+    } finally {
+      fixture.container.remove();
+      manager.cleanup();
+    }
+  });
+
   it('prefers the verified mouse position after verifying fragment geometry and preserves complete text', async () => {
     const manager = new SelectionManager();
     const fixture = createCrossRootSelection();
@@ -1221,6 +1243,82 @@ describe('SelectionManager cross-root multi-click icon fallback', () => {
       expect(events).not.toHaveBeenCalled();
     } finally {
       pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+      manager.cleanup();
+    }
+  });
+
+  it('allows only an explicitly verified drag to use the ON_CLICK fragment fallback without emitting its authorization flag', async () => {
+    const manager = new SelectionManager();
+    const fixture = createCrossRootSelection();
+    const events = vi.fn();
+    const fragmentPosition = { x: 12, y: 34 };
+    vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+    vi.spyOn(settingsManager, 'get').mockImplementation((_key, fallback) => fallback);
+    vi.spyOn(manager, 'calculateSelectionPosition').mockReturnValue(null);
+    vi.spyOn(manager, 'calculateSelectionIconFragmentPosition').mockReturnValue(fragmentPosition);
+    vi.spyOn(manager, 'checkExclusion').mockResolvedValue(false);
+    vi.spyOn(manager, 'isWindowVisible').mockReturnValue(false);
+    vi.spyOn(manager, 'showTranslationUI').mockResolvedValue(undefined);
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+    try {
+      await manager.processSelection(fixture.selectedText, fixture.selection, { verifiedDragFragmentFallback: true });
+      expect(events.mock.calls[0][0]).toEqual(expect.objectContaining({
+        text: fixture.selectedText, position: null, toolbarPosition: fragmentPosition
+      }));
+      expect(events.mock.calls[0][0].options).not.toHaveProperty('verifiedDragFragmentFallback');
+      expect(manager.showTranslationUI).toHaveBeenCalledWith(fixture.selectedText, null, {}, fragmentPosition);
+    } finally {
+      pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+      fixture.container.remove();
+      manager.cleanup();
+    }
+  });
+
+  it.each([SelectionTranslationMode.IMMEDIATE, SelectionTranslationMode.ON_FAB_CLICK])(
+    'does not use verified drag fragment fallback in mode %s', async (mode) => {
+      const manager = new SelectionManager();
+      const fixture = createCrossRootSelection({ textEndpoint: true, endOffset: 8 });
+      const events = vi.fn();
+      vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+      vi.spyOn(settingsManager, 'get').mockImplementation((key, fallback) =>
+        key === 'selectionTranslationMode' ? mode : fallback
+      );
+      vi.spyOn(manager, 'calculateSelectionPosition').mockReturnValue(null);
+      const fragment = vi.spyOn(manager, 'calculateSelectionIconFragmentPosition');
+      pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+      try {
+        await manager.processSelection(fixture.selectedText, fixture.selection, { verifiedDragFragmentFallback: true });
+        expect(fragment).not.toHaveBeenCalled();
+        expect(events).not.toHaveBeenCalled();
+      } finally {
+        pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+        fixture.container.remove();
+        manager.cleanup();
+      }
+    }
+  );
+
+  it('does not let finite drag toolbar coordinates rescue invalid TEXT fragment geometry', async () => {
+    const manager = new SelectionManager();
+    const fixture = createCrossRootSelection({ textEndpoint: true, endOffset: 8 });
+    const events = vi.fn();
+    vi.spyOn(ExtensionContextManager, 'isValidSync').mockReturnValue(true);
+    vi.spyOn(settingsManager, 'get').mockImplementation((_key, fallback) => fallback);
+    vi.spyOn(manager, 'calculateSelectionPosition').mockReturnValue(null);
+    const verifyFragment = vi.spyOn(manager, 'calculateSelectionIconFragmentPosition');
+    vi.spyOn(manager, 'showTranslationUI');
+    mockFragmentGeometry(rect(10, 20, 0, 0));
+    pageEventBus.on(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+    try {
+      await manager.processSelection(fixture.selectedText, fixture.selection, {
+        verifiedDragFragmentFallback: true, toolbarPosition: { x: 50, y: 60 }
+      });
+      expect(verifyFragment).toHaveBeenCalledWith(fixture.selection);
+      expect(events).not.toHaveBeenCalled();
+      expect(manager.showTranslationUI).not.toHaveBeenCalled();
+    } finally {
+      pageEventBus.off(SELECTION_EVENTS.GLOBAL_SELECTION_CHANGE, events);
+      fixture.container.remove();
       manager.cleanup();
     }
   });
