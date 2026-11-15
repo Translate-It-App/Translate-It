@@ -57,6 +57,148 @@ describe('SelectionManager selection geometry', () => {
     expect(selection.getRangeAt(0).collapsed).toBeUndefined();
   });
 
+  it('recovers a document range expanded by one child from a collapsed native boundary', () => {
+    const container = document.createElement('div');
+    container.append(document.createElement('i'), document.createElement('i'));
+    const selected = document.createElement('span');
+    const selectedText = 'selected '.repeat(25);
+    selected.textContent = selectedText;
+    container.append(selected);
+    document.body.append(container);
+    try {
+      const nativeRange = document.createRange();
+      nativeRange.setStart(container, 2);
+      nativeRange.collapse(true);
+      nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
+      const composedRange = { startContainer: container, startOffset: 2, endContainer: container, endOffset: 3, collapsed: false };
+      const selection = {
+        rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
+        getRangeAt: () => nativeRange, getComposedRanges: () => [composedRange], toString: () => selectedText
+      };
+      const createRange = document.createRange.bind(document);
+      vi.spyOn(document, 'createRange').mockImplementation(() => {
+        const range = createRange();
+        range.getBoundingClientRect = () => rect(30, 50, 20, 8);
+        return range;
+      });
+
+      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+    } finally {
+      container.remove();
+    }
+  });
+
+  it('matches multiline selection text using structural line breaks in the selected child', () => {
+    const container = document.createElement('div');
+    container.append(document.createElement('i'), document.createElement('i'));
+    const paragraph = document.createElement('p');
+    paragraph.append(document.createTextNode('first'), document.createElement('br'), document.createTextNode('second'));
+    Object.defineProperty(paragraph, 'innerText', { configurable: true, value: 'first\nsecond' });
+    container.append(paragraph);
+    document.body.append(container);
+    try {
+      const nativeRange = document.createRange();
+      nativeRange.setStart(container, 2);
+      nativeRange.collapse(true);
+      nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
+      const composedRange = { startContainer: container, startOffset: 2, endContainer: container, endOffset: 3, collapsed: false };
+      const selection = {
+        rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
+        getRangeAt: () => nativeRange, getComposedRanges: () => [composedRange], toString: () => 'first\nsecond'
+      };
+      const createRange = document.createRange.bind(document);
+      vi.spyOn(document, 'createRange').mockImplementation(() => {
+        const range = createRange();
+        range.getBoundingClientRect = () => rect(30, 50, 20, 8);
+        return range;
+      });
+
+      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+    } finally {
+      container.remove();
+    }
+  });
+
+  it('tries document recovery after an unrelated descendant ShadowRoot yields no usable range', () => {
+    const container = document.createElement('div');
+    container.append(document.createElement('i'), document.createElement('i'));
+    const selected = document.createElement('span');
+    selected.textContent = 'selected text';
+    container.append(selected);
+    const unrelatedHost = document.createElement('div');
+    const unrelatedRoot = unrelatedHost.attachShadow({ mode: 'open' });
+    container.append(unrelatedHost);
+    document.body.append(container);
+    try {
+      const nativeRange = document.createRange();
+      nativeRange.setStart(container, 2);
+      nativeRange.collapse(true);
+      nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
+      const composedRange = { startContainer: container, startOffset: 2, endContainer: container, endOffset: 3, collapsed: false };
+      const getComposedRanges = vi.fn(() => [composedRange]);
+      const selection = {
+        rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
+        getRangeAt: () => nativeRange, getComposedRanges, toString: () => 'selected text'
+      };
+      const createRange = document.createRange.bind(document);
+      vi.spyOn(document, 'createRange').mockImplementation(() => {
+        const range = createRange();
+        range.getBoundingClientRect = () => rect(30, 50, 20, 8);
+        return range;
+      });
+
+      expect(manager.calculateSelectionPosition(selection)).toEqual({ x: 28, y: 53, _isViewportRelative: false });
+      expect(getComposedRanges).toHaveBeenCalledTimes(3);
+      expect(getComposedRanges).toHaveBeenNthCalledWith(2, { shadowRoots: [unrelatedRoot] });
+      expect(getComposedRanges).toHaveBeenNthCalledWith(3, { shadowRoots: [] });
+    } finally {
+      container.remove();
+    }
+  });
+
+  it.each([
+    ['mismatching selected text', 'different text', 3, false],
+    ['a literal line break that does not match selected text', 'first\nsecond', 3, 'line-break'],
+    ['an oversized range', 'selected text', 4, false],
+    ['an extension UI child', 'selected text', 3, 'ui'],
+    ['a nested shadow host', 'selected text', 3, 'shadow']
+  ])('rejects a collapsed-boundary expansion with %s', (_label, selectedText, endOffset, exclusion) => {
+    const container = document.createElement('div');
+    container.append(document.createElement('i'), document.createElement('i'));
+    const selected = document.createElement('span');
+    if (exclusion === 'ui') selected.id = Object.values(UI_HOST_IDS)[0];
+    selected.textContent = selectedText;
+    if (exclusion === 'line-break') {
+      Object.defineProperty(selected, 'innerText', { configurable: true, value: selectedText });
+    }
+    if (exclusion === 'shadow') selected.attachShadow({ mode: 'open' });
+    container.append(selected);
+    if (endOffset === 4) container.append(document.createElement('b'));
+    document.body.append(container);
+    try {
+      const nativeRange = document.createRange();
+      nativeRange.setStart(container, 2);
+      nativeRange.collapse(true);
+      nativeRange.getBoundingClientRect = () => rect(0, 0, 0, 0);
+      const composedRange = { startContainer: container, startOffset: 2, endContainer: container, endOffset, collapsed: false };
+      const selection = {
+        rangeCount: 1, anchorNode: container, anchorOffset: 2, focusNode: container, focusOffset: 2,
+        getRangeAt: () => nativeRange, getComposedRanges: () => [composedRange],
+        toString: () => exclusion === 'line-break' ? 'firstsecond' : 'selected text'
+      };
+      const createRange = document.createRange.bind(document);
+      vi.spyOn(document, 'createRange').mockImplementation(() => {
+        const range = createRange();
+        range.getBoundingClientRect = () => rect(30, 50, 20, 8);
+        return range;
+      });
+
+      expect(manager.calculateSelectionPosition(selection)).toBeNull();
+    } finally {
+      container.remove();
+    }
+  });
+
   it('skips descendant discovery when a directly supplied root provides usable geometry', () => {
     const host = document.createElement('div');
     const root = host.attachShadow({ mode: 'open' });
