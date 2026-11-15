@@ -99,6 +99,9 @@ export function usePageTranslation() {
   // Aggregate revisions are ordered independently for each tab and document.
   const aggregateStreamsByTab = new Map();
   const pendingDocumentTransitions = new Map();
+  const earlyDocumentCandidates = new Map();
+  const retiredAggregateScopesByTab = new Map();
+  const MAX_EARLY_DOCUMENT_EVENTS = 20;
 
   function applyStartEvent(data) {
     errorPresentationRevision++;
@@ -156,6 +159,7 @@ export function usePageTranslation() {
 
   function applyTabChange(activeInfo) {
     translateRequestOwnership++;
+    clearEarlyDocumentEvents();
     if (Number.isInteger(activeInfo?.tabId)) {
       activeTabId = activeInfo.tabId;
       activeTabVersion++;
@@ -339,6 +343,7 @@ export function usePageTranslation() {
     errorPresentationRevision++;
     supersedeCompletedSessions();
     translateRequestOwnership++;
+    clearEarlyDocumentEvents();
     const ownership = translateRequestOwnership;
     // A superseded request must not overwrite a newer request's tab identity or dispatch.
     if (ownership !== translateRequestOwnership) return;
@@ -549,8 +554,10 @@ export function usePageTranslation() {
         .map(({ data }) => data.sessionId));
       let replayedError = false;
       if (Number.isInteger(targetTabId)) {
+        let replayOwnership = ownership;
         try {
           for (const event of events) {
+            if (translateRequestOwnership !== replayOwnership) return;
             const eventData = event.data || {};
             if (event.action === MessageActions.PAGE_TRANSLATE_START
               || eventData.tabId !== targetTabId
@@ -569,6 +576,13 @@ export function usePageTranslation() {
             } else {
               applyLifecycleEvent(event.action, eventData);
             }
+            // Fatal auto-restore is an internal ownership transition for this same session.
+            if (event.action === MessageActions.PAGE_AUTO_RESTORE_COMPLETE
+              && eventData.fatalErrorAutoRestore === true
+              && replayingFatalSessionId === eventData.sessionId) {
+              replayOwnership = translateRequestOwnership;
+            }
+            if (translateRequestOwnership !== replayOwnership) return;
           }
         } finally {
           replayingFatalSessionId = null;
@@ -609,6 +623,7 @@ export function usePageTranslation() {
     // during the fast restoration process.
     errorPresentationRevision++;
     translateRequestOwnership++;
+    clearEarlyDocumentEvents();
     supersedeCompletedSessions();
     if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
     lastTranslateTabId = null;
@@ -654,6 +669,7 @@ export function usePageTranslation() {
     // Stopping the session is a terminal lifecycle state: it supersedes a
     // still-pending request failure and invalidates a pending error presentation.
     translateRequestOwnership++;
+    clearEarlyDocumentEvents();
     errorPresentationRevision++;
     supersedeCompletedSessions();
     if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
@@ -678,14 +694,17 @@ export function usePageTranslation() {
 
       if (result.success) {
         const frames = Array.isArray(result.responses) ? result.responses : [];
+        const deliveryComplete = !Array.isArray(result.frames)
+          || (result.frames.length > 0 && result.frames.every((frame) => frame?.success === true));
         const aggregateValue = (field) => {
           if (result[field] !== undefined) return result[field];
+          if (!deliveryComplete) return undefined;
           const values = frames.map((frame) => frame[field]).filter((value) => typeof value === 'number');
           return values.length ? values.reduce((sum, value) => sum + value, 0) : undefined;
         };
         const frameTranslated = frames.some((frame) => frame.isTranslated === true)
           || frames.some((frame) => typeof frame.translatedCount === 'number' && frame.translatedCount > 0);
-        const hasFrameTranslationState = frames.some((frame) => frame.isTranslated !== undefined || frame.translatedCount !== undefined);
+        const hasFrameTranslationState = deliveryComplete && frames.some((frame => frame.isTranslated !== undefined || frame.translatedCount !== undefined));
         isAutoTranslating.value = false;
         isTranslating.value = false;
         const translated = aggregateValue('translatedCount');
@@ -714,6 +733,7 @@ export function usePageTranslation() {
       // still-pending request failure and invalidates a pending error
       // presentation.
       translateRequestOwnership++;
+      clearEarlyDocumentEvents();
       errorPresentationRevision++;
       supersedeCompletedSessions();
       if (pendingRequestSessionId) suppressSession(pendingRequestSessionId);
@@ -1062,11 +1082,34 @@ export function usePageTranslation() {
     if (changeInfo?.status !== 'complete') return;
 
     const navigationUrl = typeof tab?.url === 'string' ? tab.url : changeInfo.url;
+    let transition = null;
     if (typeof navigationUrl === 'string') {
-      pendingDocumentTransitions.set(tabId, {
+      transition = {
         url: navigationUrl,
         previousUrl: aggregateStreamsByTab.get(tabId)?.url,
-      });
+        confirmed: false,
+        earlyEvents: [],
+        earlyScope: null,
+        earlyInvalid: false,
+        priorScope: aggregateStreamsByTab.get(tabId)?.scope ?? null,
+        ownership: translateRequestOwnership,
+        tabVersion: activeTabVersion,
+      };
+      pendingDocumentTransitions.set(tabId, transition);
+      const candidate = earlyDocumentCandidates.get(tabId);
+      if (candidate) {
+        earlyDocumentCandidates.delete(tabId);
+        if (candidate.url === navigationUrl
+          && candidate.ownership === translateRequestOwnership
+          && candidate.tabVersion === activeTabVersion
+          && candidate.priorScope === (aggregateStreamsByTab.get(tabId)?.scope ?? null)) {
+          Object.assign(transition, {
+            earlyEvents: candidate.events,
+            earlyScope: candidate.scope,
+            earlyInvalid: candidate.invalid,
+          });
+        }
+      }
     }
 
     // Only the UI's active tab may supersede the current request: a background
@@ -1078,8 +1121,16 @@ export function usePageTranslation() {
       const currentActiveTabId = Number.isInteger(activeTab?.id) ? activeTab.id : activeTabId;
       // A delayed lookup must not invalidate a newer request and must not
       // refresh another tab's state.
-      if (currentActiveTabId !== tabId) return;
-      if (ownership !== translateRequestOwnership) return;
+      if ((transition && pendingDocumentTransitions.get(tabId) !== transition)
+        || currentActiveTabId !== tabId || ownership !== translateRequestOwnership) {
+        if (transition && pendingDocumentTransitions.get(tabId) === transition) pendingDocumentTransitions.delete(tabId);
+        return;
+      }
+      if (transition && (transition.ownership !== ownership
+        || transition.tabVersion !== activeTabVersion
+        || (aggregateStreamsByTab.get(tabId)?.scope ?? null) !== transition.priorScope)) {
+        pendingDocumentTransitions.delete(tabId);
+      }
       activeTabId = tabId;
       // A completed navigation replaces this tab's document identity.
       activeTabVersion++;
@@ -1098,7 +1149,14 @@ export function usePageTranslation() {
       hasPendingRequest = false;
       pendingLifecycleEvents = [];
       commandResponseReceived = false;
-      refreshStatus();
+      const verifiedTransition = pendingDocumentTransitions.get(tabId);
+      if (verifiedTransition) verifiedTransition.confirmed = true;
+      void refreshStatus();
+      if (verifiedTransition && !verifiedTransition.earlyInvalid && verifiedTransition.earlyEvents.length) {
+        const events = verifiedTransition.earlyEvents;
+        verifiedTransition.earlyEvents = [];
+        for (const event of events) handleRuntimeMessage(event);
+      }
     } catch {
       // Without the active tab the update cannot be attributed to it.
     }
@@ -1120,6 +1178,9 @@ export function usePageTranslation() {
     const current = aggregateStreamsByTab.get(tabId);
     const transition = pendingDocumentTransitions.get(tabId);
     const topLevelUrl = data.topLevelUrl;
+    if (transition && !transition.confirmed) return false;
+    const retiredScopes = retiredAggregateScopesByTab.get(tabId);
+    if (retiredScopes?.has(data.aggregateScope) && current?.scope !== data.aggregateScope) return false;
     let isSpaTransition = false;
     if (transition && current?.scope === data.aggregateScope) {
       isSpaTransition = transition.url !== transition.previousUrl && topLevelUrl === transition.url;
@@ -1129,6 +1190,7 @@ export function usePageTranslation() {
     if (isSpaTransition) pendingDocumentTransitions.delete(tabId);
     if (current && current.scope !== data.aggregateScope) {
       if (action !== MessageActions.PAGE_TRANSLATE_START || !transition || topLevelUrl !== transition.url) return false;
+      rememberRetiredScope(tabId, current.scope);
       pendingDocumentTransitions.delete(tabId);
     }
     if (transition && !current) {
@@ -1143,6 +1205,118 @@ export function usePageTranslation() {
     });
     lifecycleStateRevision++;
     return true;
+  }
+
+  function rememberRetiredScope(tabId, scope) {
+    if (typeof scope !== 'string' || !scope) return;
+    const retired = retiredAggregateScopesByTab.get(tabId) || new Set();
+    retired.delete(scope);
+    retired.add(scope);
+    while (retired.size > 20) retired.delete(retired.values().next().value);
+    retiredAggregateScopesByTab.set(tabId, retired);
+  }
+
+  function queueEarlyDocumentEvent(runtimeMessage) {
+    const { action, data = {} } = runtimeMessage;
+    if (![MessageActions.PAGE_TRANSLATE_START, MessageActions.PAGE_TRANSLATE_PROGRESS,
+      MessageActions.PAGE_TRANSLATE_IDLE, MessageActions.PAGE_TRANSLATE_COMPLETE,
+      MessageActions.PAGE_TRANSLATE_ERROR, MessageActions.PAGE_AUTO_RESTORE_COMPLETE].includes(action)) return false;
+    const tabId = Number.isInteger(data.tabId) ? data.tabId : null;
+    if (tabId === null || !hasValidAggregateRevision(data) || typeof data.topLevelUrl !== 'string') return false;
+    if (hasPendingRequest || evaluateEventOwnership(data, action) !== EVENT_APPLY) return false;
+    const transition = pendingDocumentTransitions.get(tabId);
+    if (!transition) return queuePreTransitionCandidate(runtimeMessage, tabId);
+    if (transition.confirmed || data.topLevelUrl !== transition.url) return false;
+    if (transition.earlyInvalid) return true;
+
+    const current = aggregateStreamsByTab.get(tabId);
+    if (action === MessageActions.PAGE_TRANSLATE_START) {
+      if (current?.scope === data.aggregateScope || retiredAggregateScopesByTab.get(tabId)?.has(data.aggregateScope)) return false;
+      if (transition.earlyScope && transition.earlyScope !== data.aggregateScope) {
+        transition.earlyEvents = [];
+        transition.earlyScope = null;
+        transition.earlyInvalid = true;
+        return true;
+      }
+      transition.earlyScope = data.aggregateScope;
+    } else if (transition.earlyScope !== data.aggregateScope) {
+      return false;
+    }
+
+    if (!appendEarlyDocumentEvent(transition.earlyEvents, runtimeMessage)) transition.earlyInvalid = true;
+    return true;
+  }
+
+  function queuePreTransitionCandidate(runtimeMessage, tabId) {
+    const { action, data } = runtimeMessage;
+    const current = aggregateStreamsByTab.get(tabId);
+    if (tabId !== activeTabId || !current) return false;
+    let candidate = earlyDocumentCandidates.get(tabId);
+    if (action === MessageActions.PAGE_TRANSLATE_START) {
+      if (current?.scope === data.aggregateScope || retiredAggregateScopesByTab.get(tabId)?.has(data.aggregateScope)) return false;
+      if (candidate && (candidate.scope !== data.aggregateScope || candidate.url !== data.topLevelUrl)) {
+        earlyDocumentCandidates.delete(tabId);
+        return true;
+      }
+      if (!candidate) {
+        candidate = {
+          scope: data.aggregateScope,
+          url: data.topLevelUrl,
+          priorScope: current?.scope ?? null,
+          ownership: translateRequestOwnership,
+          tabVersion: activeTabVersion,
+          events: [],
+          invalid: false,
+        };
+        earlyDocumentCandidates.set(tabId, candidate);
+      }
+    } else if (!candidate || candidate.scope !== data.aggregateScope || candidate.url !== data.topLevelUrl) {
+      return false;
+    }
+    if (candidate.invalid) return true;
+    if (!appendEarlyDocumentEvent(candidate.events, runtimeMessage)) candidate.invalid = true;
+    return true;
+  }
+
+  function appendEarlyDocumentEvent(events, runtimeMessage) {
+    const { data = {} } = runtimeMessage;
+    const isProgress = (event) => event.action === MessageActions.PAGE_TRANSLATE_PROGRESS
+      || event.action === MessageActions.PAGE_TRANSLATE_IDLE;
+    const tail = events.at(-1);
+    const sameAggregateDocument = (event) => event.data?.tabId === data.tabId
+      && event.data?.aggregateScope === data.aggregateScope
+      && event.data?.topLevelUrl === data.topLevelUrl;
+    if (isProgress(runtimeMessage)) {
+      const highWaterRevision = events
+        .filter(sameAggregateDocument)
+        .reduce((revision, event) => Math.max(revision, event.data.aggregateRevision), -1);
+      if (data.aggregateRevision <= highWaterRevision) return true;
+    }
+
+    if (isProgress(runtimeMessage) && tail && isProgress(tail)
+      && tail.data?.tabId === data.tabId
+      && tail.data?.aggregateScope === data.aggregateScope
+      && tail.data?.topLevelUrl === data.topLevelUrl) {
+      events[events.length - 1] = runtimeMessage;
+      return true;
+    }
+
+    if (events.length >= MAX_EARLY_DOCUMENT_EVENTS) {
+      const staleProgressIndex = events.findIndex(isProgress);
+      if (staleProgressIndex < 0) return false;
+      events.splice(staleProgressIndex, 1);
+    }
+    events.push(runtimeMessage);
+    return true;
+  }
+
+  function clearEarlyDocumentEvents() {
+    earlyDocumentCandidates.clear();
+    for (const transition of pendingDocumentTransitions.values()) {
+      transition.earlyEvents = [];
+      transition.earlyScope = null;
+      transition.earlyInvalid = true;
+    }
   }
 
   function hasValidAggregateRevision(data) {
@@ -1251,6 +1425,7 @@ export function usePageTranslation() {
    */
   const handleRuntimeMessage = (runtimeMessage) => {
     if (!runtimeMessage || !runtimeMessage.action) return;
+    if (queueEarlyDocumentEvent(runtimeMessage)) return;
 
     // We only care about page translation events
     switch (runtimeMessage.action) {

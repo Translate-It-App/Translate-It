@@ -182,6 +182,25 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.message.value).toBe('Auto-translation stopped');
     });
 
+    it('preserves known translation state when Stop fanout delivery is incomplete', async () => {
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : Promise.resolve({ success: true, responses: [
+          { success: true, isTranslated: false, translatedCount: 0 },
+        ], frames: [
+          { frameId: 0, success: true },
+          { frameId: 1, success: false, isResponseTimeout: true },
+        ] }));
+      const pageTranslation = await createPageTranslation();
+      pageTranslation.isTranslated.value = true;
+      pageTranslation.translatedCount.value = 7;
+
+      await pageTranslation.stopAutoTranslation();
+
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(7);
+    });
+
     it('does not let an older Stop response overwrite a newer lifecycle update', async () => {
       let resolveStop;
       sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
@@ -2033,6 +2052,50 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.translatedCount.value).toBe(4);
     });
 
+    it('stops replaying buffered transport-failure events when Stop supersedes deferred presentation', async () => {
+      browser.tabs.query.mockResolvedValue([{ id: 1 }]);
+      const presentation = deferPresentation();
+      let rejectTranslate;
+      let markSent;
+      const sentGate = new Promise((resolve) => { markSent = resolve; });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) return Promise.resolve({ success: true });
+        if (action === MessageActions.PAGE_TRANSLATE) {
+          markSent();
+          return new Promise((_, reject) => { rejectTranslate = reject; });
+        }
+        return Promise.resolve({ success: true });
+      });
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      const pending = pageTranslation.translatePage();
+      await sentGate;
+      const listener = getRuntimeMessageListener();
+      listener({ action: MessageActions.PAGE_TRANSLATE_START, data: {
+        tabId: 2, sessionId: 'replay-session', isAggregated: true,
+        aggregateScope: 'doc', aggregateRevision: 1,
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_ERROR, data: {
+        tabId: 2, sessionId: 'replay-session', isAggregated: true,
+        aggregateScope: 'doc', aggregateRevision: 2, isFatal: true, error: 'old failure',
+      } });
+      listener({ action: MessageActions.PAGE_TRANSLATE_PROGRESS, data: {
+        tabId: 2, sessionId: 'replay-session', isAggregated: true,
+        aggregateScope: 'doc', aggregateRevision: 3, translatedCount: 99,
+      } });
+      rejectTranslate(Object.assign(new Error('transport failure'), { targetTabId: 2 }));
+      await presentation.called;
+
+      await pageTranslation.stopAutoTranslation();
+      presentation.resolve(new Error('old failure'));
+      await pending;
+
+      expect(pageTranslation.message.value).toBe('Auto-translation stopped');
+      expect(pageTranslation.translatedCount.value).toBe(0);
+      expect(pageTranslation.error.value).toBeNull();
+    });
+
     it('keeps successful buffered fatal auto-restore and error correlated when active tab is unresolved', async () => {
       browser.tabs.query.mockReturnValue(new Promise(() => {}));
       getPageTranslationErrorPresentation.mockResolvedValueOnce(new Error('fatal translation failure'));
@@ -2878,6 +2941,380 @@ describe('usePageTranslation Composable', () => {
       getRuntimeMessageListener()(delayedOldIdle);
       expect(pageTranslation.isTranslating.value).toBe(true);
       expect(pageTranslation.message.value).toBe('Starting translation...');
+    });
+
+    it('replays a START received before the navigation callback after verification and failed refresh', async () => {
+      const { pageTranslation } = await createSilentScenario();
+      const oldStart = startEvent(SESSION_ID);
+      getRuntimeMessageListener()(oldStart);
+      getRuntimeMessageListener()(idleEvent(SESSION_ID));
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      let resolveTabs;
+      browser.tabs.query.mockReturnValue(new Promise((resolve) => { resolveTabs = resolve; }));
+      let statusCalls = 0;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action !== MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: true });
+        statusCalls++;
+        return Promise.resolve({ success: false });
+      });
+
+      const newStart = startEvent(NEXT_SESSION_ID);
+      newStart.data.aggregateScope = 'document-b';
+      newStart.data.aggregateRevision = 1;
+      getRuntimeMessageListener()(newStart);
+      const earlyProgress = {
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { ...newStart.data, aggregateRevision: 2, translatedCount: 3, totalCount: 5 },
+      };
+      getRuntimeMessageListener()(earlyProgress);
+      expect(pageTranslation.isTranslating.value).toBe(false);
+
+      const navigation = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID,
+        url: 'https://example.com/article',
+      });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+
+      resolveTabs([{ id: TAB_ID }]);
+      await navigation;
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(statusCalls).toBe(1);
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(3);
+      expect(pageTranslation.totalNodes.value).toBe(5);
+
+      const delayedOldScope = idleEvent(SESSION_ID, {
+        aggregateScope: 'document-a', aggregateRevision: 100,
+        topLevelUrl: 'https://example.com/article',
+      });
+      getRuntimeMessageListener()(delayedOldScope);
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(3);
+
+      const sameUrlPreviousScope = startEvent(NEXT_SESSION_ID);
+      sameUrlPreviousScope.data.aggregateScope = 'document-a';
+      sameUrlPreviousScope.data.aggregateRevision = 101;
+      getRuntimeMessageListener()(sameUrlPreviousScope);
+      expect(pageTranslation.translatedCount.value).toBe(3);
+      expect(pageTranslation.message.value).toBe('Starting translation...');
+    });
+
+    it('keeps revision 10 authoritative over a delayed revision 8 before navigation verification', async () => {
+      const { pageTranslation } = await createSilentScenario();
+      getRuntimeMessageListener()(startEvent(SESSION_ID));
+      getRuntimeMessageListener()(idleEvent(SESSION_ID));
+      let resolveTabs;
+      browser.tabs.query.mockReturnValue(new Promise((resolve) => { resolveTabs = resolve; }));
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : Promise.resolve({ success: true }));
+
+      const newStart = startEvent(NEXT_SESSION_ID);
+      Object.assign(newStart.data, { aggregateScope: 'document-b', aggregateRevision: 1 });
+      getRuntimeMessageListener()(newStart);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { ...newStart.data, aggregateRevision: 10, translatedCount: 10, totalCount: 12 },
+      });
+      const interveningStart = {
+        ...newStart,
+        data: { ...newStart.data, aggregateRevision: 9 },
+      };
+      getRuntimeMessageListener()(interveningStart);
+      for (let index = 0; index < 17; index++) getRuntimeMessageListener()(interveningStart);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_IDLE,
+        data: { ...newStart.data, aggregateRevision: 8, translatedCount: 8, totalCount: 12, isTranslating: false },
+      });
+
+      const navigation = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID,
+        url: 'https://example.com/article',
+      });
+      resolveTabs([{ id: TAB_ID }]);
+      await navigation;
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(10);
+      expect(pageTranslation.totalNodes.value).toBe(12);
+    });
+
+    it('uses newer terminal revisions as high-water marks after capacity pruning removes progress', async () => {
+      const { pageTranslation } = await createSilentScenario();
+      getRuntimeMessageListener()(startEvent(SESSION_ID));
+      getRuntimeMessageListener()(idleEvent(SESSION_ID));
+      let resolveTabs;
+      browser.tabs.query.mockReturnValue(new Promise((resolve) => { resolveTabs = resolve; }));
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : Promise.resolve({ success: true }));
+
+      const newStart = startEvent(NEXT_SESSION_ID);
+      Object.assign(newStart.data, { aggregateScope: 'document-b', aggregateRevision: 1 });
+      getRuntimeMessageListener()(newStart);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: { ...newStart.data, aggregateRevision: 10, translatedCount: 10, totalCount: 12 },
+      });
+      const terminal = {
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: {
+          ...newStart.data,
+          aggregateRevision: 11,
+          translatedCount: 10,
+          totalCount: 12,
+          isTranslated: true,
+          isTranslating: false,
+        },
+      };
+      for (let index = 0; index < 19; index++) getRuntimeMessageListener()(terminal);
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_IDLE,
+        data: { ...newStart.data, aggregateRevision: 8, translatedCount: 8, totalCount: 12, isTranslating: false },
+      });
+
+      const navigation = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID,
+        url: 'https://example.com/article',
+      });
+      resolveTabs([{ id: TAB_ID }]);
+      await navigation;
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.translatedCount.value).toBe(10);
+      expect(pageTranslation.totalNodes.value).toBe(12);
+    });
+
+    it.each([
+      [MessageActions.PAGE_TRANSLATE_PROGRESS, MessageActions.PAGE_TRANSLATE_IDLE, true],
+      [MessageActions.PAGE_TRANSLATE_IDLE, MessageActions.PAGE_TRANSLATE_PROGRESS, false],
+    ])('coalesces %s/%s snapshots by revision, preserving newer action semantics', async (newerAction, staleAction, expectedTranslating) => {
+      const { pageTranslation } = await createSilentScenario();
+      getRuntimeMessageListener()(startEvent(SESSION_ID));
+      getRuntimeMessageListener()(idleEvent(SESSION_ID));
+      let resolveTabs;
+      browser.tabs.query.mockReturnValue(new Promise((resolve) => { resolveTabs = resolve; }));
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : Promise.resolve({ success: true }));
+
+      const newStart = startEvent(NEXT_SESSION_ID);
+      Object.assign(newStart.data, { aggregateScope: 'document-b', aggregateRevision: 1 });
+      getRuntimeMessageListener()(newStart);
+      for (const [action, revision, count] of [[newerAction, 10, 10], [staleAction, 8, 8]]) {
+        getRuntimeMessageListener()({
+          action,
+          data: {
+            ...newStart.data,
+            aggregateRevision: revision,
+            translatedCount: count,
+            totalCount: 12,
+            isTranslating: action === MessageActions.PAGE_TRANSLATE_PROGRESS,
+          },
+        });
+      }
+
+      const navigation = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID,
+        url: 'https://example.com/article',
+      });
+      resolveTabs([{ id: TAB_ID }]);
+      await navigation;
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(pageTranslation.isTranslating.value).toBe(expectedTranslating);
+      expect(pageTranslation.translatedCount.value).toBe(10);
+      expect(pageTranslation.totalNodes.value).toBe(12);
+    });
+
+    it('coalesces early progress snapshots without losing START or COMPLETE on a failed refresh', async () => {
+      const { pageTranslation } = await createSilentScenario();
+      getRuntimeMessageListener()(startEvent(SESSION_ID));
+      getRuntimeMessageListener()(idleEvent(SESSION_ID));
+      let resolveTabs;
+      browser.tabs.query.mockReturnValue(new Promise((resolve) => { resolveTabs = resolve; }));
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : Promise.resolve({ success: true }));
+
+      const newStart = startEvent(NEXT_SESSION_ID);
+      newStart.data.aggregateScope = 'document-b';
+      newStart.data.aggregateRevision = 1;
+      getRuntimeMessageListener()(newStart);
+      let revision = 2;
+      while (revision <= 27) {
+        getRuntimeMessageListener()({
+          action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+          data: {
+            ...newStart.data,
+            aggregateRevision: revision,
+            translatedCount: revision,
+            failedCount: 0,
+            totalCount: 30,
+          },
+        });
+        revision++;
+        if (revision <= 27) {
+          getRuntimeMessageListener()({
+            action: MessageActions.PAGE_TRANSLATE_START,
+            data: {
+              ...newStart.data,
+              aggregateRevision: revision++,
+              translatedCount: 0,
+              failedCount: 0,
+              totalCount: 30,
+              isTranslating: true,
+              isAutoTranslating: false,
+            },
+          });
+        }
+      }
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: {
+          ...newStart.data,
+          aggregateRevision: revision,
+          translatedCount: 27,
+          failedCount: 0,
+          totalCount: 30,
+          isTranslated: true,
+          isTranslating: false,
+        },
+      });
+      expect(pageTranslation.isTranslated.value).toBe(false);
+
+      const navigation = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID,
+        url: 'https://example.com/article',
+      });
+      resolveTabs([{ id: TAB_ID }]);
+      await navigation;
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.translatedCount.value).toBe(27);
+      expect(pageTranslation.totalNodes.value).toBe(30);
+
+      const staleOldDocument = idleEvent(SESSION_ID, {
+        aggregateScope: 'document-a',
+        aggregateRevision: 1000,
+        isTranslated: false,
+        translatedCount: 1,
+        totalCount: 1,
+      });
+      getRuntimeMessageListener()(staleOldDocument);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.translatedCount.value).toBe(27);
+      expect(pageTranslation.totalNodes.value).toBe(30);
+    });
+
+    it('buffers a changed-scope START that arrives while navigation tab verification is pending', async () => {
+      const { pageTranslation } = await createSilentScenario();
+      getRuntimeMessageListener()(startEvent(SESSION_ID));
+      let resolveTabs;
+      browser.tabs.query.mockReturnValue(new Promise((resolve) => { resolveTabs = resolve; }));
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : Promise.resolve({ success: true }));
+
+      const navigation = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID,
+        url: 'https://example.com/article',
+      });
+      const duringQueryStart = startEvent(NEXT_SESSION_ID);
+      duringQueryStart.data.aggregateScope = 'document-b';
+      duringQueryStart.data.aggregateRevision = 1;
+      getRuntimeMessageListener()(duringQueryStart);
+      expect(pageTranslation.isTranslating.value).toBe(true);
+
+      resolveTabs([{ id: TAB_ID }]);
+      await navigation;
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(pageTranslation.message.value).toBe('Starting translation...');
+      expect(pageTranslation.isTranslating.value).toBe(true);
+    });
+
+    it('does not replay a request-owned START as a passive navigation candidate', async () => {
+      const { pageTranslation } = await createSilentScenario();
+      getRuntimeMessageListener()(startEvent(SESSION_ID));
+      getRuntimeMessageListener()(idleEvent(SESSION_ID));
+      pageTranslation.message.value = 'Idle before request';
+      let resolveTranslate;
+      let resolveTabs;
+      const translateResponse = new Promise((resolve) => { resolveTranslate = resolve; });
+      browser.tabs.query.mockReturnValue(new Promise((resolve) => { resolveTabs = resolve; }));
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) return translateResponse;
+        return Promise.resolve({ success: true });
+      });
+      const pendingRequest = pageTranslation.translatePage();
+      const navigation = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID,
+        url: 'https://example.com/article',
+      });
+      const requestStart = startEvent(NEXT_SESSION_ID);
+      requestStart.data.aggregateScope = 'document-b';
+      requestStart.data.aggregateRevision = 1;
+      getRuntimeMessageListener()(requestStart);
+
+      resolveTabs([{ id: TAB_ID }]);
+      await navigation;
+      await Promise.resolve();
+      await Promise.resolve();
+      resolveTranslate({ success: true, targetTabId: TAB_ID, messageId: NEXT_SESSION_ID });
+      await pendingRequest;
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.message.value).not.toBe('Starting translation...');
+    });
+
+    it('does not let an older overlapping tab query confirm a newer navigation transition', async () => {
+      const { pageTranslation } = await createSilentScenario();
+      getRuntimeMessageListener()(startEvent(SESSION_ID));
+      let resolveFirst;
+      let resolveSecond;
+      let queryCount = 0;
+      browser.tabs.query.mockImplementation(() => new Promise((resolve) => {
+        queryCount++;
+        if (queryCount === 1) resolveFirst = resolve;
+        else resolveSecond = resolve;
+      }));
+      let statusCalls = 0;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) {
+          statusCalls++;
+          return Promise.resolve({ success: false });
+        }
+        return Promise.resolve({ success: true });
+      });
+
+      const firstNavigation = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID, url: 'https://example.com/article',
+      });
+      const secondNavigation = getTabUpdateListener()(TAB_ID, { status: 'complete' }, {
+        id: TAB_ID, url: 'https://example.com/article',
+      });
+      resolveFirst([{ id: TAB_ID }]);
+      await firstNavigation;
+      expect(statusCalls).toBe(0);
+      resolveSecond([{ id: TAB_ID }]);
+      await secondNavigation;
+      await Promise.resolve();
+      expect(statusCalls).toBe(1);
+      expect(pageTranslation.isTranslating.value).toBe(false);
     });
 
     it('preserves same-scope lifecycle continuity for a verified SPA URL change', async () => {
