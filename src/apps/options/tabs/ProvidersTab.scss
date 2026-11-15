@@ -51,12 +51,11 @@
     width: 100%;
     box-sizing: border-box;
 
+    // Optimization selector: deliberately compact (issue #242) — a plain
+    // settings row like its neighbors, no card treatment. The slider is the
+    // only interactive element; labels, badge and description stay informational.
     .optimization-control-area {
-      margin-bottom: $spacing-md;
-      background: var(--color-background-alt, rgba(var(--color-text-rgb), 0.03));
-      padding: $spacing-sm $spacing-md;
-      border-radius: $border-radius-md;
-      border: 1px solid var(--color-border-light);
+      margin-bottom: $spacing-sm;
       box-sizing: border-box;
       width: 100%;
       max-width: var(--input-max-width, 100%);
@@ -64,44 +63,38 @@
       .opt-control-group {
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: $spacing-xs;
         width: 100%;
       }
 
       .label-with-value {
         display: flex;
-        align-items: center;
-        justify-content: space-between;
+        align-items: baseline;
         gap: $spacing-sm;
 
         .opt-label {
           font-weight: $font-weight-semibold;
-          font-size: 12px;
+          font-size: $font-size-sm;
           color: var(--color-text-secondary);
           margin: 0;
-          text-transform: uppercase;
-          letter-spacing: 0.3px;
         }
       }
 
+      // Subtle text-only readout: the per-level value is also visible in the
+      // slider end labels, so the loud colored pill is not needed here.
       .level-badge {
         flex-shrink: 0;
-        font-size: 10px;
-        font-weight: $font-weight-bold;
-        padding: 1px 8px;
-        border-radius: 4px;
-        text-transform: uppercase;
-        
-        &.level-1 { background-color: var(--color-surface); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
-        &.level-2 { background-color: #d1fae5; color: #065f46; }
-        &.level-3 { background-color: #dbeafe; color: #1e40af; }
-        &.level-4 { background-color: #ede9fe; color: #5b21b6; }
-        &.level-5 { background-color: #fee2e2; color: #991b1b; }
+        font-size: $font-size-xs;
+        font-weight: $font-weight-medium;
+        color: var(--color-text-secondary);
       }
 
+      // Capped width keeps the control compact; full width reserved the whole
+      // row for a 5-step selector.
       .slider-wrapper {
-        padding: 2px 0;
-        width: 100%;
+        padding: 0;
+        width: 240px;
+        max-width: 100%;
 
         .ti-range-slider {
           width: 100%;
@@ -117,8 +110,8 @@
         font-size: 10px;
         font-weight: $font-weight-medium;
         color: var(--color-text-secondary);
-        margin-top: 2px;
-        
+        margin-top: 1px;
+
         span {
           cursor: pointer;
           transition: color $transition-fast;
@@ -133,11 +126,12 @@
       }
 
       .opt-description {
-        font-size: 11px;
+        font-size: $font-size-xs;
         color: var(--color-text-secondary);
         line-height: 1.4;
-        margin-top: 2px;
+        margin: 0;
         opacity: 0.8;
+        max-width: var(--input-max-width, 100%);
       }
     }
   }
@@ -169,7 +163,16 @@
       flex-direction: column !important;
       align-items: flex-start !important;
       gap: $spacing-xs !important;
+    }
+
+    .setting-group {
       margin-bottom: $spacing-xl !important; // Increased margin for better separation between groups
+    }
+
+    // The optimization selector is intentionally compact (issue #242); it sits
+    // closer to the surrounding rows than regular setting groups.
+    .optimization-control-area {
+      margin-bottom: $spacing-sm !important;
     }
 
     .setting-group.vertical {
