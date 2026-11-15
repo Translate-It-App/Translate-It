@@ -269,8 +269,7 @@ export class SelectionManager extends ResourceTracker {
           if (descendantRoots.length > 0) {
             const expandedPosition = this.getComposedRangePosition(selection, [...expandedRoots], false, true);
             if (expandedPosition) return expandedPosition;
-          }
-          if (shadowRoots.length === 0) {
+          } else if (shadowRoots.length === 0) {
             const documentPosition = this.getComposedRangePosition(selection, shadowRoots, true);
             if (documentPosition) return documentPosition;
           }

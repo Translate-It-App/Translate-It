@@ -203,6 +203,18 @@ describe('SelectionManager selection geometry', () => {
     }
   });
 
+  it('does not retry the document fallback after unsuccessful descendant-root recovery', () => {
+    const fixture = createCollapsedShadowSelection();
+    fixture.selection.getComposedRanges.mockReturnValue([]);
+    try {
+      expect(manager.calculateSelectionPosition(fixture.selection)).toBeNull();
+      expect(fixture.selection.getComposedRanges).toHaveBeenCalledTimes(2);
+      expect(fixture.selection.getComposedRanges).toHaveBeenLastCalledWith({ shadowRoots: [fixture.root, fixture.nestedRoot] });
+    } finally {
+      fixture.container.remove();
+    }
+  });
+
   it('does not accept a mismatched one-child range in the document fallback', () => {
     const container = document.createElement('div');
     container.append(document.createElement('i'), document.createElement('i'));
