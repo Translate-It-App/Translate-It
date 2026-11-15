@@ -1012,6 +1012,94 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.message.value).toContain('Error:');
     });
 
+    it('confirms an active document transition without superseding a newer request', async () => {
+      const pageTranslation = await createPageTranslation();
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 1, windowId: 10 });
+      const listener = getRuntimeMessageListener();
+      listener({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'document-old', aggregateRevision: 1,
+          topLevelUrl: 'https://example.test/old', sessionId: 'old-session',
+          isTranslating: false, isTranslated: true, translatedCount: 4, totalCount: 4,
+        },
+      });
+
+      let resolveQuery;
+      browser.tabs.query.mockImplementationOnce(() => new Promise((resolve) => { resolveQuery = resolve; }));
+      let resolveTranslate;
+      let markTranslateSent;
+      const translateSent = new Promise((resolve) => { markTranslateSent = resolve; });
+      const translateResponse = new Promise((resolve) => { resolveTranslate = resolve; });
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
+        if (action === MessageActions.PAGE_TRANSLATE) { markTranslateSent(); return translateResponse; }
+        return Promise.resolve({ success: true });
+      });
+
+      const pendingTabUpdate = getTabUpdateListener()(1, { status: 'complete' }, { url: 'https://example.test/new' });
+      const pendingRequest = pageTranslation.translatePage();
+      await translateSent;
+      resolveQuery([{ id: 1 }]);
+      await pendingTabUpdate;
+
+      listener({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'document-new', aggregateRevision: 1,
+          topLevelUrl: 'https://example.test/new', sessionId: 'frame-new',
+          isTranslating: true, isTranslated: false, translatedCount: 0, totalCount: 5,
+        },
+      });
+      listener({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'document-new', aggregateRevision: 2,
+          topLevelUrl: 'https://example.test/new', sessionId: 'frame-new',
+          isTranslating: true, translatedCount: 3, totalCount: 5,
+        },
+      });
+      listener({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'document-new', aggregateRevision: 3,
+          topLevelUrl: 'https://example.test/new', sessionId: 'frame-new',
+          isTranslating: false, isTranslated: true, translatedCount: 5, failedCount: 0, totalCount: 5,
+        },
+      });
+      resolveTranslate({ success: true, targetTabId: 1, messageId: 'request-new' });
+      await pendingRequest;
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(5);
+      expect(pageTranslation.totalNodes.value).toBe(5);
+      expect(pageTranslation.canRestore.value).toBe(true);
+
+      listener({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'document-old', aggregateRevision: 2,
+          topLevelUrl: 'https://example.test/old', sessionId: 'old-session',
+          isTranslating: true, translatedCount: 99, totalCount: 100,
+        },
+      });
+      listener({
+        action: MessageActions.PAGE_TRANSLATE_COMPLETE,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'document-old', aggregateRevision: 3,
+          topLevelUrl: 'https://example.test/old', sessionId: 'old-session',
+          isTranslating: false, isTranslated: false, translatedCount: 0, totalCount: 100,
+        },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(5);
+      expect(pageTranslation.totalNodes.value).toBe(5);
+      expect(pageTranslation.canRestore.value).toBe(true);
+    });
+
     it('keeps an active translation failure visible after unrelated background-tab updates', async () => {
       browser.tabs.query.mockResolvedValue([{ id: 1 }]);
       const resolveTranslate = mockTranslateResponse();

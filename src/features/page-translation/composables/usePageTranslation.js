@@ -1127,15 +1127,24 @@ export function usePageTranslation() {
       // A delayed lookup must not invalidate a newer request and must not
       // refresh another tab's state.
       if ((transition && pendingDocumentTransitions.get(tabId) !== transition)
-        || currentActiveTabId !== tabId || ownership !== translateRequestOwnership
-        || (transition && transition.confirmed)) {
+        || currentActiveTabId !== tabId) {
         return;
       }
+      if (transition?.confirmed) return;
       if (transition && (transition.ownership !== ownership
         || transition.tabVersion !== activeTabVersion
         || (aggregateStreamsByTab.get(tabId)?.scope ?? null) !== transition.priorScope)) {
         if (pendingDocumentTransitions.get(tabId) === transition && !transition.confirmed) {
           pendingDocumentTransitions.delete(tabId);
+        }
+        return;
+      }
+      if (ownership !== translateRequestOwnership) {
+        if (transition) {
+          transition.confirmed = true;
+          activeTabId = tabId;
+          activeTabVersion++;
+          lifecycleStateRevision++;
         }
         return;
       }
