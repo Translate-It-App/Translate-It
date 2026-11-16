@@ -100,7 +100,11 @@ export class GeminiProvider extends BaseAIProvider {
     logger.info(`[Gemini] Model: ${model || CONFIG.GEMINI_MODEL}${sessionId ? ` (Session: ${sessionId.substring(0, 15)}..., Turn: ${turnNumber})` : ''}`);
 
     const modelConfig = CONFIG.GEMINI_MODELS?.find(configuredModel => configuredModel.value === model);
-    const minimalThinking = modelConfig?.thinking?.minimal;
+    const isOfficialCatalogModel = modelSource === 'catalog' && isOfficialGeminiEndpoint(rawApiUrl);
+    const supportsMinimalThinking = ['gemma-4-31b-it', 'gemma-4-26b-a4b-it'].includes(model);
+    const minimalThinking = supportsMinimalThinking && isOfficialCatalogModel
+      ? { type: 'level', value: 'minimal' }
+      : modelConfig?.thinking?.minimal;
     const thinkingConfig = thinkingMode === 'minimal' &&
       minimalThinking?.type === 'level' &&
       minimalThinking.value === 'minimal'
@@ -188,7 +192,11 @@ export class GeminiProvider extends BaseAIProvider {
           throw new Error('API_ERROR: Content blocked by Gemini safety filters');
         }
 
-        return candidate?.content?.parts?.[0]?.text;
+        const parts = candidate?.content?.parts;
+        const answerParts = Array.isArray(parts)
+          ? parts.filter(part => part?.thought !== true && typeof part?.text === 'string').map(part => part.text)
+          : undefined;
+        return answerParts?.length ? answerParts.join('') : undefined;
       },
       context: `${this.providerName.toLowerCase()}-translation`,
       abortController,

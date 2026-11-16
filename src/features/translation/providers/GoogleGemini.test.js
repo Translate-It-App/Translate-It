@@ -66,6 +66,54 @@ describe('GeminiProvider Error Handling', () => {
     expect(result).toBe('سلام دنیا');
   });
 
+  it.each([
+    ['ignores thinking before answer', [{ text: 'thought', thought: true }, { text: 'answer' }], 'answer'],
+    ['joins answer parts in order', [{ text: 'first ' }, { text: 'second' }], 'first second'],
+    ['keeps structured JSON in non-thinking parts', [{ text: '{"ignored":', thought: true }, { text: '{"answer":' }, { text: '"ok"}' }], '{"answer":"ok"}'],
+  ])('extracts response text: %s', async (_description, parts, expected) => {
+    proxyManager.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      json: () => Promise.resolve({ candidates: [{ content: { parts } }] }),
+      clone: function() { return this; }
+    });
+
+    await expect(provider._callAI('system', 'source')).resolves.toBe(expected);
+  });
+
+  it.each([
+    ['thinking-only', [{ text: 'internal', thought: true }]],
+    ['missing answer text', [{ thought: true }, { inlineData: { data: 'image' } }]],
+  ])('rejects %s responses as invalid', async (_description, parts) => {
+    proxyManager.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      json: () => Promise.resolve({ candidates: [{ content: { parts } }] }),
+      clone: function() { return this; }
+    });
+
+    await expect(provider._callAI('system', 'source'))
+      .rejects.toMatchObject({ type: ErrorTypes.API_RESPONSE_INVALID });
+  });
+
+  it.each([
+    ['missing parts', undefined],
+    ['malformed parts', { text: 'not an array' }],
+  ])('rejects responses with %s as invalid', async (_description, parts) => {
+    proxyManager.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      json: () => Promise.resolve({ candidates: [{ content: parts === undefined ? {} : { parts } }] }),
+      clone: function() { return this; }
+    });
+
+    await expect(provider._callAI('system', 'source'))
+      .rejects.toMatchObject({ type: ErrorTypes.API_RESPONSE_INVALID });
+  });
+
   it('uses the supplied original source length instead of transformed userText length', async () => {
     const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
     const transformedText = '<compatibility-wrapper>source</compatibility-wrapper>';
@@ -179,6 +227,53 @@ describe('GeminiProvider Error Handling', () => {
     expect(payload).not.toHaveProperty('model');
     expect(payload.generationConfig.temperature).toBe(0.1);
     expect(payload.generationConfig).not.toHaveProperty('thinkingConfig');
+  });
+
+  it.each(['gemma-4-31b-it', 'gemma-4-26b-a4b-it'])('routes catalog %s and enables minimal thinking on the official endpoint', async (model) => {
+    const { getGeminiApiUrlAsync, getGeminiModelAsync, getGeminiModelSourceAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
+    getGeminiModelAsync.mockResolvedValue(model);
+    getGeminiModelSourceAsync.mockResolvedValue('catalog');
+    getGeminiThinkingModeAsync.mockResolvedValue('minimal');
+    getGeminiApiUrlAsync.mockResolvedValue('https://generativelanguage.googleapis.com/v1beta/models');
+    const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+
+    await provider._callAI('system', 'source');
+
+    const request = executeRequest.mock.calls[0][0];
+    expect(request.url).toBe(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=test-key`);
+    expect(CONFIG.GEMINI_MODELS.some(configuredModel => configuredModel.value === model)).toBe(false);
+    expect(JSON.parse(request.fetchOptions.body).generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'minimal' });
+  });
+
+  it.each([
+    ['custom endpoint', 'catalog', 'https://custom.example/v1beta/models'],
+    ['legacy source', 'legacy', 'https://generativelanguage.googleapis.com/v1beta/models'],
+  ])('does not enable Gemma minimal thinking for %s', async (_description, source, endpoint) => {
+    const { getGeminiApiUrlAsync, getGeminiModelAsync, getGeminiModelSourceAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
+    getGeminiModelAsync.mockResolvedValue('gemma-4-31b-it');
+    getGeminiModelSourceAsync.mockResolvedValue(source);
+    getGeminiThinkingModeAsync.mockResolvedValue('minimal');
+    getGeminiApiUrlAsync.mockResolvedValue(endpoint);
+    const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+
+    await provider._callAI('system', 'source');
+
+    const request = executeRequest.mock.calls[0][0];
+    expect(request.url).toBe(`${endpoint}:generateContent?key=test-key`);
+    expect(JSON.parse(request.fetchOptions.body).generationConfig).not.toHaveProperty('thinkingConfig');
+  });
+
+  it('does not enable minimal thinking for unsupported catalog models', async () => {
+    const { getGeminiApiUrlAsync, getGeminiModelAsync, getGeminiModelSourceAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
+    getGeminiModelAsync.mockResolvedValue('unsupported-model');
+    getGeminiModelSourceAsync.mockResolvedValue('catalog');
+    getGeminiThinkingModeAsync.mockResolvedValue('minimal');
+    getGeminiApiUrlAsync.mockResolvedValue('https://generativelanguage.googleapis.com/v1beta/models');
+    const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
+
+    await provider._callAI('system', 'source');
+
+    expect(JSON.parse(executeRequest.mock.calls[0][0].fetchOptions.body).generationConfig).not.toHaveProperty('thinkingConfig');
   });
 
   it('routes the official models list URL to the configured endpoint for a curated model', async () => {
@@ -375,9 +470,9 @@ describe('GeminiProvider Error Handling', () => {
     }
   );
 
-  it('omits thinkingConfig in default mode for a verified model', async () => {
+  it.each(['gemini-3.5-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it'])('omits thinkingConfig in default mode for %s', async (model) => {
     const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
-    getGeminiModelAsync.mockResolvedValue('gemini-3.5-flash-lite');
+    getGeminiModelAsync.mockResolvedValue(model);
     getGeminiThinkingModeAsync.mockResolvedValue('default');
     const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
 
@@ -388,11 +483,17 @@ describe('GeminiProvider Error Handling', () => {
   });
 
   it.each([
-    'gemini-3.5-flash-lite'
+    'gemini-3.5-flash-lite',
+    'gemma-4-31b-it',
+    'gemma-4-26b-a4b-it'
   ])('emits minimal thinkingConfig for verified model %s', async (model) => {
-    const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
+    const { getGeminiModelAsync, getGeminiModelSourceAsync, getGeminiApiUrlAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
     getGeminiModelAsync.mockResolvedValue(model);
     getGeminiThinkingModeAsync.mockResolvedValue('minimal');
+    if (model.startsWith('gemma-4-')) {
+      getGeminiModelSourceAsync.mockResolvedValue('catalog');
+      getGeminiApiUrlAsync.mockResolvedValue('https://generativelanguage.googleapis.com/v1beta/models');
+    }
     const executeRequest = vi.spyOn(provider, '_executeRequest').mockResolvedValue('translated');
 
     await provider._callAI('system prompt', 'source text');
@@ -401,7 +502,7 @@ describe('GeminiProvider Error Handling', () => {
     expect(payload.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'minimal' });
   });
 
-  it.each(['gemini-3.8-flash', 'custom', 'unknown-model'])(
+  it.each(['gemini-3.8-flash', 'gemma-4-31b-it-preview', 'gemma-4-26b-a4b-it-preview', 'custom', 'unknown-model'])(
     'omits minimal thinkingConfig for unverified model %s',
     async (model) => {
       const { getGeminiModelAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
