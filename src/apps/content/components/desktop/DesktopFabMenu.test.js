@@ -1357,15 +1357,38 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
 
   it('renders as soon as initialization settles and applies the saved position first', async () => {
     mocks.getPosition.mockResolvedValue({ y: 230, side: 'left' });
-    wrapper = mount(DesktopFabMenu);
+    let resolveDependencies;
+    const dependenciesReady = new Promise((resolve) => { resolveDependencies = resolve; });
+    const addEventListener = mocks.tracker.addEventListener.getMockImplementation();
+    let scrollListeners = 0;
+    mocks.tracker.addEventListener.mockImplementation((...args) => {
+      const result = addEventListener(...args);
+      if (args[0] === window && args[1] === 'scroll' && ++scrollListeners === 2) {
+        resolveDependencies();
+      }
+      return result;
+    });
 
-    await settleInitialization();
+    try {
+      wrapper = mount(DesktopFabMenu);
 
-    const root = wrapper.get('.desktop-fab-container');
-    expect(wrapper.vm.isReady).toBe(true);
-    expect(root.classes()).toContain('is-left');
-    expect(root.element.style.getPropertyValue('--fab-top')).toBe('230px');
-    expect(root.classes()).toContain('is-positioning');
+      // Both scroll listeners are installed after async dependencies settle and
+      // immediately before the FAB becomes ready. Do not advance startup timers.
+      await dependenciesReady;
+      await wrapper.vm.$nextTick();
+
+      const root = wrapper.get('.desktop-fab-container');
+      expect(wrapper.vm.isReady).toBe(true);
+      expect(root.classes()).toContain('is-left');
+      expect(root.element.style.getPropertyValue('--fab-top')).toBe('230px');
+      expect(root.classes()).toContain('is-positioning');
+      // Let transition frames drain so they cannot leak into later RAF tests.
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    } finally {
+      wrapper?.unmount();
+      wrapper = null;
+      mocks.tracker.addEventListener.mockImplementation(addEventListener);
+    }
   });
 
   it('cancels the queued positioning frame and timers on unmount', async () => {
