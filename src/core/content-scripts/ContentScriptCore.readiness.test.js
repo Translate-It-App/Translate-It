@@ -78,7 +78,7 @@ describe('content core settings readiness', () => {
 
     await expect(initialization).resolves.toBe(true)
     expect(mocks.initializeDebugMode).toHaveBeenCalledOnce()
-    expect(mocks.warmupSettings).toHaveBeenCalledOnce()
+    expect(mocks.warmupSettings).not.toHaveBeenCalled()
   })
 
   it('retries critical settings initialization without duplicating completed base setup', async () => {
@@ -113,6 +113,6 @@ describe('content core settings readiness', () => {
     resolveSettings()
 
     await expect(initialization).resolves.toBe(true)
-    expect(mocks.warmupSettings).toHaveBeenCalledOnce()
+    expect(mocks.warmupSettings).not.toHaveBeenCalled()
   })
 })

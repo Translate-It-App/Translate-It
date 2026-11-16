@@ -1,16 +1,28 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-vi.mock('@/core/managers/content/FeatureManager.js', () => ({
-  FeatureManager: { getInstance: vi.fn() }
+const initializeSettings = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+
+vi.mock('@/shared/managers/SettingsManager.js', () => ({
+  default: { initialize: initializeSettings, warmup: vi.fn() }
 }));
 
-import { loadFeatureOnDemand, getFeatureManager } from './lazy-features.js';
+vi.mock('@/core/managers/content/FeatureManager.js', () => ({
+  FeatureManager: { getInstance: vi.fn(() => ({
+    requestFeatureActivation: vi.fn().mockResolvedValue(null),
+    getFeatureHandler: vi.fn(),
+    isFeatureActive: vi.fn().mockReturnValue(false)
+  })) }
+}));
+
+import { loadCoreFeatures, loadFeatureOnDemand, getFeatureManager } from './lazy-features.js';
 import { FeatureManager } from '@/core/managers/content/FeatureManager.js';
+import SettingsManager from '@/shared/managers/SettingsManager.js';
 
 describe('loadFeatureOnDemand vue special-case', () => {
   afterEach(() => {
     delete window.translateItContentCore;
     delete window.featureManager;
+    vi.clearAllMocks();
   });
 
   it('top-frame core: delegates to loadVueApp, returns vueLoaded, never reaches FeatureManager activation', async () => {
@@ -33,5 +45,12 @@ describe('loadFeatureOnDemand vue special-case', () => {
     expect(result).toBeNull();
     expect(getFeatureManager()).toBeNull();
     expect(FeatureManager.getInstance).not.toHaveBeenCalled();
+  });
+
+  it('does not warm settings after successful initialization', async () => {
+    await loadCoreFeatures();
+
+    expect(initializeSettings).toHaveBeenCalledOnce();
+    expect(SettingsManager.warmup).not.toHaveBeenCalled();
   });
 });
