@@ -30,7 +30,7 @@ export function getTranslationFontTarget(textNode) {
     if (role === 'button' || role === 'link' || parent.onclick !== null || parent.getAttribute('tabindex') === '0') return null;
     if (parent.isContentEditable || parent.hasAttribute('contenteditable')) return null;
     const descendants = [...parent.querySelectorAll('*')];
-    if (descendants.some(isUnsafeDescendant)) return null;
+    if (parent.shadowRoot || descendants.some(descendant => descendant.shadowRoot || isUnsafeDescendant(descendant))) return null;
     if (parent.style.getPropertyPriority('font-family') === 'important') return null;
     if (hasGeneratedContent(parent, '::before') || hasGeneratedContent(parent, '::after')) return null;
     const parentFontFamily = window.getComputedStyle(parent).fontFamily;

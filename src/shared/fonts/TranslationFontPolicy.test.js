@@ -88,6 +88,21 @@ describe('getTranslationFontTarget', () => {
     expect(getTranslationFontTarget(text)).toBeNull();
   });
 
+  it('rejects mixed parents containing detectable open ShadowRoot hosts', () => {
+    const element = document.createElement('span');
+    const text = document.createTextNode('source');
+    const host = document.createElement('span');
+    host.attachShadow({ mode: 'open' }).append('untranslated shadow text');
+    element.append(text, host);
+
+    expect(getTranslationFontTarget(text)).toBeNull();
+
+    const shadowHost = document.createElement('span');
+    shadowHost.append('source');
+    shadowHost.attachShadow({ mode: 'open' }).append('untranslated shadow text');
+    expect(getTranslationFontTarget(shadowHost.firstChild)).toBeNull();
+  });
+
   it.each(['::before', '::after'])('rejects generated descendant content in %s', pseudo => {
     const element = document.createElement('span');
     const text = document.createTextNode('source');
