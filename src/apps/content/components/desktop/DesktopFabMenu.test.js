@@ -1313,6 +1313,8 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
     vi.useRealTimers();
   });
 
+  const settleInitialization = () => vi.waitFor(() => expect(wrapper.vm.isReady).toBe(true));
+
   it('stops only this instance\'s TTS when the parent unmounts it after a temporary dismissal', async () => {
     wrapper = mount(DesktopFabMenu, { attachTo: document.body });
     wrapper.vm.isReady = true;
@@ -1353,8 +1355,72 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
     expect(wrapper.emitted('presence')?.at(-1)).toEqual([false]);
   });
 
-  it('cancels queued mount timers and animation frames on unmount', async () => {
+  it('renders as soon as initialization settles and applies the saved position first', async () => {
+    mocks.getPosition.mockResolvedValue({ y: 230, side: 'left' });
+    let resolveDependencies;
+    const dependenciesReady = new Promise((resolve) => { resolveDependencies = resolve; });
+    const addEventListener = mocks.tracker.addEventListener.getMockImplementation();
+    let scrollListeners = 0;
+    mocks.tracker.addEventListener.mockImplementation((...args) => {
+      const result = addEventListener(...args);
+      if (args[0] === window && args[1] === 'scroll' && ++scrollListeners === 2) {
+        resolveDependencies();
+      }
+      return result;
+    });
+
+    try {
+      wrapper = mount(DesktopFabMenu);
+
+      // Both scroll listeners are installed after async dependencies settle and
+      // immediately before the FAB becomes ready. Do not advance startup timers.
+      await dependenciesReady;
+      await wrapper.vm.$nextTick();
+
+      const root = wrapper.get('.desktop-fab-container');
+      expect(wrapper.vm.isReady).toBe(true);
+      expect(root.classes()).toContain('is-left');
+      expect(root.element.style.getPropertyValue('--fab-top')).toBe('230px');
+      expect(root.classes()).toContain('is-positioning');
+      // Let transition frames drain so they cannot leak into later RAF tests.
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    } finally {
+      wrapper?.unmount();
+      wrapper = null;
+      mocks.tracker.addEventListener.mockImplementation(addEventListener);
+    }
+  });
+
+  it('cancels the queued positioning frame and timers on unmount', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const queuedFrames = [];
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      queuedFrames.push(callback);
+      return queuedFrames.length;
+    });
+    const cancelRaf = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+    try {
+      wrapper = mount(DesktopFabMenu);
+      await settleInitialization();
+      expect(raf).toHaveBeenCalledOnce();
+
+      wrapper.unmount();
+      wrapper = null;
+      expect(cancelRaf).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      queuedFrames[0]();
+      expect(raf).toHaveBeenCalledOnce();
+    } finally {
+      wrapper?.unmount();
+      wrapper = null;
+      raf.mockRestore();
+      cancelRaf.mockRestore();
+    }
+  });
+
+  it('keeps the double animation frame position settle and 150ms positioning delay', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    mocks.getPosition.mockResolvedValue({ y: -1, side: 'right' });
     let nextFrameId = 42;
     const queuedFrames = [];
     const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
@@ -1362,31 +1428,39 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
       return nextFrameId++;
     });
     const cancelRaf = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+    const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      return this.classList?.contains('desktop-fab-container') ? { top: 321 } : { top: 0 };
+    });
     try {
       wrapper = mount(DesktopFabMenu);
-      await vi.waitFor(() => expect(mocks.tracker.addEventListener).toHaveBeenCalledWith(
-        window, 'resize', expect.any(Function),
-      ));
+      await settleInitialization();
+      expect(wrapper.vm.isReady).toBe(true);
+      expect(wrapper.get('.desktop-fab-container').classes()).toContain('is-positioning');
+      expect(wrapper.get('.desktop-fab-container').element.style.getPropertyValue('--fab-transition')).toBe('none');
+      expect(queuedFrames).toHaveLength(1);
 
-      await vi.advanceTimersByTimeAsync(100);
-      expect(raf).toHaveBeenCalled();
-      expect(vi.getTimerCount()).toBeGreaterThan(0);
-
-      wrapper.unmount();
-      wrapper = null;
-      const trackedFrameCount = mocks.tracker.trackResource.mock.calls
-        .filter(([id]) => String(id).includes('-frame-')).length;
-      expect(trackedFrameCount).toBeGreaterThan(0);
-      expect(cancelRaf).toHaveBeenCalledTimes(trackedFrameCount);
-      const scheduledFrameCount = raf.mock.calls.length;
-      queuedFrames.at(-1)();
-      expect(raf).toHaveBeenCalledTimes(scheduledFrameCount);
-      expect(vi.getTimerCount()).toBe(0);
+      queuedFrames.shift()();
+      expect(queuedFrames).toHaveLength(1);
+      expect(rect).not.toHaveBeenCalled();
+      queuedFrames.shift()();
+      await wrapper.vm.$nextTick();
+      expect(rect).toHaveBeenCalled();
+      expect(wrapper.get('.desktop-fab-container').element.style.getPropertyValue('--fab-top')).toBe('321px');
+      expect(wrapper.get('.desktop-fab-container').classes()).toContain('is-positioning');
+      expect(wrapper.get('.desktop-fab-container').element.style.getPropertyValue('--fab-transition')).toBe('none');
+      await vi.advanceTimersByTimeAsync(149);
+      expect(wrapper.get('.desktop-fab-container').classes()).toContain('is-positioning');
+      expect(wrapper.get('.desktop-fab-container').element.style.getPropertyValue('--fab-transition')).toBe('none');
+      await vi.advanceTimersByTimeAsync(1);
+      await wrapper.vm.$nextTick();
+      expect(wrapper.get('.desktop-fab-container').classes()).not.toContain('is-positioning');
+      expect(wrapper.get('.desktop-fab-container').element.style.getPropertyValue('--fab-transition')).not.toBe('none');
     } finally {
       wrapper?.unmount();
       wrapper = null;
       raf.mockRestore();
       cancelRaf.mockRestore();
+      rect.mockRestore();
     }
   });
 
@@ -1412,7 +1486,8 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
         'sync-interaction-listeners',
       ]);
       expect(mocks.pageEventBus.subscriptions.size).toBe(4);
-      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(first.vm.isReady && second.vm.isReady).toBe(true));
+      expect(raf).toHaveBeenCalled();
 
       const frameResourceIds = (groupId) => [...mocks.tracker.groups.get(groupId).resourceCleanups.keys()]
         .filter((id) => String(id).includes('-frame-'));
@@ -1460,10 +1535,10 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
       resolvePosition = resolve;
     }));
     wrapper = mount(DesktopFabMenu);
+    const vm = wrapper.vm;
     await vi.waitFor(() => expect(mocks.getPosition).toHaveBeenCalledOnce());
 
     wrapper.unmount();
-    wrapper = null;
     resolvePosition({ y: 200, side: 'left' });
     await Promise.resolve();
     await Promise.resolve();
@@ -1471,16 +1546,17 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
     expect(mocks.tracker.addEventListener).not.toHaveBeenCalled();
     expect(mocks.tracker.trackResource).not.toHaveBeenCalled();
     expect(mocks.tracker.trackTimeout).not.toHaveBeenCalled();
+    expect(vm.isReady).toBe(false);
+    expect(wrapper.exists()).toBe(false);
+    wrapper = null;
   });
 
   it('persists DESKTOP_FAB_POSITION after a drag without touching any setting', async () => {
     wrapper = mount(DesktopFabMenu, { attachTo: document.body });
     wrapper.vm.isReady = true;
-    // Flush the async onMounted chain (position load) before dispatching the
-    // drag: it resolves { y: 100 } and would otherwise overwrite the dragged
-    // value before stopDrag's deferred write fires.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await wrapper.vm.$nextTick();
+    // Wait for the saved position before dispatching the drag; initialization
+    // would otherwise overwrite the dragged value before stopDrag's deferred write fires.
+    await vi.waitFor(() => expect(wrapper.vm.verticalPos).toBe(100));
     // Pin the drag origin so the expectation does not depend on jsdom layout.
     wrapper.vm.verticalPos = 100;
     await wrapper.vm.$nextTick();
