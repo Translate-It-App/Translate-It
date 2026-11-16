@@ -224,7 +224,6 @@ export function IFrameContentScriptCore({ tinyFrame = false } = {}) {
 
       const { default: SettingsManager } = await import('@/shared/managers/SettingsManager.js');
       await SettingsManager.initialize();
-      void SettingsManager.warmup();
 
       const { FeatureManager } = await import('@/core/managers/content/FeatureManager.js');
       const fm = FeatureManager.getInstance();

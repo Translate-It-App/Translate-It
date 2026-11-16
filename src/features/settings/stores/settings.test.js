@@ -285,7 +285,7 @@ describe('Settings Store', () => {
 
       await store.loadSettings();
 
-      expect(storageManager.get).toHaveBeenCalledWith(null);
+      expect(storageManager.get).toHaveBeenCalledWith([...Object.keys(getPersistedDefaultSettings()), 'translationHistory'], false);
       expect(store.settings.COLLAPSED_PROVIDER_CATEGORIES).toEqual({ ids: ['ai'], revision: 7 });
     });
 
@@ -1696,6 +1696,37 @@ describe('Settings Store', () => {
     await store.loadSettings();
     
     expect(store.settings.translationHistory).toEqual(mockHistory);
+  });
+
+  it('loads only canonical settings and translation history', async () => {
+    const history = [{ text: 'hello', translated: 'سلام' }];
+    storageManager.get.mockResolvedValueOnce({ THEME: 'dark', translationHistory: history, unrelated: true });
+    const store = useSettingsStore();
+
+    await store.loadSettings();
+
+    expect(storageManager.get).toHaveBeenCalledWith([...Object.keys(getPersistedDefaultSettings()), 'translationHistory'], false);
+    expect(store.settings.THEME).toBe('dark');
+    expect(store.settings.translationHistory).toEqual(history);
+    expect(store.settings).not.toHaveProperty('unrelated');
+  });
+
+  it('propagates load errors and retries with the canonical settings and history keys', async () => {
+    storageManager.get
+      .mockRejectedValueOnce(new Error('storage unavailable'))
+      .mockResolvedValueOnce({ THEME: 'dark' });
+    const store = useSettingsStore();
+    const keys = [...Object.keys(getPersistedDefaultSettings()), 'translationHistory'];
+
+    await expect(store.loadSettings()).rejects.toThrow('storage unavailable');
+    expect(store.isInitialized).toBe(false);
+    expect(storageManager.get).toHaveBeenNthCalledWith(1, keys, false);
+
+    await store.loadSettings();
+
+    expect(storageManager.get).toHaveBeenNthCalledWith(2, keys, false);
+    expect(store.settings.THEME).toBe('dark');
+    expect(store.isInitialized).toBe(true);
   });
 
   it('should persist and load advanced prompt templates', async () => {

@@ -129,7 +129,6 @@ export async function loadCoreFeatures() {
   try {
     const { default: SettingsManager } = await import('@/shared/managers/SettingsManager.js');
     await SettingsManager.initialize();
-    await SettingsManager.warmup();
     const loadPromises = Array.from(CORE_FEATURES).map(feature => loadFeatureOnDemand(feature));
     await Promise.all(loadPromises);
     await initializeAndActivateFeatures();

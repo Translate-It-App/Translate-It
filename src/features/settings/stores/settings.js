@@ -348,7 +348,7 @@ export const useSettingsStore = defineStore('settings', () => {
     __loadInFlight = (async () => {
       try {
         const windowShowOriginalVersionAtLoadStart = windowShowOriginalEditVersion
-        const stored = await storageManager.get(null);
+        const stored = await storageManager.get([...Object.keys(getPersistedDefaultSettings()), 'translationHistory'], false);
         const current = settings.value;
 
         // Storage is authoritative during load; discard draft tracking from any
