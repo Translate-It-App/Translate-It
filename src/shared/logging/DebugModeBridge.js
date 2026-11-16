@@ -171,12 +171,29 @@ class DebugModeBridge {
 
   async initializeFromStorage() {
     try {
-      // Get current debug mode from storage
-      const debugMode = await this.getDebugModeFromStorage();
-      this.currentDebugMode = debugMode;
+      let settings;
+      try {
+        const { storageManager } = await import('@/shared/storage/core/StorageCore.js');
+        if (storageManager && typeof storageManager.get === 'function') {
+          settings = await storageManager.get({ DEBUG_MODE: false, COMPONENT_LOG_LEVELS: {} });
+        }
+      } catch {
+        logger.warn('storageManager not available, trying fallback for logging settings');
+      }
 
-      // Get current component log levels from storage
-      const componentLogLevels = await this.getComponentLogLevelsFromStorage();
+      if (!settings) {
+        try {
+          if (typeof browser !== 'undefined' && browser.storage?.local) {
+            settings = await browser.storage.local.get({ DEBUG_MODE: false, COMPONENT_LOG_LEVELS: {} });
+          }
+        } catch {
+          logger.warn('browser.storage not available for logging settings');
+        }
+      }
+
+      const debugMode = Boolean(settings?.DEBUG_MODE);
+      const componentLogLevels = settings?.COMPONENT_LOG_LEVELS || {};
+      this.currentDebugMode = debugMode;
 
       // Apply to logging system
       await this.applyDebugMode(debugMode);
