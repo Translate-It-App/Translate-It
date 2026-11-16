@@ -4,6 +4,7 @@ import { getTranslationFontTarget } from './TranslationFontPolicy.js';
 const nativeGetComputedStyle = window.getComputedStyle.bind(window);
 let computedStyleSpy;
 let pseudoContentOverrides;
+let fontFamilyOverrides;
 
 const setPseudoContent = (element, pseudo, content) => {
   let overrides = pseudoContentOverrides.get(element);
@@ -14,14 +15,21 @@ const setPseudoContent = (element, pseudo, content) => {
   overrides.set(pseudo, content);
 };
 
+const setComputedFontFamily = (element, fontFamily) => fontFamilyOverrides.set(element, fontFamily);
+
 describe('getTranslationFontTarget', () => {
   beforeEach(() => {
     pseudoContentOverrides = new WeakMap();
+    fontFamilyOverrides = new WeakMap();
     computedStyleSpy = vi.spyOn(window, 'getComputedStyle').mockImplementation((element, pseudo) => {
       if (pseudo) {
         return { content: pseudoContentOverrides.get(element)?.get(pseudo) ?? 'none' };
       }
-      return nativeGetComputedStyle(element, pseudo);
+      const computed = nativeGetComputedStyle(element, pseudo);
+      return {
+        ...computed,
+        fontFamily: fontFamilyOverrides.get(element) ?? computed.fontFamily,
+      };
     });
   });
 
@@ -45,6 +53,104 @@ describe('getTranslationFontTarget', () => {
     expect(getTranslationFontTarget(text)).toBe(element);
   });
 
+  it('allows direct text with independently fonted formatting, icon, and code children', () => {
+    const element = document.createElement('span');
+    const text = document.createTextNode('source');
+    const bold = document.createElement('b');
+    bold.append('formatted text');
+    const independentFont = document.createElement('i');
+    const icon = document.createElement('i');
+    const code = document.createElement('code');
+    element.style.fontFamily = 'serif';
+    bold.style.fontFamily = 'Vazirmatn';
+    independentFont.style.fontFamily = 'Vazirmatn';
+    icon.style.fontFamily = 'icons';
+    code.style.fontFamily = 'monospace';
+    setComputedFontFamily(element, 'serif');
+    setComputedFontFamily(bold, 'Vazirmatn');
+    setComputedFontFamily(independentFont, 'Vazirmatn');
+    setComputedFontFamily(icon, 'icons');
+    setComputedFontFamily(code, 'monospace');
+    element.append(text, bold, independentFont, icon, code);
+
+    expect(getTranslationFontTarget(text)).toBe(element);
+  });
+
+  it('rejects meaningful descendant text that would inherit the parent font', () => {
+    const element = document.createElement('span');
+    const text = document.createTextNode('source');
+    const child = document.createElement('span');
+    child.textContent = 'untranslated text';
+    element.append(text, child);
+    setComputedFontFamily(element, 'serif');
+    setComputedFontFamily(child, 'serif');
+
+    expect(getTranslationFontTarget(text)).toBeNull();
+  });
+
+  it('rejects mixed parents containing detectable open ShadowRoot hosts', () => {
+    const element = document.createElement('span');
+    const text = document.createTextNode('source');
+    const host = document.createElement('span');
+    host.attachShadow({ mode: 'open' }).append('untranslated shadow text');
+    element.append(text, host);
+
+    expect(getTranslationFontTarget(text)).toBeNull();
+
+    const shadowHost = document.createElement('span');
+    shadowHost.append('source');
+    shadowHost.attachShadow({ mode: 'open' }).append('untranslated shadow text');
+    expect(getTranslationFontTarget(shadowHost.firstChild)).toBeNull();
+  });
+
+  it.each(['::before', '::after'])('rejects generated descendant content in %s', pseudo => {
+    const element = document.createElement('span');
+    const text = document.createTextNode('source');
+    const icon = document.createElement('i');
+    element.append(text, icon);
+    setPseudoContent(icon, pseudo, '"icon"');
+
+    expect(getTranslationFontTarget(text)).toBeNull();
+  });
+
+  it.each([
+    ['link', () => Object.assign(document.createElement('a'), { href: '#', textContent: 'link' })],
+    ['form control', () => document.createElement('input')],
+    ['media', () => document.createElement('video')],
+    ['interactive control', () => Object.assign(document.createElement('button'), { textContent: 'control' })],
+    ['custom element', () => Object.assign(document.createElement('x-widget'), { textContent: 'widget' })],
+    ['editable descendant', () => {
+      const descendant = document.createElement('span');
+      descendant.setAttribute('contenteditable', 'true');
+      descendant.textContent = 'edit';
+      return descendant;
+    }],
+    ['interactive role', () => {
+      const descendant = document.createElement('span');
+      descendant.setAttribute('role', 'link');
+      descendant.textContent = 'link';
+      return descendant;
+    }],
+    ['handler descendant', () => {
+      const descendant = document.createElement('span');
+      descendant.textContent = 'handler';
+      descendant.onclick = () => {};
+      return descendant;
+    }],
+    ['tabindex descendant', () => {
+      const descendant = document.createElement('span');
+      descendant.setAttribute('tabindex', '0');
+      descendant.textContent = 'focus';
+      return descendant;
+    }],
+  ])('rejects a mixed parent containing an unsafe %s', (_label, createDescendant) => {
+    const element = document.createElement('span');
+    const text = document.createTextNode('source');
+    element.append(text, createDescendant());
+
+    expect(getTranslationFontTarget(text)).toBeNull();
+  });
+
   it('rejects another meaningful direct TextNode, including technical text', () => {
     const element = document.createElement('span');
     const translated = document.createTextNode('Hello');
@@ -57,9 +163,7 @@ describe('getTranslationFontTarget', () => {
     expect(getTranslationFontTarget(technicalText)).toBeNull();
   });
 
-  it('rejects element children and unsafe interactive, form, custom, SVG, and media parents', () => {
-    const mixed = document.createElement('span');
-    mixed.append('source', document.createElement('strong'));
+  it('rejects unsafe interactive, form, custom, SVG, and media parents', () => {
     const button = document.createElement('button');
     button.textContent = 'source';
     const link = document.createElement('a');
@@ -73,7 +177,6 @@ describe('getTranslationFontTarget', () => {
     const video = document.createElement('video');
     video.appendChild(document.createTextNode('source'));
 
-    expect(getTranslationFontTarget(mixed.firstChild)).toBeNull();
     expect(getTranslationFontTarget(button.firstChild)).toBeNull();
     expect(getTranslationFontTarget(link.firstChild)).toBeNull();
     expect(getTranslationFontTarget(form.firstChild)).toBeNull();

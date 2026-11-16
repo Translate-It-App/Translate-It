@@ -7,10 +7,19 @@ function hasGeneratedContent(element, pseudo) {
   return content && content !== 'none' && content !== 'normal' && content !== '""' && content !== "''";
 }
 
+function isUnsafeDescendant(element) {
+  const tagName = element.tagName.toUpperCase();
+  const role = element.getAttribute('role')?.toLowerCase();
+  return tagName.includes('-') || UNSAFE_TAGS.has(tagName)
+    || role === 'button' || role === 'link' || element.onclick !== null
+    || element.getAttribute('tabindex') === '0'
+    || element.isContentEditable || element.hasAttribute('contenteditable');
+}
+
 export function getTranslationFontTarget(textNode) {
   try {
     const parent = textNode?.parentElement;
-    if (!parent || parent.childElementCount > 0) return null;
+    if (!parent) return null;
     const meaningfulTextNodes = [...parent.childNodes].filter(
       node => node.nodeType === 3 && node.nodeValue?.trim()
     );
@@ -20,8 +29,18 @@ export function getTranslationFontTarget(textNode) {
     const role = parent.getAttribute('role')?.toLowerCase();
     if (role === 'button' || role === 'link' || parent.onclick !== null || parent.getAttribute('tabindex') === '0') return null;
     if (parent.isContentEditable || parent.hasAttribute('contenteditable')) return null;
+    const descendants = [...parent.querySelectorAll('*')];
+    if (parent.shadowRoot || descendants.some(descendant => descendant.shadowRoot || isUnsafeDescendant(descendant))) return null;
     if (parent.style.getPropertyPriority('font-family') === 'important') return null;
     if (hasGeneratedContent(parent, '::before') || hasGeneratedContent(parent, '::after')) return null;
+    const parentFontFamily = window.getComputedStyle(parent).fontFamily;
+    if (descendants.some(descendant => {
+      if (hasGeneratedContent(descendant, '::before') || hasGeneratedContent(descendant, '::after')) return true;
+      const hasMeaningfulDirectText = [...descendant.childNodes].some(
+        node => node.nodeType === 3 && node.nodeValue?.trim()
+      );
+      return hasMeaningfulDirectText && window.getComputedStyle(descendant).fontFamily === parentFontFamily;
+    })) return null;
     return parent;
   } catch {
     return null;

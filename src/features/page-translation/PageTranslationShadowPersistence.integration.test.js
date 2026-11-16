@@ -319,10 +319,20 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
     const owner = document.createElement('span');
     owner.style.setProperty('font-family', 'serif');
     owner.textContent = 'Font source';
+    const bold = document.createElement('b');
+    bold.textContent = 'independent child text';
+    bold.style.fontFamily = 'Vazirmatn';
+    const icon = document.createElement('i');
+    icon.className = 'icon';
+    icon.style.fontFamily = 'icons';
+    const code = document.createElement('code');
+    code.style.fontFamily = 'monospace';
+    owner.append(bold, icon, code);
     document.body.appendChild(owner);
     const { bridge } = await start(document.body, {
       useTranslationFont: true,
       translationFontFamily: 'system-ui',
+      excludedSelectors: ['b'],
     });
     track(bridge);
 
@@ -333,10 +343,16 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
     expect(getTranslationFontTarget(owner.firstChild)).toBe(owner);
     expect(bridge.session.fontOwnership.size).toBe(1);
     expect(owner.style.fontFamily).toBe('system-ui');
+    expect(bold.style.fontFamily).toBe('Vazirmatn');
+    expect(icon.style.fontFamily).toBe('icons');
+    expect(code.style.fontFamily).toBe('monospace');
 
     bridge.restore(document.body);
 
     expect(owner.style.fontFamily).toBe('serif');
+    expect(bold.style.fontFamily).toBe('Vazirmatn');
+    expect(icon.style.fontFamily).toBe('icons');
+    expect(code.style.fontFamily).toBe('monospace');
     expect(owner.style.getPropertyPriority('font-family')).toBe('');
     expect(bridge.session).toBeNull();
     bridge.cleanup();
@@ -377,7 +393,7 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
     expect(bridge.session.fontOwnership.size).toBe(0);
   });
 
-  it('skips unsafe mixed parents and translated attributes', async () => {
+  it('applies font to a single direct text node in a mixed parent, but not translated attributes', async () => {
     const mixed = document.createElement('div');
     mixed.append(document.createTextNode('Mixed source'), document.createElement('strong'));
     const attributeOnly = document.createElement('span');
@@ -392,7 +408,7 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
     await vi.waitFor(() => expect(mixed.textContent).toContain('Translated Mixed source'));
     await vi.waitFor(() => expect(attributeOnly.title).toContain('Translated Attribute source'));
 
-    expect(mixed.style.getPropertyValue('font-family')).toBe('');
+    expect(mixed.style.getPropertyValue('font-family')).toBe('system-ui');
     expect(attributeOnly.style.getPropertyValue('font-family')).toBe('');
   });
 
@@ -439,10 +455,19 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
     const owner = document.createElement('span');
     owner.style.fontFamily = 'serif';
     owner.textContent = 'External drift';
+    const bold = document.createElement('b');
+    bold.textContent = 'independent child text';
+    bold.style.fontFamily = 'Vazirmatn';
+    const icon = document.createElement('i');
+    icon.style.fontFamily = 'icons';
+    const code = document.createElement('code');
+    code.style.fontFamily = 'monospace';
+    owner.append(bold, icon, code);
     document.body.appendChild(owner);
     const { bridge } = await start(document.body, {
       useTranslationFont: true,
       translationFontFamily: 'system-ui',
+      excludedSelectors: ['b'],
     });
     track(bridge);
 
@@ -451,6 +476,9 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
     bridge.restore(document.body);
 
     expect(owner.style.fontFamily).toBe('site-override');
+    expect(bold.style.fontFamily).toBe('Vazirmatn');
+    expect(icon.style.fontFamily).toBe('icons');
+    expect(code.style.fontFamily).toBe('monospace');
   });
 
   it('restores connected font ownership during cleanup and clears the session', async () => {

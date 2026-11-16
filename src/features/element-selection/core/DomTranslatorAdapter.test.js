@@ -311,6 +311,15 @@ describe('DomTranslatorAdapter', () => {
       const { revertSelectElementTranslation } = await import('./DomTranslatorState.js');
       enableFontPolicyStyles();
       testElement.style.setProperty('font-family', 'serif');
+      const bold = document.createElement('b');
+      bold.textContent = 'independent child text';
+      bold.style.fontFamily = 'Vazirmatn';
+      const icon = document.createElement('i');
+      icon.className = 'icon';
+      icon.style.fontFamily = 'icons';
+      const code = document.createElement('code');
+      code.style.fontFamily = 'monospace';
+      testElement.append(bold, icon, code);
       getSelectElementUseTranslationFontAsync.mockResolvedValueOnce(true);
       getTranslationFontFamilyAsync.mockResolvedValueOnce('auto');
       resolveTranslationFontFamily.mockReturnValueOnce('system-ui');
@@ -326,6 +335,9 @@ describe('DomTranslatorAdapter', () => {
 
       expect(result).toMatchObject({ success: true, committedParentCount: 1 });
       expect(testElement.style.fontFamily).toBe('system-ui');
+      expect(bold.style.fontFamily).toBe('Vazirmatn');
+      expect(icon.style.fontFamily).toBe('icons');
+      expect(code.style.fontFamily).toBe('monospace');
       expect(fontRecord).toEqual(expect.objectContaining({
         original: { present: true, value: 'serif', priority: '' },
         applied: { present: true, value: 'system-ui', priority: '' },
@@ -334,6 +346,9 @@ describe('DomTranslatorAdapter', () => {
       testElement.style.setProperty('font-family', 'monospace');
       await revertSelectElementTranslation(entry.sessionId);
       expect(testElement.style.fontFamily).toBe('monospace');
+      expect(bold.style.fontFamily).toBe('Vazirmatn');
+      expect(icon.style.fontFamily).toBe('icons');
+      expect(code.style.fontFamily).toBe('monospace');
     });
 
     it('restores the original V2 font through normal Revert', async () => {
@@ -341,6 +356,16 @@ describe('DomTranslatorAdapter', () => {
       const { revertSelectElementTranslation } = await import('./DomTranslatorState.js');
       enableFontPolicyStyles();
       testElement.style.setProperty('font-family', 'serif');
+      const originalTextNode = testElement.firstChild;
+      const bold = document.createElement('b');
+      bold.textContent = 'independent child text';
+      bold.style.fontFamily = 'Vazirmatn';
+      const icon = document.createElement('i');
+      icon.className = 'icon';
+      icon.style.fontFamily = 'icons';
+      const code = document.createElement('code');
+      code.style.fontFamily = 'monospace';
+      testElement.append(bold, icon, code);
       getSelectElementUseTranslationFontAsync.mockResolvedValueOnce(true);
       getTranslationFontFamilyAsync.mockResolvedValueOnce('auto');
       resolveTranslationFontFamily.mockReturnValueOnce('system-ui');
@@ -355,8 +380,13 @@ describe('DomTranslatorAdapter', () => {
 
       expect(result.success).toBe(true);
       expect(testElement.style.fontFamily).toBe('system-ui');
+      expect(testElement.firstChild).toBe(originalTextNode);
+      expect(bold.style.fontFamily).toBe('Vazirmatn');
+      expect(icon.style.fontFamily).toBe('icons');
+      expect(code.style.fontFamily).toBe('monospace');
       await revertSelectElementTranslation(entry.sessionId);
       expect(testElement.style.fontFamily).toBe('serif');
+      expect(bold.style.fontFamily).toBe('Vazirmatn');
       expect(testElement.style.getPropertyPriority('font-family')).toBe('');
     });
 
@@ -827,7 +857,15 @@ describe('DomTranslatorAdapter', () => {
 
       const owner = document.createElement('span');
       const text = document.createTextNode('A');
-      owner.appendChild(text);
+      const bold = document.createElement('b');
+      bold.textContent = 'independent child text';
+      bold.style.fontFamily = 'Vazirmatn';
+      const icon = document.createElement('i');
+      icon.className = 'icon';
+      icon.style.fontFamily = 'icons';
+      const code = document.createElement('code');
+      code.style.fontFamily = 'monospace';
+      owner.append(text, bold, icon, code);
       testElement.replaceChildren(owner);
       const { collectBlockGroups } = await import('./DomTranslatorUtils.js');
       collectBlockGroups.mockReturnValueOnce([{
@@ -856,11 +894,17 @@ describe('DomTranslatorAdapter', () => {
 
       expect(result).toMatchObject({ success: true, committedParentCount: 1 });
       expect(owner.style.fontFamily).toBe('system-ui');
+      expect(bold.style.fontFamily).toBe('Vazirmatn');
+      expect(icon.style.fontFamily).toBe('icons');
+      expect(code.style.fontFamily).toBe('monospace');
       expect(entry.auxiliaryOwnershipRecords).toEqual(expect.arrayContaining([
         expect.objectContaining({ property: 'style:font-family', element: owner })
       ]));
       await revertSelectElementTranslation(entry.sessionId);
       expect(owner.style.fontFamily).toBe('');
+      expect(bold.style.fontFamily).toBe('Vazirmatn');
+      expect(icon.style.fontFamily).toBe('icons');
+      expect(code.style.fontFamily).toBe('monospace');
       expect(text.nodeValue).toBe('A');
     });
 
