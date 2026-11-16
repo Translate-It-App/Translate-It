@@ -1404,21 +1404,14 @@ export class DomTranslatorAdapter extends ResourceTracker {
       if (translationToken && !this._isCurrentTranslation(translationToken)) {
         throw new Error('Grouped translation became stale before acceptance');
       }
+      this._publishCommittedOwnership(
+        group.units.map(unit => ({
+          node: unit.node,
+          appliedText: unit.node.nodeValue,
+        })),
+        createAuxiliaryOwnershipRecords(reconstruction.auxiliarySnapshots),
+      );
       reconstruction.transaction.finalize();
-       try {
-         this._publishCommittedOwnership(
-           group.units.map(unit => ({
-             node: unit.node,
-             appliedText: unit.node.nodeValue,
-           })),
-           createAuxiliaryOwnershipRecords(reconstruction.auxiliarySnapshots),
-         );
-      } catch (error) {
-        // Finalization has closed the reconstructor rollback window. Use the
-        // session snapshot fallback if ownership publication itself fails.
-        this._rollbackBlockGroup(this.currentSessionId, group.blockId);
-        throw error;
-      }
       group.applied = true;
       this._settleParentAcceptance(group, true, reconstruction.cleanResult, translationToken);
     } catch (error) {

@@ -4402,6 +4402,82 @@ describe('DomTranslatorAdapter', () => {
   });
 
   describe('_commitBlockGroup', () => {
+    it('rolls back the V3 transaction when ownership publication fails', async () => {
+      const { BlockGroupReconstructor } = await import('./BlockGroupReconstructor.js');
+      const directionManager = await import('@/utils/dom/DomDirectionManager.js');
+      const node = testElement.firstChild;
+      const siblingParent = document.createElement('div');
+      const siblingNode = document.createTextNode(' sibling translated');
+      siblingParent.appendChild(siblingNode);
+      document.body.appendChild(siblingParent);
+      const unit = { id: 'n1', blockId: 'g1', text: 'Hello', leadingWS: '', trailingWS: '', node };
+      testElement.setAttribute('data-has-original', 'prior');
+      testElement.style.setProperty('font-family', 'serif');
+      testElement.setAttribute('dir', 'ltr');
+      testElement.classList.add('ti-translating');
+      const hoverValue = { original: 'Hello' };
+      hoverPreviewLookup.get.mockReturnValue(hoverValue);
+      hoverPreviewLookup.add.mockClear();
+      directionManager.captureNodeDirectionState.mockReturnValueOnce([
+        { element: testElement, attribute: 'dir', present: true, value: 'ltr' },
+      ]);
+      directionManager.applyNodeDirection.mockImplementationOnce(() => testElement.setAttribute('dir', 'rtl'));
+      directionManager.restoreNodeDirectionState.mockImplementationOnce(snapshots => {
+        snapshots.forEach(({ element, attribute, value }) => element.setAttribute(attribute, value));
+        return [];
+      });
+
+      const group = { blockId: 'g1', units: [unit] };
+      const reconstruction = BlockGroupReconstructor.apply([unit], 'Translated', 'fa', testElement, '', '', 'system-ui');
+      expect(testElement.style.getPropertyValue('font-family')).toBe('system-ui');
+      expect(testElement.style.getPropertyPriority('font-family')).toBe('');
+      const rollback = vi.spyOn(reconstruction.transaction, 'rollback');
+      const finalize = vi.spyOn(reconstruction.transaction, 'finalize');
+      const processedUids = new Set();
+      adapter.translatedSegmentMap.set('sibling', 'Previously translated');
+      processedUids.add('sibling');
+      const siblingOwnership = {
+        blockId: 'sibling',
+        originalTextNodesData: [{ node: siblingNode, appliedText: siblingNode.nodeValue }],
+      };
+      globalSelectElementState.translationHistory.push(siblingOwnership);
+      vi.spyOn(adapter, '_publishCommittedOwnership').mockImplementationOnce(() => {
+        throw new Error('ownership publication failed');
+      });
+      const settleAcceptance = vi.spyOn(adapter, '_settleParentAcceptance');
+
+      let failure;
+      try {
+        adapter._commitBlockGroup(group, reconstruction, 'Translated', processedUids, null);
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure.cause).toMatchObject({ message: 'ownership publication failed' });
+      expect(rollback).toHaveBeenCalledOnce();
+      expect(finalize).not.toHaveBeenCalled();
+      expect(node.nodeValue).toBe('Hello');
+      expect(siblingNode.nodeValue).toBe(' sibling translated');
+      expect(testElement.getAttribute('data-has-original')).toBe('prior');
+      expect(testElement.style.getPropertyValue('font-family')).toBe('serif');
+      expect(testElement.style.getPropertyPriority('font-family')).toBe('');
+      expect(testElement.getAttribute('dir')).toBe('ltr');
+      expect(testElement.classList.contains('ti-translating')).toBe(true);
+      expect(hoverPreviewLookup.add).toHaveBeenCalledWith(node, hoverValue, 'Hello');
+      expect(adapter.translatedSegmentMap.has('n1')).toBe(false);
+      expect(adapter.translatedSegmentMap.get('sibling')).toBe('Previously translated');
+      expect(processedUids.has('n1')).toBe(false);
+      expect(processedUids.has('sibling')).toBe(true);
+      expect(globalSelectElementState.translationHistory).toEqual([siblingOwnership]);
+      expect(globalSelectElementState.auxiliaryOwnership.size).toBe(0);
+      expect(group.applied).not.toBe(true);
+      expect(settleAcceptance).not.toHaveBeenCalled();
+      expect(sendRegularMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ parentId: 'g1', accepted: true })
+      }), { silent: true, timeout: 500 });
+      siblingParent.remove();
+    });
+
     it('rolls back DOM and exact adapter state when bookkeeping fails before ACK', async () => {
       const { BlockGroupReconstructor } = await import('./BlockGroupReconstructor.js');
       const node = testElement.firstChild;
