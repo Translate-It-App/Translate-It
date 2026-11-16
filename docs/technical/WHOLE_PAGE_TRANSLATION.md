@@ -90,7 +90,7 @@ Static utilities for DOM calculations and shared system values.
     - **Stability Guard**: Leverages the 5-minute background timeout to ensure resources are reclaimed if a provider hangs.
 5.  **Application**: Directionality (RTL/LTR) is applied, and text is replaced in the DOM.
 
-When enabled in Appearance, Page Translation resolves the existing `TRANSLATION_FONT_FAMILY` setting and best-effort applies only `font-family` to safe translated text parents after accepted text writes. The option defaults to off, and font setting or resolution failures do not fail translation.
+When enabled in Appearance, Page Translation resolves the existing `TRANSLATION_FONT_FAMILY` setting and best-effort applies only `font-family` to safe translated text parents after accepted text writes. A parent may contain child elements, but must have exactly one meaningful direct text node; descendant text must use a computed font family different from the parent's current family, and descendants must produce no generated pseudo content. Unsafe targets are skipped. The option defaults to off, and font setting or resolution failures do not fail translation.
 
 ## Sliced Discovery (Production Default)
 
