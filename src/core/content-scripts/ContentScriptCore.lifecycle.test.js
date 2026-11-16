@@ -277,6 +277,8 @@ describe('ContentScriptCore lifecycle', () => {
     mocks.aggregatorCtor.mockClear();
     mocks.coordinatorCtor.mockClear();
     mocks.loaderCtor.mockClear();
+    mocks.loadFeature.mockClear();
+    mocks.startIntelligent.mockClear();
 
     await expect(core.initializeCritical()).resolves.toBe(true);
 
@@ -287,6 +289,8 @@ describe('ContentScriptCore lifecycle', () => {
     expect(mocks.aggregatorCtor).not.toHaveBeenCalled();
     expect(mocks.coordinatorCtor).not.toHaveBeenCalled();
     expect(mocks.loaderCtor).not.toHaveBeenCalled();
+    expect(mocks.startIntelligent).not.toHaveBeenCalled();
+    expect(mocks.loadFeature).not.toHaveBeenCalledWith('vue');
   });
 
   it('C6 excluded then policy callback triggers allowed runtime without requestedFeatures', async () => {

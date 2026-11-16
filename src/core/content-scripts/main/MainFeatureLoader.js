@@ -23,7 +23,7 @@ export class MainFeatureLoader {
     this.FEATURE_CATEGORIES = {
       CRITICAL: ['messaging', 'extensionContext'], // Core infrastructure
       ESSENTIAL: ['contentMessageHandler'], // Essential communication
-      LAZY_UI: ['vue', 'textSelection', 'mouseHover'], // UI & Selection
+      LAZY_UI: ['textSelection', 'mouseHover'], // UI & Selection
       INTERACTIVE: ['windowsManager', 'selectElement', 'pageTranslation', 'screenCapture'], // On-demand heavy UI
       ON_DEMAND: ['shortcut', 'textFieldIcon'] // Optional features
     };
@@ -58,6 +58,9 @@ export class MainFeatureLoader {
         this.loadFeature(feature, 'CRITICAL')
       )
     );
+
+    // Vue is needed early by UI features, but must not delay startup stages.
+    void this.loadFeature('vue', 'LAZY_UI');
 
     // Stage 2: Essential features (short delay)
     setTimeout(() => {

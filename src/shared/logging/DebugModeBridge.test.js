@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { storageGet, storageOn, setEnabled, setGlobalDebugOverride, setErrorDebugMode } = vi.hoisted(() => ({
+const { storageGet, storageOn, setEnabled, setGlobalDebugOverride, setComponentLogLevel, setErrorDebugMode } = vi.hoisted(() => ({
   storageGet: vi.fn(), storageOn: vi.fn(), setEnabled: vi.fn(),
-  setGlobalDebugOverride: vi.fn(), setErrorDebugMode: vi.fn(),
+  setGlobalDebugOverride: vi.fn(), setComponentLogLevel: vi.fn(), setErrorDebugMode: vi.fn(),
 }));
 const originalLocation = Object.getOwnPropertyDescriptor(window, 'location');
 
@@ -10,7 +10,7 @@ vi.mock('./SafeConsole.js', () => ({ safeConsole: { setEnabled } }));
 vi.mock('./logger.js', () => ({ getScopedLogger: () => ({
   info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
 }) }));
-vi.mock('./GlobalDebugState.js', () => ({ setGlobalDebugOverride }));
+vi.mock('./GlobalDebugState.js', () => ({ setGlobalDebugOverride, setComponentLogLevel }));
 vi.mock('@/shared/error-management/ErrorHandler.js', () => ({
   ErrorHandler: { getInstance: () => ({ setDebugMode: setErrorDebugMode }) },
 }));
@@ -254,5 +254,86 @@ describe('DebugModeBridge offscreen settings handoff', () => {
     expect(setErrorDebugMode).toHaveBeenLastCalledWith(false);
     if (boundary === 'global') expect(setGlobalDebugOverride).not.toHaveBeenCalledWith(true);
     expect(setErrorDebugMode).not.toHaveBeenCalledWith(true);
+  });
+});
+
+describe('DebugModeBridge storage initialization', () => {
+  afterEach(() => {
+    delete globalThis.browser;
+    delete globalThis.chrome;
+    vi.resetModules();
+    vi.clearAllMocks();
+  });
+
+  it('reads both logging settings in one StorageCore request and applies their values', async () => {
+    storageGet.mockResolvedValue({ DEBUG_MODE: true, COMPONENT_LOG_LEVELS: { Core: 3 } });
+    vi.doMock('./GlobalDebugState.js', () => ({ setGlobalDebugOverride, setComponentLogLevel }));
+    const { DebugModeBridge } = await import('./DebugModeBridge.js');
+    const bridge = new DebugModeBridge();
+
+    await expect(bridge.initialize()).resolves.toBe(true);
+    expect(storageGet).toHaveBeenCalledOnce();
+    expect(storageGet).toHaveBeenCalledWith({ DEBUG_MODE: false, COMPONENT_LOG_LEVELS: {} });
+    expect(bridge.currentDebugMode).toBe(true);
+    expect(setEnabled).toHaveBeenCalledWith(true);
+    expect(setGlobalDebugOverride).toHaveBeenCalledWith(true);
+    await vi.waitFor(() => expect(setComponentLogLevel).toHaveBeenCalledWith('Core', 3));
+  });
+
+  it('uses defaults when StorageCore returns no stored values', async () => {
+    storageGet.mockResolvedValue({});
+    const { DebugModeBridge } = await import('./DebugModeBridge.js');
+    const bridge = new DebugModeBridge();
+
+    await expect(bridge.initialize()).resolves.toBe(true);
+    expect(bridge.currentDebugMode).toBe(false);
+    expect(setEnabled).toHaveBeenCalledWith(false);
+    expect(setComponentLogLevel).not.toHaveBeenCalled();
+    expect(storageGet).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to one batched browser storage read when StorageCore is unavailable', async () => {
+    storageGet.mockRejectedValue(new Error('StorageCore unavailable'));
+    const fallbackGet = vi.fn().mockResolvedValue({ DEBUG_MODE: true, COMPONENT_LOG_LEVELS: { Core: 2 } });
+    globalThis.browser = { storage: { local: { get: fallbackGet } } };
+    const { DebugModeBridge } = await import('./DebugModeBridge.js');
+    const bridge = new DebugModeBridge();
+
+    await expect(bridge.initialize()).resolves.toBe(true);
+    expect(storageGet).toHaveBeenCalledOnce();
+    expect(fallbackGet).toHaveBeenCalledOnce();
+    expect(fallbackGet).toHaveBeenCalledWith({ DEBUG_MODE: false, COMPONENT_LOG_LEVELS: {} });
+    expect(bridge.currentDebugMode).toBe(true);
+  });
+
+  it('falls back to defaults when both storage APIs fail', async () => {
+    storageGet.mockRejectedValue(new Error('StorageCore unavailable'));
+    globalThis.browser = { storage: { local: { get: vi.fn().mockRejectedValue(new Error('browser storage unavailable')) } } };
+    const { DebugModeBridge } = await import('./DebugModeBridge.js');
+    const bridge = new DebugModeBridge();
+
+    await expect(bridge.initialize()).resolves.toBe(true);
+    expect(bridge.currentDebugMode).toBe(false);
+    expect(setEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it('keeps failed initialization retryable and installs logging updates after success', async () => {
+    const invalidSettings = {};
+    Object.defineProperty(invalidSettings, 'DEBUG_MODE', { get: () => { throw new Error('invalid response'); } });
+    storageGet.mockResolvedValueOnce(invalidSettings).mockResolvedValue({ DEBUG_MODE: false, COMPONENT_LOG_LEVELS: {} });
+    const { DebugModeBridge } = await import('./DebugModeBridge.js');
+    const bridge = new DebugModeBridge();
+
+    await expect(bridge.initialize()).resolves.toBe(false);
+    expect(bridge.isInitialized).toBe(false);
+    await expect(bridge.initialize()).resolves.toBe(true);
+    expect(storageGet).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(storageOn).toHaveBeenCalledWith('change', expect.any(Function)));
+    const listener = storageOn.mock.calls.at(-1)[1];
+    listener({ DEBUG_MODE: true, COMPONENT_LOG_LEVELS: { Core: 3 } });
+    await vi.waitFor(() => {
+      expect(setGlobalDebugOverride).toHaveBeenCalledWith(true);
+    });
+    expect(setEnabled).toHaveBeenLastCalledWith(true);
   });
 });

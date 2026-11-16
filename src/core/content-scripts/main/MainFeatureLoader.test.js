@@ -181,10 +181,11 @@ describe('MainFeatureLoader startup scheduling', () => {
     await loader.startIntelligentLoading();
     await flushMicrotasks();
 
-    // CRITICAL delegated exactly once per feature despite two starts.
+    // CRITICAL and immediate Vue delegated once despite two starts.
     expect(delegated).toHaveBeenCalledWith('messaging');
     expect(delegated).toHaveBeenCalledWith('extensionContext');
-    expect(delegated).toHaveBeenCalledTimes(2);
+    expect(delegated).toHaveBeenCalledWith('vue');
+    expect(delegated).toHaveBeenCalledTimes(3);
 
     // Exactly one ESSENTIAL timeout + no fallbacks (requestIdleCallback present).
     expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
@@ -196,11 +197,14 @@ describe('MainFeatureLoader startup scheduling', () => {
     expect(delegated).not.toHaveBeenCalledWith('contentMessageHandler');
   });
 
-  it('CRITICAL is awaited before delayed stages are scheduled', async () => {
+  it('starts Vue only after CRITICAL completes without waiting for Vue to finish', async () => {
     let resolveCritical;
     const criticalGate = new Promise(resolve => { resolveCritical = resolve; });
+    let resolveVue;
+    const vueGate = new Promise(resolve => { resolveVue = resolve; });
     const delegated = vi.fn(featureName => {
       if (featureName === 'extensionContext') return criticalGate;
+      if (featureName === 'vue') return vueGate;
       return Promise.resolve({});
     });
     const { loader } = makeDelegatingCore(delegated);
@@ -209,15 +213,19 @@ describe('MainFeatureLoader startup scheduling', () => {
     const started = loader.startIntelligentLoading();
     await flushMicrotasks();
 
-    // extensionContext still in-flight: ESSENTIAL setTimeout must not exist yet.
+    // Vue and ESSENTIAL scheduling both wait for CRITICAL.
+    expect(delegated).not.toHaveBeenCalledWith('vue');
     expect(setTimeoutSpy).not.toHaveBeenCalled();
 
     resolveCritical();
     await started;
     await flushMicrotasks();
 
-    // Only after CRITICAL settles does ESSENTIAL scheduling begin.
+    // Vue starts after CRITICAL but does not block startup while still pending.
+    expect(delegated).toHaveBeenCalledWith('vue');
     expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    expect(idleCallbacks).toHaveLength(2);
+    resolveVue();
   });
 
   it('ESSENTIAL delegates at exactly the 400ms outer delay (no double-delay)', async () => {
@@ -236,22 +244,24 @@ describe('MainFeatureLoader startup scheduling', () => {
     await flushMicrotasks();
 
     expect(delegated).toHaveBeenCalledWith('contentMessageHandler');
-    expect(delegated).toHaveBeenCalledTimes(3);
+    expect(delegated).toHaveBeenCalledTimes(4);
   });
 
-  it('LAZY_UI idle callback delegates immediately (no extra 2500ms)', async () => {
+  it('Vue delegates at startup while other LAZY_UI features wait for idle', async () => {
     const delegated = vi.fn().mockResolvedValue({});
     const { loader } = makeDelegatingCore(delegated);
 
     await loader.startIntelligentLoading();
     await flushMicrotasks();
 
+    expect(delegated).toHaveBeenCalledWith('vue');
+    expect(delegated).not.toHaveBeenCalledWith('textSelection');
+    expect(delegated).not.toHaveBeenCalledWith('mouseHover');
     expect(idleCallbacks).toHaveLength(2);
 
     idleCallbacks[0]();
     await flushMicrotasks();
 
-    expect(delegated).toHaveBeenCalledWith('vue');
     expect(delegated).toHaveBeenCalledWith('textSelection');
     expect(delegated).toHaveBeenCalledWith('mouseHover');
   });
@@ -278,11 +288,11 @@ describe('MainFeatureLoader startup scheduling', () => {
     await loader.startIntelligentLoading();
     await flushMicrotasks();
 
-    expect(delegated).not.toHaveBeenCalledWith('vue');
+    expect(delegated).toHaveBeenCalledWith('vue');
+    expect(delegated).not.toHaveBeenCalledWith('textSelection');
 
     await vi.advanceTimersByTimeAsync(2500);
     await flushMicrotasks();
-    expect(delegated).toHaveBeenCalledWith('vue');
     expect(delegated).toHaveBeenCalledWith('textSelection');
     expect(delegated).toHaveBeenCalledWith('mouseHover');
 
@@ -327,5 +337,25 @@ describe('MainFeatureLoader startup scheduling', () => {
     expect(delegated).toHaveBeenCalledWith('contentMessageHandler');
     expect(delegated).toHaveBeenCalledWith('vue');
     expect(delegated).toHaveBeenCalledWith('shortcut');
+  });
+
+  it('Vue failure does not prevent critical or unrelated lazy features', async () => {
+    const delegated = vi.fn().mockImplementation(featureName => {
+      if (featureName === 'vue') return Promise.reject(new Error('Vue failed'));
+      return Promise.resolve({});
+    });
+    const { loader } = makeDelegatingCore(delegated);
+
+    await loader.startIntelligentLoading();
+    await flushMicrotasks();
+
+    expect(delegated).toHaveBeenCalledWith('messaging');
+    expect(delegated).toHaveBeenCalledWith('extensionContext');
+    expect(delegated).not.toHaveBeenCalledWith('textSelection');
+
+    idleCallbacks[0]();
+    await flushMicrotasks();
+    expect(delegated).toHaveBeenCalledWith('textSelection');
+    expect(delegated).toHaveBeenCalledWith('mouseHover');
   });
 });
