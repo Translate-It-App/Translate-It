@@ -267,6 +267,69 @@ describe('ProvidersTab.vue - Live Dubbing provider separation', () => {
   });
 });
 
+describe('ProvidersTab.vue - Optimization level controls', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    currentRouteQuery.value = {};
+    mockSettingsStore.settings.TRANSLATION_API = 'googlev2';
+    mockSettingsStore.settings.HIDDEN_PROVIDERS = [];
+    delete mockSettingsStore.settings.PROVIDER_OPTIMIZATION_LEVELS;
+    delete mockSettingsStore.settings.OPTIMIZATION_LEVEL;
+    mockSettingsStore.activeConfigProvider = 'test-provider';
+    mockUpdateSettingLocally.mockImplementation((key, value) => {
+      mockSettingsStore.settings[key] = value;
+    });
+  });
+
+  it('programmatically associates the visible label with the range input', () => {
+    const wrapper = mountTab();
+    const label = wrapper.get('#OPTIMIZATION_LEVELS_SECTION label');
+    const input = wrapper.get('#PROVIDER_OPTIMIZATION_LEVEL');
+
+    expect(input.attributes('type')).toBe('range');
+    expect(label.attributes('for')).toBe(input.attributes('id'));
+    expect(input.element.labels).toContain(label.element);
+  });
+
+  it.each([
+    ['test-provider', ['opt_stable', 'opt_balanced', 'opt_fast'], 'optimization_description_traditional'],
+    ['openai', ['opt_economy', 'opt_balanced', 'opt_turbo'], 'optimization_description_ai']
+  ])('gives %s strategy buttons accessible names with level and description', async (provider, descriptions, descriptionKey) => {
+    mockSettingsStore.activeConfigProvider = provider;
+    const wrapper = mountTab();
+    await nextTick();
+    const buttons = wrapper.findAll('#OPTIMIZATION_LEVELS_SECTION .slider-labels button');
+
+    expect(buttons).toHaveLength(5);
+    expect(buttons.map((button) => [button.element.tagName, button.attributes('type'), button.attributes('aria-label')])).toEqual([
+      ['BUTTON', 'button', `optimization_level_1, ${descriptions[0]}`],
+      ['BUTTON', 'button', 'optimization_level_2'],
+      ['BUTTON', 'button', `optimization_level_3, ${descriptions[1]}`],
+      ['BUTTON', 'button', 'optimization_level_4'],
+      ['BUTTON', 'button', `optimization_level_5, ${descriptions[2]}`]
+    ]);
+    expect(wrapper.get('#OPTIMIZATION_LEVELS_SECTION .opt-description').text()).toBe(descriptionKey);
+    expect(wrapper.get('#OPTIMIZATION_LEVELS_SECTION .level-badge').text()).toBe('optimization_level_3');
+  });
+
+  it('restores tick button opacity when keyboard-focused', () => {
+    const scss = readFileSync('src/apps/options/tabs/ProvidersTab.scss', 'utf8');
+    const tickRules = scss.slice(scss.indexOf(':where(.slider-tick)'), scss.indexOf('\n      }', scss.indexOf(':where(.slider-tick)')));
+
+    expect(tickRules).toMatch(/opacity:\s*0\.5/);
+    expect(tickRules).toMatch(/:where\(:focus-visible\)\s*\{\s*opacity:\s*1;\s*\}/);
+  });
+
+  it.each([1, 2, 3, 4, 5])('selecting level %i updates the range and stages provider settings', async (level) => {
+    const wrapper = mountTab();
+
+    await wrapper.findAll('#OPTIMIZATION_LEVELS_SECTION .slider-labels button')[level - 1].trigger('click');
+
+    expect(wrapper.get('#PROVIDER_OPTIMIZATION_LEVEL').element.value).toBe(String(level));
+    expect(mockUpdateSettingLocally).toHaveBeenCalledWith('PROVIDER_OPTIMIZATION_LEVELS', { 'test-provider': level });
+  });
+});
+
 describe('ProvidersTab.vue - Provider visibility checkbox placement & behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks();

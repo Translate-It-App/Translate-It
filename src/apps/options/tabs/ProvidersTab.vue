@@ -83,7 +83,10 @@
                 >
                   <div class="opt-control-group">
                     <div class="label-with-value">
-                      <label class="opt-label">{{ t('optimization_level_label') || 'Translation Strategy (Speed vs. Cost)' }}</label>
+                      <label
+                        class="opt-label"
+                        for="PROVIDER_OPTIMIZATION_LEVEL"
+                      >{{ t('optimization_level_label') || 'Translation Strategy (Speed vs. Cost)' }}</label>
                       <span
                         class="level-badge"
                         :class="'level-' + currentOptimizationLevel"
@@ -94,6 +97,7 @@
                   
                     <div class="slider-wrapper">
                       <input 
+                        id="PROVIDER_OPTIMIZATION_LEVEL"
                         v-model.number="currentOptimizationLevel" 
                         type="range" 
                         min="1" 
@@ -101,17 +105,43 @@
                         class="ti-range-slider"
                       >
                       <div class="slider-labels">
-                        <span @click="currentOptimizationLevel = 1">{{ isAIProvider ? t('opt_economy') || 'Economy' : t('opt_stable') || 'Stable' }}</span>
-                        <span
+                        <button
+                          type="button"
+                          :aria-label="optimizationLevelName(1, isAIProvider ? 'opt_economy' : 'opt_stable')"
+                          @click="currentOptimizationLevel = 1"
+                        >
+                          {{ isAIProvider ? t('opt_economy') || 'Economy' : t('opt_stable') || 'Stable' }}
+                        </button>
+                        <button
+                          type="button"
                           class="slider-tick"
+                          :aria-label="t('optimization_level_2') || 'Level 2'"
                           @click="currentOptimizationLevel = 2"
-                        >|</span>
-                        <span @click="currentOptimizationLevel = 3">{{ t('opt_balanced') || 'Balanced' }}</span>
-                        <span
+                        >
+                          |
+                        </button>
+                        <button
+                          type="button"
+                          :aria-label="optimizationLevelName(3, 'opt_balanced')"
+                          @click="currentOptimizationLevel = 3"
+                        >
+                          {{ t('opt_balanced') || 'Balanced' }}
+                        </button>
+                        <button
+                          type="button"
                           class="slider-tick"
+                          :aria-label="t('optimization_level_4') || 'Level 4'"
                           @click="currentOptimizationLevel = 4"
-                        >|</span>
-                        <span @click="currentOptimizationLevel = 5">{{ isAIProvider ? t('opt_turbo') || 'Turbo' : t('opt_fast') || 'Fast' }}</span>
+                        >
+                          |
+                        </button>
+                        <button
+                          type="button"
+                          :aria-label="optimizationLevelName(5, isAIProvider ? 'opt_turbo' : 'opt_fast')"
+                          @click="currentOptimizationLevel = 5"
+                        >
+                          {{ isAIProvider ? t('opt_turbo') || 'Turbo' : t('opt_fast') || 'Fast' }}
+                        </button>
                       </div>
                     </div>
                   
@@ -409,6 +439,8 @@ const currentOptimizationLevel = computed({
 })
 
 const isAIProvider = computed(() => ['gemini', 'openai', 'openrouter', 'requesty', 'deepseek', 'webai', 'custom'].includes(selectedProvider.value))
+const optimizationLevelName = (level, descriptionKey) =>
+  `${t('optimization_level_' + level) || 'Level ' + level}, ${t(descriptionKey) || descriptionKey}`
 const isAutoLanguageProvider = computed(() => selectedProviderInfo.value?.features?.includes('autoLanguage'))
 const selectedProviderInfo = computed(() => findProviderById(selectedProvider.value))
 const providerSettingsComponent = computed(() => {
