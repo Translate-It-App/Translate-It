@@ -4444,6 +4444,7 @@ describe('DomTranslatorAdapter', () => {
       vi.spyOn(adapter, '_publishCommittedOwnership').mockImplementationOnce(() => {
         throw new Error('ownership publication failed');
       });
+      const settleAcceptance = vi.spyOn(adapter, '_settleParentAcceptance');
 
       let failure;
       try {
@@ -4470,6 +4471,7 @@ describe('DomTranslatorAdapter', () => {
       expect(globalSelectElementState.translationHistory).toEqual([siblingOwnership]);
       expect(globalSelectElementState.auxiliaryOwnership.size).toBe(0);
       expect(group.applied).not.toBe(true);
+      expect(settleAcceptance).not.toHaveBeenCalled();
       expect(sendRegularMessage).not.toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ parentId: 'g1', accepted: true })
       }), { silent: true, timeout: 500 });
