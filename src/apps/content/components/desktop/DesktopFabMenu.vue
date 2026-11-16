@@ -1534,26 +1534,24 @@ onMounted(async () => {
     passive: true,
   });
 
-  // Settle position before showing to prevent jumps
-  scheduleTimeout(() => {
-    isReady.value = true;
+  // Render immediately without transitions, then settle the initial pixel position.
+  isReady.value = true;
 
-    // Settling pixel position on first mount if not already set
-    // We do this in a double requestAnimationFrame or nextTick to ensure the DOM is ready
+  // Settling pixel position on first mount if not already set
+  // We do this in a double requestAnimationFrame or nextTick to ensure the DOM is ready
+  scheduleAnimationFrame(() => {
     scheduleAnimationFrame(() => {
-      scheduleAnimationFrame(() => {
-        if (verticalPos.value === -1 && fabContainerRef.value) {
-          const rect = fabContainerRef.value.getBoundingClientRect();
-          verticalPos.value = rect.top;
-          userPreferredY.value = rect.top;
-        }
+      if (verticalPos.value === -1 && fabContainerRef.value) {
+        const rect = fabContainerRef.value.getBoundingClientRect();
+        verticalPos.value = rect.top;
+        userPreferredY.value = rect.top;
+      }
 
-        scheduleTimeout(() => {
-          isPositioning.value = false;
-        }, 150);
-      });
+      scheduleTimeout(() => {
+        isPositioning.value = false;
+      }, 150);
     });
-  }, 100);
+  });
 
   startFadeTimer(false);
 
