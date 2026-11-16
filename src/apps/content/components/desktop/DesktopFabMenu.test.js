@@ -1313,15 +1313,7 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
     vi.useRealTimers();
   });
 
-  const settleInitialization = async () => {
-    // Drain the async mounted chain (including the lazy-style import) without
-    // relying on a wall-clock delay.
-    for (let i = 0; i < 20; i += 1) {
-      await Promise.resolve();
-      await Promise.resolve();
-    }
-    await wrapper.vm.$nextTick();
-  };
+  const settleInitialization = () => vi.waitFor(() => expect(wrapper.vm.isReady).toBe(true));
 
   it('stops only this instance\'s TTS when the parent unmounts it after a temporary dismissal', async () => {
     wrapper = mount(DesktopFabMenu, { attachTo: document.body });
@@ -1471,10 +1463,7 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
         'sync-interaction-listeners',
       ]);
       expect(mocks.pageEventBus.subscriptions.size).toBe(4);
-      for (let i = 0; i < 20; i += 1) {
-        await Promise.resolve();
-        await Promise.resolve();
-      }
+      await vi.waitFor(() => expect(first.vm.isReady && second.vm.isReady).toBe(true));
       expect(raf).toHaveBeenCalled();
 
       const frameResourceIds = (groupId) => [...mocks.tracker.groups.get(groupId).resourceCleanups.keys()]
@@ -1542,11 +1531,9 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
   it('persists DESKTOP_FAB_POSITION after a drag without touching any setting', async () => {
     wrapper = mount(DesktopFabMenu, { attachTo: document.body });
     wrapper.vm.isReady = true;
-    // Flush the async onMounted chain (position load) before dispatching the
-    // drag: it resolves { y: 100 } and would otherwise overwrite the dragged
-    // value before stopDrag's deferred write fires.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await wrapper.vm.$nextTick();
+    // Wait for the saved position before dispatching the drag; initialization
+    // would otherwise overwrite the dragged value before stopDrag's deferred write fires.
+    await vi.waitFor(() => expect(wrapper.vm.verticalPos).toBe(100));
     // Pin the drag origin so the expectation does not depend on jsdom layout.
     wrapper.vm.verticalPos = 100;
     await wrapper.vm.$nextTick();
