@@ -42,15 +42,27 @@
       >{{ savedModelWarningMessage }}</small>
     </div>
     <div class="setting-group vertical">
-      <label>{{ t('gemini_thinking_mode_label') || 'Thinking Mode' }}</label>
+      <label for="gemini-thinking-mode-select">{{ t('gemini_thinking_mode_label') || 'Thinking Mode' }}</label>
       <BaseSelect
+        id="gemini-thinking-mode-select"
         v-model="geminiThinkingMode"
         :options="geminiThinkingModeOptions"
         class="thinking-mode-select"
+        :aria-describedby="thinkingModeDescriptionIds"
         :style="rtlSelectStyle"
       />
-      <p class="setting-description">
+      <p
+        id="gemini-thinking-mode-description"
+        class="setting-description"
+      >
         {{ t('gemini_thinking_mode_description') || 'Provider Default uses provider behavior. Minimal is applied only when the selected model supports it.' }}
+      </p>
+      <p
+        v-if="showGemmaThinkingGuidance"
+        id="gemini-gemma4-thinking-guidance"
+        class="setting-description"
+      >
+        {{ t('gemini_gemma4_thinking_guidance') || 'For Gemma 4, Minimal disables thinking and usually provides faster translations with lower token usage.' }}
       </p>
     </div>
     <div
@@ -138,6 +150,14 @@ const hasGeminiKey = computed(() => ApiKeyManager.parseKeys(geminiApiKey.value).
 // predicate treats an empty/absent stored URL as the official default.
 const storedGeminiEndpoint = computed(() => settingsStore.settings?.GEMINI_API_URL || '')
 const usesOfficialGeminiEndpoint = computed(() => isOfficialGeminiEndpoint(storedGeminiEndpoint.value))
+const showGemmaThinkingGuidance = computed(() => (
+  ['gemma-4-31b-it', 'gemma-4-26b-a4b-it'].includes(selectedModelOption.value)
+  && (settingsStore.settings?.GEMINI_MODEL_SOURCE || CONFIG.GEMINI_MODEL_SOURCE) === 'catalog'
+  && usesOfficialGeminiEndpoint.value
+))
+const thinkingModeDescriptionIds = computed(() => showGemmaThinkingGuidance.value
+  ? 'gemini-thinking-mode-description gemini-gemma4-thinking-guidance'
+  : 'gemini-thinking-mode-description')
 let discoveryRequestId = 0
 let discoveryTimer
 let activeController

@@ -25,6 +25,8 @@ const translations = {
   gemini_catalog_showing_count: ({ shown, total }) => `Showing ${shown} of ${total} matching models`,
   gemini_custom_endpoint_info: 'Using a custom API URL — Google\'s model catalog is not loaded.',
   gemini_catalog_official_info: 'Catalog selection uses Google\'s official Gemini API.',
+  gemini_gemma4_thinking_guidance: 'For Gemma 4, Minimal disables thinking and usually provides faster translations with lower token usage.',
+  gemini_thinking_mode_description: 'Provider Default uses provider behavior. Minimal is applied only when the selected model supports it.',
 }
 
 vi.mock('@/features/settings/stores/settings.js', () => ({ useSettingsStore: () => mocks.settingsStore }))
@@ -749,6 +751,89 @@ describe('GeminiApiSettings dynamic model catalog', () => {
     expect(select.element.value).toBe('curated-two')
     const ids = wrapper.findAll('[id]').map(element => element.attributes('id'))
     expect(ids).toHaveLength(new Set(ids).size)
+    wrapper.unmount()
+  })
+
+  it.each(['gemma-4-31b-it', 'gemma-4-26b-a4b-it'])('shows Gemma 4 guidance for catalog model %s without changing Thinking Mode', async model => {
+    mocks.settingsStore.settings.GEMINI_MODEL = model
+    mocks.settingsStore.settings.GEMINI_MODEL_SOURCE = 'catalog'
+    mocks.settingsStore.settings.GEMINI_THINKING_MODE = 'minimal'
+    const wrapper = mount(GeminiApiSettings)
+    await flushPromises()
+    expect(wrapper.text()).toContain(translations.gemini_gemma4_thinking_guidance)
+    expect(wrapper.get('.thinking-mode-select').element.value).toBe('minimal')
+    expect(mocks.settingsStore.updateSettingLocally).not.toHaveBeenCalledWith('GEMINI_THINKING_MODE', expect.anything())
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['unsupported model', 'gemma-4-preview', 'catalog', 'https://generativelanguage.googleapis.com/v1beta/models/curated-one:generateContent'],
+    ['31b preview model', 'gemma-4-31b-it-preview', 'catalog', 'https://generativelanguage.googleapis.com/v1beta/models/curated-one:generateContent'],
+    ['26b preview model', 'gemma-4-26b-a4b-it-preview', 'catalog', 'https://generativelanguage.googleapis.com/v1beta/models/curated-one:generateContent'],
+    ['legacy source', 'gemma-4-31b-it', 'legacy', 'https://generativelanguage.googleapis.com/v1beta/models/curated-one:generateContent'],
+    ['custom endpoint', 'gemma-4-31b-it', 'catalog', 'https://custom.example/v1beta/models/custom:generateContent'],
+  ])('hides Gemma 4 guidance for %s', async (_, model, source, url) => {
+    mocks.settingsStore.settings.GEMINI_MODEL = model
+    mocks.settingsStore.settings.GEMINI_MODEL_SOURCE = source
+    mocks.settingsStore.settings.GEMINI_API_URL = url
+    const wrapper = mount(GeminiApiSettings)
+    await flushPromises()
+    expect(wrapper.text()).not.toContain(translations.gemini_gemma4_thinking_guidance)
+    expect(wrapper.text()).toContain(translations.gemini_thinking_mode_description)
+    wrapper.unmount()
+  })
+
+  it('updates guidance across model switches and external model, source, and endpoint changes without changing Thinking Mode', async () => {
+    mocks.settingsStore.settings.GEMINI_MODEL = 'gemma-4-31b-it'
+    mocks.settingsStore.settings.GEMINI_MODEL_SOURCE = 'catalog'
+    mocks.settingsStore.settings.GEMINI_THINKING_MODE = 'minimal'
+    const wrapper = mount(GeminiApiSettings)
+    await flushPromises()
+    const guidance = translations.gemini_gemma4_thinking_guidance
+    const select = wrapper.get('#gemini-thinking-mode-select')
+    expect(select.attributes('aria-describedby')).toBe('gemini-thinking-mode-description gemini-gemma4-thinking-guidance')
+    expect(wrapper.text()).toContain(guidance)
+
+    mocks.settingsStore.settings.GEMINI_MODEL = 'gemma-4-26b-a4b-it'
+    await nextTick()
+    expect(wrapper.text()).toContain(guidance)
+    mocks.settingsStore.settings.GEMINI_MODEL = 'curated-one'
+    mocks.settingsStore.settings.GEMINI_MODEL_SOURCE = 'curated'
+    await nextTick()
+    expect(wrapper.text()).not.toContain(guidance)
+    expect(select.attributes('aria-describedby')).toBe('gemini-thinking-mode-description')
+
+    mocks.settingsStore.settings.GEMINI_MODEL = 'gemma-4-31b-it'
+    mocks.settingsStore.settings.GEMINI_MODEL_SOURCE = 'catalog'
+    await nextTick()
+    expect(wrapper.text()).toContain(guidance)
+    mocks.settingsStore.settings.GEMINI_MODEL_SOURCE = 'legacy'
+    await nextTick()
+    expect(wrapper.text()).not.toContain(guidance)
+    mocks.settingsStore.settings.GEMINI_MODEL_SOURCE = 'catalog'
+    await nextTick()
+    expect(wrapper.text()).toContain(guidance)
+    mocks.settingsStore.settings.GEMINI_API_URL = 'https://custom.example/v1beta/models/custom:generateContent'
+    await nextTick()
+    expect(wrapper.text()).not.toContain(guidance)
+    expect(select.element.value).toBe('minimal')
+    expect(mocks.settingsStore.settings.GEMINI_THINKING_MODE).toBe('minimal')
+    expect(mocks.settingsStore.updateSettingLocally).not.toHaveBeenCalledWith('GEMINI_THINKING_MODE', expect.anything())
+    wrapper.unmount()
+  })
+
+  it('shows guidance for a saved catalog Gemma model after discovery without changing Thinking Mode', async () => {
+    mocks.settingsStore.settings.GEMINI_API_KEY = 'key'
+    mocks.settingsStore.settings.GEMINI_MODEL = 'gemma-4-26b-a4b-it'
+    mocks.settingsStore.settings.GEMINI_MODEL_SOURCE = 'catalog'
+    mocks.settingsStore.settings.GEMINI_THINKING_MODE = 'default'
+    mocks.fetchModels.mockResolvedValue([{ value: 'gemma-4-26b-a4b-it', name: 'Gemma 4' }])
+    const wrapper = mount(GeminiApiSettings)
+    await flushPromises()
+    expect(wrapper.get('.model-select').element.value).toBe('gemma-4-26b-a4b-it')
+    expect(wrapper.text()).toContain(translations.gemini_gemma4_thinking_guidance)
+    expect(wrapper.get('#gemini-thinking-mode-select').element.value).toBe('default')
+    expect(mocks.settingsStore.updateSettingLocally).not.toHaveBeenCalledWith('GEMINI_THINKING_MODE', expect.anything())
     wrapper.unmount()
   })
 })
