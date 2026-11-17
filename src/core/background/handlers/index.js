@@ -11,6 +11,7 @@ export * from "./lifecycle/handleContextInvalid.js";
 export * from "./lifecycle/handleExtensionReloaded.js";
 export * from "./lifecycle/handleRestartContentScript.js";
 export * from "./lifecycle/handleInjectSelectElementFontStyles.js";
+export * from "./lifecycle/handleInjectPageTranslationFontStyles.js";
 export * from "./lifecycle/handleBackgroundReloadExtension.js";
 
 // Translation handlers

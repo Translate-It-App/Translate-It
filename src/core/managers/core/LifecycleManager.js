@@ -249,6 +249,7 @@ class LifecycleManager {
       'extensionReloaded': Handlers.handleExtensionReloaded,
       'restartContentScript': Handlers.handleRestartContentScript,
       'injectSelectElementFontStyles': Handlers.handleInjectSelectElementFontStyles,
+      'injectPageTranslationFontStyles': Handlers.handleInjectPageTranslationFontStyles,
       'backgroundReloadExtension': Handlers.handleBackgroundReloadExtension,
       
       // Translation handlers
