@@ -4,7 +4,7 @@
 
 - Significantly improved Page Translation performance and responsiveness, especially on complex websites.
 
-##### Fixed.
+##### Fixed
 
 - Fixed Gemini translation responses containing unwanted thinking text and improved Gemma model support.
 - Fixed translation font application on websites with mixed HTML content.
