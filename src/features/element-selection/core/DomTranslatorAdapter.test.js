@@ -12,6 +12,18 @@ const enableFontPolicyStyles = () => {
   });
 };
 
+const injectSelectElementFontStyles = () => {
+  window.translateItContentCore = {
+    injectMainDOMStyles(css, id) {
+      if (document.getElementById(id)) return;
+      const style = document.createElement('style');
+      style.id = id;
+      style.textContent = css;
+      document.head.append(style);
+    },
+  };
+};
+
 // Mock dependencies
 vi.mock('@/shared/logging/logger.js', () => ({
   getScopedLogger: vi.fn(() => ({
@@ -163,6 +175,7 @@ describe('DomTranslatorAdapter', () => {
     ExtensionContextManager.isValidSync.mockReturnValue(true);
     globalSelectElementState.translationHistory = [];
     globalSelectElementState.auxiliaryOwnership = new Map();
+    globalSelectElementState.auxiliaryInvalidations = new Map();
     adapter = new DomTranslatorAdapter();
     testElement = document.createElement('div');    testElement.textContent = 'Hello';
     document.body.appendChild(testElement);
@@ -250,6 +263,7 @@ describe('DomTranslatorAdapter', () => {
 
       expect(result).toMatchObject({ success: true, committedParentCount: 1 });
       expect(testElement.style.getPropertyValue('font-family')).toBe('');
+      expect(testElement.hasAttribute('data-ti-select-font-target')).toBe(false);
       expect(getTranslationFontFamilyAsync).not.toHaveBeenCalled();
     });
 
@@ -335,6 +349,7 @@ describe('DomTranslatorAdapter', () => {
 
       expect(result).toMatchObject({ success: true, committedParentCount: 1 });
       expect(testElement.style.fontFamily).toBe('system-ui');
+      expect(testElement.hasAttribute('data-ti-select-font-target')).toBe(false);
       expect(bold.style.fontFamily).toBe('Vazirmatn');
       expect(icon.style.fontFamily).toBe('icons');
       expect(code.style.fontFamily).toBe('monospace');
@@ -388,6 +403,165 @@ describe('DomTranslatorAdapter', () => {
       expect(testElement.style.fontFamily).toBe('serif');
       expect(bold.style.fontFamily).toBe('Vazirmatn');
       expect(testElement.style.getPropertyPriority('font-family')).toBe('');
+    });
+
+    it.each([
+      ['V2', false, 'code', null, 'monospace'],
+      ['V2', false, 'pre', null, 'monospace'],
+      ['V2', false, 'i', 'fa', 'icons'],
+      ['V3', true, 'code', null, 'monospace'],
+      ['V3', true, 'pre', null, 'monospace'],
+      ['V3', true, 'i', 'fa', 'icons'],
+    ])('continues %s translation without changing a font-sensitive <%s> target', async (_mode, grouped, tag, className, originalFont) => {
+      const { getFeatureSemanticBlockGroupingAsync, getSelectElementUseTranslationFontAsync, getTranslationFontFamilyAsync } = await import('@/config.js');
+      const { collectTextNodes, collectBlockGroups } = await import('./DomTranslatorUtils.js');
+      getFeatureSemanticBlockGroupingAsync.mockResolvedValueOnce(grouped);
+      getSelectElementUseTranslationFontAsync.mockResolvedValueOnce(true);
+      getTranslationFontFamilyAsync.mockResolvedValueOnce('auto');
+      resolveTranslationFontFamily.mockReturnValueOnce('system-ui');
+
+      const target = document.createElement(tag);
+      if (className) target.className = className;
+      target.style.fontFamily = originalFont;
+      const text = document.createTextNode('Source text');
+      target.append(text);
+      testElement.replaceChildren(target);
+      if (grouped) {
+        collectBlockGroups.mockReturnValueOnce([{
+          id: 'n1', blockId: 'g1', text: 'Source text', leadingWS: '', trailingWS: '', preWhitespace: false,
+          directionHint: 'ltr', inlineParentTags: [tag], mode: 'standard', node: text,
+        }]);
+      } else {
+        collectTextNodes.mockReturnValueOnce([{ node: text, text: 'Source text', uid: 'n1', blockId: 'b1', role: tag }]);
+      }
+      contentScriptIntegration.sendTranslationRequest.mockResolvedValueOnce({
+        success: true, streaming: false, translatedText: JSON.stringify([{ t: 'Translated text', i: 'n1' }]),
+      });
+
+      const result = await adapter.translateElement(testElement);
+
+      expect(result).toMatchObject({ success: true, committedParentCount: 1 });
+      expect(text.nodeValue).toContain('Translated text');
+      expect(target.style.fontFamily).toBe(originalFont);
+      expect(target.hasAttribute('data-ti-select-font-target')).toBe(false);
+      expect(target.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+    });
+
+    it('styles eligible mixed content through the scoped CSS marker and owns it for Revert', async () => {
+      const { getSelectElementUseTranslationFontAsync, getTranslationFontFamilyAsync } = await import('@/config.js');
+      const { revertSelectElementTranslation } = await import('./DomTranslatorState.js');
+      injectSelectElementFontStyles();
+      enableFontPolicyStyles();
+      getSelectElementUseTranslationFontAsync.mockResolvedValueOnce(true);
+      getTranslationFontFamilyAsync.mockResolvedValueOnce('auto');
+      resolveTranslationFontFamily.mockReturnValueOnce('system-ui');
+
+      const parent = document.createElement('span');
+      parent.style.fontFamily = 'serif';
+      const directText = document.createTextNode('Post twelve source');
+      const quote = document.createElement('q');
+      quote.textContent = 'quoted text';
+      const link = document.createElement('a');
+      link.href = '#';
+      link.textContent = 'linked text';
+      const image = document.createElement('img');
+      image.alt = '😀';
+      const code = document.createElement('code');
+      code.textContent = 'literal code';
+      const icon = document.createElement('i');
+      icon.className = 'icon icon-test';
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      parent.append(directText, quote, link, image, code, icon, svg);
+      testElement.replaceChildren(parent);
+      const { collectTextNodes } = await import('./DomTranslatorUtils.js');
+      collectTextNodes.mockReturnValueOnce([{ node: directText, text: directText.nodeValue, uid: 'n1', blockId: 'b1', role: 'span' }]);
+      contentScriptIntegration.sendTranslationRequest.mockResolvedValueOnce({
+        success: true, streaming: false, translatedText: JSON.stringify([{ t: 'Post twelve translated', i: 'n1' }]),
+      });
+
+      const result = await adapter.translateElement(testElement);
+      expect(result).toMatchObject({ success: true, committedParentCount: 1 });
+      expect(directText.parentNode).toBe(parent);
+      expect(parent.hasAttribute('data-ti-select-font-target')).toBe(true);
+      expect(parent.style.getPropertyValue('--ti-select-element-font-family')).toBe('system-ui');
+      expect(parent.querySelector('a')).toBe(link);
+      expect(parent.querySelector('q')).toBe(quote);
+      expect(parent.querySelector('code')).toBe(code);
+      await revertSelectElementTranslation(globalSelectElementState.translationHistory.at(-1).sessionId);
+      expect(parent.hasAttribute('data-ti-select-font-target')).toBe(false);
+      expect(parent.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+      expect(directText.parentNode).toBe(parent);
+      expect(parent.contains(link)).toBe(true);
+      expect(parent.contains(quote)).toBe(true);
+    });
+
+    it('keeps CSS ownership stacked across repeated V2 commits to the same mixed target', async () => {
+      const { getSelectElementUseTranslationFontAsync, getTranslationFontFamilyAsync } = await import('@/config.js');
+      const { revertSelectElementTranslation } = await import('./DomTranslatorState.js');
+      const { collectTextNodes } = await import('./DomTranslatorUtils.js');
+      injectSelectElementFontStyles();
+      enableFontPolicyStyles();
+      const owner = document.createElement('span');
+      const text = document.createTextNode('First source');
+      const link = document.createElement('a');
+      link.href = '#';
+      link.textContent = 'link';
+      owner.append(text, link);
+      testElement.replaceChildren(owner);
+      collectTextNodes.mockImplementationOnce(() => [{ node: text, text: text.nodeValue, uid: 'n1', blockId: 'b1', role: 'span' }]);
+      collectTextNodes.mockImplementationOnce(() => [{ node: text, text: text.nodeValue, uid: 'n1', blockId: 'b1', role: 'span' }]);
+      getSelectElementUseTranslationFontAsync.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+      getTranslationFontFamilyAsync.mockResolvedValueOnce('auto').mockResolvedValueOnce('auto');
+      resolveTranslationFontFamily.mockReturnValueOnce('system-ui').mockReturnValueOnce('system-ui');
+      contentScriptIntegration.sendTranslationRequest
+        .mockResolvedValueOnce({ success: true, streaming: false, translatedText: [{ t: 'First translation', i: 'n1' }] })
+        .mockResolvedValueOnce({ success: true, streaming: false, translatedText: [{ t: 'Second translation', i: 'n1' }] });
+
+      const firstResult = await adapter.translateElement(testElement);
+      const firstEntry = globalSelectElementState.translationHistory.at(-1);
+      const secondResult = await adapter.translateElement(testElement);
+      const secondEntry = globalSelectElementState.translationHistory.at(-1);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+      expect(secondEntry.sessionId).not.toBe(firstEntry.sessionId);
+      expect(owner.hasAttribute('data-ti-select-font-target')).toBe(true);
+      expect(owner.style.getPropertyValue('--ti-select-element-font-family')).toBe('system-ui');
+      await revertSelectElementTranslation(secondEntry.sessionId);
+      expect(owner.hasAttribute('data-ti-select-font-target')).toBe(true);
+      await revertSelectElementTranslation(firstEntry.sessionId);
+      expect(owner.hasAttribute('data-ti-select-font-target')).toBe(false);
+      expect(owner.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+      expect(text.nodeValue).toBe('First source');
+    });
+
+    it('rolls back mixed-content CSS ownership when V2 publication fails', async () => {
+      const { getSelectElementUseTranslationFontAsync, getTranslationFontFamilyAsync } = await import('@/config.js');
+      injectSelectElementFontStyles();
+      enableFontPolicyStyles();
+      getSelectElementUseTranslationFontAsync.mockResolvedValueOnce(true);
+      getTranslationFontFamilyAsync.mockResolvedValueOnce('auto');
+      resolveTranslationFontFamily.mockReturnValueOnce('system-ui');
+      const parent = document.createElement('span');
+      parent.style.fontFamily = 'serif';
+      const text = document.createTextNode('Hello');
+      parent.append(text, Object.assign(document.createElement('a'), { href: '#', textContent: 'link' }));
+      testElement.replaceChildren(parent);
+      const { collectTextNodes } = await import('./DomTranslatorUtils.js');
+      collectTextNodes.mockReturnValueOnce([{ node: text, text: 'Hello', uid: 'n1', blockId: 'b1', role: 'span' }]);
+      vi.spyOn(adapter, '_publishCommittedOwnership').mockImplementationOnce(() => {
+        throw new Error('ownership publication failed');
+      });
+      contentScriptIntegration.sendTranslationRequest.mockResolvedValueOnce({
+        success: true, streaming: false, translatedText: JSON.stringify([{ t: 'Bonjour', i: 'n1' }]),
+      });
+
+      await expect(adapter.translateElement(testElement)).rejects.toThrow('ownership publication failed');
+      expect(text.nodeValue).toBe('Hello');
+      expect(text.parentNode).toBe(parent);
+      expect(parent.hasAttribute('data-ti-select-font-target')).toBe(false);
+      expect(parent.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+      expect(parent.style.getPropertyValue('font-family')).toBe('serif');
     });
 
     it('rejects direct internal shadow roots before extraction while shadow support is disabled', async () => {
@@ -463,6 +637,32 @@ describe('DomTranslatorAdapter', () => {
       releasedCallbacks.onStreamEnd({ success: true });
       await expect(releasedTranslation).resolves.toMatchObject({ success: true });
       expect(testElement.textContent).toContain('Released');
+    });
+
+    it('does not publish mixed-content CSS font markers for a cancelled stream', async () => {
+      const { getSelectElementUseTranslationFontAsync, getTranslationFontFamilyAsync } = await import('@/config.js');
+      const parent = document.createElement('span');
+      const text = document.createTextNode('Pending source');
+      parent.append(text, Object.assign(document.createElement('a'), { href: '#', textContent: 'link' }));
+      testElement.replaceChildren(parent);
+      const { collectTextNodes } = await import('./DomTranslatorUtils.js');
+      collectTextNodes.mockReturnValueOnce([{ node: text, text: text.nodeValue, uid: 'n1', blockId: 'b1', role: 'span' }]);
+      getSelectElementUseTranslationFontAsync.mockResolvedValueOnce(true);
+      getTranslationFontFamilyAsync.mockResolvedValueOnce('auto');
+      resolveTranslationFontFamily.mockReturnValueOnce('system-ui');
+      let callbacks;
+      registerTranslation.mockImplementationOnce((_id, registered) => { callbacks = registered; });
+      contentScriptIntegration.sendTranslationRequest.mockResolvedValueOnce({ success: true, streaming: true });
+
+      const translation = adapter.translateElement(testElement);
+      await vi.waitFor(() => expect(callbacks).toBeDefined());
+      expect(parent.hasAttribute('data-ti-select-font-target')).toBe(false);
+      await adapter.cancelTranslation({ silent: true });
+      callbacks.onStreamEnd({ cancelled: true });
+      await expect(translation).resolves.toMatchObject({ success: false, cancelled: true });
+      expect(parent.hasAttribute('data-ti-select-font-target')).toBe(false);
+      expect(parent.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+      expect(text.nodeValue).toBe('Pending source');
     });
 
     it('allows two non-overlapping roots to translate concurrently', async () => {
@@ -785,9 +985,15 @@ describe('DomTranslatorAdapter', () => {
     });
 
     it('reports PARTIAL_SUCCESS when a direct parent result is stale', async () => {
+      const { getSelectElementUseTranslationFontAsync, getTranslationFontFamilyAsync } = await import('@/config.js');
+      injectSelectElementFontStyles();
+      const firstParent = document.createElement('span');
+      const secondParent = document.createElement('span');
       const first = document.createTextNode('A');
       const second = document.createTextNode('B');
-      testElement.replaceChildren(first, second);
+      firstParent.append(first, Object.assign(document.createElement('a'), { href: '#', textContent: 'first link' }));
+      secondParent.append(second, Object.assign(document.createElement('a'), { href: '#', textContent: 'second link' }));
+      testElement.replaceChildren(firstParent, secondParent);
       const { collectTextNodes } = await import('./DomTranslatorUtils.js');
       collectTextNodes.mockReturnValueOnce([
         { node: first, text: 'A', uid: 'n1', blockId: 'b1', role: 'div' },
@@ -795,6 +1001,9 @@ describe('DomTranslatorAdapter', () => {
       ]);
       let callbacks;
       registerTranslation.mockImplementationOnce((_id, registered) => { callbacks = registered; });
+      getSelectElementUseTranslationFontAsync.mockResolvedValueOnce(true);
+      getTranslationFontFamilyAsync.mockResolvedValueOnce('auto');
+      resolveTranslationFontFamily.mockReturnValueOnce('system-ui');
       contentScriptIntegration.sendTranslationRequest.mockResolvedValueOnce({ success: true, streaming: true });
 
       const translation = adapter.translateElement(testElement);
@@ -813,6 +1022,11 @@ describe('DomTranslatorAdapter', () => {
       });
       expect(first.nodeValue).toContain('Uno');
       expect(second.nodeValue).toBe('Changed B');
+      expect(firstParent.hasAttribute('data-ti-select-font-target')).toBe(true);
+      expect(firstParent.style.getPropertyValue('--ti-select-element-font-family')).toBe('system-ui');
+      expect(secondParent.hasAttribute('data-ti-select-font-target')).toBe(false);
+      expect(secondParent.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+      expect(resolveTranslationFontFamily).toHaveBeenCalledOnce();
     });
 
     it('reports FULL_SUCCESS for grouped 2/2 applied groups', async () => {
@@ -906,6 +1120,48 @@ describe('DomTranslatorAdapter', () => {
       expect(icon.style.fontFamily).toBe('icons');
       expect(code.style.fontFamily).toBe('monospace');
       expect(text.nodeValue).toBe('A');
+    });
+
+    it('commits and reverts V3 mixed-content CSS font ownership', async () => {
+      const { getFeatureSemanticBlockGroupingAsync, getSelectElementUseTranslationFontAsync, getTranslationFontFamilyAsync } = await import('@/config.js');
+      const { revertSelectElementTranslation } = await import('./DomTranslatorState.js');
+      injectSelectElementFontStyles();
+      enableFontPolicyStyles();
+      getFeatureSemanticBlockGroupingAsync.mockResolvedValueOnce(true);
+      getSelectElementUseTranslationFontAsync.mockResolvedValueOnce(true);
+      getTranslationFontFamilyAsync.mockResolvedValueOnce('auto');
+      resolveTranslationFontFamily.mockReturnValueOnce('system-ui');
+
+      const owner = document.createElement('span');
+      owner.style.fontFamily = 'serif';
+      const text = document.createTextNode('A');
+      const link = document.createElement('a');
+      link.href = '#';
+      link.textContent = 'linked text';
+      owner.append(text, link);
+      testElement.replaceChildren(owner);
+      const { collectBlockGroups } = await import('./DomTranslatorUtils.js');
+      collectBlockGroups.mockReturnValueOnce([{
+        id: 'n1', blockId: 'g1', text: 'A', leadingWS: '', trailingWS: '', preWhitespace: false,
+        directionHint: 'ltr', inlineParentTags: ['span'], mode: 'standard', node: text,
+      }]);
+      contentScriptIntegration.sendTranslationRequest.mockResolvedValueOnce({
+        success: true, streaming: false, translatedText: JSON.stringify([{ t: 'Uno', i: 'n1' }]),
+      });
+
+      const result = await adapter.translateElement(testElement);
+      const entry = globalSelectElementState.translationHistory.at(-1);
+
+      expect(result).toMatchObject({ success: true, committedParentCount: 1 });
+      expect(text.nodeValue).toContain('Uno');
+      expect(owner.hasAttribute('data-ti-select-font-target')).toBe(true);
+      expect(owner.style.getPropertyValue('--ti-select-element-font-family')).toBe('system-ui');
+      expect(owner.contains(link)).toBe(true);
+      await revertSelectElementTranslation(entry.sessionId);
+      expect(text.nodeValue).toBe('A');
+      expect(owner.hasAttribute('data-ti-select-font-target')).toBe(false);
+      expect(owner.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+      expect(owner.contains(link)).toBe(true);
     });
 
     it('marks grouped non-passthrough rejected content invalid and reports PARTIAL_SUCCESS', async () => {
@@ -4402,6 +4658,40 @@ describe('DomTranslatorAdapter', () => {
   });
 
   describe('_commitBlockGroup', () => {
+    it('rolls back mixed-content CSS ownership when V3 publication fails', async () => {
+      const { BlockGroupReconstructor } = await import('./BlockGroupReconstructor.js');
+      injectSelectElementFontStyles();
+      enableFontPolicyStyles();
+      const parent = document.createElement('span');
+      parent.style.fontFamily = 'serif';
+      const node = document.createTextNode('Hello');
+      parent.append(node, Object.assign(document.createElement('a'), { href: '#', textContent: 'link' }));
+      testElement.replaceChildren(parent);
+      const unit = {
+        id: 'mixed-css-v3', blockId: 'mixed-css-v3', text: 'Hello', leadingWS: '', trailingWS: '',
+        preWhitespace: false, directionHint: 'ltr', inlineParentTags: ['span'], mode: 'standard', node,
+      };
+      const reconstruction = BlockGroupReconstructor.apply([unit], 'Bonjour', 'fr', testElement, '', '', 'system-ui');
+      expect(parent.hasAttribute('data-ti-select-font-target')).toBe(true);
+      vi.spyOn(adapter, '_publishCommittedOwnership').mockImplementationOnce(() => {
+        throw new Error('ownership publication failed');
+      });
+
+      let failure;
+      try {
+        adapter._commitBlockGroup({ units: [unit] }, reconstruction, 'Bonjour', new Set(), null);
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure.cause.message).toBe('ownership publication failed');
+      expect(node.nodeValue).toBe('Hello');
+      expect(node.parentNode).toBe(parent);
+      expect(parent.hasAttribute('data-ti-select-font-target')).toBe(false);
+      expect(parent.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+      expect(parent.style.fontFamily).toBe('serif');
+    });
+
     it('rolls back the V3 transaction when ownership publication fails', async () => {
       const { BlockGroupReconstructor } = await import('./BlockGroupReconstructor.js');
       const directionManager = await import('@/utils/dom/DomDirectionManager.js');

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getTranslationFontTarget } from './TranslationFontPolicy.js';
+import { getTranslationFontTarget, getSelectElementMixedFontTarget, isSelectElementFontTargetSafe } from './TranslationFontPolicy.js';
 
 const nativeGetComputedStyle = window.getComputedStyle.bind(window);
 let computedStyleSpy;
@@ -43,6 +43,19 @@ describe('getTranslationFontTarget', () => {
     element.textContent = 'source';
 
     expect(getTranslationFontTarget(element.firstChild)).toBe(element);
+  });
+
+  it.each([
+    ['code', 'code', null],
+    ['pre', 'pre', null],
+    ['Font Awesome', 'i', 'fa'],
+  ])('keeps shared font targeting unchanged for Select Element-sensitive %s targets', (_label, tag, className) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    element.append('source');
+
+    expect(getTranslationFontTarget(element.firstChild)).toBe(element);
+    expect(isSelectElementFontTargetSafe(element)).toBe(false);
   });
 
   it('ignores an extra whitespace-only direct TextNode', () => {
@@ -203,5 +216,38 @@ describe('getTranslationFontTarget', () => {
     expect(getTranslationFontTarget(editable.firstChild)).toBeNull();
     expect(getTranslationFontTarget(important.firstChild)).toBeNull();
     expect(getTranslationFontTarget(pseudo.firstChild)).toBeNull();
+  });
+});
+
+describe('getSelectElementMixedFontTarget', () => {
+  it('permits one direct TextNode with link, quote, and other visual siblings without relaxing shared policy', () => {
+    const parent = document.createElement('span');
+    const direct = document.createTextNode('source');
+    const quote = document.createElement('q');
+    quote.textContent = 'quote';
+    const link = document.createElement('a');
+    link.href = '#';
+    link.textContent = 'link';
+    parent.append(direct, quote, link, document.createElement('img'));
+
+    expect(getTranslationFontTarget(direct)).toBeNull();
+    expect(getSelectElementMixedFontTarget(direct)).toBe(parent);
+  });
+
+  it.each(['button', 'a', 'x-widget'])('rejects unsafe mixed parent <%s>', tag => {
+    const parent = document.createElement(tag);
+    parent.append(document.createTextNode('source'), document.createElement('i'));
+    expect(getSelectElementMixedFontTarget(parent.firstChild)).toBeNull();
+  });
+
+  it('skips mixed-content CSS targets inside a ShadowRoot', () => {
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    const parent = document.createElement('span');
+    const text = document.createTextNode('source');
+    parent.append(text, document.createElement('a'));
+    shadow.append(parent);
+
+    expect(getSelectElementMixedFontTarget(text)).toBeNull();
   });
 });

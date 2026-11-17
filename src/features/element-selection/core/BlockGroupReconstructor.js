@@ -6,7 +6,8 @@ import { detectDirectionFromContent, applyNodeDirection, captureNodeDirectionSta
 import { parseV3Intervals } from '@/features/translation/core/V3IntervalParser.js';
 import { runBestEffortRollback } from '@/utils/dom/DomRollback.js';
 import { iterateSelectElementAncestors } from '../utils/shadowDom.js';
-import { getTranslationFontTarget } from '@/shared/fonts/TranslationFontPolicy.js';
+import { getTranslationFontTarget, getSelectElementMixedFontTarget, isSelectElementFontTargetSafe } from '@/shared/fonts/TranslationFontPolicy.js';
+import { applySelectElementMixedFontStyle, restoreSelectElementMixedFontStyle } from './SelectElementFontStyles.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.ELEMENT_SELECTION, 'BlockGroupReconstructor');
 
@@ -222,6 +223,7 @@ export class BlockGroupReconstructor {
     const attributeParents = new Map();
     const directionSnapshots = [];
     const fontParents = new Map();
+    const cssFontTargets = new Map();
     const directionElements = new Set();
     const hoverSnapshots = commitPlan.map(({ unit }) => ({ node: unit.node, value: hoverPreviewLookup.get(unit.node) }));
     for (const { unit } of commitPlan) {
@@ -273,6 +275,11 @@ export class BlockGroupReconstructor {
           },
           createFailure: (error) => ({ kind: 'font', element, error }),
         })),
+        ...[...cssFontTargets].map(([target, state]) => ({
+          kind: 'css-font',
+          restore: () => restoreSelectElementMixedFontStyle(target, state),
+          createFailure: (error) => ({ kind: 'css-font', element: target, error }),
+        })),
         {
           kind: 'direction',
           restore: () => restoreNodeDirectionState(directionSnapshots),
@@ -312,7 +319,7 @@ export class BlockGroupReconstructor {
 
         if (translationFontFamily) {
           const fontTarget = getTranslationFontTarget(task.unit.node);
-          if (fontTarget && !fontParents.has(fontTarget)) {
+          if (fontTarget && isSelectElementFontTargetSafe(fontTarget) && !fontParents.has(fontTarget)) {
             try {
               fontParents.set(fontTarget, {
                 present: fontTarget.style.getPropertyValue('font-family') !== '',
@@ -324,6 +331,9 @@ export class BlockGroupReconstructor {
               fontParents.delete(fontTarget);
               logger.debug('[Reconstructor] Select Element font enhancement skipped', fontError);
             }
+          } else if (!fontTarget) {
+            const mixedTarget = getSelectElementMixedFontTarget(task.unit.node);
+            if (mixedTarget) applySelectElementMixedFontStyle(mixedTarget, translationFontFamily, cssFontTargets);
           }
         }
         applyNodeDirection(task.unit.node, targetLanguage, rootElement, {
@@ -336,7 +346,7 @@ export class BlockGroupReconstructor {
         success: true,
         cleanResult: parsedSegments.map(segment => segment.text).join(''),
         segments: parsedSegments,
-        auxiliarySnapshots: { attributeParents, directionSnapshots, fontParents },
+        auxiliarySnapshots: { attributeParents, directionSnapshots, fontParents, cssFontTargets },
         transaction: {
           rollback,
           finalize() { active = false; },

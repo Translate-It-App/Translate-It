@@ -412,6 +412,31 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
     expect(attributeOnly.style.getPropertyValue('font-family')).toBe('');
   });
 
+  it('keeps Page Translation mixed direct-text parents with link and emoji descendants unstyled', async () => {
+    const mixed = document.createElement('div');
+    mixed.style.fontFamily = 'serif';
+    const directText = document.createTextNode('Mixed page source');
+    const link = document.createElement('a');
+    link.href = '#';
+    link.textContent = 'linked text';
+    const emoji = document.createElement('img');
+    emoji.alt = '😀';
+    mixed.append(directText, link, emoji);
+    document.body.append(mixed);
+    const { bridge } = await start(document.body, {
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+    });
+    track(bridge);
+
+    await vi.waitFor(() => expect(mixed.textContent).toContain('Translated Mixed page source'));
+
+    expect(getTranslationFontTarget(directText)).toBeNull();
+    expect(mixed.style.fontFamily).toBe('serif');
+    expect(link.style.getPropertyValue('font-family')).toBe('');
+    expect(emoji.style.getPropertyValue('font-family')).toBe('');
+  });
+
   it('does not apply font for identical translated text', async () => {
     const owner = document.createElement('span');
     owner.textContent = 'Identical source';
