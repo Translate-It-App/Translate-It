@@ -1,3 +1,17 @@
+#### v1.26.0 – Released on November 17, 2026
+
+##### Changed
+
+- Significantly improved Page Translation performance and responsiveness, especially on complex websites.
+
+##### Fixed
+
+- Fixed Gemini translation responses containing unwanted thinking text and improved Gemma model support.
+- Fixed translation font application on websites with mixed HTML content.
+- Fixed various minor bugs and website compatibility issues.
+
+---
+
 #### v1.25.2 – Released on October 29, 2026
 
 ##### Changed
