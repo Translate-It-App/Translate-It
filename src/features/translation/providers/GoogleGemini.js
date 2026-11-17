@@ -22,6 +22,7 @@ import {
 } from "@/features/translation/ir/CompletionContract.js";
 import { recordProviderCompletion } from "@/features/translation/ir/TranslationOperation.js";
 import { isOfficialGeminiEndpoint } from './modelDiscoveryEndpoints.js';
+import { GEMINI_MODELS_SUPPORTING_MINIMAL_THINKING } from './geminiModelCapabilities.js';
 const logger = getScopedLogger(LOG_COMPONENTS.PROVIDERS, 'GoogleGemini');
 
 function buildGeminiCatalogModelUrl(model) {
@@ -101,7 +102,7 @@ export class GeminiProvider extends BaseAIProvider {
 
     const modelConfig = CONFIG.GEMINI_MODELS?.find(configuredModel => configuredModel.value === model);
     const isOfficialCatalogModel = modelSource === 'catalog' && isOfficialGeminiEndpoint(rawApiUrl);
-    const supportsMinimalThinking = ['gemma-4-31b-it', 'gemma-4-26b-a4b-it'].includes(model);
+    const supportsMinimalThinking = GEMINI_MODELS_SUPPORTING_MINIMAL_THINKING.includes(model);
     const minimalThinking = supportsMinimalThinking && isOfficialCatalogModel
       ? { type: 'level', value: 'minimal' }
       : modelConfig?.thinking?.minimal;

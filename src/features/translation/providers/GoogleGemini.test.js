@@ -6,6 +6,7 @@ import { TranslationCallPurpose } from './ProviderConstants.js';
 import { AIConversationHelper } from './utils/AIConversationHelper.js';
 import { createTranslationOperation } from '../ir/TranslationOperation.js';
 import { CompletionTermination } from '../ir/CompletionContract.js';
+import { GEMINI_MODELS_SUPPORTING_MINIMAL_THINKING } from './geminiModelCapabilities.js';
 import { ResponseFormat } from '@/shared/config/translationConstants.js';
 import {
   CONFIG,
@@ -229,7 +230,7 @@ describe('GeminiProvider Error Handling', () => {
     expect(payload.generationConfig).not.toHaveProperty('thinkingConfig');
   });
 
-  it.each(['gemma-4-31b-it', 'gemma-4-26b-a4b-it'])('routes catalog %s and enables minimal thinking on the official endpoint', async (model) => {
+  it.each(GEMINI_MODELS_SUPPORTING_MINIMAL_THINKING)('routes catalog %s and enables minimal thinking on the official endpoint', async (model) => {
     const { getGeminiApiUrlAsync, getGeminiModelAsync, getGeminiModelSourceAsync, getGeminiThinkingModeAsync } = await import('@/shared/config/config.js');
     getGeminiModelAsync.mockResolvedValue(model);
     getGeminiModelSourceAsync.mockResolvedValue('catalog');

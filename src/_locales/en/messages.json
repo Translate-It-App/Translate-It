@@ -2637,8 +2637,8 @@
   "gemini_thinking_mode_description": {
     "message": "Provider Default uses provider behavior. Minimal is applied only when the selected model supports it."
   },
-  "gemini_gemma4_thinking_guidance": {
-    "message": "For Gemma 4, Minimal disables thinking and usually provides faster translations with lower token usage."
+  "gemini_gemma_minimal_thinking_guidance": {
+    "message": "For this Gemma model, Minimal disables thinking and usually provides faster translations with lower token usage."
   },
   "advance_section_title": {
     "message": "Advanced Settings"

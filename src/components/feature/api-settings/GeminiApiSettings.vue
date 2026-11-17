@@ -59,10 +59,10 @@
       </p>
       <p
         v-if="showGemmaThinkingGuidance"
-        id="gemini-gemma4-thinking-guidance"
+        id="gemini-gemma-thinking-guidance"
         class="setting-description"
       >
-        {{ t('gemini_gemma4_thinking_guidance') || 'For Gemma 4, Minimal disables thinking and usually provides faster translations with lower token usage.' }}
+        {{ t('gemini_gemma_minimal_thinking_guidance') || 'For this Gemma model, Minimal disables thinking and usually provides faster translations with lower token usage.' }}
       </p>
     </div>
     <div
@@ -120,6 +120,7 @@ import {
   MissingGeminiKeyError,
 } from '@/features/translation/providers/GeminiModelDiscovery.js'
 import { isOfficialGeminiEndpoint } from '@/features/translation/providers/modelDiscoveryEndpoints.js'
+import { GEMINI_MODELS_SUPPORTING_MINIMAL_THINKING } from '@/features/translation/providers/geminiModelCapabilities.js'
 
 const { t } = useI18n()
 const { rtlSelectStyle } = useRTLSelect()
@@ -151,12 +152,12 @@ const hasGeminiKey = computed(() => ApiKeyManager.parseKeys(geminiApiKey.value).
 const storedGeminiEndpoint = computed(() => settingsStore.settings?.GEMINI_API_URL || '')
 const usesOfficialGeminiEndpoint = computed(() => isOfficialGeminiEndpoint(storedGeminiEndpoint.value))
 const showGemmaThinkingGuidance = computed(() => (
-  ['gemma-4-31b-it', 'gemma-4-26b-a4b-it'].includes(selectedModelOption.value)
+  GEMINI_MODELS_SUPPORTING_MINIMAL_THINKING.includes(selectedModelOption.value)
   && (settingsStore.settings?.GEMINI_MODEL_SOURCE || CONFIG.GEMINI_MODEL_SOURCE) === 'catalog'
   && usesOfficialGeminiEndpoint.value
 ))
 const thinkingModeDescriptionIds = computed(() => showGemmaThinkingGuidance.value
-  ? 'gemini-thinking-mode-description gemini-gemma4-thinking-guidance'
+  ? 'gemini-thinking-mode-description gemini-gemma-thinking-guidance'
   : 'gemini-thinking-mode-description')
 let discoveryRequestId = 0
 let discoveryTimer

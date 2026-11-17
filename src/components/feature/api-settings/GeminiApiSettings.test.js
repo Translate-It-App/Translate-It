@@ -4,6 +4,7 @@ import { nextTick, reactive } from 'vue'
 import GeminiApiSettings from './GeminiApiSettings.vue'
 import ApiKeyInput from './ApiKeyInput.vue'
 import { ApiKeyManager } from '@/features/translation/providers/ApiKeyManager.js'
+import { GEMINI_MODELS_SUPPORTING_MINIMAL_THINKING } from '@/features/translation/providers/geminiModelCapabilities.js'
 
 const mocks = vi.hoisted(() => ({
   settingsStore: null,
@@ -25,7 +26,7 @@ const translations = {
   gemini_catalog_showing_count: ({ shown, total }) => `Showing ${shown} of ${total} matching models`,
   gemini_custom_endpoint_info: 'Using a custom API URL — Google\'s model catalog is not loaded.',
   gemini_catalog_official_info: 'Catalog selection uses Google\'s official Gemini API.',
-  gemini_gemma4_thinking_guidance: 'For Gemma 4, Minimal disables thinking and usually provides faster translations with lower token usage.',
+  gemini_gemma_minimal_thinking_guidance: 'For this Gemma model, Minimal disables thinking and usually provides faster translations with lower token usage.',
   gemini_thinking_mode_description: 'Provider Default uses provider behavior. Minimal is applied only when the selected model supports it.',
 }
 
@@ -754,13 +755,13 @@ describe('GeminiApiSettings dynamic model catalog', () => {
     wrapper.unmount()
   })
 
-  it.each(['gemma-4-31b-it', 'gemma-4-26b-a4b-it'])('shows Gemma 4 guidance for catalog model %s without changing Thinking Mode', async model => {
+  it.each(GEMINI_MODELS_SUPPORTING_MINIMAL_THINKING)('shows Gemma 4 guidance for catalog model %s without changing Thinking Mode', async model => {
     mocks.settingsStore.settings.GEMINI_MODEL = model
     mocks.settingsStore.settings.GEMINI_MODEL_SOURCE = 'catalog'
     mocks.settingsStore.settings.GEMINI_THINKING_MODE = 'minimal'
     const wrapper = mount(GeminiApiSettings)
     await flushPromises()
-    expect(wrapper.text()).toContain(translations.gemini_gemma4_thinking_guidance)
+    expect(wrapper.text()).toContain(translations.gemini_gemma_minimal_thinking_guidance)
     expect(wrapper.get('.thinking-mode-select').element.value).toBe('minimal')
     expect(mocks.settingsStore.updateSettingLocally).not.toHaveBeenCalledWith('GEMINI_THINKING_MODE', expect.anything())
     wrapper.unmount()
@@ -778,7 +779,7 @@ describe('GeminiApiSettings dynamic model catalog', () => {
     mocks.settingsStore.settings.GEMINI_API_URL = url
     const wrapper = mount(GeminiApiSettings)
     await flushPromises()
-    expect(wrapper.text()).not.toContain(translations.gemini_gemma4_thinking_guidance)
+    expect(wrapper.text()).not.toContain(translations.gemini_gemma_minimal_thinking_guidance)
     expect(wrapper.text()).toContain(translations.gemini_thinking_mode_description)
     wrapper.unmount()
   })
@@ -789,9 +790,9 @@ describe('GeminiApiSettings dynamic model catalog', () => {
     mocks.settingsStore.settings.GEMINI_THINKING_MODE = 'minimal'
     const wrapper = mount(GeminiApiSettings)
     await flushPromises()
-    const guidance = translations.gemini_gemma4_thinking_guidance
+    const guidance = translations.gemini_gemma_minimal_thinking_guidance
     const select = wrapper.get('#gemini-thinking-mode-select')
-    expect(select.attributes('aria-describedby')).toBe('gemini-thinking-mode-description gemini-gemma4-thinking-guidance')
+    expect(select.attributes('aria-describedby')).toBe('gemini-thinking-mode-description gemini-gemma-thinking-guidance')
     expect(wrapper.text()).toContain(guidance)
 
     mocks.settingsStore.settings.GEMINI_MODEL = 'gemma-4-26b-a4b-it'
@@ -831,7 +832,7 @@ describe('GeminiApiSettings dynamic model catalog', () => {
     const wrapper = mount(GeminiApiSettings)
     await flushPromises()
     expect(wrapper.get('.model-select').element.value).toBe('gemma-4-26b-a4b-it')
-    expect(wrapper.text()).toContain(translations.gemini_gemma4_thinking_guidance)
+    expect(wrapper.text()).toContain(translations.gemini_gemma_minimal_thinking_guidance)
     expect(wrapper.get('#gemini-thinking-mode-select').element.value).toBe('default')
     expect(mocks.settingsStore.updateSettingLocally).not.toHaveBeenCalledWith('GEMINI_THINKING_MODE', expect.anything())
     wrapper.unmount()
