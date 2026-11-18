@@ -62,6 +62,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.contextMap = new WeakMap();
     this._nextContextId = 1;
     this._nextItemId = 1;
+    this._nextBatchId = 1;
 
     this.settings = { 
       ...DEFAULT_PAGE_TRANSLATION_SETTINGS,
@@ -298,6 +299,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       this.queue.push({ 
         id: String(this._nextItemId++),
         text: text.trim(), 
+        enqueuedAt: performance.now(),
         score: score || 0, 
         isHighPriority,
         contextId,
@@ -438,9 +440,19 @@ export class PageTranslationScheduler extends ResourceTracker {
     try {
       // Process batches in a loop as long as there are items and we are still translating
       while (this.queue.length > 0 && this.isTranslated && flushContext === this.sessionContext) {
+        const preparationStartedAt = performance.now();
+        const batchId = this._nextBatchId++;
         const config = await this._getBatchConfig();
         if (!this._ownsFlushSession(flushSessionId, flushContext) || this.fatalErrorOccurred) return;
         if (this.activeFlushes > (this.settings.maxConcurrentFlushes || 1)) break;
+        const totalQueuedBeforeSelection = this.queue.length;
+        config.diagnostics = {
+          sessionId: flushSessionId,
+          batchId,
+          concurrencyLimit: this.settings.maxConcurrentFlushes || 1,
+          preparationStartedAt,
+          totalQueued: totalQueuedBeforeSelection
+        };
         let currentBatch = [];
 
         // 1. SELECT BATCH: Use specialized filters based on the mode
@@ -616,6 +628,30 @@ export class PageTranslationScheduler extends ResourceTracker {
       },
       MessageContexts.PAGE_TRANSLATION_BATCH
     );
+
+    const diagnostics = config.diagnostics;
+    if (diagnostics) {
+      const dispatchedAt = performance.now();
+      this.logger.debugLazy(() => [
+        'Page translation batch dispatch:',
+        {
+          sessionId: diagnostics.sessionId,
+          batchId: diagnostics.batchId,
+          messageId: batchMessage.messageId,
+          totalQueued: diagnostics.totalQueued,
+          selectedItemCount: batch.length,
+          originalChars: batch.reduce((total, item) => total + item.text.length, 0),
+          chunkSize: config.chunkSize,
+          maxChars: config.maxChars,
+          concurrencyLimit: diagnostics.concurrencyLimit,
+          preparationDurationMs: dispatchedAt - diagnostics.preparationStartedAt,
+          enqueueToDispatchMs: dispatchedAt - Math.min(...batch.map(item => item.enqueuedAt ?? dispatchedAt)),
+          activeWorkersAtDispatch: this.activeFlushes,
+          stopReason: diagnostics.stopReason,
+          stoppingReasons: diagnostics.stoppingReasons,
+        }
+      ]);
+    }
 
     try {
       if (!this.isTranslated) throw new Error('Session stopped');

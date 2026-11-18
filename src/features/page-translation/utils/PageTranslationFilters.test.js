@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PageTranslationQueueFilter } from './PageTranslationQueueFilter.js';
 import { PageTranslationFluidFilter } from './PageTranslationFluidFilter.js';
 import { PageTranslationHelper } from '../PageTranslationHelper.js';
+import { getScopedLogger } from '@/shared/logging/logger.js';
 
 vi.mock('../PageTranslationHelper.js', () => ({
   PageTranslationHelper: {
@@ -85,6 +86,112 @@ describe('PageTranslation Filters', () => {
         const { batchItems, remainingItems } = FilterClass.process(queue, config);
         expect(batchItems).toHaveLength(0);
         expect(remainingItems).toHaveLength(queue.length);
+      });
+
+      it('logs aggregate batch diagnostics without item text', () => {
+        config.chunkSize = 2;
+        PageTranslationHelper.isInViewportWithMargin.mockReturnValue(true);
+
+        FilterClass.process(queue, { ...config, diagnostics: {
+          sessionId: 'session-1', batchId: 7, concurrencyLimit: 3, preparationStartedAt: performance.now()
+        } });
+
+        const logger = getScopedLogger.mock.results.at(-1).value;
+        const [message, details] = logger.debugLazy.mock.calls.at(-1)[0]();
+        expect(message).toMatch(/Filter Results/);
+        expect(details).toMatchObject({
+          sessionId: 'session-1', batchId: 7, concurrencyLimit: 3,
+          totalQueued: 4, viewportCount: 4, bufferCount: 0, offscreenCount: 0,
+          selectedItemCount: 2, originalChars: 12, chunkSize: 2,
+          stopReason: 'capacity', compatibleEligibleRemaining: 1
+        });
+        expect(JSON.stringify(details)).not.toContain('Item 1');
+      });
+
+      it('reports buffer-only compatible counts and keeps script-boundary stop reasons', () => {
+        config.chunkSize = 1;
+        const bufferItems = [
+          { id: 'buffer-selected', text: 'selected', score: 1, matchesTargetScript: false, contextId: 1 },
+          { id: 'buffer-compatible', text: 'compatible', score: 1, matchesTargetScript: false, contextId: 1 },
+          { id: 'buffer-other-script', text: 'other', score: 1, matchesTargetScript: true, contextId: 1 },
+        ];
+        PageTranslationHelper.isInViewportWithMargin.mockImplementation((node, margin) => margin > 0);
+        FilterClass.process(bufferItems, { ...config, diagnostics: { preparationStartedAt: performance.now() } });
+        const logger = getScopedLogger.mock.results.at(-1).value;
+        const details = logger.debugLazy.mock.calls.at(-1)[0]()[1];
+
+        expect(details).toMatchObject({
+          stopReason: 'capacity',
+          stoppingReasons: { viewport: 'not_applicable', buffer: 'capacity', offscreen: 'not_applicable' },
+          compatibleEligibleRemaining: 1,
+        });
+      });
+
+      it('reports capacity when viewport fills exactly and eligible later phases are skipped', () => {
+        config.chunkSize = 2;
+        config.lazyLoading = false;
+        const items = [
+          { id: 'viewport-1', text: 'one', score: 1, matchesTargetScript: false, contextId: 1 },
+          { id: 'viewport-2', text: 'two', score: 1, matchesTargetScript: false, contextId: 1 },
+          { id: 'buffer-1', text: 'buffer', score: 1, matchesTargetScript: false, contextId: 1 },
+          { id: 'offscreen-1', text: 'offscreen', score: 1, matchesTargetScript: false, contextId: 1 },
+        ];
+        PageTranslationHelper.isInViewportWithMargin.mockImplementation((node, margin) => node.id.startsWith('viewport')
+          ? margin === 0
+          : node.id.startsWith('buffer') && margin > 0);
+        FilterClass.process(items, { ...config, diagnostics: { preparationStartedAt: performance.now() } });
+        const logger = getScopedLogger.mock.results.at(-1).value;
+        const details = logger.debugLazy.mock.calls.at(-1)[0]()[1];
+
+        expect(details).toMatchObject({
+          selectedItemCount: 2,
+          stopReason: 'capacity',
+          stoppingReasons: { viewport: 'capacity', buffer: 'capacity', offscreen: 'capacity' },
+        });
+      });
+
+      it('keeps a viewport script boundary as the final reason when buffer work exhausts', () => {
+        config.chunkSize = 4;
+        const items = [
+          { id: 'viewport-other-script', text: 'other', score: 1, matchesTargetScript: true, contextId: 1 },
+          { id: 'viewport-first-script', text: 'first', score: 1, matchesTargetScript: false, contextId: 1 },
+          { id: 'buffer-item', text: 'buffer', score: 1, matchesTargetScript: false, contextId: 1 },
+        ];
+        PageTranslationHelper.isInViewportWithMargin.mockImplementation((node, margin) => node.id.startsWith('viewport')
+          ? margin === 0
+          : margin > 0);
+        FilterClass.process(items, { ...config, diagnostics: { preparationStartedAt: performance.now() } });
+        const logger = getScopedLogger.mock.results.at(-1).value;
+        const details = logger.debugLazy.mock.calls.at(-1)[0]()[1];
+
+        expect(details).toMatchObject({
+          selectedItemCount: 2,
+          stopReason: 'script_boundary',
+          stoppingReasons: { viewport: 'script_boundary', buffer: 'insufficient_eligible_items' },
+        });
+      });
+
+      it('counts remaining work compatible with every script represented in the batch', () => {
+        config.chunkSize = 3;
+        const mixedItems = [
+          { id: 'viewport-latin', text: 'latin', score: 1, matchesTargetScript: false, contextId: 1 },
+          { id: 'viewport-target', text: 'target', score: 1, matchesTargetScript: true, contextId: 1 },
+          { id: 'buffer-target', text: 'buffer target', score: 1, matchesTargetScript: true, contextId: 1 },
+          { id: 'remaining-latin', text: 'remaining latin', score: 1, matchesTargetScript: false, contextId: 1 },
+          { id: 'remaining-target', text: 'remaining target', score: 1, matchesTargetScript: true, contextId: 1 },
+        ];
+        PageTranslationHelper.isInViewportWithMargin.mockImplementation((node, margin) => node.id.startsWith('viewport')
+          ? margin === 0
+          : margin > 0);
+        FilterClass.process(mixedItems, { ...config, diagnostics: { preparationStartedAt: performance.now() } });
+        const logger = getScopedLogger.mock.results.at(-1).value;
+        const details = logger.debugLazy.mock.calls.at(-1)[0]()[1];
+
+        expect(details).toMatchObject({
+          selectedItemCount: 3,
+          compatibleEligibleRemaining: 2,
+          stoppingReasons: { viewport: 'script_boundary', buffer: 'capacity' },
+        });
       });
 
       it('should fill batch from off-screen if NOT lazy', () => {

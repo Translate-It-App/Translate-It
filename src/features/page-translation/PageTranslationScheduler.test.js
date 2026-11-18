@@ -125,6 +125,32 @@ describe('PageTranslationScheduler', () => {
     scheduler.reset();
   });
 
+  it('logs aggregate dispatch diagnostics without source text', async () => {
+    const item = { id: 'item-1', text: 'private source text', enqueuedAt: performance.now(), resolve: vi.fn(), score: 1 };
+    scheduler.queue.push(item);
+    PageTranslationFluidFilter.process.mockReturnValue({ batchItems: [item], remainingItems: [] });
+    vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({
+      providerRegistryId: 'google', targetLanguage: 'fa', chunkSize: 8, maxChars: 500, parallelExecution: false
+    });
+    safeSendMessage.mockResolvedValue({ success: true, translatedText: '["translated"]' });
+    const capturedLogs = [];
+    scheduler.logger.debugLazy.mockImplementation(factory => capturedLogs.push(factory()));
+
+    await scheduler.flush();
+
+    const [message, details] = capturedLogs.at(-1);
+    expect(message).toContain('dispatch');
+    expect(details).toMatchObject({
+      sessionId: 'test-session-123', totalQueued: 1, selectedItemCount: 1,
+      originalChars: 19, chunkSize: 8, maxChars: 500, concurrencyLimit: 1,
+      activeWorkersAtDispatch: 1, messageId: expect.any(String),
+      preparationDurationMs: expect.any(Number), enqueueToDispatchMs: expect.any(Number),
+    });
+    expect(details.messageId).toBe(safeSendMessage.mock.calls[0][0].messageId);
+    expect(details.batchId).toBeDefined();
+    expect(JSON.stringify(details)).not.toContain('private source text');
+  });
+
   it('counts retained nodes once per callback and reaches idle without a provider request', async () => {
     vi.useFakeTimers();
     try {
