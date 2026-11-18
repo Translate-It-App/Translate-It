@@ -39,6 +39,11 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.queue = []; // Tasks: { text, score, resolve, reject, context, node }
     this.batchTimer = null;
     this.isVisibilityRetryTimer = false;
+    this.adaptiveBatchDeadline = null;
+    this.isAdaptiveBatchTimer = false;
+    this._adaptiveRecheckThreshold = null;
+    this._adaptiveRecheckPending = false;
+    this._adaptiveRecheckToken = 0;
     this.translatedCount = 0;
     this.failedCount = 0;
     this.totalTasks = 0;
@@ -115,6 +120,9 @@ export class PageTranslationScheduler extends ResourceTracker {
       if (isNewSession) {
         this.consecutiveTransientBatchFailures = 0;
         this._visibilityIdleSnapshot = null;
+        if (this.adaptiveBatchDeadline !== null) {
+          this._clearAdaptiveBatchWait();
+        }
       }
       this.lastNonFatalError = null;
       this.isTranslated = isTranslated;
@@ -126,7 +134,10 @@ export class PageTranslationScheduler extends ResourceTracker {
   setDiscoveryPending(pending, sessionContext) {
     if (sessionContext !== this.sessionContext || !this.isTranslated) return false;
     this.discoveryPending = Boolean(pending);
-    if (!this.discoveryPending) this._checkCompletion();
+    if (!this.discoveryPending) {
+      this._checkCompletion();
+      if (this.adaptiveBatchDeadline !== null && this.queue.length > 0) void this.flush();
+    }
     return true;
   }
 
@@ -181,7 +192,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       });
     }
 
-    this._clearBatchTimer();
+    this._clearAdaptiveBatchWait();
     if (this._completionTimer) {
       clearTimeout(this._completionTimer);
       this._completionTimer = null;
@@ -347,6 +358,25 @@ export class PageTranslationScheduler extends ResourceTracker {
    * High priority (Viewport) triggers faster flushes.
    */
   _scheduleFlush(score) {
+    if (this.adaptiveBatchDeadline !== null && this.settings.translateAfterScrollStop) {
+      this._clearAdaptiveBatchWait();
+    }
+    if (this.adaptiveBatchDeadline !== null) {
+      if (!this._adaptiveRecheckPending && this.queue.length >= this._adaptiveRecheckThreshold) {
+        this._adaptiveRecheckPending = true;
+        const recheckToken = this._adaptiveRecheckToken;
+        const sessionId = this.translationSessionId;
+        const sessionContext = this.sessionContext;
+        queueMicrotask(() => {
+          if (recheckToken !== this._adaptiveRecheckToken) return;
+          this._adaptiveRecheckPending = false;
+          if (!this._ownsFlushSession(sessionId, sessionContext) || this.adaptiveBatchDeadline === null) return;
+          this._adaptiveRecheckThreshold = null;
+          void this.flush();
+        });
+      }
+      return;
+    }
     // Fresh arrivals should use the normal batching deadline, not a visibility poll.
     if (this.isVisibilityRetryTimer) {
       this._clearBatchTimer();
@@ -425,7 +455,15 @@ export class PageTranslationScheduler extends ResourceTracker {
     // Respect concurrency limits
     if (this.activeFlushes >= (this.settings.maxConcurrentFlushes || 1)) {
       if (!this.batchTimer && this.isTranslated) {
-        this.batchTimer = this.trackTimeout(() => this.flush(), PAGE_TRANSLATION_TIMING.CONCURRENCY_RETRY_DELAY);
+        if (this.adaptiveBatchDeadline !== null) {
+          this._scheduleAdaptiveBatchFlush(
+            this.translationSessionId,
+            this.sessionContext,
+            PAGE_TRANSLATION_TIMING.CONCURRENCY_RETRY_DELAY
+          );
+        } else {
+          this.batchTimer = this.trackTimeout(() => this.flush(), PAGE_TRANSLATION_TIMING.CONCURRENCY_RETRY_DELAY);
+        }
       }
       return;
     }
@@ -435,6 +473,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     const flushSessionId = this.translationSessionId;
     const flushContext = this.sessionContext;
     this.activeFlushes++;
+    let ownsWorkerSlot = true;
     let activeBatch = null;
 
     try {
@@ -478,11 +517,58 @@ export class PageTranslationScheduler extends ResourceTracker {
           const result = PageTranslationFluidFilter.process(this.queue, config);
           this._validateFilterResult(result);
           currentBatch = result.batchItems;
+
+          const stopReasons = Object.values(config.diagnostics.stoppingReasons || {});
+          const selectedChars = currentBatch.reduce((total, item) => total + item.text.length, 0);
+          const isSelectionLimited = stopReasons.includes('script_boundary')
+            || stopReasons.includes('character_limit')
+            || (config.maxChars > 0 && selectedChars >= config.maxChars);
+          const canDefer = config.isAI === true
+            && !this.settings.translateAfterScrollStop
+            && !this.isFirstBatch
+            && this.discoveryPending
+            && !this.isWaitingForVisibility
+            && currentBatch.length >= 1
+            && currentBatch.length <= 3
+            && currentBatch.length < config.chunkSize
+            && !isSelectionLimited
+            && config.diagnostics.stopReason === 'insufficient_eligible_items';
+
+          if (canDefer && (this.adaptiveBatchDeadline === null || performance.now() < this.adaptiveBatchDeadline)) {
+            if (this.adaptiveBatchDeadline === null) {
+              this.adaptiveBatchDeadline = performance.now() + PAGE_TRANSLATION_TIMING.HIGH_PRIORITY_DELAY;
+            }
+            this._adaptiveRecheckThreshold = this.queue.length + (4 - currentBatch.length);
+            const remainingMs = Math.max(0, this.adaptiveBatchDeadline - performance.now());
+            this.logger.debugLazy(() => ['Adaptive batch deferred:', JSON.stringify({
+              sessionId: flushSessionId, batchId, selectedItemCount: currentBatch.length,
+              deadlineRemainingMs: remainingMs, reason: 'discovery_pending',
+            })]);
+            this._scheduleAdaptiveBatchFlush(flushSessionId, flushContext, remainingMs);
+            this.isWaitingForVisibility = false;
+            this._visibilityIdleSnapshot = null;
+            this.activeFlushes--;
+            ownsWorkerSlot = false;
+            break;
+          }
+
+          if (this.adaptiveBatchDeadline !== null && currentBatch.length > 0) {
+            const releaseReason = currentBatch.length >= 4 ? 'sufficient_eligible_items'
+              : !this.discoveryPending ? 'discovery_complete'
+                : isSelectionLimited || currentBatch.length >= config.chunkSize ? 'selection_limited'
+                  : 'deadline_elapsed';
+            this.logger.debugLazy(() => ['Adaptive batch released:', JSON.stringify({
+              sessionId: flushSessionId, batchId, selectedItemCount: currentBatch.length, reason: releaseReason,
+            })]);
+            this._clearAdaptiveBatchWait();
+          }
+
           activeBatch = this._trackBatch(currentBatch);
           this.queue = result.remainingItems;
         }
 
         if (currentBatch.length === 0) {
+          if (this.adaptiveBatchDeadline !== null) this._clearAdaptiveBatchWait();
           this.activeBatches.delete(activeBatch);
           activeBatch = null;
           this.logger.debug('No visible content in queue, stopping flush loop');
@@ -531,10 +617,10 @@ export class PageTranslationScheduler extends ResourceTracker {
       // finalizer must not decrement the newer session's accounting.
       const ownsAccounting = this.translationSessionId === flushSessionId
         && this.sessionContext === flushContext;
-      if (ownsAccounting) {
+      if (ownsAccounting && ownsWorkerSlot) {
         this.activeFlushes--;
-        this._checkCompletion();
       }
+      if (ownsAccounting) this._checkCompletion();
     }
   }
 
@@ -555,13 +641,42 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.batchTimerDelay = 1000;
   }
 
+  _scheduleAdaptiveBatchFlush(sessionId, sessionContext, delay) {
+    if (this.batchTimer) this._clearBatchTimer();
+    let adaptiveTimer;
+    adaptiveTimer = this.trackTimeout(() => {
+      if (this.batchTimer !== adaptiveTimer) return;
+      this.batchTimer = null;
+      this.isAdaptiveBatchTimer = false;
+      this.batchTimerDelay = null;
+      if (this.settings.translateAfterScrollStop && this.isScrolling) {
+        this.adaptiveBatchDeadline = null;
+        return;
+      }
+      if (this._ownsFlushSession(sessionId, sessionContext)) void this.flush();
+    }, delay);
+    this.batchTimer = adaptiveTimer;
+    this.isAdaptiveBatchTimer = true;
+    this.isVisibilityRetryTimer = false;
+    this.batchTimerDelay = delay;
+  }
+
   _clearBatchTimer() {
     if (this.batchTimer) {
-      if (this.isVisibilityRetryTimer) this.clearTimer(this.batchTimer);
+      if (this.isVisibilityRetryTimer || this.isAdaptiveBatchTimer) this.clearTimer(this.batchTimer);
       else clearTimeout(this.batchTimer);
       this.batchTimer = null;
     }
     this.isVisibilityRetryTimer = false;
+    this.isAdaptiveBatchTimer = false;
+  }
+
+  _clearAdaptiveBatchWait() {
+    this._clearBatchTimer();
+    this.adaptiveBatchDeadline = null;
+    this._adaptiveRecheckThreshold = null;
+    this._adaptiveRecheckPending = false;
+    this._adaptiveRecheckToken++;
   }
 
   _ownsFlushSession(sessionId, sessionContext) {
@@ -812,6 +927,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       targetLanguage,
       chunkSize: Math.max(chunkSize, 5), // Ensure at least 5 segments per batch
       parallelExecution: isAI || isProviderType(providerName, ProviderTypes.CUSTOM),
+      isAI,
       lazyLoading: settings.lazyLoading,
       maxChars: isAI ? (providerConfig.batching?.maxBatchSizeChars || await getWholePageAiMaxCharsAsync()) : (providerConfig.batching?.characterLimit || await getWholePageMaxCharsAsync())
     };

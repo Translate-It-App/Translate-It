@@ -153,6 +153,321 @@ describe('PageTranslationScheduler', () => {
     expect(JSON.stringify(details)).not.toContain('private source text');
   });
 
+  describe('adaptive AI batch deferral', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      scheduler.isFirstBatch = false;
+      scheduler.setSettings({ translateAfterScrollStop: false, maxConcurrentFlushes: 1 });
+      vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({
+        providerRegistryId: 'openai', targetLanguage: 'en', chunkSize: 10, maxChars: 1000,
+        parallelExecution: true, isAI: true, lazyLoading: false,
+      });
+      safeSendMessage.mockImplementation(async message => {
+        const items = JSON.parse(message.data.text);
+        return { success: true, translatedText: JSON.stringify(items.map(({ id }) => ({ id, text: 'translated' }))) };
+      });
+      scheduler.setDiscoveryPending(true, scheduler.sessionContext);
+    });
+
+    afterEach(() => vi.useRealTimers());
+
+    const queueItems = count => Array.from({ length: count }, (_, index) => ({
+      id: `adaptive-${index}`, text: `item-${index}`, enqueuedAt: performance.now(),
+      isHighPriority: false, matchesTargetScript: true, resolve: vi.fn(),
+    }));
+    const select = (count, reasons = { viewport: 'insufficient_eligible_items' }) => {
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        config.diagnostics.stopReason = 'insufficient_eligible_items';
+        config.diagnostics.stoppingReasons = reasons;
+        return { batchItems: queue.slice(0, count), remainingItems: queue.slice(count) };
+      });
+    };
+
+    it.each([1, 2, 3])('defers %i eligible items without holding a worker slot', async count => {
+      scheduler.queue = queueItems(count);
+      const originalQueue = scheduler.queue;
+      select(count);
+
+      await scheduler.flush();
+
+      expect(scheduler.queue).toBe(originalQueue);
+      expect(scheduler.activeFlushes).toBe(0);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.batchTimer).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases early when discovery completes and re-filters the unchanged queue', async () => {
+      scheduler.queue = queueItems(2);
+      select(2);
+      await scheduler.flush();
+      select(2);
+
+      scheduler.setDiscoveryPending(false, scheduler.sessionContext);
+      await vi.runAllTimersAsync();
+
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not extend the original deadline when more small items arrive', async () => {
+      scheduler.queue = queueItems(1);
+      select(1);
+      await scheduler.flush();
+      await vi.advanceTimersByTimeAsync(200);
+
+      scheduler.queue.push(...queueItems(2));
+      select(3);
+      scheduler._scheduleFlush(1);
+      await Promise.resolve();
+      expect(scheduler.activeFlushes).toBe(0);
+      await vi.advanceTimersByTimeAsync(49);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not defer batches limited by script or character boundaries', async () => {
+      for (const reason of ['script_boundary', 'character_limit']) {
+        scheduler.queue = queueItems(2);
+        select(2, { viewport: reason });
+        await scheduler.flush();
+      }
+      expect(safeSendMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('dispatches sufficient batches, exact character limits, and non-AI/On-Stop work immediately', async () => {
+      scheduler.queue = queueItems(4);
+      select(4);
+      await scheduler.flush();
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+
+      scheduler.isFirstBatch = false;
+      scheduler.queue = queueItems(1);
+      scheduler.queue[0].text = '12345';
+      scheduler._getBatchConfig.mockResolvedValueOnce({
+        providerRegistryId: 'openai', targetLanguage: 'en', chunkSize: 10, maxChars: 5,
+        parallelExecution: true, isAI: true, lazyLoading: false,
+      });
+      select(1);
+      await scheduler.flush();
+      expect(safeSendMessage).toHaveBeenCalledTimes(2);
+
+      scheduler.queue = queueItems(1);
+      scheduler._getBatchConfig.mockResolvedValueOnce({
+        providerRegistryId: 'custom', targetLanguage: 'en', chunkSize: 10, maxChars: 1000,
+        parallelExecution: true, isAI: false, lazyLoading: false,
+      });
+      select(1);
+      await scheduler.flush();
+      expect(safeSendMessage).toHaveBeenCalledTimes(3);
+
+      scheduler.setSettings({ translateAfterScrollStop: true });
+      scheduler.queue = queueItems(1);
+      PageTranslationQueueFilter.process.mockImplementation(queue => ({
+        batchItems: queue,
+        remainingItems: [],
+        purgedCount: 0,
+        ejectedItems: [],
+      }));
+      scheduler._getBatchConfig.mockResolvedValueOnce({
+        providerRegistryId: 'openai', targetLanguage: 'en', chunkSize: 10, maxChars: 1000,
+        parallelExecution: true, isAI: true, lazyLoading: false,
+      });
+      select(1);
+      await scheduler.flush();
+      expect(safeSendMessage).toHaveBeenCalledTimes(4);
+    });
+
+    it('keeps discovery deferral bounded by the original deadline', async () => {
+      scheduler.queue = queueItems(1);
+      select(1);
+      await scheduler.flush();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      expect(scheduler.adaptiveBatchDeadline).toBeNull();
+    });
+
+    it('keeps the first AI batch on its original 800ms deadline', async () => {
+      scheduler.isFirstBatch = true;
+      scheduler.setSettings({ chunkSize: 10, priorityThreshold: 1, scrollStopDelay: 600 });
+      select(1);
+      void scheduler.enqueue('first item', scheduler.sessionContext, 1);
+
+      await vi.advanceTimersByTimeAsync(799);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.adaptiveBatchDeadline).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases immediately on a fourth eligible enqueue, once and without duplicate IDs', async () => {
+      scheduler.queue = queueItems(3);
+      select(Number.MAX_SAFE_INTEGER);
+      await scheduler.flush();
+      expect(scheduler.activeFlushes).toBe(0);
+
+      void scheduler.enqueue('fourth item', scheduler.sessionContext, 1);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      const items = JSON.parse(safeSendMessage.mock.calls[0][0].data.text);
+      expect(items).toHaveLength(4);
+      expect(new Set(items.map(item => item.id)).size).toBe(4);
+    });
+
+    it('coalesces burst enqueues into one eligibility recheck at the arrival threshold', async () => {
+      scheduler.queue = queueItems(1);
+      select(Number.MAX_SAFE_INTEGER);
+      await scheduler.flush();
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+
+      void scheduler.enqueue('second item', scheduler.sessionContext, 0);
+      void scheduler.enqueue('third item', scheduler.sessionContext, 0);
+      await Promise.resolve();
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+
+      void scheduler.enqueue('fourth item', scheduler.sessionContext, 0);
+      void scheduler.enqueue('fifth item', scheduler.sessionContext, 0);
+      void scheduler.enqueue('sixth item', scheduler.sessionContext, 0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      const items = JSON.parse(safeSendMessage.mock.calls[0][0].data.text);
+      expect(items).toHaveLength(6);
+      expect(new Set(items.map(item => item.id)).size).toBe(6);
+    });
+
+    it('re-filters visibility before dispatch and waits for the existing visibility retry', async () => {
+      scheduler.queue = queueItems(1);
+      let visible = true;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        config.diagnostics.stopReason = 'insufficient_eligible_items';
+        config.diagnostics.stoppingReasons = { viewport: 'insufficient_eligible_items' };
+        return visible
+          ? { batchItems: queue.slice(0, 1), remainingItems: queue.slice(1) }
+          : { batchItems: [], remainingItems: queue };
+      });
+      scheduler._getBatchConfig.mockResolvedValue({
+        providerRegistryId: 'openai', targetLanguage: 'en', chunkSize: 10, maxChars: 1000,
+        parallelExecution: true, isAI: true, lazyLoading: true,
+      });
+      await scheduler.flush();
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+      visible = false;
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.adaptiveBatchDeadline).toBeNull();
+      expect(scheduler.isAdaptiveBatchTimer).toBe(false);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+      visible = true;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(3);
+      expect(scheduler.adaptiveBatchDeadline).toBeNull();
+      expect(scheduler.isAdaptiveBatchTimer).toBe(false);
+      expect(scheduler.isWaitingForVisibility).toBe(false);
+    });
+
+    it.each(['stop', 'reset', 'replace-session'])(
+      '%s prevents a stale adaptive callback from dispatching or touching replacement work', async action => {
+        scheduler.queue = queueItems(1);
+        select(1);
+        await scheduler.flush();
+        const replacementQueue = queueItems(1);
+        if (action === 'stop') {
+          scheduler.stop();
+          scheduler.setTranslationState(true, 'replacement-session', { pageTitle: 'replacement' });
+        } else if (action === 'reset') {
+          scheduler.reset();
+          scheduler.setTranslationState(true, 'replacement-session', { pageTitle: 'replacement' });
+        } else {
+          scheduler.setTranslationState(true, 'replacement-session', { pageTitle: 'replacement' });
+        }
+        scheduler.queue = replacementQueue;
+
+        await vi.advanceTimersByTimeAsync(250);
+
+        expect(safeSendMessage).not.toHaveBeenCalled();
+        expect(scheduler.queue).toBe(replacementQueue);
+      }
+    );
+
+    it('preserves another worker slot and keeps one adaptive timer across repeated flushes', async () => {
+      scheduler.setSettings({ maxConcurrentFlushes: 2 });
+      scheduler.activeFlushes = 1;
+      scheduler.queue = queueItems(2);
+      select(2);
+
+      await scheduler.flush();
+      expect(scheduler.activeFlushes).toBe(1);
+      const timersDuringWait = vi.getTimerCount();
+      await scheduler.flush();
+      expect(scheduler.activeFlushes).toBe(1);
+      expect(vi.getTimerCount()).toBe(timersDuringWait);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      const items = JSON.parse(safeSendMessage.mock.calls[0][0].data.text);
+      expect(new Set(items.map(item => item.id)).size).toBe(items.length);
+      expect(scheduler.activeFlushes).toBe(1);
+      scheduler.activeFlushes = 0;
+    });
+
+    it('retries after the fixed deadline when concurrency is full', async () => {
+      scheduler.queue = queueItems(1);
+      select(1);
+      await scheduler.flush();
+      scheduler.activeFlushes = 1;
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.isAdaptiveBatchTimer).toBe(true);
+
+      scheduler.activeFlushes = 0;
+      await vi.advanceTimersByTimeAsync(300);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the original adaptive timer while enqueues retry against full worker capacity', async () => {
+      scheduler.queue = queueItems(1);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        config.diagnostics.stopReason = 'insufficient_eligible_items';
+        config.diagnostics.stoppingReasons = { viewport: 'insufficient_eligible_items' };
+        return { batchItems: queue, remainingItems: [] };
+      });
+      await scheduler.flush();
+      const fixedDeadline = scheduler.adaptiveBatchDeadline;
+      const originalTimer = scheduler.batchTimer;
+      scheduler.activeFlushes = 1;
+
+      void scheduler.enqueue('second item', scheduler.sessionContext, 0);
+      await Promise.resolve();
+      expect(scheduler.batchTimer).toBe(originalTimer);
+      void scheduler.enqueue('third item', scheduler.sessionContext, 0);
+      await Promise.resolve();
+      expect(scheduler.batchTimer).toBe(originalTimer);
+      expect(scheduler.batchTimerDelay).toBe(250);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.adaptiveBatchDeadline).toBe(fixedDeadline);
+      expect(scheduler.batchTimer).not.toBe(originalTimer);
+      expect(scheduler.batchTimerDelay).toBe(300);
+
+      scheduler.activeFlushes = 0;
+      await vi.advanceTimersByTimeAsync(300);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      const items = JSON.parse(safeSendMessage.mock.calls[0][0].data.text);
+      expect(items).toHaveLength(3);
+    });
+  });
+
   it('counts retained nodes once per callback and reaches idle without a provider request', async () => {
     vi.useFakeTimers();
     try {
