@@ -46,7 +46,7 @@ export const NewlineManager = {
   restore(text) {
     if (!text || typeof text !== 'string') return text;
 
-    logger.debug('Restoring newlines from markers', { length: text.length });
+    // logger.debug('Restoring newlines from markers', { length: text.length });
 
     let restored = text;
 
