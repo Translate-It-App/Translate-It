@@ -97,8 +97,10 @@ describe('PageTranslation Filters', () => {
         } });
 
         const logger = getScopedLogger.mock.results.at(-1).value;
-        const [message, details] = logger.debugLazy.mock.calls.at(-1)[0]();
+        const [message, serializedDetails] = logger.debugLazy.mock.calls.at(-1)[0]();
+        const details = JSON.parse(serializedDetails);
         expect(message).toMatch(/Filter Results/);
+        expect(serializedDetails).not.toContain('\n');
         expect(details).toMatchObject({
           sessionId: 'session-1', batchId: 7, concurrencyLimit: 3,
           totalQueued: 4, viewportCount: 4, bufferCount: 0, offscreenCount: 0,
@@ -118,7 +120,7 @@ describe('PageTranslation Filters', () => {
         PageTranslationHelper.isInViewportWithMargin.mockImplementation((node, margin) => margin > 0);
         FilterClass.process(bufferItems, { ...config, diagnostics: { preparationStartedAt: performance.now() } });
         const logger = getScopedLogger.mock.results.at(-1).value;
-        const details = logger.debugLazy.mock.calls.at(-1)[0]()[1];
+        const details = JSON.parse(logger.debugLazy.mock.calls.at(-1)[0]()[1]);
 
         expect(details).toMatchObject({
           stopReason: 'capacity',
@@ -141,7 +143,7 @@ describe('PageTranslation Filters', () => {
           : node.id.startsWith('buffer') && margin > 0);
         FilterClass.process(items, { ...config, diagnostics: { preparationStartedAt: performance.now() } });
         const logger = getScopedLogger.mock.results.at(-1).value;
-        const details = logger.debugLazy.mock.calls.at(-1)[0]()[1];
+        const details = JSON.parse(logger.debugLazy.mock.calls.at(-1)[0]()[1]);
 
         expect(details).toMatchObject({
           selectedItemCount: 2,
@@ -162,7 +164,7 @@ describe('PageTranslation Filters', () => {
           : margin > 0);
         FilterClass.process(items, { ...config, diagnostics: { preparationStartedAt: performance.now() } });
         const logger = getScopedLogger.mock.results.at(-1).value;
-        const details = logger.debugLazy.mock.calls.at(-1)[0]()[1];
+        const details = JSON.parse(logger.debugLazy.mock.calls.at(-1)[0]()[1]);
 
         expect(details).toMatchObject({
           selectedItemCount: 2,
@@ -185,7 +187,7 @@ describe('PageTranslation Filters', () => {
           : margin > 0);
         FilterClass.process(mixedItems, { ...config, diagnostics: { preparationStartedAt: performance.now() } });
         const logger = getScopedLogger.mock.results.at(-1).value;
-        const details = logger.debugLazy.mock.calls.at(-1)[0]()[1];
+        const details = JSON.parse(logger.debugLazy.mock.calls.at(-1)[0]()[1]);
 
         expect(details).toMatchObject({
           selectedItemCount: 3,

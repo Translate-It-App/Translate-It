@@ -138,8 +138,10 @@ describe('PageTranslationScheduler', () => {
 
     await scheduler.flush();
 
-    const [message, details] = capturedLogs.at(-1);
+    const [message, serializedDetails] = capturedLogs.at(-1);
+    const details = JSON.parse(serializedDetails);
     expect(message).toContain('dispatch');
+    expect(serializedDetails).not.toContain('\n');
     expect(details).toMatchObject({
       sessionId: 'test-session-123', totalQueued: 1, selectedItemCount: 1,
       originalChars: 19, chunkSize: 8, maxChars: 500, concurrencyLimit: 1,

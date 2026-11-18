@@ -57,7 +57,7 @@ export class PageTranslationQueueFilter {
         
         if (purgeResult.purgedCount > 0) {
           logger.debug(`Purged ${purgeResult.purgedCount} items that were too far (> ${MAX_DISTANCE_PX}px)`);
-          logger.debugLazy(() => ['Filter Results (Smart Buffer):', {
+          logger.debugLazy(() => ['Filter Results (Smart Buffer):', JSON.stringify({
             sessionId: config.diagnostics?.sessionId,
             batchId: config.diagnostics?.batchId,
             concurrencyLimit: config.diagnostics?.concurrencyLimit,
@@ -73,7 +73,7 @@ export class PageTranslationQueueFilter {
              stopReason: 'insufficient_eligible_items',
               stoppingReasons: { viewport: 'not_applicable', buffer: 'not_applicable', offscreen: 'not_applicable' },
             compatibleEligibleRemaining: 0
-          }]);
+          })]);
           if (config.diagnostics) {
             config.diagnostics.stopReason = 'insufficient_eligible_items';
             config.diagnostics.stoppingReasons = { viewport: 'not_applicable', buffer: 'not_applicable', offscreen: 'not_applicable' };
@@ -81,7 +81,7 @@ export class PageTranslationQueueFilter {
           return { batchItems: [], remainingItems: [...bufferItems, ...purgeResult.remaining], purgedCount: purgeResult.purgedCount, ejectedItems: purgeResult.ejectedItems };
         }
       }
-      logger.debugLazy(() => ['Filter Results (Smart Buffer):', {
+      logger.debugLazy(() => ['Filter Results (Smart Buffer):', JSON.stringify({
         sessionId: config.diagnostics?.sessionId,
         batchId: config.diagnostics?.batchId,
         concurrencyLimit: config.diagnostics?.concurrencyLimit,
@@ -97,7 +97,7 @@ export class PageTranslationQueueFilter {
          stopReason: 'insufficient_eligible_items',
           stoppingReasons: { viewport: 'not_applicable', buffer: 'not_applicable', offscreen: 'not_applicable' },
         compatibleEligibleRemaining: 0
-      }]);
+      })]);
       if (config.diagnostics) {
         config.diagnostics.stopReason = 'insufficient_eligible_items';
         config.diagnostics.stoppingReasons = { viewport: 'not_applicable', buffer: 'not_applicable', offscreen: 'not_applicable' };
@@ -202,7 +202,7 @@ export class PageTranslationQueueFilter {
       const compatibleEligibleRemaining = selectedScripts.size === 0
         ? eligibleRemaining.length
         : eligibleRemaining.filter(item => selectedScripts.has(item.matchesTargetScript)).length;
-      return ['Filter Results (Smart Buffer):', {
+      return ['Filter Results (Smart Buffer):', JSON.stringify({
         sessionId: config.diagnostics?.sessionId,
         batchId: config.diagnostics?.batchId,
         concurrencyLimit: config.diagnostics?.concurrencyLimit,
@@ -219,7 +219,7 @@ export class PageTranslationQueueFilter {
          stoppingReasons,
         compatibleEligibleRemaining,
         remaining: remainingItems.length
-      }];
+      })];
     });
 
     return { batchItems, remainingItems };

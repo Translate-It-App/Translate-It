@@ -41,7 +41,7 @@ export class PageTranslationFluidFilter {
     // This prevents unnecessary API calls for far-away content.
     const isLazy = config.lazyLoading !== false;
     if (viewportItems.length === 0 && bufferItems.length === 0 && isLazy) {
-      logger.debugLazy(() => ['Fluid Filter Results:', {
+      logger.debugLazy(() => ['Fluid Filter Results:', JSON.stringify({
         sessionId: config.diagnostics?.sessionId,
         batchId: config.diagnostics?.batchId,
         concurrencyLimit: config.diagnostics?.concurrencyLimit,
@@ -57,7 +57,7 @@ export class PageTranslationFluidFilter {
          stopReason: 'insufficient_eligible_items',
          stoppingReasons: { viewport: 'not_applicable', buffer: 'not_applicable', offscreen: 'not_applicable' },
         compatibleEligibleRemaining: 0
-      }]);
+      })]);
       if (config.diagnostics) {
         config.diagnostics.stopReason = 'insufficient_eligible_items';
         config.diagnostics.stoppingReasons = { viewport: 'not_applicable', buffer: 'not_applicable', offscreen: 'not_applicable' };
@@ -177,7 +177,7 @@ export class PageTranslationFluidFilter {
       const compatibleEligibleRemaining = selectedScripts.size === 0
         ? eligibleRemaining.length
         : eligibleRemaining.filter(item => selectedScripts.has(item.matchesTargetScript)).length;
-      return ['Fluid Filter Results:', {
+      return ['Fluid Filter Results:', JSON.stringify({
         sessionId: config.diagnostics?.sessionId,
         batchId: config.diagnostics?.batchId,
         concurrencyLimit: config.diagnostics?.concurrencyLimit,
@@ -194,7 +194,7 @@ export class PageTranslationFluidFilter {
          stoppingReasons,
         compatibleEligibleRemaining,
         remaining: remainingItems.length
-      }];
+      })];
     });
 
     return { batchItems, remainingItems };

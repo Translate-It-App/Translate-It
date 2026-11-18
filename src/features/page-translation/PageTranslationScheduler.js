@@ -634,7 +634,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       const dispatchedAt = performance.now();
       this.logger.debugLazy(() => [
         'Page translation batch dispatch:',
-        {
+        JSON.stringify({
           sessionId: diagnostics.sessionId,
           batchId: diagnostics.batchId,
           messageId: batchMessage.messageId,
@@ -649,7 +649,7 @@ export class PageTranslationScheduler extends ResourceTracker {
           activeWorkersAtDispatch: this.activeFlushes,
           stopReason: diagnostics.stopReason,
           stoppingReasons: diagnostics.stoppingReasons,
-        }
+        })
       ]);
     }
 
