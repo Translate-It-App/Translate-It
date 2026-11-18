@@ -38,7 +38,10 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.onInternalError = typeof onInternalError === 'function' ? onInternalError : null;
     this.queue = []; // Tasks: { text, score, resolve, reject, context, node }
     this.batchTimer = null;
+    this._batchTimerDeadline = null;
     this.isVisibilityRetryTimer = false;
+    this._visibilityRetryDeadline = null;
+    this._visibilityBlockRevision = 0;
     this.adaptiveBatchDeadline = null;
     this.isAdaptiveBatchTimer = false;
     this._adaptiveRecheckThreshold = null;
@@ -120,6 +123,12 @@ export class PageTranslationScheduler extends ResourceTracker {
       if (isNewSession) {
         this.consecutiveTransientBatchFailures = 0;
         this._visibilityIdleSnapshot = null;
+        if (!this.settings.translateAfterScrollStop && this.settings.lazyLoading !== false) {
+          this._visibilityBlockRevision++;
+        }
+        this.isWaitingForVisibility = false;
+        this._visibilityRetryDeadline = null;
+        if (this.batchTimer) this._clearBatchTimer();
         if (this.adaptiveBatchDeadline !== null) {
           this._clearAdaptiveBatchWait();
         }
@@ -149,6 +158,10 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.highPriorityCount = 0;
     this.isWaitingForVisibility = false;
     this._visibilityIdleSnapshot = null;
+    this._visibilityRetryDeadline = null;
+    if (!this.settings.translateAfterScrollStop && this.settings.lazyLoading !== false) {
+      this._visibilityBlockRevision++;
+    }
     this.fatalErrorOccurred = false;
     this.consecutiveTransientBatchFailures = 0;
     this._handledBatchOutcomes = new WeakSet();
@@ -172,6 +185,10 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.isScrolling = false;
     this.isWaitingForVisibility = false;
     this._visibilityIdleSnapshot = null;
+    this._visibilityRetryDeadline = null;
+    if (!this.settings.translateAfterScrollStop && this.settings.lazyLoading !== false) {
+      this._visibilityBlockRevision++;
+    }
     this.contextMap = new WeakMap();
     
     // CRITICAL: Notify background to abort any pending batch for this session
@@ -337,7 +354,7 @@ export class PageTranslationScheduler extends ResourceTracker {
   signalScrollStop() {
     this.isScrolling = false;
     this.logger.debug('Signal: Scroll Stop. Queue size:', this.queue.length);
-    this.flush();
+    this.flush({ recheckVisibility: true });
   }
 
   /**
@@ -375,6 +392,15 @@ export class PageTranslationScheduler extends ResourceTracker {
           void this.flush();
         });
       }
+      return;
+    }
+    if (this._isFluidLazyVisibilityBlocked()) {
+      const standardDelay = this.settings.scrollStopDelay || PAGE_TRANSLATION_TIMING.STANDARD_LOAD_DELAY;
+      const isHighPriority = score >= this.settings.priorityThreshold;
+      const delay = this.isFirstBatch
+        ? PAGE_TRANSLATION_TIMING.FIRST_BATCH_DELAY
+        : (isHighPriority ? Math.min(PAGE_TRANSLATION_TIMING.HIGH_PRIORITY_DELAY, standardDelay) : standardDelay);
+      this._scheduleVisibilityRetry(this.translationSessionId, this.sessionContext, delay);
       return;
     }
     // Fresh arrivals should use the normal batching deadline, not a visibility poll.
@@ -442,15 +468,30 @@ export class PageTranslationScheduler extends ResourceTracker {
       }
     }
 
+    const sessionId = this.translationSessionId;
+    const sessionContext = this.sessionContext;
+    let batchTimer;
+    batchTimer = this.trackTimeout(() => {
+      if (this.batchTimer !== batchTimer) return;
+      this.batchTimer = null;
+      this.batchTimerDelay = null;
+      this._batchTimerDeadline = null;
+      if (this._ownsFlushSession(sessionId, sessionContext)) void this.flush();
+    }, delay);
     this.batchTimerDelay = delay;
-    this.batchTimer = this.trackTimeout(() => this.flush(), delay);
+    this._batchTimerDeadline = performance.now() + delay;
+    this.batchTimer = batchTimer;
   }
 
-  async flush() {
+  async flush({ recheckVisibility = false } = {}) {
     if (!this.isTranslated || this.fatalErrorOccurred || this.queue.length === 0) {
       if (!this.isTranslated && this.queue.length > 0) this.stop();
       return;
     }
+
+    if (this._isFluidLazyVisibilityBlocked() && !recheckVisibility) return;
+    const trackVisibilityRevision = !this.settings.translateAfterScrollStop
+      && this.settings.lazyLoading !== false;
     
     // Respect concurrency limits
     if (this.activeFlushes >= (this.settings.maxConcurrentFlushes || 1)) {
@@ -461,8 +502,26 @@ export class PageTranslationScheduler extends ResourceTracker {
             this.sessionContext,
             PAGE_TRANSLATION_TIMING.CONCURRENCY_RETRY_DELAY
           );
+        } else if (recheckVisibility && trackVisibilityRevision && this.isWaitingForVisibility) {
+          this._scheduleVisibilityRetry(
+            this.translationSessionId,
+            this.sessionContext,
+            PAGE_TRANSLATION_TIMING.CONCURRENCY_RETRY_DELAY
+          );
         } else {
-          this.batchTimer = this.trackTimeout(() => this.flush(), PAGE_TRANSLATION_TIMING.CONCURRENCY_RETRY_DELAY);
+          const sessionId = this.translationSessionId;
+          const sessionContext = this.sessionContext;
+          let batchTimer;
+          batchTimer = this.trackTimeout(() => {
+            if (this.batchTimer !== batchTimer) return;
+            this.batchTimer = null;
+            this.batchTimerDelay = null;
+            this._batchTimerDeadline = null;
+            if (this._ownsFlushSession(sessionId, sessionContext)) void this.flush();
+          }, PAGE_TRANSLATION_TIMING.CONCURRENCY_RETRY_DELAY);
+          this.batchTimer = batchTimer;
+          this.batchTimerDelay = PAGE_TRANSLATION_TIMING.CONCURRENCY_RETRY_DELAY;
+          this._batchTimerDeadline = performance.now() + PAGE_TRANSLATION_TIMING.CONCURRENCY_RETRY_DELAY;
         }
       }
       return;
@@ -472,6 +531,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     
     const flushSessionId = this.translationSessionId;
     const flushContext = this.sessionContext;
+    let mayRecheckVisibility = recheckVisibility;
     this.activeFlushes++;
     let ownsWorkerSlot = true;
     let activeBatch = null;
@@ -479,10 +539,15 @@ export class PageTranslationScheduler extends ResourceTracker {
     try {
       // Process batches in a loop as long as there are items and we are still translating
       while (this.queue.length > 0 && this.isTranslated && flushContext === this.sessionContext) {
+        if (this._isFluidLazyVisibilityBlocked() && !mayRecheckVisibility) break;
+        const visibilityBlockRevision = this._visibilityBlockRevision;
         const preparationStartedAt = performance.now();
         const batchId = this._nextBatchId++;
         const config = await this._getBatchConfig();
         if (!this._ownsFlushSession(flushSessionId, flushContext) || this.fatalErrorOccurred) return;
+        if ((trackVisibilityRevision && visibilityBlockRevision !== this._visibilityBlockRevision)
+            || (this._isFluidLazyVisibilityBlocked() && !mayRecheckVisibility)) break;
+        mayRecheckVisibility = false;
         if (this.activeFlushes > (this.settings.maxConcurrentFlushes || 1)) break;
         const totalQueuedBeforeSelection = this.queue.length;
         config.diagnostics = {
@@ -579,7 +644,12 @@ export class PageTranslationScheduler extends ResourceTracker {
             && this.queue.length > 0
             && !filterResult.hasVisibleEligibleItems;
           this.isWaitingForVisibility = isVisibilityBlocked;
-          if (isVisibilityBlocked) this._scheduleVisibilityRetry(flushSessionId, flushContext);
+          if (isVisibilityBlocked) {
+            if (trackVisibilityRevision) this._visibilityBlockRevision++;
+            this._scheduleVisibilityRetry(flushSessionId, flushContext);
+          } else {
+            this._visibilityRetryDeadline = null;
+          }
           break;
         }
 
@@ -588,6 +658,7 @@ export class PageTranslationScheduler extends ResourceTracker {
         this.highPriorityCount = Math.max(0, this.highPriorityCount - removedHighPriority);
         this.isWaitingForVisibility = false; // We found something to translate
         this._visibilityIdleSnapshot = null;
+        this._visibilityRetryDeadline = null;
 
         // 2. EXECUTE BATCH: Process the selected items
         this.isFirstBatch = false;
@@ -622,21 +693,36 @@ export class PageTranslationScheduler extends ResourceTracker {
     }
   }
 
-  _scheduleVisibilityRetry(sessionId, sessionContext) {
+  _scheduleVisibilityRetry(sessionId, sessionContext, requestedDelay = 1000) {
     if (!this._ownsFlushSession(sessionId, sessionContext)
         || this.queue.length === 0
-        || this.batchTimer
         || (this.settings.translateAfterScrollStop && this.isScrolling)) return;
+    const now = performance.now();
+    if (this.batchTimer && !this.isVisibilityRetryTimer && !this.isAdaptiveBatchTimer
+        && !this._isFluidLazyVisibilityBlocked()) return;
+    const pendingDeadline = this.isVisibilityRetryTimer
+      ? this._visibilityRetryDeadline
+      : (!this.isAdaptiveBatchTimer ? this._batchTimerDeadline : null);
+    const dueAt = Math.min(now + requestedDelay, pendingDeadline ?? now + 1000);
+    if (this.batchTimer && this.isVisibilityRetryTimer && this._visibilityRetryDeadline <= dueAt) return;
+    if (this.batchTimer && this.isAdaptiveBatchTimer) return;
+    if (this.batchTimer) this._clearBatchTimer();
+    const delay = Math.max(0, dueAt - now);
+    this._visibilityRetryDeadline = dueAt;
 
     const retryTimer = this.trackTimeout(() => {
       if (this.batchTimer !== retryTimer) return;
       this.batchTimer = null;
       this.isVisibilityRetryTimer = false;
-      if (this._ownsFlushSession(sessionId, sessionContext)) void this.flush();
-    }, 1000);
+      this.batchTimerDelay = null;
+      this._batchTimerDeadline = null;
+      this._visibilityRetryDeadline = null;
+      if (this._ownsFlushSession(sessionId, sessionContext)) void this.flush({ recheckVisibility: true });
+    }, delay);
     this.batchTimer = retryTimer;
+    this._batchTimerDeadline = dueAt;
     this.isVisibilityRetryTimer = true;
-    this.batchTimerDelay = 1000;
+    this.batchTimerDelay = delay;
   }
 
   _scheduleAdaptiveBatchFlush(sessionId, sessionContext, delay) {
@@ -647,6 +733,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       this.batchTimer = null;
       this.isAdaptiveBatchTimer = false;
       this.batchTimerDelay = null;
+      this._batchTimerDeadline = null;
       if (this.settings.translateAfterScrollStop && this.isScrolling) {
         this.adaptiveBatchDeadline = null;
         return;
@@ -657,6 +744,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.isAdaptiveBatchTimer = true;
     this.isVisibilityRetryTimer = false;
     this.batchTimerDelay = delay;
+    this._batchTimerDeadline = null;
   }
 
   _clearBatchTimer() {
@@ -667,6 +755,8 @@ export class PageTranslationScheduler extends ResourceTracker {
     }
     this.isVisibilityRetryTimer = false;
     this.isAdaptiveBatchTimer = false;
+    this._visibilityRetryDeadline = null;
+    this._batchTimerDeadline = null;
   }
 
   _clearAdaptiveBatchWait() {
@@ -681,6 +771,12 @@ export class PageTranslationScheduler extends ResourceTracker {
     return this.isTranslated
       && this.translationSessionId === sessionId
       && this.sessionContext === sessionContext;
+  }
+
+  _isFluidLazyVisibilityBlocked() {
+    return !this.settings.translateAfterScrollStop
+      && this.settings.lazyLoading !== false
+      && this.isWaitingForVisibility;
   }
 
   _validateFilterResult(result) {
