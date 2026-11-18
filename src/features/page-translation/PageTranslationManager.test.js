@@ -84,6 +84,7 @@ vi.mock('./PageTranslationHelper.js', () => ({
         this.sessionContext = null;
         this.signalScrollStop = vi.fn();
         this.signalScrollStart = vi.fn();
+        this.signalViewportActivity = vi.fn();
       }
     }
   }));
@@ -102,7 +103,8 @@ vi.mock('./PageTranslationBridge.js', () => ({
 
 vi.mock('./utils/PageTranslationScrollTracker.js', () => ({
   PageTranslationScrollTracker: class {
-    constructor() {
+    constructor(onScrollStop, onScrollStart, onViewportActivity) {
+      this.onViewportActivity = onViewportActivity;
       this.start = vi.fn();
       this.stop = vi.fn();
       this.destroy = vi.fn();
@@ -246,6 +248,11 @@ describe('PageTranslationManager', () => {
     // Setup standard DOM elements
     document.head.innerHTML = '';
     document.body.innerHTML = '<div>Original Content</div>';
+  });
+
+  it('wires tracker viewport activity to the scheduler', () => {
+    manager.scrollTracker.onViewportActivity();
+    expect(manager.scheduler.signalViewportActivity).toHaveBeenCalledOnce();
   });
 
   afterEach(async () => {

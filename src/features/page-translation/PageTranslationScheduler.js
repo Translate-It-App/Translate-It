@@ -41,6 +41,9 @@ export class PageTranslationScheduler extends ResourceTracker {
     this._batchTimerDeadline = null;
     this.isVisibilityRetryTimer = false;
     this._visibilityRetryDeadline = null;
+    this._visibilityRetryDelay = 1000;
+    this._visibilityActivityRevision = 0;
+    this._visibilityLastBlockedActivityRevision = null;
     this._visibilityBlockRevision = 0;
     this.adaptiveBatchDeadline = null;
     this.isAdaptiveBatchTimer = false;
@@ -128,6 +131,8 @@ export class PageTranslationScheduler extends ResourceTracker {
         }
         this.isWaitingForVisibility = false;
         this._visibilityRetryDeadline = null;
+        this._visibilityRetryDelay = 1000;
+        this._visibilityLastBlockedActivityRevision = null;
         if (this.batchTimer) this._clearBatchTimer();
         if (this.adaptiveBatchDeadline !== null) {
           this._clearAdaptiveBatchWait();
@@ -159,6 +164,8 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.isWaitingForVisibility = false;
     this._visibilityIdleSnapshot = null;
     this._visibilityRetryDeadline = null;
+    this._visibilityRetryDelay = 1000;
+    this._visibilityLastBlockedActivityRevision = null;
     if (!this.settings.translateAfterScrollStop && this.settings.lazyLoading !== false) {
       this._visibilityBlockRevision++;
     }
@@ -186,6 +193,8 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.isWaitingForVisibility = false;
     this._visibilityIdleSnapshot = null;
     this._visibilityRetryDeadline = null;
+    this._visibilityRetryDelay = 1000;
+    this._visibilityLastBlockedActivityRevision = null;
     if (!this.settings.translateAfterScrollStop && this.settings.lazyLoading !== false) {
       this._visibilityBlockRevision++;
     }
@@ -343,6 +352,12 @@ export class PageTranslationScheduler extends ResourceTracker {
         this.highPriorityCount++;
       }
 
+      if (this._isFluidLazyVisibilityBlocked()) {
+        this._visibilityRetryDelay = 1000;
+        this._visibilityActivityRevision++;
+        this._visibilityLastBlockedActivityRevision = null;
+      }
+
       this._scheduleFlush(score);
     });
   }
@@ -353,8 +368,21 @@ export class PageTranslationScheduler extends ResourceTracker {
    */
   signalScrollStop() {
     this.isScrolling = false;
+    this._visibilityRetryDelay = 1000;
+    if (!this.settings.translateAfterScrollStop && this.settings.lazyLoading !== false) {
+      this._visibilityActivityRevision++;
+      this._visibilityLastBlockedActivityRevision = null;
+    }
     this.logger.debug('Signal: Scroll Stop. Queue size:', this.queue.length);
     this.flush({ recheckVisibility: true });
+  }
+
+  signalViewportActivity() {
+    if (!this._isFluidLazyVisibilityBlocked()) return;
+    this._visibilityRetryDelay = 1000;
+    this._visibilityActivityRevision++;
+    this._visibilityLastBlockedActivityRevision = null;
+    this._scheduleVisibilityRetry(this.translationSessionId, this.sessionContext, 1000);
   }
 
   /**
@@ -362,6 +390,11 @@ export class PageTranslationScheduler extends ResourceTracker {
    */
   signalScrollStart() {
     this.isScrolling = true;
+    this._visibilityRetryDelay = 1000;
+    if (!this.settings.translateAfterScrollStop && this.settings.lazyLoading !== false) {
+      this._visibilityActivityRevision++;
+      this._visibilityLastBlockedActivityRevision = null;
+    }
     
     // If we are waiting for a scroll stop, clear any pending automatic timers
     // to ensure we strictly wait for the next stop.
@@ -400,7 +433,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       const delay = this.isFirstBatch
         ? PAGE_TRANSLATION_TIMING.FIRST_BATCH_DELAY
         : (isHighPriority ? Math.min(PAGE_TRANSLATION_TIMING.HIGH_PRIORITY_DELAY, standardDelay) : standardDelay);
-      this._scheduleVisibilityRetry(this.translationSessionId, this.sessionContext, delay);
+      this._scheduleVisibilityRetry(this.translationSessionId, this.sessionContext, Math.min(delay, 1000));
       return;
     }
     // Fresh arrivals should use the normal batching deadline, not a visibility poll.
@@ -541,6 +574,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       while (this.queue.length > 0 && this.isTranslated && flushContext === this.sessionContext) {
         if (this._isFluidLazyVisibilityBlocked() && !mayRecheckVisibility) break;
         const visibilityBlockRevision = this._visibilityBlockRevision;
+        const visibilityActivityRevision = this._visibilityActivityRevision;
         const preparationStartedAt = performance.now();
         const batchId = this._nextBatchId++;
         const config = await this._getBatchConfig();
@@ -645,10 +679,27 @@ export class PageTranslationScheduler extends ResourceTracker {
             && !filterResult.hasVisibleEligibleItems;
           this.isWaitingForVisibility = isVisibilityBlocked;
           if (isVisibilityBlocked) {
-            if (trackVisibilityRevision) this._visibilityBlockRevision++;
-            this._scheduleVisibilityRetry(flushSessionId, flushContext);
+            if (trackVisibilityRevision) {
+              this._visibilityBlockRevision++;
+              const stableIdleContext = !this.discoveryPending
+                && !this.isScrolling
+                && this.activeFlushes <= 1
+                && visibilityActivityRevision === this._visibilityActivityRevision;
+              const stableIdleCheck = recheckVisibility
+                && stableIdleContext
+                && this._visibilityLastBlockedActivityRevision === visibilityActivityRevision;
+              this._visibilityRetryDelay = stableIdleCheck
+                ? Math.min(3000, this._visibilityRetryDelay + 1000)
+                : 1000;
+              this._visibilityLastBlockedActivityRevision = stableIdleContext
+                ? this._visibilityActivityRevision
+                : null;
+            }
+            this._scheduleVisibilityRetry(flushSessionId, flushContext, this._visibilityRetryDelay);
           } else {
             this._visibilityRetryDeadline = null;
+            this._visibilityRetryDelay = 1000;
+            this._visibilityLastBlockedActivityRevision = null;
           }
           break;
         }
@@ -659,6 +710,8 @@ export class PageTranslationScheduler extends ResourceTracker {
         this.isWaitingForVisibility = false; // We found something to translate
         this._visibilityIdleSnapshot = null;
         this._visibilityRetryDeadline = null;
+        this._visibilityRetryDelay = 1000;
+        this._visibilityLastBlockedActivityRevision = null;
 
         // 2. EXECUTE BATCH: Process the selected items
         this.isFirstBatch = false;
@@ -703,7 +756,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     const pendingDeadline = this.isVisibilityRetryTimer
       ? this._visibilityRetryDeadline
       : (!this.isAdaptiveBatchTimer ? this._batchTimerDeadline : null);
-    const dueAt = Math.min(now + requestedDelay, pendingDeadline ?? now + 1000);
+    const dueAt = Math.min(now + requestedDelay, pendingDeadline ?? now + requestedDelay);
     if (this.batchTimer && this.isVisibilityRetryTimer && this._visibilityRetryDeadline <= dueAt) return;
     if (this.batchTimer && this.isAdaptiveBatchTimer) return;
     if (this.batchTimer) this._clearBatchTimer();

@@ -77,7 +77,8 @@ export class PageTranslationManager extends ResourceTracker {
       () => {
         this.logger.debug('Scroll start detected, signaling scheduler');
         this.scheduler.signalScrollStart();
-      }
+      },
+      () => this.scheduler.signalViewportActivity()
     );
 
     this.settings = {};

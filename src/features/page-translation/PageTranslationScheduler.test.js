@@ -796,19 +796,280 @@ describe('PageTranslationScheduler', () => {
       });
       const task = enqueueTimed('still-lazy');
 
-      await vi.advanceTimersByTimeAsync(800 + 3 * 1000);
+      await vi.advanceTimersByTimeAsync(800 + 1000 + 2000);
       expect(handoffs).toEqual([]);
       expect(safeSendMessage).not.toHaveBeenCalled();
-      expect(flushCalls).toEqual([800, 1800, 2800, 3800]);
+      expect(flushCalls).toEqual([800, 1800, 3800]);
       expect(scheduler.queue).toHaveLength(1);
 
       visible = true;
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(3000);
       await task;
-      expect(handoffs.map(({ at }) => at)).toEqual([4800]);
+      expect(handoffs.map(({ at }) => at)).toEqual([6800]);
       expect(safeSendMessage).toHaveBeenCalledTimes(1);
       expect(scheduler.queue).toHaveLength(0);
       expect(scheduler.batchTimer).toBeNull();
+    });
+
+    it('backs off stable blocked checks from one to two to three seconds and caps there', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const batchItems = visible ? queue.slice(0, config.chunkSize) : [];
+        return { batchItems, remainingItems: queue.slice(batchItems.length), hasVisibleEligibleItems: visible };
+      });
+      enqueueTimed('stable-blocked');
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler._visibilityRetryDeadline).toBe(1800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(flushCalls).toEqual([800, 1800]);
+      expect(scheduler._visibilityRetryDeadline).toBe(3800);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(flushCalls).toEqual([800, 1800, 3800]);
+      expect(scheduler._visibilityRetryDeadline).toBe(6800);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(flushCalls).toEqual([800, 1800, 3800, 6800]);
+      expect(scheduler._visibilityRetryDeadline).toBe(9800);
+      scheduler.stop();
+    });
+
+    it('grows visibility intervals only after discovery finishes and another stable idle check', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      scheduler.setDiscoveryPending(true, scheduler.sessionContext);
+      enqueueTimed('discovery-blocked');
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler._visibilityRetryDeadline).toBe(1800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3800);
+
+      scheduler.setDiscoveryPending(false, scheduler.sessionContext);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(4800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(2000);
+      expect(scheduler._visibilityRetryDeadline).toBe(6800);
+      scheduler.stop();
+    });
+
+    it('holds backoff while Fluid scrolling continues and restarts at one second after stop', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('scrolling-blocked');
+      scheduler.signalScrollStart();
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler._visibilityRetryDeadline).toBe(1800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(2000);
+      expect(scheduler._visibilityRetryDeadline).toBe(4800);
+      scheduler.stop();
+    });
+
+    it('resets to the first retry interval when one item recovers and another remains blocked', async () => {
+      configureTimedQueue({ lazyLoading: true, chunkSize: 1 });
+      scheduler.isFirstBatch = false;
+      const visibleItems = new Set();
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(item => visibleItems.has(item.text));
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return {
+          batchItems,
+          remainingItems: queue.filter(item => !batchSet.has(item)),
+          hasVisibleEligibleItems: selected.length > 0,
+        };
+      });
+      vi.spyOn(scheduler, '_executeBatchRequest').mockImplementation(async items => {
+        items.forEach(item => scheduler._resolveItem(item, `translated:${item.text}`, 'accepted'));
+      });
+      const recoveredTask = enqueueTimed('first-recovers');
+      enqueueTimed('still-blocked');
+      await scheduler.flush();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3000);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(scheduler._visibilityRetryDeadline).toBe(6000);
+      expect(scheduler._visibilityRetryDelay).toBe(3000);
+
+      visibleItems.add('first-recovers');
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.advanceTimersByTimeAsync(0);
+      await recoveredTask;
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(scheduler.translatedCount).toBe(1);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler.queue.map(({ text }) => text)).toEqual(['still-blocked']);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(5);
+      expect(scheduler.activeFlushes).toBe(0);
+      expect(scheduler.isWaitingForVisibility).toBe(true);
+      expect(scheduler._visibilityRetryDeadline).toBe(7001);
+      scheduler.stop();
+    });
+
+    it('resets backoff on viewport activity without reading geometry or postponing a retry', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('activity-reset');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3800);
+      const filterCalls = PageTranslationFluidFilter.process.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(200);
+      scheduler.signalViewportActivity();
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3000);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(filterCalls);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(filterCalls);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(filterCalls + 1);
+      scheduler.stop();
+    });
+
+    it('resets backoff for new arrivals and accelerates without postponing the retry', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('arrival-reset');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3800);
+
+      await vi.advanceTimersByTimeAsync(200);
+      enqueueTimed('arrival-during-backoff');
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      scheduler.stop();
+    });
+
+    it('bounds low-priority arrival acceleration and never postpones an earlier retry deadline', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.setSettings({ scrollStopDelay: 5000 });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const batchItems = visible ? queue.slice(0, config.chunkSize) : [];
+        return { batchItems, remainingItems: queue.slice(batchItems.length), hasVisibleEligibleItems: visible };
+      });
+      enqueueTimed('long-delay-base', 0);
+      await vi.advanceTimersByTimeAsync(800);
+      scheduler.isFirstBatch = false;
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(scheduler._visibilityRetryDelay).toBe(3000);
+      expect(scheduler._visibilityRetryDeadline).toBe(6800);
+
+      await vi.advanceTimersByTimeAsync(200);
+      enqueueTimed('accelerates-to-one-second', 0);
+      expect(scheduler._visibilityRetryDeadline).toBe(5000);
+      await vi.advanceTimersByTimeAsync(500);
+      enqueueTimed('earlier-deadline-retained', 0);
+      expect(scheduler._visibilityRetryDeadline).toBe(5000);
+      await vi.advanceTimersByTimeAsync(200);
+      enqueueTimed('continuous-arrival', 0);
+      expect(scheduler._visibilityRetryDeadline).toBe(5000);
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(1000);
+      await Promise.all(taskPromises);
+      expect(flushCalls.at(-1)).toBe(5000);
+      expect(handoffs.length).toBeGreaterThan(0);
+      scheduler.stop();
+    });
+
+    it('does not increase visibility backoff while another provider worker is active', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.settings.maxConcurrentFlushes = 2;
+      scheduler.activeFlushes = 1;
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('busy-blocked');
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.activeFlushes).toBe(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      scheduler.activeFlushes = 0;
+      scheduler.stop();
+    });
+
+    it('keeps a delayed blocked config from restoring backoff after viewport activity', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('activity-during-config');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      let resolveConfig;
+      scheduler._getBatchConfig.mockImplementation(() => new Promise(resolve => { resolveConfig = resolve; }));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(resolveConfig).toBeTypeOf('function');
+
+      scheduler.signalViewportActivity();
+      resolveConfig({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      scheduler._getBatchConfig.mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(4800);
+      scheduler.stop();
+    });
+
+    it('invalidates a previous stable check when an arrival occurs during delayed config', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('arrival-before-config');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(2000);
+      let resolveConfig;
+      scheduler._getBatchConfig.mockImplementation(() => new Promise(resolve => { resolveConfig = resolve; }));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(resolveConfig).toBeTypeOf('function');
+
+      enqueueTimed('arrival-during-config');
+      resolveConfig({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      scheduler._getBatchConfig.mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(4600);
+      scheduler.stop();
     });
 
     it('deduplicates unchanged visibility-idle events and re-emits when progress or queued work changes', async () => {
@@ -946,6 +1207,24 @@ describe('PageTranslationScheduler', () => {
       await task;
       expect(flushCalls).toEqual([800, 800]);
       expect(handoffs.map(({ texts }) => texts)).toEqual([['scroll-wakeup']]);
+    });
+
+    it('keeps the first automatic interval after a blocked immediate scroll-stop check', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('scroll-stop-still-blocked');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(2000);
+
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      scheduler.stop();
     });
 
     it('lets later high-priority eligible arrivals accelerate a blocked retry without rearming it', async () => {
@@ -1419,28 +1698,33 @@ describe('PageTranslationScheduler', () => {
       }));
       const oldTask = enqueueTimed(`old-${lifecycle}`);
       await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(3000);
       const staleDeadline = scheduler._visibilityRetryDeadline;
       const oldFilterCount = PageTranslationFluidFilter.process.mock.calls.length;
       expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(scheduler._visibilityRetryDelay).toBe(3000);
 
       if (lifecycle === 'stop') scheduler.stop();
       else if (lifecycle === 'reset') scheduler.reset();
       else scheduler.setTranslationState(true, 'direct-replacement', { replacement: true });
       expect(scheduler.batchTimer).toBeNull();
       expect(scheduler._visibilityRetryDeadline).toBeNull();
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
       expect(scheduler.isWaitingForVisibility).toBe(false);
       if (!scheduler.isTranslated) scheduler.setTranslationState(true, `fresh-${lifecycle}`, { fresh: true });
-
-      await vi.advanceTimersByTimeAsync(Math.max(0, staleDeadline - performance.now()));
-      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(oldFilterCount);
 
       PageTranslationFluidFilter.process.mockImplementation(queue => ({
         batchItems: [...queue], remainingItems: [], hasVisibleEligibleItems: true,
       }));
       const freshTask = enqueueTimed(`fresh-${lifecycle}`);
-      expect(scheduler.batchTimer).not.toBeNull();
-      await vi.advanceTimersByTimeAsync(800);
+      const replacementTimer = scheduler.batchTimer;
+      expect(replacementTimer).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(Math.max(0, staleDeadline - performance.now()));
       await Promise.all([oldTask, freshTask]);
+      expect(scheduler.batchTimer).toBeNull();
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(oldFilterCount + 1);
       expect(handoffs.at(-1).texts).toContain(`fresh-${lifecycle}`);
     });
 

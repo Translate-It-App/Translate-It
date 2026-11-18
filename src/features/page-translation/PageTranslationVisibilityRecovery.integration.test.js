@@ -17,12 +17,15 @@ vi.mock('@/config.js', () => ({
 }));
 
 import { PageTranslationScheduler } from './PageTranslationScheduler.js';
+import { PageTranslationScrollTracker } from './utils/PageTranslationScrollTracker.js';
 
 describe('Page translation visibility recovery integration', () => {
   let scheduler;
+  let tracker;
   let element;
   let rect;
   let dispatched;
+  let dispatchTimes;
   let config;
 
   const enqueue = (text, score = 0) => scheduler.enqueue(text, scheduler.sessionContext, score, element);
@@ -30,6 +33,7 @@ describe('Page translation visibility recovery integration', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
+    tracker = null;
     document.body.replaceChildren();
     element = document.createElement('p');
     element.textContent = 'Content waiting for translation';
@@ -37,7 +41,7 @@ describe('Page translation visibility recovery integration', () => {
     rect = { top: 2_000, left: 10, right: 100, bottom: 2_020, width: 90, height: 20 };
     vi.spyOn(element, 'getBoundingClientRect').mockImplementation(() => ({ ...rect }));
     scheduler = new PageTranslationScheduler();
-    scheduler.setSettings({ lazyLoading: true, scrollStopDelay: 1000, chunkSize: 2000, maxConcurrentFlushes: 1 });
+    scheduler.setSettings({ lazyLoading: true, translateAfterScrollStop: false, scrollStopDelay: 1000, chunkSize: 2000, maxConcurrentFlushes: 1 });
     scheduler.setTranslationState(true, 'visibility-recovery', {});
     config = {
       providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 2000,
@@ -45,13 +49,16 @@ describe('Page translation visibility recovery integration', () => {
     };
     vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue(config);
     dispatched = [];
+    dispatchTimes = [];
     vi.spyOn(scheduler, '_executeBatchRequest').mockImplementation(async items => {
       dispatched.push(...items.map(item => item.id));
+      dispatchTimes.push(Date.now());
       items.forEach(item => scheduler._resolveItem(item, `translated:${item.text}`, 'accepted'));
     });
   });
 
   afterEach(() => {
+    tracker?.destroy();
     scheduler?.stop();
     scheduler?.reset();
     vi.restoreAllMocks();
@@ -86,6 +93,92 @@ describe('Page translation visibility recovery integration', () => {
     expect(new Set(dispatched).size).toBe(1010);
     expect(scheduler.queue).toHaveLength(0);
     expect(element.getBoundingClientRect).toHaveBeenCalledTimes(2010);
+  });
+
+  it('uses fresh geometry at the capped idle retry without any viewport activity signal', async () => {
+    scheduler.isFirstBatch = false;
+    const task = enqueue('Content becoming visible during stable idle');
+    await scheduler.flush();
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(1);
+    expect(scheduler._visibilityRetryDeadline).toBe(1000);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(2);
+    expect(scheduler._visibilityRetryDeadline).toBe(3000);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(3);
+    expect(scheduler._visibilityRetryDeadline).toBe(6000);
+    rect = { top: 10, left: 10, right: 100, bottom: 30, width: 90, height: 20 };
+
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(dispatched).toEqual([]);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    await task;
+
+    expect(dispatchTimes).toEqual([6000]);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(4);
+    expect(scheduler._visibilityRetryDelay).toBe(1000);
+  });
+
+  it('resets the idle interval on viewport activity without an immediate geometry read', async () => {
+    scheduler.isFirstBatch = false;
+    const task = enqueue('Content becoming visible after activity');
+    await scheduler.flush();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(scheduler._visibilityRetryDeadline).toBe(3000);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(500);
+    rect = { top: 10, left: 10, right: 100, bottom: 30, width: 90, height: 20 };
+    scheduler.signalViewportActivity();
+    expect(scheduler._visibilityRetryDeadline).toBe(2500);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(dispatchTimes).toEqual([2500]);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(3);
+    await task;
+  });
+
+  it('wires nested scroll and resize activity to an accelerated, non-postponable retry', async () => {
+    scheduler.isFirstBatch = false;
+    const task = enqueue('Content becoming visible after tracked activity');
+    await scheduler.flush();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(scheduler._visibilityRetryDeadline).toBe(3000);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(2);
+
+    tracker = new PageTranslationScrollTracker(
+      () => scheduler.signalScrollStop(),
+      () => scheduler.signalScrollStart(),
+      () => scheduler.signalViewportActivity(),
+    );
+    tracker.start(5000);
+    rect = { top: 10, left: 10, right: 100, bottom: 30, width: 90, height: 20 };
+    await vi.advanceTimersByTimeAsync(500);
+    const nested = document.createElement('span');
+    element.append(nested);
+    nested.dispatchEvent(new Event('scroll'));
+    window.dispatchEvent(new Event('resize'));
+    expect(scheduler._visibilityRetryDeadline).toBe(2500);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(2);
+
+    for (let index = 0; index < 19; index++) {
+      await vi.advanceTimersByTimeAsync(50);
+      window.dispatchEvent(new Event('resize'));
+      expect(scheduler._visibilityRetryDeadline).toBe(2500);
+      expect(element.getBoundingClientRect).toHaveBeenCalledTimes(2);
+    }
+
+    await vi.advanceTimersByTimeAsync(49);
+    expect(scheduler._visibilityRetryDeadline).toBe(2500);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(dispatchTimes).toEqual([2500]);
+    expect(element.getBoundingClientRect).toHaveBeenCalledTimes(3);
+    await task;
   });
 
   it('rechecks immediately on scroll stop and cancels the pending retry', async () => {
