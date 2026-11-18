@@ -323,8 +323,18 @@ class SystemFontDetector {
       'segoe-ui': '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
       'roboto': 'Roboto, Arial, sans-serif'
     }
-    
-    return staticFonts[fontValue] || 'system-ui, sans-serif'
+
+    if (staticFonts[fontValue]) {
+      return staticFonts[fontValue]
+    }
+
+    const catalogFont = this.testFonts.find(name => this._sanitizeFontValue(name) === fontValue)
+    if (catalogFont) {
+      const fallback = this._getFallbackByCategory(this._categorizeFontName(catalogFont))
+      return `"${catalogFont}", ${fallback}`
+    }
+
+    return 'system-ui, sans-serif'
   }
 
   /**

@@ -89,6 +89,23 @@ describe('getTranslationFontTarget', () => {
     expect(getTranslationFontTarget(text)).toBe(element);
   });
 
+  it.each(['material-symbols-outlined', 'bi bi-alarm', 'bi-alarm', 'glyph-star'])(
+    'rejects icon-font classes on the parent or a descendant: %s', className => {
+      const parent = document.createElement('span');
+      parent.className = className;
+      parent.append('source');
+      expect(getTranslationFontTarget(parent.firstChild)).toBeNull();
+      expect(isSelectElementFontTargetSafe(parent)).toBe(false);
+
+      parent.className = '';
+      const icon = document.createElement('span');
+      icon.className = className;
+      parent.append(icon);
+      expect(getTranslationFontTarget(parent.firstChild)).toBeNull();
+      expect(getSelectElementMixedFontTarget(parent.firstChild)).toBe(parent);
+    }
+  );
+
   it('rejects meaningful descendant text that would inherit the parent font', () => {
     const element = document.createElement('span');
     const text = document.createTextNode('source');

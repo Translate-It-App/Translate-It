@@ -133,6 +133,13 @@ describe('SelectElementFontStyles', () => {
     fontAwesome.className = 'fa';
     const fontAwesomeText = document.createElement('span');
     fontAwesome.append(fontAwesomeText);
+    const fontIcons = ['material-symbols-outlined', 'bi bi-alarm', 'bi-alarm', 'glyph-star'].map(className => {
+      const iconElement = document.createElement('span');
+      iconElement.className = className;
+      const iconChild = document.createElement('span');
+      iconElement.append(iconChild);
+      return { iconElement, iconChild };
+    });
     const protectedContainers = ['button', 'form', 'fieldset', 'label', '[contenteditable]', '[role="button"]']
       .map(selector => {
         const container = document.createElement(selector.startsWith('[') ? 'div' : selector);
@@ -142,7 +149,7 @@ describe('SelectElementFontStyles', () => {
         root.append(container);
         return { container, nestedText };
       });
-    root.append(link, quote, code, pre, svg, icon, fontAwesome);
+    root.append(link, quote, code, pre, svg, icon, fontAwesome, ...fontIcons.map(({ iconElement }) => iconElement));
     document.body.append(root);
     const selectors = [...style.sheet.cssRules].flatMap(rule => rule.selectorText.split(',').map(selector => selector.trim()));
     const matchesTarget = element => selectors.some(selector => element.matches(selector));
@@ -158,6 +165,10 @@ describe('SelectElementFontStyles', () => {
     expect(matchesTarget(iconText)).toBe(false);
     expect(matchesTarget(fontAwesome)).toBe(false);
     expect(matchesTarget(fontAwesomeText)).toBe(false);
+    for (const { iconElement, iconChild } of fontIcons) {
+      expect(matchesTarget(iconElement)).toBe(false);
+      expect(matchesTarget(iconChild)).toBe(false);
+    }
     for (const { container, nestedText } of protectedContainers) {
       expect(matchesTarget(container)).toBe(false);
       expect(matchesTarget(nestedText)).toBe(false);

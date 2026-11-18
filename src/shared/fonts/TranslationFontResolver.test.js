@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveTranslationFontFamily } from './TranslationFontResolver.js';
+import { systemFontDetector } from './SystemFontDetector.js';
 
 describe('resolveTranslationFontFamily', () => {
   it('uses the Vazirmatn stack for auto Persian', () => {
@@ -23,5 +24,21 @@ describe('resolveTranslationFontFamily', () => {
     expect(resolveTranslationFontFamily('vazirmatn', 'en'))
       .toBe('"Vazirmatn", "Vazir", Tahoma, Arial, sans-serif');
     expect(resolveTranslationFontFamily('arial', 'en')).toBe('Arial, Helvetica, sans-serif');
+  });
+
+  it('resolves catalog fonts when the detector cache is cold', () => {
+    const cachedFonts = systemFontDetector.cachedFonts;
+
+    try {
+      systemFontDetector.cachedFonts = [
+        { name: 'B Nazanin', value: 'b-nazanin', category: 'other', isSystemFont: true },
+      ];
+      const warmCacheFamily = resolveTranslationFontFamily('b-nazanin', 'en');
+
+      systemFontDetector.clearCache();
+      expect(resolveTranslationFontFamily('b-nazanin', 'en')).toBe(warmCacheFamily);
+    } finally {
+      systemFontDetector.cachedFonts = cachedFonts;
+    }
   });
 });

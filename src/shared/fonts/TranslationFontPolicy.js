@@ -3,14 +3,24 @@ const UNSAFE_TAGS = new Set([
 ]);
 const SELECT_ELEMENT_FONT_SENSITIVE_TAGS = new Set(['CODE', 'PRE', 'KBD', 'SAMP']);
 
+function hasCommonIconFontClass(element) {
+  const className = element.getAttribute('class') || '';
+  return /(?:material-symbols|bi-|glyph)/i.test(className)
+    || className.split(/\s+/).some(className => className.toLowerCase() === 'bi');
+}
+
+function hasIconFontClass(element) {
+  return /(?:icon|fa-)/i.test(element.getAttribute('class') || '')
+    || hasCommonIconFontClass(element);
+}
+
 export function isSelectElementFontTargetSafe(target) {
   if (!target) return false;
   const tagName = target.tagName.toUpperCase();
-  const className = target.getAttribute('class') || '';
   return !SELECT_ELEMENT_FONT_SENSITIVE_TAGS.has(tagName)
     && !(tagName === 'I' && target.hasAttribute('class'))
     && !target.hasAttribute('data-icon')
-    && !/(?:icon|fa-)/i.test(className);
+    && !hasIconFontClass(target);
 }
 
 function hasGeneratedContent(element, pseudo) {
@@ -21,7 +31,7 @@ function hasGeneratedContent(element, pseudo) {
 function isUnsafeDescendant(element) {
   const tagName = element.tagName.toUpperCase();
   const role = element.getAttribute('role')?.toLowerCase();
-  return tagName.includes('-') || UNSAFE_TAGS.has(tagName)
+  return tagName.includes('-') || UNSAFE_TAGS.has(tagName) || hasCommonIconFontClass(element)
     || role === 'button' || role === 'link' || element.onclick !== null
     || element.getAttribute('tabindex') === '0'
     || element.isContentEditable || element.hasAttribute('contenteditable');
@@ -39,7 +49,7 @@ export function getSelectElementMixedFontTarget(textNode) {
     const isUnsafeContext = (element) => {
       const tagName = element.tagName.toUpperCase();
       const role = element.getAttribute('role')?.toLowerCase();
-      return tagName.includes('-') || UNSAFE_TAGS.has(tagName)
+      return tagName.includes('-') || UNSAFE_TAGS.has(tagName) || hasCommonIconFontClass(element)
         || role === 'button' || role === 'link' || element.onclick !== null
         || element.getAttribute('tabindex') === '0' || element.isContentEditable
         || element.hasAttribute('contenteditable');
@@ -64,7 +74,7 @@ export function getTranslationFontTarget(textNode) {
     );
     if (meaningfulTextNodes.length !== 1 || meaningfulTextNodes[0] !== textNode) return null;
     const tagName = parent.tagName.toUpperCase();
-    if (tagName.includes('-') || UNSAFE_TAGS.has(tagName)) return null;
+    if (tagName.includes('-') || UNSAFE_TAGS.has(tagName) || hasCommonIconFontClass(parent)) return null;
     const role = parent.getAttribute('role')?.toLowerCase();
     if (role === 'button' || role === 'link' || parent.onclick !== null || parent.getAttribute('tabindex') === '0') return null;
     if (parent.isContentEditable || parent.hasAttribute('contenteditable')) return null;
