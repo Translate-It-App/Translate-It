@@ -43,6 +43,8 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.totalTasks = 0;
     this.activeFlushes = 0;
     this.fatalErrorOccurred = false;
+    this.consecutiveTransientBatchFailures = 0;
+    this._handledBatchOutcomes = new WeakSet();
     // Keep latest non-fatal terminal cause for zero-result completion.
     this.lastNonFatalError = null;
     this.isFirstBatch = true;
@@ -106,6 +108,9 @@ export class PageTranslationScheduler extends ResourceTracker {
     if (!isTranslated) {
       this.stop('cancelled', cancellationReason);
     } else {
+      if (!this.isTranslated || this.translationSessionId !== sessionId || this.sessionContext !== sessionContext) {
+        this.consecutiveTransientBatchFailures = 0;
+      }
       this.lastNonFatalError = null;
       this.isTranslated = isTranslated;
       this.translationSessionId = sessionId;
@@ -128,6 +133,8 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.highPriorityCount = 0;
     this.isWaitingForVisibility = false;
     this.fatalErrorOccurred = false;
+    this.consecutiveTransientBatchFailures = 0;
+    this._handledBatchOutcomes = new WeakSet();
     this.translationSessionId = null;
     this.sessionContext = null;
     this.discoveryPending = false;
@@ -140,6 +147,7 @@ export class PageTranslationScheduler extends ResourceTracker {
   stop(settlementOutcome = 'cancelled', cancellationReason = INTERNAL_CANCELLATION_REASON) {
     const wasTranslating = this.isTranslated;
     this.isTranslated = false;
+    this.consecutiveTransientBatchFailures = 0;
     this.discoveryPending = false;
     this.lastNonFatalError = null;
     this.sessionContext = null;
@@ -402,7 +410,7 @@ export class PageTranslationScheduler extends ResourceTracker {
   }
 
   async flush() {
-    if (!this.isTranslated || this.queue.length === 0) {
+    if (!this.isTranslated || this.fatalErrorOccurred || this.queue.length === 0) {
       if (!this.isTranslated && this.queue.length > 0) this.stop();
       return;
     }
@@ -429,7 +437,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       // Process batches in a loop as long as there are items and we are still translating
       while (this.queue.length > 0 && this.isTranslated && flushContext === this.sessionContext) {
         const config = await this._getBatchConfig();
-        if (!this._ownsFlushSession(flushSessionId, flushContext)) return;
+        if (!this._ownsFlushSession(flushSessionId, flushContext) || this.fatalErrorOccurred) return;
         if (this.activeFlushes > (this.settings.maxConcurrentFlushes || 1)) break;
         let currentBatch = [];
 
@@ -483,6 +491,7 @@ export class PageTranslationScheduler extends ResourceTracker {
         await this._executeBatchRequest(currentBatch, config, flushContext, flushSessionId);
         this.activeBatches.delete(activeBatch);
         activeBatch = null;
+        if (this.fatalErrorOccurred || !this._ownsFlushSession(flushSessionId, flushContext)) break;
 
         // 3. YIELD: Give event loop a breath if there's more work
         if (this.queue.length > 0) {
@@ -577,11 +586,12 @@ export class PageTranslationScheduler extends ResourceTracker {
       const result = await safeSendMessage(batchMessage, 'page-translation-batch');
 
       // Validation after async call
-      if (!this._ownsFlushSession(flushSessionId, flushContext)) {
+      if (!this._ownsFlushSession(flushSessionId, flushContext) || this.fatalErrorOccurred) {
         this.logger.debug('Batch discarded: session changed or stopped');
         batch.forEach(item => this._resolveItem(item, item.text, 'cancelled'));
         return;
       }
+      if (this._handledBatchOutcomes.has(batch)) return;
 
       // Detect failure or Soft-Failure with error details
       if (!result?.success || result?.hasError) {
@@ -624,6 +634,12 @@ export class PageTranslationScheduler extends ResourceTracker {
         this.logger.error('Batch size mismatch!', { sent: batch.length, received: translatedTexts.length });
       }
 
+      this._handledBatchOutcomes.add(batch);
+      // A valid provider response resets transport health even if individual items were skipped.
+      if (this._ownsFlushSession(flushSessionId, flushContext) && !this.fatalErrorOccurred) {
+        this.consecutiveTransientBatchFailures = 0;
+      }
+
       batch.forEach((item, index) => {
         const translatedItem = resultsById ? resultsById.get(item.id) : translatedTexts[index];
 
@@ -663,6 +679,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       this._reportProgress();
     } catch (error) {
       this.logger.error('Batch execution error:', error);
+      if (this._handledBatchOutcomes.has(batch)) throw error;
       await this._handleBatchError(error, batch, null, flushSessionId, flushContext);
     }  }
 
@@ -738,21 +755,31 @@ export class PageTranslationScheduler extends ResourceTracker {
       return false;
     }
 
-    if (this.fatalErrorOccurred) return;
+    if (this._handledBatchOutcomes.has(batch)) return false;
+    if (this.fatalErrorOccurred) {
+      batch.forEach(item => this._resolveItem(item, item.text, 'cancelled'));
+      return false;
+    }
+    this._handledBatchOutcomes.add(batch);
 
     // Preserve original error identity as per guidelines
     const errorType = pageErrorType || matchErrorToType(error);
     
-    // Page Translation Specific: If a batch fails PERMANENTLY (after all internal retries)
-    // due to network or server issues, we treat it as fatal for the session to prevent
-    // continuous failing requests in Auto-translate mode and avoid Circuit Breaker deadlock.
+    // Only three consecutive eligible final batch failures are fatal, ordered by completion.
+    const isContextError = ExtensionContextManager.isContextError(error);
     const fatalityInput = error && typeof error === 'object'
-      && (error.type || error.originalType || error.statusCode !== undefined)
+      && (error.type || error.originalType || error.statusCode !== undefined || error.status !== undefined)
       ? error
       : errorType;
-    let isFatal = isFatalError(fatalityInput) || 
-                  errorType === 'NETWORK_ERROR' || 
-                  errorType === 'SERVER_ERROR';
+    let isFatal = error?.isFatal === true || isContextError
+      || isFatalError(fatalityInput);
+    const isTransientBatchFailure = !isFatal
+      && (errorType === 'NETWORK_ERROR' || errorType === 'SERVER_ERROR');
+
+    if (isTransientBatchFailure) {
+      this.consecutiveTransientBatchFailures++;
+      isFatal = this.consecutiveTransientBatchFailures >= 3;
+    }
 
     if (isFatal) {
       this.fatalErrorOccurred = true;

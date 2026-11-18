@@ -799,7 +799,7 @@ export class PageTranslationManager extends ResourceTracker {
     if (sessionId == null || sessionContext == null) return false;
     if (sessionId !== this.translationMessageId || sessionContext !== this.sessionContext) return false;
     if (this.scheduler.translationSessionId !== sessionId) return false;
-    if (!this.isTranslating && !this.isAutoTranslating) return false;
+    if (!this.isTranslating && !this.isAutoTranslating && !this.scheduler.isTranslated) return false;
 
     this._handleFatalError(error, errorType, localizedMessage, sessionId);
     return true;

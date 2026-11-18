@@ -495,18 +495,20 @@ describe('PageTranslationEventManager', () => {
       expect(mockManager.isAutoTranslating).toBe(true);
     });
 
-    it('keeps non-fatal provider failures presentation-only at PageEventBus boundary', async () => {
-      const callback = mockBus.on.mock.calls.find(c => c[0] === 'page-translation-internal-error')[1];
-      const error = Object.assign(new Error('raw provider diagnostic'), {
-        type: ErrorTypes.MODEL_MISSING,
-        providerName: 'Provider',
-      });
+    it.each([ErrorTypes.MODEL_MISSING, ErrorTypes.NETWORK_ERROR, ErrorTypes.SERVER_ERROR])(
+      'keeps non-fatal %s provider failures presentation-only at PageEventBus boundary', async (type) => {
+        const callback = mockBus.on.mock.calls.find(c => c[0] === 'page-translation-internal-error')[1];
+        const error = Object.assign(new Error('raw provider diagnostic'), {
+          type,
+          providerName: 'Provider',
+        });
 
-      await callback({ error, errorType: error.type, isFatal: false, context: 'page-translation-batch' });
+        await callback({ error, errorType: error.type, isFatal: false, context: 'page-translation-batch' });
 
-      expect(mockManager._broadcastEvent).not.toHaveBeenCalled();
-      expect(ErrorHandler.getInstance().handle).not.toHaveBeenCalled();
-    });
+        expect(mockManager._broadcastEvent).not.toHaveBeenCalled();
+        expect(ErrorHandler.getInstance().handle).not.toHaveBeenCalled();
+      }
+    );
 
     it('keeps legacy non-fatal failures silent', async () => {
       const callback = mockBus.on.mock.calls.find(c => c[0] === 'page-translation-internal-error')[1];
@@ -562,12 +564,16 @@ describe('PageTranslationEventManager', () => {
       });
     });
 
-    it('presents structured terminal cause instead of generic zero-result error', async () => {
+    it.each([
+      [ErrorTypes.RATE_LIMIT_REACHED, 429],
+      [ErrorTypes.NETWORK_ERROR, undefined],
+      [ErrorTypes.SERVER_ERROR, 500],
+    ])('presents structured terminal %s cause instead of generic zero-result error', async (type, statusCode) => {
       const callback = mockBus.on.mock.calls.find(c => c[0] === MessageActions.PAGE_TRANSLATE_COMPLETE)[1];
       const errorDetails = {
-        message: 'Too Many Requests',
-        type: ErrorTypes.RATE_LIMIT_REACHED,
-        statusCode: 429,
+        message: 'Provider request failed',
+        type,
+        ...(statusCode === undefined ? {} : { statusCode }),
       };
 
       callback({
@@ -582,13 +588,30 @@ describe('PageTranslationEventManager', () => {
       await vi.waitFor(() => expect(ErrorHandler.getInstance().handle).toHaveBeenCalledTimes(1));
 
       expect(ErrorHandler.getInstance().handle.mock.calls[0][0]).toMatchObject({
-        type: ErrorTypes.RATE_LIMIT_REACHED,
+        type,
       });
       expect(ErrorHandler.getInstance().handle.mock.calls[0][1]).toMatchObject({
-        type: ErrorTypes.RATE_LIMIT_REACHED,
+        type,
         context: 'page-translation-zero-result',
         showToast: true,
       });
+    });
+
+    it('does not present a zero-result error when aggregate translation partially succeeds', async () => {
+      const callback = mockBus.on.mock.calls.find(c => c[0] === MessageActions.PAGE_TRANSLATE_COMPLETE)[1];
+
+      callback({
+        isAggregated: true,
+        isTranslating: false,
+        isAutoTranslating: false,
+        translatedCount: 2,
+        failedCount: 1,
+        totalCount: 3,
+        errorDetails: { message: 'Provider request failed', type: ErrorTypes.SERVER_ERROR, statusCode: 500 },
+      });
+      await Promise.resolve();
+
+      expect(ErrorHandler.getInstance().handle).not.toHaveBeenCalled();
     });
 
     it.each([ErrorTypes.USER_CANCELLED, ErrorTypes.TRANSLATION_CANCELLED, ErrorTypes.CONTEXT, ErrorTypes.EXTENSION_CONTEXT_INVALIDATED])(
