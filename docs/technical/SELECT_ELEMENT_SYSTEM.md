@@ -9,15 +9,18 @@ lifecycle.
 ## Translation Font
 
 `SELECT_ELEMENT_USE_TRANSLATION_FONT` is disabled by default. When enabled,
-Select Element applies resolved translation `font-family` to a safe immediate
-parent when the translated node is its only meaningful direct text node; the
-parent may also contain child elements only when descendant text uses a computed
-font family different from the parent's current family and descendants produce
-no generated pseudo content or detectable open ShadowRoots. Closed ShadowRoots
-cannot be detected and may still inherit the parent's font. Unsafe descendants
-and other mixed direct text are skipped without affecting translation. Font
-changes use normal inline styles and Select Element ownership tracking, so
-revert restores prior values while preserving external changes.
+Select Element retains the shared safe-parent inline-font behavior. For eligible
+mixed-content parents rejected by that shared policy, it uses a Select
+Element-only marker and CSS custom property to style the translated container
+and safe textual descendants without wrapping or replacing text nodes. The
+stylesheet is requested from the background through the existing
+`scripting.insertCSS` permission and targeted to the originating frame;
+injection failure does not reject translation. CSP behavior for extension-
+inserted CSS is not guaranteed here, so restrictive policies may still prevent
+the visual rule from applying. Marker and custom-property changes use Select Element
+ownership tracking, so Revert restores prior values while preserving external
+changes. SVG, code/preformatted, and practical icon descendants are excluded by
+the scoped CSS rule.
 
 This document explains feature architecture and integration. Observable
 behavior is defined by [Feature Behavioral Contracts](contracts/FEATURE_CONTRACTS.md#6-select-element-contract).

@@ -15,7 +15,7 @@ import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import ResourceTracker from '@/core/memory/ResourceTracker.js';
 import { walkOpenShadowTree } from '@/utils/dom/walkOpenShadowTree.js';
-import { getTranslationFontTarget } from '@/shared/fonts/TranslationFontPolicy.js';
+import { getTranslationFontTarget, getSelectElementMixedFontTarget } from '@/shared/fonts/TranslationFontPolicy.js';
 import {
   PAGE_TRANSLATION_SLICED_DISCOVERY,
   PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY,
@@ -331,7 +331,9 @@ export class PageTranslationBridge extends ResourceTracker {
       let original = null;
       try {
         target = getTranslationFontTarget(textNode);
-        if (!target || currentSession.fontOwnership.has(target)) return;
+        target ||= getSelectElementMixedFontTarget(textNode);
+        if (!target) return;
+        if (currentSession.fontOwnership.has(target)) return;
 
         original = readInlineFontState(target);
         target.style.setProperty(FONT_FAMILY_PROPERTY, currentSession.translationFontFamily);

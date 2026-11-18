@@ -27,15 +27,6 @@ import { PageTranslationBridge } from './PageTranslationBridge.js';
 import { getTranslationFontTarget } from '@/shared/fonts/TranslationFontPolicy.js';
 
 const nativeGetComputedStyle = window.getComputedStyle.bind(window);
-let fontComputedStyleSpy;
-
-const enableFontPolicyStyles = () => {
-  if (fontComputedStyleSpy) return;
-  fontComputedStyleSpy = vi.spyOn(window, 'getComputedStyle').mockImplementation((element, pseudo) => {
-    if (pseudo) return { content: 'none' };
-    return nativeGetComputedStyle(element, pseudo);
-  });
-};
 
 const settings = (overrides = {}) => ({
   targetLanguage: 'en',
@@ -54,7 +45,6 @@ const createHost = (parent = document.body) => {
 };
 
 const start = async (root = document.body, overrides = {}) => {
-  if (overrides.useTranslationFont) enableFontPolicyStyles();
   const onTranslate = vi.fn((text) => settlement(`Translated ${text}`));
   const bridge = new PageTranslationBridge();
   await bridge.initialize(settings(overrides), onTranslate);
@@ -63,7 +53,6 @@ const start = async (root = document.body, overrides = {}) => {
 };
 
 const startDeferred = async (root = document.body, overrides = {}) => {
-  if (overrides.useTranslationFont) enableFontPolicyStyles();
   const pending = [];
   const onTranslate = vi.fn((text, context, score, node) => new Promise(resolve => {
     pending.push({ text, context, score, node, resolve });
@@ -93,8 +82,6 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
   const bridges = [];
 
   afterEach(() => {
-    fontComputedStyleSpy?.mockRestore();
-    fontComputedStyleSpy = null;
     bridges.forEach(bridge => bridge.cleanup());
     bridges.length = 0;
     document.body.innerHTML = '';
@@ -315,6 +302,25 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
     expect(stale).toHaveBeenCalledWith('stale');
   });
 
+  it('does not apply mixed-content font ownership for a stale removed target', async () => {
+    const { bridge, pending } = await startDeferred(document.body, {
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+    });
+    track(bridge);
+    const mixed = document.createElement('div');
+    mixed.append(document.createTextNode('Stale mixed'), document.createElement('a'));
+    document.body.append(mixed);
+    await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
+
+    mixed.remove();
+    pending[0].resolve(settlement('Translated Stale mixed'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(bridge.session.fontOwnership.has(mixed)).toBe(false);
+  });
+
   it('applies translation font only after accepted text writes and restores the original inline font', async () => {
     const owner = document.createElement('span');
     owner.style.setProperty('font-family', 'serif');
@@ -380,9 +386,9 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
   });
 
   it('leaves website font unchanged when Page Translation font is disabled', async () => {
-    const owner = document.createElement('span');
+    const owner = document.createElement('div');
     owner.style.fontFamily = 'serif';
-    owner.textContent = 'Font disabled';
+    owner.append(document.createTextNode('Font disabled'), document.createElement('a'));
     document.body.appendChild(owner);
     const { bridge } = await start(document.body);
     track(bridge);
@@ -410,6 +416,209 @@ describe('PageTranslationBridge persistent ShadowRoot observation', () => {
 
     expect(mixed.style.getPropertyValue('font-family')).toBe('system-ui');
     expect(attributeOnly.style.getPropertyValue('font-family')).toBe('');
+  });
+
+  it('applies inline font to mixed direct text while preserving independent descendants and ownership', async () => {
+    const mixed = document.createElement('div');
+    mixed.style.fontFamily = 'serif';
+    const directText = document.createTextNode('Mixed page source');
+    const explicit = document.createElement('b');
+    explicit.style.fontFamily = 'Vazirmatn';
+    explicit.textContent = 'explicit child';
+    const link = document.createElement('a');
+    link.href = '#';
+    link.textContent = 'linked text';
+    const quote = document.createElement('q');
+    quote.textContent = 'quoted text';
+    const icon = document.createElement('span');
+    icon.className = 'material-symbols-outlined';
+    icon.style.fontFamily = 'Material Symbols Outlined';
+    icon.textContent = 'home';
+    const emoji = document.createElement('img');
+    emoji.alt = '😀';
+    mixed.append(directText, explicit, link, quote, icon, emoji);
+    document.body.append(mixed);
+    const { bridge } = await start(document.body, {
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+      excludedSelectors: ['b', 'q'],
+    });
+    track(bridge);
+
+    await vi.waitFor(() => expect(mixed.textContent).toContain('Translated Mixed page source'));
+
+    expect(getTranslationFontTarget(directText)).toBeNull();
+    expect(mixed.style.fontFamily).toBe('system-ui');
+    expect(bridge.session.fontOwnership.has(mixed)).toBe(true);
+    expect(nativeGetComputedStyle(mixed).fontFamily).toBe('system-ui');
+    expect(nativeGetComputedStyle(link).fontFamily).toBe('system-ui');
+    expect(nativeGetComputedStyle(quote).fontFamily).toBe('system-ui');
+    expect(nativeGetComputedStyle(explicit).fontFamily).toBe('Vazirmatn');
+    expect(nativeGetComputedStyle(icon).fontFamily).toBe('"Material Symbols Outlined"');
+    expect(explicit.style.fontFamily).toBe('Vazirmatn');
+    expect(link.style.getPropertyValue('font-family')).toBe('');
+    expect(quote.style.getPropertyValue('font-family')).toBe('');
+    expect(emoji.style.getPropertyValue('font-family')).toBe('');
+
+    bridge.restore(document.body);
+
+    expect(mixed.style.fontFamily).toBe('serif');
+  });
+
+  it.each(['editable descendant', 'open ShadowRoot host descendant'])('skips unsafe mixed font targets containing an %s', async kind => {
+    const mixed = document.createElement('div');
+    const unsafe = document.createElement('span');
+    if (kind === 'editable descendant') unsafe.setAttribute('contenteditable', 'true');
+    else unsafe.attachShadow({ mode: 'open' }).append('shadow content');
+    mixed.append(document.createTextNode('Unsafe mixed'), unsafe);
+    document.body.append(mixed);
+    const { bridge } = await start(document.body, {
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+    });
+    track(bridge);
+
+    await vi.waitFor(() => expect(mixed.textContent).toContain('Translated Unsafe mixed'));
+
+    expect(mixed.style.getPropertyValue('font-family')).toBe('');
+    expect(bridge.session.fontOwnership.has(mixed)).toBe(false);
+  });
+
+  it.each(['restore', 'cleanup'])('preserves an overlapping descendant inline font on Page %s', async action => {
+    const mixed = document.createElement('div');
+    mixed.style.fontFamily = 'serif';
+    const explicit = document.createElement('b');
+    explicit.style.fontFamily = 'serif';
+    explicit.textContent = 'explicit font';
+    const link = document.createElement('a');
+    link.textContent = 'link';
+    const quote = document.createElement('q');
+    quote.textContent = 'quote';
+    mixed.append(document.createTextNode('Mixed page source'), explicit, link, quote);
+    document.body.append(mixed);
+    const { bridge } = await start(document.body, {
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+      excludedSelectors: ['b', 'q'],
+    });
+    track(bridge);
+
+    await vi.waitFor(() => expect(mixed.textContent).toContain('Translated Mixed page source'));
+    expect(mixed.style.fontFamily).toBe('system-ui');
+    expect(explicit.style.fontFamily).toBe('serif');
+
+    bridge[action](document.body);
+
+    expect(mixed.style.fontFamily).toBe('serif');
+    expect(explicit.style.fontFamily).toBe('serif');
+  });
+
+  it('keeps Page font ownership separate from existing Select Element ownership', async () => {
+    const mixed = document.createElement('div');
+    const quote = document.createElement('q');
+    quote.textContent = 'quoted text';
+    mixed.append(document.createTextNode('Select isolated mixed'), quote);
+    mixed.setAttribute('data-ti-select-font-target', 'select-owner');
+    mixed.style.setProperty('--ti-select-element-font-family', 'select-font');
+    document.body.append(mixed);
+    const { bridge } = await start(document.body, {
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+      excludedSelectors: ['q'],
+    });
+    track(bridge);
+    await vi.waitFor(() => expect(mixed.style.fontFamily).toBe('system-ui'));
+
+    bridge.cleanup();
+
+    expect(mixed.getAttribute('data-ti-select-font-target')).toBe('select-owner');
+    expect(mixed.style.getPropertyValue('--ti-select-element-font-family')).toBe('select-font');
+    expect(mixed.style.getPropertyValue('font-family')).toBe('');
+  });
+
+  it('preserves external mixed-font edits during cleanup', async () => {
+    const mixed = document.createElement('div');
+    const quote = document.createElement('q');
+    quote.textContent = 'quoted text';
+    mixed.append(document.createTextNode('Mixed external edit'), quote);
+    document.body.append(mixed);
+    const { bridge } = await start(document.body, {
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+    });
+    track(bridge);
+    await vi.waitFor(() => expect(mixed.style.fontFamily).toBe('system-ui'));
+
+    mixed.style.setProperty('font-family', 'external-font');
+    bridge.cleanup();
+
+    expect(mixed.style.getPropertyValue('font-family')).toBe('external-font');
+  });
+
+  it('preserves external mixed-font edits during restore', async () => {
+    const mixed = document.createElement('div');
+    const quote = document.createElement('q');
+    quote.textContent = 'quoted text';
+    mixed.append(document.createTextNode('Mixed restore edit'), quote);
+    document.body.append(mixed);
+    const { bridge } = await start(document.body, {
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+    });
+    track(bridge);
+    await vi.waitFor(() => expect(mixed.style.fontFamily).toBe('system-ui'));
+
+    mixed.style.setProperty('font-family', 'external-font');
+    bridge.restore(document.body);
+
+    expect(mixed.style.getPropertyValue('font-family')).toBe('external-font');
+  });
+
+  it('reuses mixed font ownership for dynamic translations and restores between sessions', async () => {
+    const bridge = new PageTranslationBridge();
+    bridges.push(bridge);
+    await bridge.initialize(settings({
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+    }), text => settlement(`Translated ${text}`));
+    bridge.translate(document.body);
+    const mixed = document.createElement('div');
+    const quote = document.createElement('q');
+    quote.textContent = 'quoted text';
+    mixed.append(document.createTextNode('Dynamic mixed'), quote);
+    document.body.append(mixed);
+    await vi.waitFor(() => expect(mixed.textContent).toContain('Translated Dynamic mixed'));
+    expect(bridge.session.fontOwnership.has(mixed)).toBe(true);
+    const initialOwnershipSize = bridge.session.fontOwnership.size;
+    mixed.firstChild.nodeValue = 'Dynamic mixed edited';
+    await vi.waitFor(() => expect(mixed.textContent).toContain('Translated Dynamic mixed edited'));
+    expect(bridge.session.fontOwnership.size).toBe(initialOwnershipSize);
+
+    bridge.restore(document.body);
+    expect(mixed.style.getPropertyValue('font-family')).toBe('');
+    await bridge.initialize(settings({
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+    }), text => settlement(`Again ${text}`));
+    bridge.translate(document.body);
+    await vi.waitFor(() => expect(mixed.textContent).toContain('Again Dynamic mixed edited'));
+    expect(mixed.style.fontFamily).toBe('system-ui');
+  });
+
+  it('keeps eligible safe ShadowRoot text on the existing inline font path', async () => {
+    const { shadow } = createHost();
+    const owner = document.createElement('span');
+    owner.textContent = 'Safe shadow font';
+    shadow.append(owner);
+    const { bridge } = await start(document.body, {
+      useTranslationFont: true,
+      translationFontFamily: 'system-ui',
+    });
+    track(bridge);
+
+    await vi.waitFor(() => expect(owner.textContent).toContain('Translated Safe shadow font'));
+
+    expect(owner.style.getPropertyValue('font-family')).toBe('system-ui');
   });
 
   it('does not apply font for identical translated text', async () => {

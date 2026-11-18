@@ -201,6 +201,44 @@ describe('BlockGroupReconstructor', () => {
     document.body.removeChild(owner);
   });
 
+  it('applies and transactionally restores CSS font targeting for eligible mixed content', () => {
+    enablePseudoElementStyles();
+    window.translateItContentCore = {
+      injectMainDOMStyles(css, id) {
+        if (document.getElementById(id)) return;
+        const style = document.createElement('style');
+        style.id = id;
+        style.textContent = css;
+        document.head.append(style);
+      },
+    };
+    const owner = document.createElement('span');
+    owner.style.fontFamily = 'serif';
+    const text = document.createTextNode('Hello');
+    const link = document.createElement('a');
+    link.href = '#';
+    link.textContent = 'link sibling';
+    owner.append(text, link);
+    document.body.append(owner);
+    const unit = new TranslationUnit({
+      id: 'css-font-node', blockId: 'css-font-group', text: 'Hello', leadingWS: '', trailingWS: '',
+      preWhitespace: false, directionHint: 'ltr', inlineParentTags: ['span'], mode: 'standard',
+    });
+    unit.node = text;
+
+    const result = BlockGroupReconstructor.apply([unit], 'Bonjour', 'fr', document.body, '', '', 'system-ui');
+    expect(owner.hasAttribute('data-ti-select-font-target')).toBe(true);
+    expect(owner.style.getPropertyValue('--ti-select-element-font-family')).toBe('system-ui');
+    expect(text.parentNode).toBe(owner);
+    expect(owner.contains(link)).toBe(true);
+    result.transaction.rollback();
+    expect(owner.hasAttribute('data-ti-select-font-target')).toBe(false);
+    expect(owner.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+    expect(text.nodeValue).toBe('Hello');
+    expect(text.parentNode).toBe(owner);
+    document.body.removeChild(owner);
+  });
+
   describe('splitTranslatedBlock & Corruption Detection', () => {
     it('should split translated text correctly into expected segments', () => {
       const translated = 'مرحبا @@SEG_n2@@بالعالم@@SEG_n3@@.';

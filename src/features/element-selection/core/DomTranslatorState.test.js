@@ -791,6 +791,53 @@ describe('DomTranslatorState', () => {
       document.body.removeChild(container);
     });
 
+    it('reverts repeated Select Element font marker/property ownership across sessions', async () => {
+      const { container, nodes } = appendTextNodes(['Second translation']);
+      container.setAttribute('data-ti-select-font-target', '');
+      container.style.setProperty('--ti-select-element-font-family', 'system-ui');
+      globalSelectElementState.translationHistory = [
+        {
+          ...createTranslationEntry(container, [{ node: nodes[0], originalText: 'Original', appliedText: 'First translation' }], 'css-font-one'),
+          auxiliaryOwnershipRecords: [
+            { element: container, property: 'attribute:data-ti-select-font-target', original: { present: false, value: null }, applied: { present: true, value: '' } },
+            { element: container, property: 'style:--ti-select-element-font-family', original: { present: false, value: '', priority: '' }, applied: { present: true, value: 'system-ui', priority: '' } },
+          ],
+        },
+        {
+          ...createTranslationEntry(container, [{ node: nodes[0], originalText: 'First translation', appliedText: 'Second translation' }], 'css-font-two'),
+          auxiliaryOwnershipRecords: [
+            { element: container, property: 'attribute:data-ti-select-font-target', original: { present: true, value: '' }, applied: { present: true, value: '' } },
+            { element: container, property: 'style:--ti-select-element-font-family', original: { present: true, value: 'system-ui', priority: '' }, applied: { present: true, value: 'system-ui', priority: '' } },
+          ],
+        },
+      ];
+
+      expect(await revertSelectElementTranslation()).toBe(2);
+      expect(nodes[0].nodeValue).toBe('Original');
+      expect(container.hasAttribute('data-ti-select-font-target')).toBe(false);
+      expect(container.style.getPropertyValue('--ti-select-element-font-family')).toBe('');
+      document.body.removeChild(container);
+    });
+
+    it('preserves external edits to the Select Element CSS marker and font variable', async () => {
+      const { container, nodes } = appendTextNodes(['Translated']);
+      container.setAttribute('data-ti-select-font-target', 'external-marker');
+      container.style.setProperty('--ti-select-element-font-family', 'external-family', 'important');
+      globalSelectElementState.translationHistory = [{
+        ...createTranslationEntry(container, [{ node: nodes[0], originalText: 'Original', appliedText: 'Translated' }], 'css-font-external'),
+        auxiliaryOwnershipRecords: [
+          { element: container, property: 'attribute:data-ti-select-font-target', original: { present: false, value: null }, applied: { present: true, value: '' } },
+          { element: container, property: 'style:--ti-select-element-font-family', original: { present: false, value: '', priority: '' }, applied: { present: true, value: 'system-ui', priority: '' } },
+        ],
+      }];
+
+      await revertSelectElementTranslation('css-font-external');
+      expect(container.getAttribute('data-ti-select-font-target')).toBe('external-marker');
+      expect(container.style.getPropertyValue('--ti-select-element-font-family')).toBe('external-family');
+      expect(container.style.getPropertyPriority('--ti-select-element-font-family')).toBe('important');
+      document.body.removeChild(container);
+    });
+
     it('retires all style owners when external state aliases an older applied value', async () => {
       const { container, nodes } = appendTextNodes(['Generation two']);
       container.style.setProperty('direction', 'rtl');

@@ -248,6 +248,7 @@ class LifecycleManager {
       'contextInvalid': Handlers.handleContextInvalid,
       'extensionReloaded': Handlers.handleExtensionReloaded,
       'restartContentScript': Handlers.handleRestartContentScript,
+      'injectSelectElementFontStyles': Handlers.handleInjectSelectElementFontStyles,
       'backgroundReloadExtension': Handlers.handleBackgroundReloadExtension,
       
       // Translation handlers

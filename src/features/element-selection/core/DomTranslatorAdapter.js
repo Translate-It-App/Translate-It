@@ -54,8 +54,9 @@ import {
 import { collectTextNodes, collectBlockGroups, generateElementId, extractContextMetadata } from './DomTranslatorUtils.js';
 import { SelectElementExtractionMode, isSelectElementTraversable, SelectElementReason } from './SelectElementPolicy.js';
 import { BlockGroupReconstructor, BlockGroupMutationFailure } from './BlockGroupReconstructor.js';
-import { getTranslationFontTarget } from '@/shared/fonts/TranslationFontPolicy.js';
+import { getTranslationFontTarget, getSelectElementMixedFontTarget, isSelectElementFontTargetSafe } from '@/shared/fonts/TranslationFontPolicy.js';
 import { resolveTranslationFontFamily } from '@/shared/fonts/TranslationFontResolver.js';
+import { applySelectElementMixedFontStyle, restoreSelectElementMixedFontStyle } from './SelectElementFontStyles.js';
 import * as DirectionManager from '@/utils/dom/DomDirectionManager.js';
 
 // Import hover manager dependencies
@@ -118,7 +119,7 @@ function auxiliaryStatesEqual(original, applied, property) {
   return !property.startsWith('style:') || original.priority === applied.priority;
 }
 
-function createAuxiliaryOwnershipRecords({ attributeParents = new Map(), directionSnapshots = [], fontParents = new Map() } = {}) {
+function createAuxiliaryOwnershipRecords({ attributeParents = new Map(), directionSnapshots = [], fontParents = new Map(), cssFontTargets = new Map() } = {}) {
   const records = [];
   const addRecord = (element, property, original) => {
     const applied = readAuxiliaryState(element, property);
@@ -143,6 +144,16 @@ function createAuxiliaryOwnershipRecords({ attributeParents = new Map(), directi
 
   for (const [element, original] of fontParents || []) {
     addRecord(element, 'style:font-family', original);
+  }
+
+  for (const [element, original] of cssFontTargets || []) {
+    for (const [property, state] of [
+      ['attribute:data-ti-select-font-target', original.marker],
+      ['style:--ti-select-element-font-family', original.family],
+    ]) {
+      const applied = readAuxiliaryState(element, property);
+      if (applied) records.push({ element, property, original: state, applied });
+    }
   }
 
   return records;
@@ -538,6 +549,7 @@ export class DomTranslatorAdapter extends ResourceTracker {
           attributeParents: new Map(),
           directionSnapshots: [],
           fontParents: new Map(),
+          cssFontTargets: new Map(),
           hoverNodes: plan.map(({ nodeData }) => ({ node: nodeData.node, value: hoverPreviewLookup.get(nodeData.node) })),
         };
         const directionElements = new Set();
@@ -563,7 +575,7 @@ export class DomTranslatorAdapter extends ResourceTracker {
 
         try {
           for (const { nodeData, translatedText } of plan) {
-            this._applyTranslationToNode(nodeData.node, translatedText, targetLanguage, element, translationFontFamily, mutationSnapshot.fontParents);
+            this._applyTranslationToNode(nodeData.node, translatedText, targetLanguage, element, translationFontFamily, mutationSnapshot.fontParents, mutationSnapshot.cssFontTargets);
           }
            this._publishCommittedOwnership(
              plan.map(({ nodeData }) => ({
@@ -612,6 +624,11 @@ export class DomTranslatorAdapter extends ResourceTracker {
                 else parentElement.style.removeProperty('font-family');
               },
               createFailure: (rollbackError) => ({ kind: 'font', element: parentElement, error: rollbackError }),
+            })),
+            ...[...mutationSnapshot.cssFontTargets].map(([target, state]) => ({
+              kind: 'css-font',
+              restore: () => restoreSelectElementMixedFontStyle(target, state),
+              createFailure: (rollbackError) => ({ kind: 'css-font', element: target, error: rollbackError }),
             })),
             {
               kind: 'direction',
@@ -1313,7 +1330,7 @@ export class DomTranslatorAdapter extends ResourceTracker {
     );
   }
 
-  _applyTranslationToNode(textNode, translatedText, targetLanguage, rootElement, translationFontFamily = null, fontParents = null) {
+  _applyTranslationToNode(textNode, translatedText, targetLanguage, rootElement, translationFontFamily = null, fontParents = null, cssFontTargets = null) {
     if (!textNode || !translatedText) return;
     
     // Safety check: extract string content
@@ -1359,22 +1376,29 @@ export class DomTranslatorAdapter extends ResourceTracker {
     // Register only after the DOM write so cache validation reflects the value actually applied.
     hoverPreviewLookup.add(textNode, originalText, textNode.nodeValue);
 
-    this._applyTranslationFont(textNode, translationFontFamily, fontParents);
+    this._applyTranslationFont(textNode, translationFontFamily, fontParents, cssFontTargets);
     DirectionManager.applyNodeDirection(textNode, targetLanguage, rootElement, {
       shadowAware: isSelectShadowNode(textNode),
     });
   }
 
-  _applyTranslationFont(textNode, fontFamily, fontParents) {
+  _applyTranslationFont(textNode, fontFamily, fontParents, cssFontTargets) {
     if (!fontFamily || !fontParents) return;
     const target = getTranslationFontTarget(textNode);
-    if (!target || fontParents.has(target)) return;
-    try {
-      fontParents.set(target, readAuxiliaryState(target, 'style:font-family'));
-      target.style.setProperty('font-family', fontFamily);
-    } catch (error) {
-      fontParents.delete(target);
-      this.logger.debug('Select Element font enhancement skipped', error);
+    if (target) {
+      if (!isSelectElementFontTargetSafe(target) || fontParents.has(target)) return;
+      try {
+        fontParents.set(target, readAuxiliaryState(target, 'style:font-family'));
+        target.style.setProperty('font-family', fontFamily);
+      } catch (error) {
+        fontParents.delete(target);
+        this.logger.debug('Select Element font enhancement skipped', error);
+      }
+      return;
+    }
+    if (!target) {
+      const mixedTarget = getSelectElementMixedFontTarget(textNode);
+      if (mixedTarget) applySelectElementMixedFontStyle(mixedTarget, fontFamily, cssFontTargets);
     }
   }
 
