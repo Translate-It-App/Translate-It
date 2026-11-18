@@ -38,6 +38,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.onInternalError = typeof onInternalError === 'function' ? onInternalError : null;
     this.queue = []; // Tasks: { text, score, resolve, reject, context, node }
     this.batchTimer = null;
+    this.isVisibilityRetryTimer = false;
     this.translatedCount = 0;
     this.failedCount = 0;
     this.totalTasks = 0;
@@ -55,6 +56,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.isScrolling = false;
     this.highPriorityCount = 0;
     this.isWaitingForVisibility = false; // flag to track idle state
+    this._visibilityIdleSnapshot = null;
     
     // Memory-safe map for logical context grouping
     this.contextMap = new WeakMap();
@@ -108,8 +110,10 @@ export class PageTranslationScheduler extends ResourceTracker {
     if (!isTranslated) {
       this.stop('cancelled', cancellationReason);
     } else {
-      if (!this.isTranslated || this.translationSessionId !== sessionId || this.sessionContext !== sessionContext) {
+      const isNewSession = !this.isTranslated || this.translationSessionId !== sessionId || this.sessionContext !== sessionContext;
+      if (isNewSession) {
         this.consecutiveTransientBatchFailures = 0;
+        this._visibilityIdleSnapshot = null;
       }
       this.lastNonFatalError = null;
       this.isTranslated = isTranslated;
@@ -132,6 +136,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.totalTasks = 0;
     this.highPriorityCount = 0;
     this.isWaitingForVisibility = false;
+    this._visibilityIdleSnapshot = null;
     this.fatalErrorOccurred = false;
     this.consecutiveTransientBatchFailures = 0;
     this._handledBatchOutcomes = new WeakSet();
@@ -154,6 +159,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     this._reportPending = false;
     this.isScrolling = false;
     this.isWaitingForVisibility = false;
+    this._visibilityIdleSnapshot = null;
     this.contextMap = new WeakMap();
     
     // CRITICAL: Notify background to abort any pending batch for this session
@@ -174,10 +180,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       });
     }
 
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
-    }
+    this._clearBatchTimer();
     if (this._completionTimer) {
       clearTimeout(this._completionTimer);
       this._completionTimer = null;
@@ -333,8 +336,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     // If we are waiting for a scroll stop, clear any pending automatic timers
     // to ensure we strictly wait for the next stop.
     if (this.settings.translateAfterScrollStop && this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
+      this._clearBatchTimer();
     }
   }
 
@@ -343,6 +345,10 @@ export class PageTranslationScheduler extends ResourceTracker {
    * High priority (Viewport) triggers faster flushes.
    */
   _scheduleFlush(score) {
+    // Fresh arrivals should use the normal batching deadline, not a visibility poll.
+    if (this.isVisibilityRetryTimer) {
+      this._clearBatchTimer();
+    }
     if (this.activeFlushes >= (this.settings.maxConcurrentFlushes || 1)) return;
 
     // 1. EMERGENCY FLUSH (Memory Safety)
@@ -398,8 +404,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       if (this.isFirstBatch) return; // Preserve the deadline from the first enqueue.
       // If a high-priority item comes in, we might want to speed up the existing timer
       if (isHighPriority && this.batchTimerDelay > 100) {
-        clearTimeout(this.batchTimer);
-        this.batchTimer = null;
+        this._clearBatchTimer();
       } else {
         return; // Already scheduled
       }
@@ -423,10 +428,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       return;
     }
 
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
-    }
+    this._clearBatchTimer();
     
     const flushSessionId = this.translationSessionId;
     const flushContext = this.sessionContext;
@@ -472,7 +474,16 @@ export class PageTranslationScheduler extends ResourceTracker {
           this.activeBatches.delete(activeBatch);
           activeBatch = null;
           this.logger.debug('No visible content in queue, stopping flush loop');
-          this.isWaitingForVisibility = true; // No visible content found
+          const hasVisibleQueuedItem = this.queue.some(item => PageTranslationHelper.isInViewportWithMargin(
+            item.node || item.textNode || item,
+            PAGE_TRANSLATION_TIMING.VIEWPORT_BUFFER_PX || 100,
+            this.logger
+          ));
+          const isVisibilityBlocked = config.lazyLoading !== false
+            && this.queue.length > 0
+            && !hasVisibleQueuedItem;
+          this.isWaitingForVisibility = isVisibilityBlocked;
+          if (isVisibilityBlocked) this._scheduleVisibilityRetry(flushSessionId, flushContext);
           break;
         }
 
@@ -480,6 +491,7 @@ export class PageTranslationScheduler extends ResourceTracker {
         const removedHighPriority = currentBatch.filter(item => item.isHighPriority).length;
         this.highPriorityCount = Math.max(0, this.highPriorityCount - removedHighPriority);
         this.isWaitingForVisibility = false; // We found something to translate
+        this._visibilityIdleSnapshot = null;
 
         // 2. EXECUTE BATCH: Process the selected items
         this.isFirstBatch = false;
@@ -512,6 +524,32 @@ export class PageTranslationScheduler extends ResourceTracker {
         this._checkCompletion();
       }
     }
+  }
+
+  _scheduleVisibilityRetry(sessionId, sessionContext) {
+    if (!this._ownsFlushSession(sessionId, sessionContext)
+        || this.queue.length === 0
+        || this.batchTimer
+        || (this.settings.translateAfterScrollStop && this.isScrolling)) return;
+
+    const retryTimer = this.trackTimeout(() => {
+      if (this.batchTimer !== retryTimer) return;
+      this.batchTimer = null;
+      this.isVisibilityRetryTimer = false;
+      if (this._ownsFlushSession(sessionId, sessionContext)) void this.flush();
+    }, 1000);
+    this.batchTimer = retryTimer;
+    this.isVisibilityRetryTimer = true;
+    this.batchTimerDelay = 1000;
+  }
+
+  _clearBatchTimer() {
+    if (this.batchTimer) {
+      if (this.isVisibilityRetryTimer) this.clearTimer(this.batchTimer);
+      else clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
+    this.isVisibilityRetryTimer = false;
   }
 
   _ownsFlushSession(sessionId, sessionContext) {
@@ -900,13 +938,35 @@ export class PageTranslationScheduler extends ResourceTracker {
       // This is triggered if the last flush attempt found NO visible content.
       // We allow idle even if some failed or nothing successfully translated yet.
       if (this.isWaitingForVisibility && processedCount >= 0) {
-        this.logger.debug('Scheduler entering idle state (Visible content processed)');
-        this._emitLifecycle(MessageActions.PAGE_TRANSLATE_IDLE, {
-          translatedCount: this.translatedCount,
-          totalCount: this.totalTasks,
-          failedCount: this.failedCount,
-          isAutoTranslating: isAuto
-        });
+        const queuedItemIds = new Set(this.queue.map(item => item.id ?? item));
+        const previous = this._visibilityIdleSnapshot;
+        const isSameSnapshot = previous
+          && previous.sessionId === this.translationSessionId
+          && previous.sessionContext === this.sessionContext
+          && previous.translatedCount === this.translatedCount
+          && previous.failedCount === this.failedCount
+          && previous.totalCount === this.totalTasks
+          && previous.isAutoTranslating === isAuto
+          && previous.queuedItemIds.size === queuedItemIds.size
+          && [...queuedItemIds].every(id => previous.queuedItemIds.has(id));
+        if (!isSameSnapshot) {
+          this._visibilityIdleSnapshot = {
+            sessionId: this.translationSessionId,
+            sessionContext: this.sessionContext,
+            translatedCount: this.translatedCount,
+            failedCount: this.failedCount,
+            totalCount: this.totalTasks,
+            isAutoTranslating: isAuto,
+            queuedItemIds,
+          };
+          this.logger.debug('Scheduler entering idle state (Visible content processed)');
+          this._emitLifecycle(MessageActions.PAGE_TRANSLATE_IDLE, {
+            translatedCount: this.translatedCount,
+            totalCount: this.totalTasks,
+            failedCount: this.failedCount,
+            isAutoTranslating: isAuto
+          });
+        }
       }
     }, 500);
   }

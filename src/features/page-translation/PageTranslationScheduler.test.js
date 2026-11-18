@@ -25,6 +25,7 @@ vi.mock('@/core/extensionContext.js', () => {
 });
 
 import { PageTranslationScheduler } from './PageTranslationScheduler.js';
+import { PageTranslationHelper } from './PageTranslationHelper.js';
 import { isFatalError, matchErrorToType } from '@/shared/error-management/ErrorMatcher.js';
 import { PageTranslationQueueFilter } from './utils/PageTranslationQueueFilter.js';
 import { PageTranslationFluidFilter } from './utils/PageTranslationFluidFilter.js';
@@ -47,7 +48,8 @@ vi.mock('./utils/PageTranslationFluidFilter.js', () => ({
 vi.mock('./PageTranslationHelper.js', () => ({
   PageTranslationHelper: {
     shouldTranslate: vi.fn(() => true),
-    getNearestSemanticContainer: vi.fn(() => null)
+    getNearestSemanticContainer: vi.fn(() => null),
+    isInViewportWithMargin: vi.fn(() => true),
   }
 }));
 
@@ -115,6 +117,7 @@ describe('PageTranslationScheduler', () => {
     };
     PageTranslationQueueFilter.process.mockReturnValue({ ...defaultResult });
     PageTranslationFluidFilter.process.mockReturnValue({ ...defaultResult });
+    PageTranslationHelper.isInViewportWithMargin.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -151,15 +154,15 @@ describe('PageTranslationScheduler', () => {
     let flushCalls;
     let taskPromises;
 
-    const configureTimedQueue = ({ translateAfterScrollStop = false, chunkSize = 250 } = {}) => {
+    const configureTimedQueue = ({ translateAfterScrollStop = false, chunkSize = 250, lazyLoading = false } = {}) => {
       scheduler.setSettings({
-        translationApi: 'google', targetLanguage: 'en', lazyLoading: false,
+        translationApi: 'google', targetLanguage: 'en', lazyLoading,
         translateAfterScrollStop, scrollStopDelay: 600, poolDelay: 150,
         priorityThreshold: 1, chunkSize, maxConcurrentFlushes: 1,
       });
       vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({
         providerRegistryId: 'google', targetLanguage: 'en', chunkSize,
-        maxChars: 1_000_000, parallelExecution: false, lazyLoading: false,
+        maxChars: 1_000_000, parallelExecution: false, lazyLoading,
       });
       PageTranslationFluidFilter.process.mockImplementation((queue, config) => ({
         batchItems: queue.slice(0, config.chunkSize),
@@ -390,6 +393,211 @@ describe('PageTranslationScheduler', () => {
       expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([
         [800, ['first-visible']], [1850, ['after-first-batch']],
       ]);
+    });
+
+    it('retries visibility on a low-frequency timer until the queued item becomes eligible', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)) };
+      });
+      const task = enqueueTimed('lazy-item');
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(handoffs).toEqual([]);
+      expect(scheduler.batchTimer).not.toBeNull();
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(999);
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await task;
+
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([[1800, ['lazy-item']]]);
+      expect(flushCalls).toEqual([800, 1800]);
+      expect(scheduler.batchTimer).toBeNull();
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps polling blocked items without provider requests and can recover later', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)) };
+      });
+      const task = enqueueTimed('still-lazy');
+
+      await vi.advanceTimersByTimeAsync(800 + 3 * 1000);
+      expect(handoffs).toEqual([]);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(flushCalls).toEqual([800, 1800, 2800, 3800]);
+      expect(scheduler.queue).toHaveLength(1);
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(1000);
+      await task;
+      expect(handoffs.map(({ at }) => at)).toEqual([4800]);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      expect(scheduler.queue).toHaveLength(0);
+      expect(scheduler.batchTimer).toBeNull();
+    });
+
+    it('deduplicates unchanged visibility-idle events and re-emits when progress or queued work changes', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)) };
+      });
+      const visibilityIdles = () => pageEventBus.emit.mock.calls
+        .filter(([action]) => action === MessageActions.PAGE_TRANSLATE_IDLE)
+        .map(([, payload]) => payload);
+      const first = enqueueTimed('blocked-progress');
+
+      await vi.advanceTimersByTimeAsync(1300);
+      expect(visibilityIdles()).toHaveLength(1);
+      scheduler.failedCount++;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(visibilityIdles()).toHaveLength(2);
+      expect(visibilityIdles()[1]).toMatchObject({ failedCount: 1, totalCount: 1 });
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(1000);
+      await first;
+      expect(scheduler.queue).toHaveLength(0);
+
+      visible = false;
+      const next = enqueueTimed('new-blocked-work');
+      await vi.advanceTimersByTimeAsync(1200);
+      expect(visibilityIdles()).toHaveLength(3);
+      expect(visibilityIdles()[2]).toMatchObject({ totalCount: 2 });
+      scheduler.stop();
+      await next;
+    });
+
+    it('emits an initial visibility-idle event for a replacement session', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue],
+      }));
+      const visibilityIdleCount = () => pageEventBus.emit.mock.calls
+        .filter(([action]) => action === MessageActions.PAGE_TRANSLATE_IDLE).length;
+
+      enqueueTimed('first-session-blocked');
+      await vi.advanceTimersByTimeAsync(1300);
+      expect(visibilityIdleCount()).toBe(1);
+
+      scheduler.stop();
+      scheduler.setTranslationState(true, 'replacement-session', { replacement: true });
+      enqueueTimed('replacement-session-blocked');
+      await vi.advanceTimersByTimeAsync(1300);
+      expect(visibilityIdleCount()).toBe(2);
+    });
+
+    it('replaces a visibility retry with normal timing for a newly enqueued item', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)) };
+      });
+      enqueueTimed('blocked');
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+
+      visible = true;
+      const later = enqueueTimed('new-arrival');
+      expect(scheduler.isVisibilityRetryTimer).toBe(false);
+      await vi.advanceTimersByTimeAsync(799);
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await later;
+
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([[1600, ['blocked', 'new-arrival']]]);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not poll an empty batch when lazy loading is disabled', async () => {
+      configureTimedQueue({ lazyLoading: false });
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue],
+      }));
+      enqueueTimed('non-lazy-empty');
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.queue).toHaveLength(1);
+      expect(scheduler.isWaitingForVisibility).toBe(false);
+      expect(scheduler.batchTimer).toBeNull();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(flushCalls).toEqual([800]);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+    });
+
+    it('cancels On-Stop visibility retries during scrolling and rechecks at scroll stop', async () => {
+      configureTimedQueue({ translateAfterScrollStop: true, lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationQueueFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), purgedCount: 0, ejectedItems: [] };
+      });
+      const task = enqueueTimed('on-stop-lazy');
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+
+      scheduler.signalScrollStart();
+      expect(scheduler.batchTimer).toBeNull();
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(flushCalls).toEqual([800]);
+
+      visible = true;
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+      await task;
+      expect(flushCalls).toEqual([800, 2300]);
+      expect(handoffs.map(({ texts }) => texts)).toEqual([['on-stop-lazy']]);
+    });
+
+    it('invalidates pending visibility retries on stop and session replacement', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue],
+      }));
+      enqueueTimed('old-session-item');
+      await vi.advanceTimersByTimeAsync(800);
+      const staleRetry = scheduler.batchTimer;
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+
+      scheduler.stop();
+      scheduler.setTranslationState(true, 'replacement-session', { replacement: true });
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [...queue], remainingItems: [],
+      }));
+      const replacement = enqueueTimed('replacement-item');
+      const replacementTimer = scheduler.batchTimer;
+      expect(replacementTimer).not.toBe(staleRetry);
+      await vi.advanceTimersByTimeAsync(800);
+      await replacement;
+      expect(handoffs.map(({ texts }) => texts)).toEqual([['replacement-item']]);
     });
 
     it('keeps flush invocation at 800ms distinct from the 200ms batch-config handoff delay', async () => {
