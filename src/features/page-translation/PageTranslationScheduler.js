@@ -22,6 +22,7 @@ import { PageTranslationFluidFilter } from './utils/PageTranslationFluidFilter.j
 import ResourceTracker from '@/core/memory/ResourceTracker.js';
 import { sendRegularMessage, safeSendMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
 import { registryIdToName, isProviderType, ProviderTypes } from '@/features/translation/providers/ProviderConstants.js';
+import { findProviderById } from '@/features/translation/providers/ProviderManifest.js';
 
 const INTERNAL_CANCELLATION_REASON = 'operation-abort';
 
@@ -1038,12 +1039,15 @@ export class PageTranslationScheduler extends ResourceTracker {
     const providerName = registryIdToName(providerRegistryId);
     const level = await getProviderOptimizationLevelAsync(providerName);
     const providerConfig = getProviderConfiguration(providerName, level);
+    const supportsPageParallelExecution = findProviderById(providerRegistryId)?.supportsPageParallelExecution === true;
 
     const isAI = isProviderType(providerName, ProviderTypes.AI);
 
     // Sync concurrency settings with optimization level
     if (providerConfig.rateLimit) {
-      settings.maxConcurrentFlushes = providerConfig.rateLimit.maxConcurrent;
+      settings.maxConcurrentFlushes = supportsPageParallelExecution
+        ? Math.min(2, providerConfig.rateLimit.maxConcurrent)
+        : providerConfig.rateLimit.maxConcurrent;
     }
 
     // Dynamic Chunk Size Scaling (Optimization Level Alignment)
@@ -1075,7 +1079,8 @@ export class PageTranslationScheduler extends ResourceTracker {
       chunkSize: Math.max(chunkSize, 5), // Ensure at least 5 segments per batch
       parallelExecution: isAI
         || isProviderType(providerName, ProviderTypes.CUSTOM)
-        || isProviderType(providerName, ProviderTypes.MOCK),
+        || isProviderType(providerName, ProviderTypes.MOCK)
+        || (supportsPageParallelExecution && providerConfig.rateLimit?.maxConcurrent > 1),
       isAI,
       lazyLoading: settings.lazyLoading,
       maxChars: isAI ? (providerConfig.batching?.maxBatchSizeChars || await getWholePageAiMaxCharsAsync()) : (providerConfig.batching?.characterLimit || await getWholePageMaxCharsAsync())
