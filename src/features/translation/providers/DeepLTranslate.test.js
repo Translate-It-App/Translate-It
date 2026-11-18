@@ -4,6 +4,7 @@ import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import { ApiKeyManager } from './ApiKeyManager.js';
 import { ProviderRequestEngine } from './utils/ProviderRequestEngine.js';
 import { QueueManager } from '@/features/translation/core/QueueManager.js';
+import { RateLimitManager } from '@/features/translation/core/RateLimitManager.js';
 import { getProviderLanguageCode } from '@/shared/config/languageConstants.js';
 
 const deeplConfigMocks = vi.hoisted(() => ({
@@ -862,6 +863,253 @@ describe('DeepLTranslateProvider response contract', () => {
     await expect(provider._translateChunk(['first', 'second'], 'en', 'fa', 'selection', null, 0, 2, 0, 1, {}))
       .rejects.toThrow('HTTP 400');
     expect(calls).toBe(3);
+  });
+
+  it('translates recursive split children sequentially and preserves result order', async () => {
+    let calls = 0;
+    vi.spyOn(provider, '_executeRequest').mockImplementation(async options => {
+      calls++;
+      if (calls === 1) throw requestSizeError();
+      const text = options.fetchOptions.body.get('text');
+      return options.extractResponse({ translations: [{ text: `translated ${text}` }] });
+    });
+
+    await expect(provider._translateChunk(['first', 'second'], 'en', 'fa', 'selection', null, 0, 2, 0, 1, {}))
+      .resolves.toEqual(['translated first', 'translated second']);
+    expect(calls).toBe(3);
+  });
+
+  it('does not start the second split child after the first child fails', async () => {
+    const network = Object.assign(new Error('network failed'), { type: ErrorTypes.NETWORK_ERROR });
+    let calls = 0;
+    vi.spyOn(provider, '_executeRequest').mockImplementation(async () => {
+      calls++;
+      if (calls === 1) throw requestSizeError();
+      throw network;
+    });
+
+    await expect(provider._translateChunk(['first', 'second'], 'en', 'fa', 'selection', null, 0, 2, 0, 1, {}))
+      .rejects.toBe(network);
+    expect(calls).toBe(2);
+  });
+
+  it('does not start the second split child when the first child completes after cancellation', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    vi.spyOn(provider, '_executeRequest').mockImplementation(async options => {
+      calls++;
+      if (calls === 1) throw requestSizeError();
+      controller.abort('user-cancelled');
+      return options.extractResponse({ translations: [{ text: 'translated first' }] });
+    });
+
+    await expect(provider._translateChunk(['first', 'second'], 'en', 'fa', 'selection', controller, 0, 2, 0, 1, {}))
+      .rejects.toMatchObject({ type: ErrorTypes.USER_CANCELLED });
+    expect(calls).toBe(2);
+  });
+
+  it('keeps physical DeepL requests within the limiter capacity during concurrent splits', async () => {
+    const limiter = RateLimitManager.getInstance();
+    const providerName = provider.providerName;
+    const priorState = limiter.providerStates.get(providerName);
+    limiter.providerStates.delete(providerName);
+    const state = limiter._initializeProvider(providerName, { maxConcurrent: 2, delayBetweenRequests: 0 });
+    state.config = { ...state.config, maxConcurrent: 2, delayBetweenRequests: 0 };
+    state.isManualConfig = true;
+    let active = 0;
+    let maximumActive = 0;
+    const childArrivals = [];
+    let releaseChildren;
+    const childGate = new Promise(resolve => { releaseChildren = resolve; });
+    let resolveFirstPair;
+    const firstPair = new Promise(resolve => { resolveFirstPair = resolve; });
+
+    try {
+      await runWithRuntime(['key'], 'free', async () => {
+      proxyFetch.mockImplementation(async (_url, options) => {
+        const texts = options.body.getAll('text');
+        if (texts.length > 1) return createJsonResponse(400, { message: 'HTTP request is too long' }, 'Bad Request');
+        active++;
+        maximumActive = Math.max(maximumActive, active);
+        childArrivals.push(options.body.get('text'));
+        if (childArrivals.length === 2) resolveFirstPair();
+        try {
+          await childGate;
+          return createJsonResponse(200, { translations: [{ text: `translated ${texts[0]}` }] }, 'OK');
+        } finally {
+          active--;
+        }
+      });
+
+      const executeOuter = text => provider._executeWithRateLimit(
+        () => provider._translateChunk([`${text}-one`, `${text}-two`], 'en', 'fa', 'selection', null, 0, 2, 0, 1, {}),
+        `deepl-split-${text}`,
+      );
+      const first = executeOuter('alpha');
+      const second = executeOuter('beta');
+      try {
+        await firstPair;
+        expect(childArrivals).toEqual(['alpha-one', 'beta-one']);
+        expect(childArrivals).not.toContain('alpha-two');
+        expect(childArrivals).not.toContain('beta-two');
+        expect(active).toBe(2);
+        expect(maximumActive).toBe(2);
+        expect(state.activeRequests).toBe(2);
+        releaseChildren();
+        await expect(Promise.all([first, second])).resolves.toEqual([
+          ['translated alpha-one', 'translated alpha-two'],
+          ['translated beta-one', 'translated beta-two'],
+        ]);
+        expect(maximumActive).toBeLessThanOrEqual(2);
+        expect(state.activeRequests).toBe(0);
+      } finally {
+        releaseChildren();
+        await Promise.allSettled([first, second]);
+      }
+      });
+
+      expect(state.activeRequests).toBe(0);
+    } finally {
+      releaseChildren();
+      if (state.nextProcessTimer) clearTimeout(state.nextProcessTimer);
+      for (const queue of Object.values(state.queues)) {
+        for (const request of queue) {
+          request.cleanupAbort?.();
+          request.reject(new Error('DeepL limiter test cleanup'));
+        }
+        queue.length = 0;
+      }
+      if (priorState) limiter.providerStates.set(providerName, priorState);
+      else limiter.providerStates.delete(providerName);
+    }
+  });
+
+  it('releases limiter capacity after DeepL recovery succeeds, fails, or is cancelled', async () => {
+    const limiter = RateLimitManager.getInstance();
+    const providerName = provider.providerName;
+    const priorState = limiter.providerStates.get(providerName);
+    limiter.providerStates.delete(providerName);
+    const state = limiter._initializeProvider(providerName, {
+      maxConcurrent: 1,
+      delayBetweenRequests: 0,
+      circuitBreakThreshold: 10,
+      adaptiveBackoff: { enabled: false },
+    });
+    state.config = { ...state.config, maxConcurrent: 1, delayBetweenRequests: 0, adaptiveBackoff: { enabled: false } };
+    state.isManualConfig = true;
+
+    try {
+      await runWithRuntime(['key'], 'free', async () => {
+        for (const scenario of ['success', 'failure', 'cancelled']) {
+          proxyFetch.mockClear();
+          let physicalActive = 0;
+          const childTexts = [];
+          let releaseChild;
+          const childGate = new Promise(resolve => { releaseChild = resolve; });
+          let releaseSibling;
+          const siblingGate = new Promise(resolve => { releaseSibling = resolve; });
+          let resolveChildStarted;
+          const childStarted = new Promise(resolve => { resolveChildStarted = resolve; });
+          let resolvePhysicalIdle;
+          const physicalIdle = new Promise(resolve => { resolvePhysicalIdle = resolve; });
+          let releaseSentinel;
+          const sentinelGate = new Promise(resolve => { releaseSentinel = resolve; });
+          let resolveSentinelStarted;
+          const sentinelStarted = new Promise(resolve => { resolveSentinelStarted = resolve; });
+          let physicalAtSentinelStart;
+          const controller = new AbortController();
+
+          proxyFetch.mockImplementation(async (_url, options) => {
+            const texts = options.body.getAll('text');
+            if (texts.length > 1) {
+              return createJsonResponse(400, { message: 'HTTP request is too long' }, 'Bad Request');
+            }
+
+            const text = texts[0];
+            childTexts.push(text);
+            physicalActive++;
+            resolveChildStarted();
+            try {
+              await (scenario === 'failure' && text === 'second' ? siblingGate : childGate);
+              if (scenario === 'cancelled') controller.abort('user-cancelled');
+              if (scenario === 'failure') {
+                throw new TypeError('NetworkError: Failed to fetch');
+              }
+              return createJsonResponse(200, { translations: [{ text: `translated ${text}` }] }, 'OK');
+            } finally {
+              physicalActive--;
+              if (physicalActive === 0) resolvePhysicalIdle();
+            }
+          });
+
+          const operation = provider._executeWithRateLimit(
+            () => provider._translateChunk(
+              ['first', 'second'], 'en', 'fa', 'selection', controller, 0, 2, 0, 1, {},
+            ),
+            `deepl-recovery-${scenario}`,
+            null,
+            { abortController: controller },
+          );
+          let operationOutcome;
+          operation.then(
+            value => { operationOutcome = { value }; },
+            error => { operationOutcome = { error }; },
+          );
+
+          try {
+            await childStarted;
+            const sentinel = provider._executeWithRateLimit(async () => {
+              physicalAtSentinelStart = physicalActive;
+              resolveSentinelStarted();
+              await sentinelGate;
+              return 'sentinel';
+            }, `deepl-recovery-sentinel-${scenario}`);
+            await Promise.resolve();
+            expect(Object.values(state.queues).flat()).toHaveLength(1);
+
+            releaseChild();
+            await sentinelStarted;
+            await Promise.allSettled([operation]);
+
+            expect(physicalAtSentinelStart).toBe(0);
+            if (scenario === 'success') {
+              expect(childTexts).toEqual(['first', 'second']);
+              expect(operationOutcome).toEqual({ value: ['translated first', 'translated second'] });
+              expect(proxyFetch).toHaveBeenCalledTimes(3);
+            } else if (scenario === 'failure') {
+              expect(childTexts).toEqual(['first']);
+              expect(operationOutcome.error).toMatchObject({ type: ErrorTypes.NETWORK_ERROR });
+              expect(proxyFetch).toHaveBeenCalledTimes(2);
+            } else {
+              expect(childTexts).toEqual(['first']);
+              expect(operationOutcome.error).toMatchObject({ type: ErrorTypes.USER_CANCELLED });
+              expect(proxyFetch).toHaveBeenCalledTimes(2);
+            }
+
+            releaseSentinel();
+            await expect(sentinel).resolves.toBe('sentinel');
+            expect(state.activeRequests).toBe(0);
+          } finally {
+            releaseChild();
+            releaseSibling();
+            releaseSentinel();
+            await Promise.allSettled([operation]);
+            await physicalIdle;
+          }
+        }
+      });
+    } finally {
+      if (state.nextProcessTimer) clearTimeout(state.nextProcessTimer);
+      for (const queue of Object.values(state.queues)) {
+        for (const request of queue) {
+          request.cleanupAbort?.();
+          request.reject(new Error('DeepL limiter test cleanup'));
+        }
+        queue.length = 0;
+      }
+      if (priorState) limiter.providerStates.set(providerName, priorState);
+      else limiter.providerStates.delete(providerName);
+    }
   });
 
   it('rejects the parent when a sequential fallback item fails', async () => {

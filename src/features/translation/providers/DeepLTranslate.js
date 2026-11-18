@@ -665,13 +665,16 @@ export class DeepLTranslateProvider extends BaseTranslateProvider {
         const firstHalf = chunkTexts.slice(0, midPoint);
         const secondHalf = chunkTexts.slice(midPoint);
 
-        // Run both halves in parallel for better performance during fallback
-        const [firstResult, secondResult] = await Promise.all([
-          this._translateChunk(firstHalf, sourceLang, targetLang, translateMode, abortController, retryAttempt + 1, segmentCount, chunkIndex, totalChunks, options),
-          this._translateChunk(secondHalf, sourceLang, targetLang, translateMode, abortController, retryAttempt + 1, segmentCount, chunkIndex, totalChunks, options)
-        ]);
+        const results = [];
+        for (const half of [firstHalf, secondHalf]) {
+          if (abortController?.signal?.aborted) throw createOperationAbortError(abortController.signal);
+          results.push(...await this._translateChunk(
+            half, sourceLang, targetLang, translateMode, abortController,
+            retryAttempt + 1, segmentCount, chunkIndex, totalChunks, options,
+          ));
+        }
 
-        return [...firstResult, ...secondResult];
+        return results;
       }
 
       // Final fallback for request-size errors: translate each segment individually.
