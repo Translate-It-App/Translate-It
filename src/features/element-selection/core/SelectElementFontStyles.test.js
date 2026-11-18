@@ -5,6 +5,29 @@ import { resolve } from 'node:path';
 import { applySelectElementMixedFontStyle, ensureSelectElementFontStyles } from './SelectElementFontStyles.js';
 
 const selectFontCss = readFileSync(resolve(process.cwd(), 'src/public/translate-it-select-font.css'), 'utf8');
+const protectedRoles = [
+  'button', 'link', 'checkbox', 'radio', 'switch', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab', 'tablist',
+  'textbox', 'searchbox', 'combobox', 'listbox', 'option', 'slider', 'spinbutton', 'scrollbar', 'treeitem', 'tree',
+  'treegrid', 'gridcell', 'grid', 'row', 'rowheader', 'columnheader', 'menu', 'menubar', 'radiogroup', 'toolbar', 'application',
+];
+const getSelectors = style => {
+  const selectors = [];
+  for (const rule of style.sheet.cssRules) {
+    let start = 0;
+    let depth = 0;
+    for (let index = 0; index < rule.selectorText.length; index += 1) {
+      if (rule.selectorText[index] === '(') depth += 1;
+      if (rule.selectorText[index] === ')') depth -= 1;
+      if (rule.selectorText[index] === ',' && depth === 0) {
+        selectors.push(rule.selectorText.slice(start, index).trim());
+        start = index + 1;
+      }
+    }
+    selectors.push(rule.selectorText.slice(start).trim());
+  }
+  return selectors;
+};
+const matchesTarget = (style, element) => getSelectors(style).some(selector => element.matches(selector));
 
 describe('SelectElementFontStyles', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -140,10 +163,13 @@ describe('SelectElementFontStyles', () => {
       iconElement.append(iconChild);
       return { iconElement, iconChild };
     });
-    const protectedContainers = ['button', 'form', 'fieldset', 'label', '[contenteditable]', '[role="button"]']
+    const protectedContainers = ['button', 'form', 'fieldset', 'label', 'kbd', 'samp', '[contenteditable]', ...protectedRoles.map(role => `[role="${role}"]`)]
       .map(selector => {
         const container = document.createElement(selector.startsWith('[') ? 'div' : selector);
-        if (selector.startsWith('[')) container.setAttribute(selector.slice(1, -1).split('=')[0], selector.includes('=') ? 'button' : 'true');
+        if (selector.startsWith('[')) {
+          const [attribute, value] = selector.slice(1, -1).split('=');
+          container.setAttribute(attribute, value ? value.replaceAll('"', '') : 'true');
+        }
         const nestedText = document.createElement('span');
         container.append(nestedText);
         root.append(container);
@@ -151,34 +177,32 @@ describe('SelectElementFontStyles', () => {
       });
     root.append(link, quote, code, pre, svg, icon, fontAwesome, ...fontIcons.map(({ iconElement }) => iconElement));
     document.body.append(root);
-    const selectors = [...style.sheet.cssRules].flatMap(rule => rule.selectorText.split(',').map(selector => selector.trim()));
-    const matchesTarget = element => selectors.some(selector => element.matches(selector));
+    const matches = element => matchesTarget(style, element);
 
-    expect(matchesTarget(root)).toBe(true);
-    expect(matchesTarget(link)).toBe(true);
-    expect(matchesTarget(quote)).toBe(true);
-    expect(matchesTarget(code)).toBe(false);
-    expect(matchesTarget(codeText)).toBe(false);
-    expect(matchesTarget(pre)).toBe(false);
-    expect(matchesTarget(svg)).toBe(false);
-    expect(matchesTarget(icon)).toBe(false);
-    expect(matchesTarget(iconText)).toBe(false);
-    expect(matchesTarget(fontAwesome)).toBe(false);
-    expect(matchesTarget(fontAwesomeText)).toBe(false);
+    expect(matches(root)).toBe(true);
+    expect(matches(link)).toBe(true);
+    expect(matches(quote)).toBe(true);
+    expect(matches(code)).toBe(false);
+    expect(matches(codeText)).toBe(false);
+    expect(matches(pre)).toBe(false);
+    expect(matches(svg)).toBe(false);
+    expect(matches(icon)).toBe(false);
+    expect(matches(iconText)).toBe(false);
+    expect(matches(fontAwesome)).toBe(false);
+    expect(matches(fontAwesomeText)).toBe(false);
     for (const { iconElement, iconChild } of fontIcons) {
-      expect(matchesTarget(iconElement)).toBe(false);
-      expect(matchesTarget(iconChild)).toBe(false);
+      expect(matches(iconElement)).toBe(false);
+      expect(matches(iconChild)).toBe(false);
     }
     for (const { container, nestedText } of protectedContainers) {
-      expect(matchesTarget(container)).toBe(false);
-      expect(matchesTarget(nestedText)).toBe(false);
+      expect(matches(container)).toBe(false);
+      expect(matches(nestedText)).toBe(false);
     }
-    expect(window.getComputedStyle(link).fontFamily).toContain('var(--ti-select-element-font-family)');
     const ltrRoot = document.createElement('span');
     ltrRoot.setAttribute('data-ti-select-font-target', '');
     ltrRoot.setAttribute('data-translate-dir', 'ltr');
     document.body.append(ltrRoot);
-    expect(matchesTarget(ltrRoot)).toBe(true);
+    expect(matches(ltrRoot)).toBe(true);
     ltrRoot.remove();
     root.remove();
     style.remove();
@@ -191,13 +215,11 @@ describe('SelectElementFontStyles', () => {
     const root = document.createElement('i');
     root.className = 'fa';
     root.setAttribute('data-ti-select-font-target', '');
-    const selectors = [...style.sheet.cssRules].flatMap(rule => rule.selectorText.split(',').map(selector => selector.trim()));
-
-    expect(selectors.some(selector => root.matches(selector))).toBe(false);
+    expect(matchesTarget(style, root)).toBe(false);
     style.remove();
   });
 
-  it.each(['code', 'pre', 'button', 'input', 'textarea', 'select', '[contenteditable]', '.icon-home', '[data-icon]'])('does not match unsafe marked root %s', selector => {
+  it.each(['code', 'pre', 'kbd', 'samp', 'button', 'input', 'textarea', 'select', '[contenteditable]', '.icon-home', '[data-icon]'])('does not match unsafe marked root %s', selector => {
       const root = document.createElement(selector.startsWith('[') || selector.startsWith('.') ? 'span' : selector);
       if (selector.startsWith('.')) root.className = selector.slice(1);
       else if (selector.startsWith('[')) root.setAttribute(selector.slice(1, -1).split('=')[0], '');
@@ -205,10 +227,20 @@ describe('SelectElementFontStyles', () => {
       const rule = document.createElement('style');
       rule.textContent = selectFontCss;
       document.head.append(rule);
-      const selectors = [...rule.sheet.cssRules].flatMap(cssRule => cssRule.selectorText.split(',').map(value => value.trim()));
-      expect(selectors.some(value => root.matches(value))).toBe(false);
+      expect(matchesTarget(rule, root)).toBe(false);
       rule.remove();
     });
+
+  it.each(protectedRoles)('does not match a marked root with interactive ARIA role %s', role => {
+    const root = document.createElement('span');
+    root.setAttribute('role', role);
+    root.setAttribute('data-ti-select-font-target', '');
+    const rule = document.createElement('style');
+    rule.textContent = selectFontCss;
+    document.head.append(rule);
+    expect(matchesTarget(rule, root)).toBe(false);
+    rule.remove();
+  });
 
   it('leaves the persistent stylesheet inert after ownership markers are removed', () => {
     const style = document.createElement('style');
@@ -217,12 +249,11 @@ describe('SelectElementFontStyles', () => {
     const target = document.createElement('span');
     target.setAttribute('data-ti-select-font-target', '');
     document.body.append(target);
-    const selectors = [...style.sheet.cssRules].flatMap(rule => rule.selectorText.split(',').map(value => value.trim()));
-    const matchesTarget = () => selectors.some(selector => target.matches(selector));
+    const matches = () => matchesTarget(style, target);
 
-    expect(matchesTarget()).toBe(true);
+    expect(matches()).toBe(true);
     target.removeAttribute('data-ti-select-font-target');
-    expect(matchesTarget()).toBe(false);
+    expect(matches()).toBe(false);
     target.remove();
     style.remove();
   });

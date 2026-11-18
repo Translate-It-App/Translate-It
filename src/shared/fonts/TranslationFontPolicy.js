@@ -57,7 +57,11 @@ export function getSelectElementMixedFontTarget(textNode) {
     for (let element = parent; element; element = element.parentElement) {
       if (isUnsafeContext(element)) return null;
     }
-    if (parent.shadowRoot || parent.style.getPropertyPriority('font-family') === 'important') return null;
+    const descendants = [...parent.querySelectorAll('*')];
+    if (parent.shadowRoot
+        || descendants.some(element => element.shadowRoot || element.isContentEditable
+          || element.hasAttribute('contenteditable') || element.tagName.includes('-'))
+        || parent.style.getPropertyPriority('font-family') === 'important') return null;
     if (hasGeneratedContent(parent, '::before') || hasGeneratedContent(parent, '::after')) return null;
     return parent;
   } catch {

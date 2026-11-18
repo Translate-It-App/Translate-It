@@ -106,6 +106,13 @@ describe('getTranslationFontTarget', () => {
     }
   );
 
+  it('rejects mixed targets containing custom-element descendants', () => {
+    const parent = document.createElement('span');
+    parent.append(document.createTextNode('source'), document.createElement('x-widget'));
+
+    expect(getSelectElementMixedFontTarget(parent.firstChild)).toBeNull();
+  });
+
   it('rejects meaningful descendant text that would inherit the parent font', () => {
     const element = document.createElement('span');
     const text = document.createTextNode('source');
@@ -264,6 +271,17 @@ describe('getSelectElementMixedFontTarget', () => {
     const text = document.createTextNode('source');
     parent.append(text, document.createElement('a'));
     shadow.append(parent);
+
+    expect(getSelectElementMixedFontTarget(text)).toBeNull();
+  });
+
+  it.each(['editable descendant', 'open ShadowRoot host descendant'])('rejects a mixed target with an unsafe %s', kind => {
+    const parent = document.createElement('div');
+    const text = document.createTextNode('source');
+    const child = document.createElement('span');
+    if (kind === 'editable descendant') child.setAttribute('contenteditable', 'true');
+    else child.attachShadow({ mode: 'open' }).append('shadow text');
+    parent.append(text, child);
 
     expect(getSelectElementMixedFontTarget(text)).toBeNull();
   });

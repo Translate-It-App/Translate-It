@@ -16,7 +16,6 @@ import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import ResourceTracker from '@/core/memory/ResourceTracker.js';
 import { walkOpenShadowTree } from '@/utils/dom/walkOpenShadowTree.js';
 import { getTranslationFontTarget, getSelectElementMixedFontTarget } from '@/shared/fonts/TranslationFontPolicy.js';
-import { ensurePageTranslationFontStyles } from './PageTranslationFontStyles.js';
 import {
   PAGE_TRANSLATION_SLICED_DISCOVERY,
   PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY,
@@ -143,21 +142,6 @@ const restoreSessionFontOwnership = (session, logger) => {
   try {
     for (const [element, ownership] of session.fontOwnership) {
       try {
-        if (ownership.kind === 'mixed') {
-          if (element.getAttribute('data-ti-page-font-target') === ownership.appliedMarker) {
-            if (ownership.originalMarkerPresent) element.setAttribute('data-ti-page-font-target', ownership.originalMarker);
-            else element.removeAttribute('data-ti-page-font-target');
-          }
-          if (element.style.getPropertyValue('--ti-page-translation-font-family') === ownership.appliedValue
-              && element.style.getPropertyPriority('--ti-page-translation-font-family') === ownership.appliedPriority) {
-            if (ownership.originalPresent) {
-              element.style.setProperty('--ti-page-translation-font-family', ownership.originalValue, ownership.originalPriority);
-            } else {
-              element.style.removeProperty('--ti-page-translation-font-family');
-            }
-          }
-          continue;
-        }
         const current = readInlineFontState(element);
         const wasNotChangedExternally = current.present === ownership.appliedPresent
           && current.value === ownership.appliedValue
@@ -345,32 +329,10 @@ export class PageTranslationBridge extends ResourceTracker {
 
       let target = null;
       let original = null;
-      let mixedOriginal = null;
       try {
         target = getTranslationFontTarget(textNode);
-        if (!target) {
-          target = getSelectElementMixedFontTarget(textNode);
-          if (!target) return;
-          ensurePageTranslationFontStyles(target.ownerDocument);
-          const existing = currentSession.fontOwnership.get(target);
-          if (existing) return;
-          const ownership = {
-            kind: 'mixed',
-            originalMarkerPresent: target.hasAttribute('data-ti-page-font-target'),
-            originalMarker: target.getAttribute('data-ti-page-font-target'),
-            originalPresent: target.style.getPropertyValue('--ti-page-translation-font-family') !== '',
-            originalValue: target.style.getPropertyValue('--ti-page-translation-font-family'),
-            originalPriority: target.style.getPropertyPriority('--ti-page-translation-font-family'),
-          };
-          mixedOriginal = ownership;
-          target.setAttribute('data-ti-page-font-target', '');
-          target.style.setProperty('--ti-page-translation-font-family', currentSession.translationFontFamily);
-          ownership.appliedMarker = '';
-          ownership.appliedValue = target.style.getPropertyValue('--ti-page-translation-font-family');
-          ownership.appliedPriority = target.style.getPropertyPriority('--ti-page-translation-font-family');
-          currentSession.fontOwnership.set(target, ownership);
-          return;
-        }
+        target ||= getSelectElementMixedFontTarget(textNode);
+        if (!target) return;
         if (currentSession.fontOwnership.has(target)) return;
 
         original = readInlineFontState(target);
@@ -383,19 +345,6 @@ export class PageTranslationBridge extends ResourceTracker {
           appliedPriority: applied.priority,
         });
       } catch (error) {
-        if (target && mixedOriginal) {
-          try {
-            if (mixedOriginal.originalMarkerPresent) target.setAttribute('data-ti-page-font-target', mixedOriginal.originalMarker);
-            else target.removeAttribute('data-ti-page-font-target');
-            if (mixedOriginal.originalPresent) {
-              target.style.setProperty('--ti-page-translation-font-family', mixedOriginal.originalValue, mixedOriginal.originalPriority);
-            } else {
-              target.style.removeProperty('--ti-page-translation-font-family');
-            }
-          } catch {
-            // Best-effort font presentation must not affect translation.
-          }
-        }
         if (target && original) {
           try {
             restoreInlineFontState(target, original);
