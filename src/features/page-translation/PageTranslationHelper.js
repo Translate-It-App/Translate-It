@@ -133,13 +133,18 @@ export class PageTranslationHelper {
    * @returns {boolean}
    */
   static isInViewportWithMargin(node, margin, logger = null) {
-    if (!node) return false;
+    return this.classifyVisibility(node, margin, logger) !== 'offscreen';
+  }
+
+  /** Classify a node's current geometry without retaining it between checks. */
+  static classifyVisibility(node, bufferMargin, logger = null) {
+    if (!node) return 'offscreen';
     try {
       let rect;
 
       // 1. Precise Viewport Detection for Text Nodes
       if (node.nodeType === Node.TEXT_NODE) {
-        if (!node.parentElement || !node.isConnected) return false;
+        if (!node.parentElement || !node.isConnected) return 'offscreen';
 
         // Use a shared Range to prevent GC pressure during high-frequency scrolling
         if (!this._sharedRange) {
@@ -157,30 +162,30 @@ export class PageTranslationHelper {
       } else {
         // 2. Detection for Elements and Attributes
         const element = node.nodeType === Node.ATTRIBUTE_NODE ? node.ownerElement : node;
-        if (!element || element.nodeType !== Node.ELEMENT_NODE || !element.isConnected) return false;
+        if (!element || element.nodeType !== Node.ELEMENT_NODE || !element.isConnected) return 'offscreen';
         rect = element.getBoundingClientRect();
       }
       
       // If the bounding box has no dimensions, it's effectively invisible (e.g., display: none)
       if (!rect || (rect.width === 0 && rect.height === 0)) {
-        return false;
+        return 'offscreen';
       }
 
       const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
       const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
 
-      const inViewport = (
-        rect.bottom >= -margin &&
-        rect.top <= viewportHeight + margin &&
-        rect.right >= -margin &&
-        rect.left <= viewportWidth + margin
-      );
-      
-      return inViewport;
+      if (this._intersectsViewport(rect, 0, viewportHeight, viewportWidth)) return 'viewport';
+      if (this._intersectsViewport(rect, bufferMargin, viewportHeight, viewportWidth)) return 'buffer';
+      return 'offscreen';
     } catch (e) {
-      if (logger) logger.debug('Error in isInViewportWithMargin', e);
-      return false;
+      if (logger) logger.debug('Error in classifyVisibility', e);
+      return 'offscreen';
     }
+  }
+
+  static _intersectsViewport(rect, margin, viewportHeight, viewportWidth) {
+    return rect.bottom >= -margin && rect.top <= viewportHeight + margin
+      && rect.right >= -margin && rect.left <= viewportWidth + margin;
   }
 
   static isSuitableForTranslation(logger = null) {

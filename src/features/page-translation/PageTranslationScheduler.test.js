@@ -112,6 +112,7 @@ describe('PageTranslationScheduler', () => {
     const defaultResult = {
       batchItems: [],
       remainingItems: [],
+      hasVisibleEligibleItems: false,
       purgedCount: 0,
       ejectedItems: []
     };
@@ -123,6 +124,22 @@ describe('PageTranslationScheduler', () => {
   afterEach(() => {
     scheduler.stop();
     scheduler.reset();
+  });
+
+  it.each([false, true])('uses filter visibility eligibility (%s) without rechecking item geometry', async hasVisibleEligibleItems => {
+    const item = { id: 'visibility-item', text: 'item', resolve: vi.fn() };
+    scheduler.queue = [item];
+    scheduler.setSettings({ lazyLoading: true });
+    vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({ lazyLoading: true });
+    PageTranslationFluidFilter.process.mockReturnValue({
+      batchItems: [], remainingItems: [item], hasVisibleEligibleItems,
+    });
+
+    await scheduler.flush();
+
+    expect(PageTranslationHelper.isInViewportWithMargin).not.toHaveBeenCalled();
+    expect(scheduler.isWaitingForVisibility).toBe(!hasVisibleEligibleItems);
+    expect(scheduler.isVisibilityRetryTimer).toBe(!hasVisibleEligibleItems);
   });
 
   it('logs aggregate dispatch diagnostics without source text', async () => {
@@ -349,8 +366,8 @@ describe('PageTranslationScheduler', () => {
         config.diagnostics.stopReason = 'insufficient_eligible_items';
         config.diagnostics.stoppingReasons = { viewport: 'insufficient_eligible_items' };
         return visible
-          ? { batchItems: queue.slice(0, 1), remainingItems: queue.slice(1) }
-          : { batchItems: [], remainingItems: queue };
+          ? { batchItems: queue.slice(0, 1), remainingItems: queue.slice(1), hasVisibleEligibleItems: true }
+          : { batchItems: [], remainingItems: queue, hasVisibleEligibleItems: false };
       });
       scheduler._getBatchConfig.mockResolvedValue({
         providerRegistryId: 'openai', targetLanguage: 'en', chunkSize: 10, maxChars: 1000,
@@ -746,7 +763,7 @@ describe('PageTranslationScheduler', () => {
         const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
         const batchItems = selected.slice(0, config.chunkSize);
         const batchSet = new Set(batchItems);
-        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)) };
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
       });
       const task = enqueueTimed('lazy-item');
 
@@ -775,7 +792,7 @@ describe('PageTranslationScheduler', () => {
         const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
         const batchItems = selected.slice(0, config.chunkSize);
         const batchSet = new Set(batchItems);
-        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)) };
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
       });
       const task = enqueueTimed('still-lazy');
 
@@ -802,7 +819,7 @@ describe('PageTranslationScheduler', () => {
         const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
         const batchItems = selected.slice(0, config.chunkSize);
         const batchSet = new Set(batchItems);
-        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)) };
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
       });
       const visibilityIdles = () => pageEventBus.emit.mock.calls
         .filter(([action]) => action === MessageActions.PAGE_TRANSLATE_IDLE)
@@ -834,7 +851,7 @@ describe('PageTranslationScheduler', () => {
       configureTimedQueue({ lazyLoading: true });
       PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
       PageTranslationFluidFilter.process.mockImplementation(queue => ({
-        batchItems: [], remainingItems: [...queue],
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
       }));
       const visibilityIdleCount = () => pageEventBus.emit.mock.calls
         .filter(([action]) => action === MessageActions.PAGE_TRANSLATE_IDLE).length;
@@ -858,7 +875,7 @@ describe('PageTranslationScheduler', () => {
         const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
         const batchItems = selected.slice(0, config.chunkSize);
         const batchSet = new Set(batchItems);
-        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)) };
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
       });
       enqueueTimed('blocked');
       await vi.advanceTimersByTimeAsync(800);
@@ -879,7 +896,7 @@ describe('PageTranslationScheduler', () => {
     it('does not poll an empty batch when lazy loading is disabled', async () => {
       configureTimedQueue({ lazyLoading: false });
       PageTranslationFluidFilter.process.mockImplementation(queue => ({
-        batchItems: [], remainingItems: [...queue],
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
       }));
       enqueueTimed('non-lazy-empty');
 
@@ -900,7 +917,7 @@ describe('PageTranslationScheduler', () => {
         const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
         const batchItems = selected.slice(0, config.chunkSize);
         const batchSet = new Set(batchItems);
-        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), purgedCount: 0, ejectedItems: [] };
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0, purgedCount: 0, ejectedItems: [] };
       });
       const task = enqueueTimed('on-stop-lazy');
       await vi.advanceTimersByTimeAsync(800);
@@ -923,7 +940,7 @@ describe('PageTranslationScheduler', () => {
       configureTimedQueue({ lazyLoading: true });
       PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
       PageTranslationFluidFilter.process.mockImplementation(queue => ({
-        batchItems: [], remainingItems: [...queue],
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
       }));
       enqueueTimed('old-session-item');
       await vi.advanceTimersByTimeAsync(800);

@@ -26,10 +26,10 @@ export class PageTranslationQueueFilter {
     for (const item of queue) {
       const targetNode = item.node || item.textNode || item;
 
-      // Pass logger for diagnostics
-      if (PageTranslationHelper.isInViewportWithMargin(targetNode, 0, logger)) {
+      const visibility = PageTranslationHelper.classifyVisibility(targetNode, viewportBuffer, logger);
+      if (visibility === 'viewport') {
         viewportItems.push(item);
-      } else if (PageTranslationHelper.isInViewportWithMargin(targetNode, viewportBuffer, logger)) {
+      } else if (visibility === 'buffer') {
         bufferItems.push(item);
       } else {
         otherItems.push(item);
@@ -78,7 +78,7 @@ export class PageTranslationQueueFilter {
             config.diagnostics.stopReason = 'insufficient_eligible_items';
             config.diagnostics.stoppingReasons = { viewport: 'not_applicable', buffer: 'not_applicable', offscreen: 'not_applicable' };
           }
-          return { batchItems: [], remainingItems: [...bufferItems, ...purgeResult.remaining], purgedCount: purgeResult.purgedCount, ejectedItems: purgeResult.ejectedItems };
+          return { batchItems: [], remainingItems: [...bufferItems, ...purgeResult.remaining], purgedCount: purgeResult.purgedCount, ejectedItems: purgeResult.ejectedItems, hasVisibleEligibleItems: false };
         }
       }
       logger.debugLazy(() => ['Filter Results (Smart Buffer):', JSON.stringify({
@@ -102,7 +102,7 @@ export class PageTranslationQueueFilter {
         config.diagnostics.stopReason = 'insufficient_eligible_items';
         config.diagnostics.stoppingReasons = { viewport: 'not_applicable', buffer: 'not_applicable', offscreen: 'not_applicable' };
       }
-      return { batchItems: [], remainingItems: queue };
+      return { batchItems: [], remainingItems: queue, hasVisibleEligibleItems: false };
     }
 
     const batchItems = [];
@@ -222,7 +222,7 @@ export class PageTranslationQueueFilter {
       })];
     });
 
-    return { batchItems, remainingItems };
+    return { batchItems, remainingItems, hasVisibleEligibleItems: viewportItems.length > 0 || bufferItems.length > 0 };
   }
 
   /**

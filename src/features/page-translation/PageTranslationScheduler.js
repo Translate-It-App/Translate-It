@@ -493,10 +493,12 @@ export class PageTranslationScheduler extends ResourceTracker {
           totalQueued: totalQueuedBeforeSelection
         };
         let currentBatch = [];
+        let filterResult;
 
         // 1. SELECT BATCH: Use specialized filters based on the mode
         if (this.settings.translateAfterScrollStop) {
-          const result = PageTranslationQueueFilter.process(this.queue, config);
+          filterResult = PageTranslationQueueFilter.process(this.queue, config);
+          const result = filterResult;
           this._validateFilterResult(result);
           currentBatch = result.batchItems;
           const ejectedItems = Array.isArray(result.ejectedItems) ? result.ejectedItems : [];
@@ -514,7 +516,8 @@ export class PageTranslationScheduler extends ResourceTracker {
             });
           }
         } else {
-          const result = PageTranslationFluidFilter.process(this.queue, config);
+          filterResult = PageTranslationFluidFilter.process(this.queue, config);
+          const result = filterResult;
           this._validateFilterResult(result);
           currentBatch = result.batchItems;
 
@@ -572,14 +575,9 @@ export class PageTranslationScheduler extends ResourceTracker {
           this.activeBatches.delete(activeBatch);
           activeBatch = null;
           this.logger.debug('No visible content in queue, stopping flush loop');
-          const hasVisibleQueuedItem = this.queue.some(item => PageTranslationHelper.isInViewportWithMargin(
-            item.node || item.textNode || item,
-            PAGE_TRANSLATION_TIMING.VIEWPORT_BUFFER_PX || 100,
-            this.logger
-          ));
           const isVisibilityBlocked = config.lazyLoading !== false
             && this.queue.length > 0
-            && !hasVisibleQueuedItem;
+            && !filterResult.hasVisibleEligibleItems;
           this.isWaitingForVisibility = isVisibilityBlocked;
           if (isVisibilityBlocked) this._scheduleVisibilityRetry(flushSessionId, flushContext);
           break;
