@@ -103,7 +103,7 @@ The central orchestrator for all detection and direction requests. It manages:
 ### Operation Source Resolution
 
 Detection, operation source resolution, and scheduling are separate concerns.
-`src/features/translation/core/OperationSourceLanguageResolver.js` builds one bounded representative sample, reuses one detailed detection result, applies existing swap semantics once, and returns an explicit `canBypassSequentialGate` decision with a stable reason. Stateless structured AUTO requests now consume this contract: eligible resolutions bypass first-batch translation gating; denied resolutions retain the first-batch fallback.
+`src/features/translation/core/OperationSourceLanguageResolver.js` builds one bounded representative sample, reuses one detailed detection result, applies existing swap semantics once, and returns an explicit `canBypassSequentialGate` decision with a stable reason. Stateless structured AUTO requests and the first AUTO batch in a Page session consume this contract: eligible resolutions bypass first-batch translation gating; denied resolutions retain the first-provider-batch fallback. Page samples are drawn only from the first batch, not the entire lazily discovered page, so they do not establish the language of unseen content or guarantee detection of mixed-language pages. A Page session reuses the resolved canonical source/target pair (including any bilingual swap) for sibling batches rather than detecting or swapping again.
 
 Bypass is intentionally stricter than `DetectionResult.reliable`:
 

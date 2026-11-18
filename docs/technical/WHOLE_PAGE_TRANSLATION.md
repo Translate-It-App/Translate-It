@@ -55,7 +55,7 @@ Centralizes all external event listeners for the system.
 ### 4. PageTranslationScheduler
 The core engine for queue management and batch request dispatching. It is deeply integrated with the **Optimization Levels** system.
 - **Dynamic Chunk Scaling**: Automatically adjusts the number of text segments per request based on the provider's optimization level (e.g., larger batches for "Economy" mode to save AI tokens, smaller batches for "Turbo" mode for faster progressive updates).
-- **Concurrency Control**: Fills a bounded set of independent AI batch workers from one flush. The existing parallel retry lane dispatches these batches; the shared provider `RateLimitManager` bounds physical AI requests, including recovery. AUTO source resolution still holds siblings until the first batch confirms the session's language pair. Traditional providers retain their existing dispatch behavior.
+- **Concurrency Control**: Fills a bounded set of independent AI batch workers from one flush. The existing parallel retry lane dispatches these batches; the shared provider `RateLimitManager` bounds physical AI requests, including recovery. For Page AUTO, a safe local resolution from a bounded distributed sample of the first batch can release siblings before provider completion; otherwise they wait for the first provider batch to confirm the session's language pair. The sample is not the full page and does not guarantee detection of mixed-language content. Traditional providers retain their existing dispatch behavior.
 - **Memory Safety**: Inherits from `ResourceTracker`; automatically clears the queue on cleanup.
 - **Prioritization**: Forces immediate flush for high-priority items if capacity is reached.
 
