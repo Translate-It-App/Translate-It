@@ -28,7 +28,7 @@ vi.mock('@/core/memory/ResourceTracker.js', () => ({
   },
 }));
 vi.mock('@/core/memory/SmartCache.js', () => ({
-  default: class { constructor() { this.isDestroyed=false; } has() {return false} get(){} set(){} delete(){} clear(){} destroy(){this.isDestroyed=true} },
+  default: class { constructor() { this.isDestroyed=false; } has() {return false} hasValid() {return false} get(){} set(){} delete(){} clear(){} destroy(){this.isDestroyed=true} },
 }));
 
 function deferred() {

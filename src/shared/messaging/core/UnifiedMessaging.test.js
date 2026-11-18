@@ -154,6 +154,118 @@ describe('UnifiedMessaging', () => {
       await expect(promise).rejects.toThrow(/timed out/);
     });
 
+    it('cancels only the timed-out page batch message and preserves the cancellation payload', async () => {
+      const pendingResponses = [];
+      browser.runtime.sendMessage.mockImplementation((message) => {
+        if (message.action === 'CANCEL_TRANSLATION') return Promise.resolve({ success: true });
+        return new Promise((resolve) => pendingResponses.push(resolve));
+      });
+
+      const timedOut = sendRegularMessage(
+        { action: 'page-translate-batch', messageId: 'page-timeout' },
+        { timeout: 100 }
+      );
+      const stillPending = sendRegularMessage(
+        { action: 'page-translate-batch', messageId: 'page-pending' },
+        { timeout: 200 }
+      );
+      const timeoutExpectation = expect(timedOut).rejects.toThrow(/timed out/);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await timeoutExpectation;
+      expect(browser.runtime.sendMessage).toHaveBeenCalledWith({
+        action: 'CANCEL_TRANSLATION',
+        data: { messageId: 'page-timeout', reason: 'Translation timed out', timeout: true }
+      });
+      expect(browser.runtime.sendMessage.mock.calls.filter(([message]) => message.action === 'CANCEL_TRANSLATION'))
+        .toHaveLength(1);
+
+      pendingResponses[1]({ success: true });
+      await expect(stillPending).resolves.toEqual({ success: true });
+    });
+
+    it('does not cancel a successful page batch response', async () => {
+      browser.runtime.sendMessage.mockResolvedValue({ success: true });
+
+      await expect(sendRegularMessage(
+        { action: 'page-translate-batch', messageId: 'page-success' },
+        { timeout: 100 }
+      )).resolves.toEqual({ success: true });
+      expect(browser.runtime.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not cancel a page batch for other errors or explicit user cancellation', async () => {
+      browser.runtime.sendMessage.mockRejectedValue(new Error('Runtime failed'));
+      await expect(sendRegularMessage({ action: 'page-translate-batch', messageId: 'page-error' }))
+        .rejects.toThrow('Runtime failed');
+      expect(browser.runtime.sendMessage).toHaveBeenCalledTimes(1);
+
+      const { streamingTimeoutManager } = await import('./StreamingTimeoutManager.js');
+      streamingTimeoutManager.shouldContinue.mockReturnValue(false);
+      streamingTimeoutManager.getOperationState.mockReturnValue({
+        isCancelled: true,
+        hasTimedOut: false,
+        isCompleted: false
+      });
+      try {
+        await expect(sendRegularMessage({ action: 'page-translate-batch', messageId: 'page-cancelled' }))
+          .rejects.toMatchObject({ type: ErrorTypes.USER_CANCELLED });
+        expect(browser.runtime.sendMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        streamingTimeoutManager.shouldContinue.mockReturnValue(true);
+        streamingTimeoutManager.getOperationState.mockReturnValue(null);
+      }
+    });
+
+    it('does not settle a timed-out page batch again when its original response arrives late', async () => {
+      let resolveOriginal;
+      browser.runtime.sendMessage.mockImplementation((message) => {
+        if (message.action === 'CANCEL_TRANSLATION') return Promise.resolve({ success: true });
+        return new Promise((resolve) => { resolveOriginal = resolve; });
+      });
+
+      const promise = sendRegularMessage(
+        { action: 'page-translate-batch', messageId: 'page-late' },
+        { timeout: 100 }
+      );
+      const settlements = [];
+      promise.then(
+        (value) => settlements.push({ value }),
+        (error) => settlements.push({ error })
+      );
+      const timeoutExpectation = expect(promise).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(100);
+      await timeoutExpectation;
+
+      resolveOriginal({ success: true, late: true });
+      await Promise.resolve();
+      expect(settlements).toHaveLength(1);
+      expect(settlements[0].error).toMatchObject({ type: ErrorTypes.OPERATION_TIMEOUT });
+      expect(browser.runtime.sendMessage.mock.calls.filter(([message]) => message.action === 'CANCEL_TRANSLATION'))
+        .toHaveLength(1);
+    });
+
+    it('continues cancelling a generic translation when its operation times out', async () => {
+      browser.runtime.sendMessage.mockImplementation((message) => (
+        message.action === 'CANCEL_TRANSLATION'
+          ? Promise.resolve({ success: true })
+          : new Promise(() => {})
+      ));
+
+      const promise = sendRegularMessage(
+        { action: 'TRANSLATE', messageId: 'translation-timeout' },
+        { timeout: 100 }
+      );
+      const timeoutExpectation = expect(promise).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(100);
+      await timeoutExpectation;
+
+      expect(browser.runtime.sendMessage).toHaveBeenCalledWith({
+        action: 'CANCEL_TRANSLATION',
+        data: { messageId: 'translation-timeout', reason: 'Translation timed out', timeout: true }
+      });
+    });
+
     it('should throw an error if response.success is false', async () => {
       const message = { action: 'FAIL', messageId: '2' };
       browser.runtime.sendMessage.mockResolvedValue({ 

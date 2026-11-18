@@ -137,6 +137,74 @@ describe('StorageCore set plain-data conversion', () => {
   });
 });
 
+describe('StorageCore cache expiration', () => {
+  let storage;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    browser.storage.local.get.mockResolvedValue({});
+    storage = new StorageCore();
+    await storage._readyPromise;
+  });
+
+  it('uses defaults and reports misses for expired synchronous cache entries', () => {
+    storage.cache.set('expired', 'stale');
+    storage.cache.expiryTimes.set('expired', Date.now() - 1);
+
+    expect(storage.getCached('expired', 'fallback')).toBe('fallback');
+    expect(storage.hasCached('expired')).toBe(false);
+  });
+
+  it('preserves valid falsy cached values and defaults on synchronous reads', () => {
+    for (const [key, value] of Object.entries({ falseValue: false, zero: 0, empty: '', nullValue: null })) {
+      storage.cache.set(key, value);
+    }
+
+    expect(storage.getCached('falseValue', true)).toBe(false);
+    expect(storage.hasCached('falseValue')).toBe(true);
+    expect(storage.getCached('zero', 1)).toBe(0);
+    expect(storage.getCached('empty', 'fallback')).toBe('');
+    expect(storage.getCached('nullValue', 'fallback')).toBeNull();
+    expect(storage.getCached('missing', 'fallback')).toBe('fallback');
+  });
+
+  it('reads expired keys from storage while retaining valid cached values', async () => {
+    browser.storage.local.get.mockResolvedValue({ expired: 'fresh' });
+    storage.cache.set('expired', 'stale');
+    storage.cache.expiryTimes.set('expired', Date.now() - 1);
+    storage.cache.set('cachedFalse', false);
+
+    await expect(storage.get({ expired: 'fallback', cachedFalse: true })).resolves.toEqual({
+      expired: 'fresh',
+      cachedFalse: false
+    });
+    expect(browser.storage.local.get).toHaveBeenCalledWith(['expired']);
+  });
+
+  it('returns supplied defaults when expired keys are missing from storage', async () => {
+    browser.storage.local.get.mockResolvedValue({});
+    storage.cache.set('expired', 'stale');
+    storage.cache.expiryTimes.set('expired', Date.now() - 1);
+
+    await expect(storage.get({ expired: 'fallback' })).resolves.toEqual({ expired: 'fallback' });
+    expect(browser.storage.local.get).toHaveBeenCalledWith(['expired']);
+  });
+
+  it('treats an entry expiring between validation and get as a cache miss', async () => {
+    browser.storage.local.get.mockResolvedValue({ theme: 'fresh' });
+    storage.cache.set('theme', 'stale');
+    const originalGet = storage.cache.get.bind(storage.cache);
+    const cacheGet = vi.spyOn(storage.cache, 'get').mockImplementationOnce(key => {
+      storage.cache.expiryTimes.set(key, Date.now() - 1);
+      return originalGet(key);
+    });
+
+    await expect(storage.get({ theme: 'fallback' })).resolves.toEqual({ theme: 'fresh' });
+    expect(browser.storage.local.get).toHaveBeenCalledWith(['theme']);
+    cacheGet.mockRestore();
+  });
+});
+
 describe('StorageCore Synchronization', () => {
   let storage;
 

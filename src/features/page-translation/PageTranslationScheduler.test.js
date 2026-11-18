@@ -25,6 +25,7 @@ vi.mock('@/core/extensionContext.js', () => {
 });
 
 import { PageTranslationScheduler } from './PageTranslationScheduler.js';
+import { PageTranslationHelper } from './PageTranslationHelper.js';
 import { isFatalError, matchErrorToType } from '@/shared/error-management/ErrorMatcher.js';
 import { PageTranslationQueueFilter } from './utils/PageTranslationQueueFilter.js';
 import { PageTranslationFluidFilter } from './utils/PageTranslationFluidFilter.js';
@@ -47,7 +48,8 @@ vi.mock('./utils/PageTranslationFluidFilter.js', () => ({
 vi.mock('./PageTranslationHelper.js', () => ({
   PageTranslationHelper: {
     shouldTranslate: vi.fn(() => true),
-    getNearestSemanticContainer: vi.fn(() => null)
+    getNearestSemanticContainer: vi.fn(() => null),
+    isInViewportWithMargin: vi.fn(() => true),
   }
 }));
 
@@ -110,16 +112,377 @@ describe('PageTranslationScheduler', () => {
     const defaultResult = {
       batchItems: [],
       remainingItems: [],
+      hasVisibleEligibleItems: false,
       purgedCount: 0,
       ejectedItems: []
     };
     PageTranslationQueueFilter.process.mockReturnValue({ ...defaultResult });
     PageTranslationFluidFilter.process.mockReturnValue({ ...defaultResult });
+    PageTranslationHelper.isInViewportWithMargin.mockReturnValue(true);
   });
 
   afterEach(() => {
     scheduler.stop();
     scheduler.reset();
+  });
+
+  it.each([false, true])('uses filter visibility eligibility (%s) without rechecking item geometry', async hasVisibleEligibleItems => {
+    const item = { id: 'visibility-item', text: 'item', resolve: vi.fn() };
+    scheduler.queue = [item];
+    scheduler.setSettings({ lazyLoading: true });
+    vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({ lazyLoading: true });
+    PageTranslationFluidFilter.process.mockReturnValue({
+      batchItems: [], remainingItems: [item], hasVisibleEligibleItems,
+    });
+
+    await scheduler.flush();
+
+    expect(PageTranslationHelper.isInViewportWithMargin).not.toHaveBeenCalled();
+    expect(scheduler.isWaitingForVisibility).toBe(!hasVisibleEligibleItems);
+    expect(scheduler.isVisibilityRetryTimer).toBe(!hasVisibleEligibleItems);
+  });
+
+  it('logs aggregate dispatch diagnostics without source text', async () => {
+    const item = { id: 'item-1', text: 'private source text', enqueuedAt: performance.now(), resolve: vi.fn(), score: 1 };
+    scheduler.queue.push(item);
+    PageTranslationFluidFilter.process.mockReturnValue({ batchItems: [item], remainingItems: [] });
+    vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({
+      providerRegistryId: 'google', targetLanguage: 'fa', chunkSize: 8, maxChars: 500, parallelExecution: false
+    });
+    safeSendMessage.mockResolvedValue({ success: true, translatedText: '["translated"]' });
+    const capturedLogs = [];
+    scheduler.logger.debugLazy.mockImplementation(factory => capturedLogs.push(factory()));
+
+    await scheduler.flush();
+
+    const [message, serializedDetails] = capturedLogs.at(-1);
+    const details = JSON.parse(serializedDetails);
+    expect(message).toContain('dispatch');
+    expect(serializedDetails).not.toContain('\n');
+    expect(details).toMatchObject({
+      sessionId: 'test-session-123', totalQueued: 1, selectedItemCount: 1,
+      originalChars: 19, chunkSize: 8, maxChars: 500, concurrencyLimit: 1,
+      activeWorkersAtDispatch: 1, messageId: expect.any(String),
+      preparationDurationMs: expect.any(Number), enqueueToDispatchMs: expect.any(Number),
+    });
+    expect(details.messageId).toBe(safeSendMessage.mock.calls[0][0].messageId);
+    expect(details.batchId).toBeDefined();
+    expect(JSON.stringify(details)).not.toContain('private source text');
+  });
+
+  describe('adaptive AI batch deferral', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      scheduler.isFirstBatch = false;
+      scheduler.setSettings({ translateAfterScrollStop: false, maxConcurrentFlushes: 1 });
+      vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({
+        providerRegistryId: 'openai', targetLanguage: 'en', chunkSize: 10, maxChars: 1000,
+        parallelExecution: true, isAI: true, lazyLoading: false,
+      });
+      safeSendMessage.mockImplementation(async message => {
+        const items = JSON.parse(message.data.text);
+        return { success: true, translatedText: JSON.stringify(items.map(({ id }) => ({ id, text: 'translated' }))) };
+      });
+      scheduler.setDiscoveryPending(true, scheduler.sessionContext);
+    });
+
+    afterEach(() => vi.useRealTimers());
+
+    const queueItems = count => Array.from({ length: count }, (_, index) => ({
+      id: `adaptive-${index}`, text: `item-${index}`, enqueuedAt: performance.now(),
+      isHighPriority: false, matchesTargetScript: true, resolve: vi.fn(),
+    }));
+    const select = (count, reasons = { viewport: 'insufficient_eligible_items' }) => {
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        config.diagnostics.stopReason = 'insufficient_eligible_items';
+        config.diagnostics.stoppingReasons = reasons;
+        return { batchItems: queue.slice(0, count), remainingItems: queue.slice(count) };
+      });
+    };
+
+    it.each([1, 2, 3])('defers %i eligible items without holding a worker slot', async count => {
+      scheduler.queue = queueItems(count);
+      const originalQueue = scheduler.queue;
+      select(count);
+
+      await scheduler.flush();
+
+      expect(scheduler.queue).toBe(originalQueue);
+      expect(scheduler.activeFlushes).toBe(0);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.batchTimer).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases early when discovery completes and re-filters the unchanged queue', async () => {
+      scheduler.queue = queueItems(2);
+      select(2);
+      await scheduler.flush();
+      select(2);
+
+      scheduler.setDiscoveryPending(false, scheduler.sessionContext);
+      await vi.runAllTimersAsync();
+
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not extend the original deadline when more small items arrive', async () => {
+      scheduler.queue = queueItems(1);
+      select(1);
+      await scheduler.flush();
+      await vi.advanceTimersByTimeAsync(200);
+
+      scheduler.queue.push(...queueItems(2));
+      select(3);
+      scheduler._scheduleFlush(1);
+      await Promise.resolve();
+      expect(scheduler.activeFlushes).toBe(0);
+      await vi.advanceTimersByTimeAsync(49);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not defer batches limited by script or character boundaries', async () => {
+      for (const reason of ['script_boundary', 'character_limit']) {
+        scheduler.queue = queueItems(2);
+        select(2, { viewport: reason });
+        await scheduler.flush();
+      }
+      expect(safeSendMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('dispatches sufficient batches, exact character limits, and non-AI/On-Stop work immediately', async () => {
+      scheduler.queue = queueItems(4);
+      select(4);
+      await scheduler.flush();
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+
+      scheduler.isFirstBatch = false;
+      scheduler.queue = queueItems(1);
+      scheduler.queue[0].text = '12345';
+      scheduler._getBatchConfig.mockResolvedValueOnce({
+        providerRegistryId: 'openai', targetLanguage: 'en', chunkSize: 10, maxChars: 5,
+        parallelExecution: true, isAI: true, lazyLoading: false,
+      });
+      select(1);
+      await scheduler.flush();
+      expect(safeSendMessage).toHaveBeenCalledTimes(2);
+
+      scheduler.queue = queueItems(1);
+      scheduler._getBatchConfig.mockResolvedValueOnce({
+        providerRegistryId: 'custom', targetLanguage: 'en', chunkSize: 10, maxChars: 1000,
+        parallelExecution: true, isAI: false, lazyLoading: false,
+      });
+      select(1);
+      await scheduler.flush();
+      expect(safeSendMessage).toHaveBeenCalledTimes(3);
+
+      scheduler.setSettings({ translateAfterScrollStop: true });
+      scheduler.queue = queueItems(1);
+      PageTranslationQueueFilter.process.mockImplementation(queue => ({
+        batchItems: queue,
+        remainingItems: [],
+        purgedCount: 0,
+        ejectedItems: [],
+      }));
+      scheduler._getBatchConfig.mockResolvedValueOnce({
+        providerRegistryId: 'openai', targetLanguage: 'en', chunkSize: 10, maxChars: 1000,
+        parallelExecution: true, isAI: true, lazyLoading: false,
+      });
+      select(1);
+      await scheduler.flush();
+      expect(safeSendMessage).toHaveBeenCalledTimes(4);
+    });
+
+    it('keeps discovery deferral bounded by the original deadline', async () => {
+      scheduler.queue = queueItems(1);
+      select(1);
+      await scheduler.flush();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      expect(scheduler.adaptiveBatchDeadline).toBeNull();
+    });
+
+    it('keeps the first AI batch on its original 800ms deadline', async () => {
+      scheduler.isFirstBatch = true;
+      scheduler.setSettings({ chunkSize: 10, priorityThreshold: 1, scrollStopDelay: 600 });
+      select(1);
+      void scheduler.enqueue('first item', scheduler.sessionContext, 1);
+
+      await vi.advanceTimersByTimeAsync(799);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.adaptiveBatchDeadline).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases immediately on a fourth eligible enqueue, once and without duplicate IDs', async () => {
+      scheduler.queue = queueItems(3);
+      select(Number.MAX_SAFE_INTEGER);
+      await scheduler.flush();
+      expect(scheduler.activeFlushes).toBe(0);
+
+      void scheduler.enqueue('fourth item', scheduler.sessionContext, 1);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      const items = JSON.parse(safeSendMessage.mock.calls[0][0].data.text);
+      expect(items).toHaveLength(4);
+      expect(new Set(items.map(item => item.id)).size).toBe(4);
+    });
+
+    it('coalesces burst enqueues into one eligibility recheck at the arrival threshold', async () => {
+      scheduler.queue = queueItems(1);
+      select(Number.MAX_SAFE_INTEGER);
+      await scheduler.flush();
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+
+      void scheduler.enqueue('second item', scheduler.sessionContext, 0);
+      void scheduler.enqueue('third item', scheduler.sessionContext, 0);
+      await Promise.resolve();
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+
+      void scheduler.enqueue('fourth item', scheduler.sessionContext, 0);
+      void scheduler.enqueue('fifth item', scheduler.sessionContext, 0);
+      void scheduler.enqueue('sixth item', scheduler.sessionContext, 0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      const items = JSON.parse(safeSendMessage.mock.calls[0][0].data.text);
+      expect(items).toHaveLength(6);
+      expect(new Set(items.map(item => item.id)).size).toBe(6);
+    });
+
+    it('re-filters visibility before dispatch and waits for the existing visibility retry', async () => {
+      scheduler.queue = queueItems(1);
+      let visible = true;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        config.diagnostics.stopReason = 'insufficient_eligible_items';
+        config.diagnostics.stoppingReasons = { viewport: 'insufficient_eligible_items' };
+        return visible
+          ? { batchItems: queue.slice(0, 1), remainingItems: queue.slice(1), hasVisibleEligibleItems: true }
+          : { batchItems: [], remainingItems: queue, hasVisibleEligibleItems: false };
+      });
+      scheduler._getBatchConfig.mockResolvedValue({
+        providerRegistryId: 'openai', targetLanguage: 'en', chunkSize: 10, maxChars: 1000,
+        parallelExecution: true, isAI: true, lazyLoading: true,
+      });
+      await scheduler.flush();
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+      visible = false;
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.adaptiveBatchDeadline).toBeNull();
+      expect(scheduler.isAdaptiveBatchTimer).toBe(false);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+      visible = true;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(3);
+      expect(scheduler.adaptiveBatchDeadline).toBeNull();
+      expect(scheduler.isAdaptiveBatchTimer).toBe(false);
+      expect(scheduler.isWaitingForVisibility).toBe(false);
+    });
+
+    it.each(['stop', 'reset', 'replace-session'])(
+      '%s prevents a stale adaptive callback from dispatching or touching replacement work', async action => {
+        scheduler.queue = queueItems(1);
+        select(1);
+        await scheduler.flush();
+        const replacementQueue = queueItems(1);
+        if (action === 'stop') {
+          scheduler.stop();
+          scheduler.setTranslationState(true, 'replacement-session', { pageTitle: 'replacement' });
+        } else if (action === 'reset') {
+          scheduler.reset();
+          scheduler.setTranslationState(true, 'replacement-session', { pageTitle: 'replacement' });
+        } else {
+          scheduler.setTranslationState(true, 'replacement-session', { pageTitle: 'replacement' });
+        }
+        scheduler.queue = replacementQueue;
+
+        await vi.advanceTimersByTimeAsync(250);
+
+        expect(safeSendMessage).not.toHaveBeenCalled();
+        expect(scheduler.queue).toBe(replacementQueue);
+      }
+    );
+
+    it('preserves another worker slot and keeps one adaptive timer across repeated flushes', async () => {
+      scheduler.setSettings({ maxConcurrentFlushes: 2 });
+      scheduler.activeFlushes = 1;
+      scheduler.queue = queueItems(2);
+      select(2);
+
+      await scheduler.flush();
+      expect(scheduler.activeFlushes).toBe(1);
+      const timersDuringWait = vi.getTimerCount();
+      await scheduler.flush();
+      expect(scheduler.activeFlushes).toBe(1);
+      expect(vi.getTimerCount()).toBe(timersDuringWait);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      const items = JSON.parse(safeSendMessage.mock.calls[0][0].data.text);
+      expect(new Set(items.map(item => item.id)).size).toBe(items.length);
+      expect(scheduler.activeFlushes).toBe(1);
+      scheduler.activeFlushes = 0;
+    });
+
+    it('retries after the fixed deadline when concurrency is full', async () => {
+      scheduler.queue = queueItems(1);
+      select(1);
+      await scheduler.flush();
+      scheduler.activeFlushes = 1;
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.isAdaptiveBatchTimer).toBe(true);
+
+      scheduler.activeFlushes = 0;
+      await vi.advanceTimersByTimeAsync(300);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the original adaptive timer while enqueues retry against full worker capacity', async () => {
+      scheduler.queue = queueItems(1);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        config.diagnostics.stopReason = 'insufficient_eligible_items';
+        config.diagnostics.stoppingReasons = { viewport: 'insufficient_eligible_items' };
+        return { batchItems: queue, remainingItems: [] };
+      });
+      await scheduler.flush();
+      const fixedDeadline = scheduler.adaptiveBatchDeadline;
+      const originalTimer = scheduler.batchTimer;
+      scheduler.activeFlushes = 1;
+
+      void scheduler.enqueue('second item', scheduler.sessionContext, 0);
+      await Promise.resolve();
+      expect(scheduler.batchTimer).toBe(originalTimer);
+      void scheduler.enqueue('third item', scheduler.sessionContext, 0);
+      await Promise.resolve();
+      expect(scheduler.batchTimer).toBe(originalTimer);
+      expect(scheduler.batchTimerDelay).toBe(250);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(scheduler.adaptiveBatchDeadline).toBe(fixedDeadline);
+      expect(scheduler.batchTimer).not.toBe(originalTimer);
+      expect(scheduler.batchTimerDelay).toBe(300);
+
+      scheduler.activeFlushes = 0;
+      await vi.advanceTimersByTimeAsync(300);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      const items = JSON.parse(safeSendMessage.mock.calls[0][0].data.text);
+      expect(items).toHaveLength(3);
+    });
   });
 
   it('counts retained nodes once per callback and reaches idle without a provider request', async () => {
@@ -151,15 +514,15 @@ describe('PageTranslationScheduler', () => {
     let flushCalls;
     let taskPromises;
 
-    const configureTimedQueue = ({ translateAfterScrollStop = false, chunkSize = 250 } = {}) => {
+    const configureTimedQueue = ({ translateAfterScrollStop = false, chunkSize = 250, lazyLoading = false } = {}) => {
       scheduler.setSettings({
-        translationApi: 'google', targetLanguage: 'en', lazyLoading: false,
+        translationApi: 'google', targetLanguage: 'en', lazyLoading,
         translateAfterScrollStop, scrollStopDelay: 600, poolDelay: 150,
         priorityThreshold: 1, chunkSize, maxConcurrentFlushes: 1,
       });
       vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({
         providerRegistryId: 'google', targetLanguage: 'en', chunkSize,
-        maxChars: 1_000_000, parallelExecution: false, lazyLoading: false,
+        maxChars: 1_000_000, parallelExecution: false, lazyLoading,
       });
       PageTranslationFluidFilter.process.mockImplementation((queue, config) => ({
         batchItems: queue.slice(0, config.chunkSize),
@@ -390,6 +753,979 @@ describe('PageTranslationScheduler', () => {
       expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([
         [800, ['first-visible']], [1850, ['after-first-batch']],
       ]);
+    });
+
+    it('retries visibility on a low-frequency timer until the queued item becomes eligible', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
+      });
+      const task = enqueueTimed('lazy-item');
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(handoffs).toEqual([]);
+      expect(scheduler.batchTimer).not.toBeNull();
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(999);
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await task;
+
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([[1800, ['lazy-item']]]);
+      expect(flushCalls).toEqual([800, 1800]);
+      expect(scheduler.batchTimer).toBeNull();
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps polling blocked items without provider requests and can recover later', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
+      });
+      const task = enqueueTimed('still-lazy');
+
+      await vi.advanceTimersByTimeAsync(800 + 1000 + 2000);
+      expect(handoffs).toEqual([]);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+      expect(flushCalls).toEqual([800, 1800, 3800]);
+      expect(scheduler.queue).toHaveLength(1);
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(3000);
+      await task;
+      expect(handoffs.map(({ at }) => at)).toEqual([6800]);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+      expect(scheduler.queue).toHaveLength(0);
+      expect(scheduler.batchTimer).toBeNull();
+    });
+
+    it('backs off stable blocked checks from one to two to three seconds and caps there', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const batchItems = visible ? queue.slice(0, config.chunkSize) : [];
+        return { batchItems, remainingItems: queue.slice(batchItems.length), hasVisibleEligibleItems: visible };
+      });
+      enqueueTimed('stable-blocked');
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler._visibilityRetryDeadline).toBe(1800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(flushCalls).toEqual([800, 1800]);
+      expect(scheduler._visibilityRetryDeadline).toBe(3800);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(flushCalls).toEqual([800, 1800, 3800]);
+      expect(scheduler._visibilityRetryDeadline).toBe(6800);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(flushCalls).toEqual([800, 1800, 3800, 6800]);
+      expect(scheduler._visibilityRetryDeadline).toBe(9800);
+      scheduler.stop();
+    });
+
+    it('grows visibility intervals only after discovery finishes and another stable idle check', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      scheduler.setDiscoveryPending(true, scheduler.sessionContext);
+      enqueueTimed('discovery-blocked');
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler._visibilityRetryDeadline).toBe(1800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3800);
+
+      scheduler.setDiscoveryPending(false, scheduler.sessionContext);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(4800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(2000);
+      expect(scheduler._visibilityRetryDeadline).toBe(6800);
+      scheduler.stop();
+    });
+
+    it('holds backoff while Fluid scrolling continues and restarts at one second after stop', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('scrolling-blocked');
+      scheduler.signalScrollStart();
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler._visibilityRetryDeadline).toBe(1800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(2000);
+      expect(scheduler._visibilityRetryDeadline).toBe(4800);
+      scheduler.stop();
+    });
+
+    it('resets to the first retry interval when one item recovers and another remains blocked', async () => {
+      configureTimedQueue({ lazyLoading: true, chunkSize: 1 });
+      scheduler.isFirstBatch = false;
+      const visibleItems = new Set();
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(item => visibleItems.has(item.text));
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return {
+          batchItems,
+          remainingItems: queue.filter(item => !batchSet.has(item)),
+          hasVisibleEligibleItems: selected.length > 0,
+        };
+      });
+      vi.spyOn(scheduler, '_executeBatchRequest').mockImplementation(async items => {
+        items.forEach(item => scheduler._resolveItem(item, `translated:${item.text}`, 'accepted'));
+      });
+      const recoveredTask = enqueueTimed('first-recovers');
+      enqueueTimed('still-blocked');
+      await scheduler.flush();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3000);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(scheduler._visibilityRetryDeadline).toBe(6000);
+      expect(scheduler._visibilityRetryDelay).toBe(3000);
+
+      visibleItems.add('first-recovers');
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.advanceTimersByTimeAsync(0);
+      await recoveredTask;
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(scheduler.translatedCount).toBe(1);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler.queue.map(({ text }) => text)).toEqual(['still-blocked']);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(5);
+      expect(scheduler.activeFlushes).toBe(0);
+      expect(scheduler.isWaitingForVisibility).toBe(true);
+      expect(scheduler._visibilityRetryDeadline).toBe(7001);
+      scheduler.stop();
+    });
+
+    it('resets backoff on viewport activity without reading geometry or postponing a retry', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('activity-reset');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3800);
+      const filterCalls = PageTranslationFluidFilter.process.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(200);
+      scheduler.signalViewportActivity();
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3000);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(filterCalls);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(filterCalls);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(filterCalls + 1);
+      scheduler.stop();
+    });
+
+    it('resets backoff for new arrivals and accelerates without postponing the retry', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('arrival-reset');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(3800);
+
+      await vi.advanceTimersByTimeAsync(200);
+      enqueueTimed('arrival-during-backoff');
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      scheduler.stop();
+    });
+
+    it('bounds low-priority arrival acceleration and never postpones an earlier retry deadline', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.setSettings({ scrollStopDelay: 5000 });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const batchItems = visible ? queue.slice(0, config.chunkSize) : [];
+        return { batchItems, remainingItems: queue.slice(batchItems.length), hasVisibleEligibleItems: visible };
+      });
+      enqueueTimed('long-delay-base', 0);
+      await vi.advanceTimersByTimeAsync(800);
+      scheduler.isFirstBatch = false;
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(scheduler._visibilityRetryDelay).toBe(3000);
+      expect(scheduler._visibilityRetryDeadline).toBe(6800);
+
+      await vi.advanceTimersByTimeAsync(200);
+      enqueueTimed('accelerates-to-one-second', 0);
+      expect(scheduler._visibilityRetryDeadline).toBe(5000);
+      await vi.advanceTimersByTimeAsync(500);
+      enqueueTimed('earlier-deadline-retained', 0);
+      expect(scheduler._visibilityRetryDeadline).toBe(5000);
+      await vi.advanceTimersByTimeAsync(200);
+      enqueueTimed('continuous-arrival', 0);
+      expect(scheduler._visibilityRetryDeadline).toBe(5000);
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(1000);
+      await Promise.all(taskPromises);
+      expect(flushCalls.at(-1)).toBe(5000);
+      expect(handoffs.length).toBeGreaterThan(0);
+      scheduler.stop();
+    });
+
+    it('does not increase visibility backoff while another provider worker is active', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.settings.maxConcurrentFlushes = 2;
+      scheduler.activeFlushes = 1;
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('busy-blocked');
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.activeFlushes).toBe(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      scheduler.activeFlushes = 0;
+      scheduler.stop();
+    });
+
+    it('keeps a delayed blocked config from restoring backoff after viewport activity', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('activity-during-config');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      let resolveConfig;
+      scheduler._getBatchConfig.mockImplementation(() => new Promise(resolve => { resolveConfig = resolve; }));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(resolveConfig).toBeTypeOf('function');
+
+      scheduler.signalViewportActivity();
+      resolveConfig({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      scheduler._getBatchConfig.mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(4800);
+      scheduler.stop();
+    });
+
+    it('invalidates a previous stable check when an arrival occurs during delayed config', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('arrival-before-config');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(2000);
+      let resolveConfig;
+      scheduler._getBatchConfig.mockImplementation(() => new Promise(resolve => { resolveConfig = resolve; }));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(resolveConfig).toBeTypeOf('function');
+
+      enqueueTimed('arrival-during-config');
+      resolveConfig({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      scheduler._getBatchConfig.mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(4600);
+      scheduler.stop();
+    });
+
+    it('deduplicates unchanged visibility-idle events and re-emits when progress or queued work changes', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
+      });
+      const visibilityIdles = () => pageEventBus.emit.mock.calls
+        .filter(([action]) => action === MessageActions.PAGE_TRANSLATE_IDLE)
+        .map(([, payload]) => payload);
+      const first = enqueueTimed('blocked-progress');
+
+      await vi.advanceTimersByTimeAsync(1300);
+      expect(visibilityIdles()).toHaveLength(1);
+      scheduler.failedCount++;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(visibilityIdles()).toHaveLength(2);
+      expect(visibilityIdles()[1]).toMatchObject({ failedCount: 1, totalCount: 1 });
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(1000);
+      await first;
+      expect(scheduler.queue).toHaveLength(0);
+
+      visible = false;
+      const next = enqueueTimed('new-blocked-work');
+      await vi.advanceTimersByTimeAsync(1200);
+      expect(visibilityIdles()).toHaveLength(3);
+      expect(visibilityIdles()[2]).toMatchObject({ totalCount: 2 });
+      scheduler.stop();
+      await next;
+    });
+
+    it('emits an initial visibility-idle event for a replacement session', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      const visibilityIdleCount = () => pageEventBus.emit.mock.calls
+        .filter(([action]) => action === MessageActions.PAGE_TRANSLATE_IDLE).length;
+
+      enqueueTimed('first-session-blocked');
+      await vi.advanceTimersByTimeAsync(1300);
+      expect(visibilityIdleCount()).toBe(1);
+
+      scheduler.stop();
+      scheduler.setTranslationState(true, 'replacement-session', { replacement: true });
+      enqueueTimed('replacement-session-blocked');
+      await vi.advanceTimersByTimeAsync(1300);
+      expect(visibilityIdleCount()).toBe(2);
+    });
+
+    it('keeps a visibility retry bounded when a newly enqueued item arrives', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
+      });
+      enqueueTimed('blocked');
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+
+      visible = true;
+      const later = enqueueTimed('new-arrival');
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      await vi.advanceTimersByTimeAsync(799);
+      expect(handoffs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await later;
+
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([[1600, ['blocked', 'new-arrival']]]);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('coalesces emergency-queue arrivals without postponing the visibility recheck deadline', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
+      });
+      for (let index = 0; index < 1000; index++) enqueueTimed(`emergency-${index}`);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(flushCalls).toEqual([0]);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+
+      for (const at of [100, 200, 300, 400, 500, 600, 700, 800, 900, 999]) {
+        await vi.advanceTimersByTimeAsync(at - Date.now());
+        enqueueTimed(`arrival-${at}`, at % 200 === 0 ? 0 : 1);
+      }
+      expect(scheduler.batchTimer).not.toBeNull();
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(flushCalls).toEqual([0, 900]);
+      const acceleratedDeadline = scheduler._visibilityRetryDeadline;
+      for (const at of [1000, 1100, 1200, 1300, 1400, 1500, 1600]) {
+        await vi.advanceTimersByTimeAsync(at - Date.now());
+        enqueueTimed(`arrival-${at}`);
+        expect(scheduler._visibilityRetryDeadline).toBe(acceleratedDeadline);
+      }
+      await vi.advanceTimersByTimeAsync(acceleratedDeadline - Date.now());
+      expect(flushCalls.at(-1)).toBe(acceleratedDeadline);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(3);
+      expect(scheduler._visibilityRetryDeadline).toBe(acceleratedDeadline + 1000);
+
+      scheduler.stop();
+    });
+
+    it('rechecks immediately on scroll stop while visibility retry is pending', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const batchItems = visible ? queue.slice(0, config.chunkSize) : [];
+        return { batchItems, remainingItems: queue.slice(batchItems.length), hasVisibleEligibleItems: visible };
+      });
+      const task = enqueueTimed('scroll-wakeup');
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      visible = true;
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+      await task;
+      expect(flushCalls).toEqual([800, 800]);
+      expect(handoffs.map(({ texts }) => texts)).toEqual([['scroll-wakeup']]);
+    });
+
+    it('keeps the first automatic interval after a blocked immediate scroll-stop check', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('scroll-stop-still-blocked');
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler._visibilityRetryDelay).toBe(2000);
+
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler._visibilityRetryDeadline).toBe(2800);
+      scheduler.stop();
+    });
+
+    it('lets later high-priority eligible arrivals accelerate a blocked retry without rearming it', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      const visibleItems = new Set();
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(item => visibleItems.has(item.text));
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0 };
+      });
+      const first = enqueueTimed('initial');
+      visibleItems.add('initial');
+      await vi.advanceTimersByTimeAsync(800);
+      await first;
+
+      const blocked = enqueueTimed('blocked-later', 0);
+      await vi.advanceTimersByTimeAsync(600);
+      expect(scheduler.isWaitingForVisibility).toBe(true);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+
+      const arrival = enqueueTimed('newly-visible-high', 1);
+      visibleItems.add('newly-visible-high');
+      const dueAt = scheduler._visibilityRetryDeadline;
+      expect(dueAt).toBe(1650);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(handoffs).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await arrival;
+      expect(handoffs.map(({ at, texts }) => [at, texts])).toEqual([[800, ['initial']], [1650, ['newly-visible-high']]]);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(3);
+      scheduler.stop();
+      await blocked;
+    });
+
+    it('lets the first blocked config worker invalidate all slower concurrent selectors', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.settings.maxConcurrentFlushes = 3;
+      scheduler._clearBatchTimer();
+      scheduler.queue.push({ text: 'config-race', score: 0, isHighPriority: false, resolve: vi.fn() });
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      const configs = [];
+      scheduler._getBatchConfig.mockImplementation(() => new Promise(resolve => configs.push(resolve)));
+      const workers = [scheduler.flush(), scheduler.flush(), scheduler.flush()];
+      expect(configs).toHaveLength(3);
+      const config = {
+        providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250,
+        maxChars: 1_000_000, parallelExecution: false, lazyLoading: true,
+      };
+
+      configs[0](config);
+      await workers[0];
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+      configs[1](config);
+      configs[2](config);
+      await Promise.all(workers.slice(1));
+
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+      expect(scheduler.isWaitingForVisibility).toBe(true);
+      scheduler.stop();
+    });
+
+    it('preserves visibility-recheck permission across concurrency saturation', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.settings.maxConcurrentFlushes = 1;
+      const task = enqueueTimed('saturated-recheck');
+      PageTranslationFluidFilter.process.mockReturnValue({
+        batchItems: [], remainingItems: [...scheduler.queue], hasVisibleEligibleItems: false,
+      });
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.isWaitingForVisibility).toBe(true);
+
+      scheduler.activeFlushes = 1;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(scheduler.batchTimerDelay).toBe(300);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(1);
+
+      scheduler.activeFlushes = 0;
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [...queue], remainingItems: [], hasVisibleEligibleItems: true,
+      }));
+      await vi.advanceTimersByTimeAsync(300);
+      await task;
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('converts a pending normal timer to visibility recovery without extending its deadline', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.settings.maxConcurrentFlushes = 2;
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const batchItems = visible ? queue.slice(0, config.chunkSize) : [];
+        return { batchItems, remainingItems: queue.slice(batchItems.length), hasVisibleEligibleItems: visible };
+      });
+      let resolveConfig;
+      scheduler._getBatchConfig.mockImplementation(() => new Promise(resolve => { resolveConfig = resolve; }));
+      const first = enqueueTimed('delayed-worker');
+      scheduler._clearBatchTimer();
+      const worker = scheduler.flush();
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(100);
+      const second = enqueueTimed('concurrent-arrival');
+      const originalTimer = scheduler.batchTimer;
+      expect(scheduler._batchTimerDeadline).toBe(900);
+      await vi.advanceTimersByTimeAsync(100);
+      resolveConfig({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      scheduler._getBatchConfig.mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      await worker;
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(scheduler.batchTimer).not.toBe(originalTimer);
+      expect(scheduler._visibilityRetryDeadline).toBe(900);
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(700);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handoffs.map(({ at }) => at)).toEqual([900]);
+      expect(scheduler.batchTimer).toBeNull();
+      await Promise.all([first, second]);
+      scheduler.stop();
+    });
+
+    it.each([
+      { mode: 'non-lazy fluid', translateAfterScrollStop: false, lazyLoading: false },
+      { mode: 'on-stop', translateAfterScrollStop: true, lazyLoading: true },
+    ])('does not convert a pending normal timer for $mode scheduling', ({ translateAfterScrollStop, lazyLoading }) => {
+      configureTimedQueue({ translateAfterScrollStop, lazyLoading });
+      scheduler.queue.push({ text: 'pending', score: 1, isHighPriority: true, resolve: vi.fn() });
+      scheduler._scheduleFlush(1);
+      const timer = scheduler.batchTimer;
+      const deadline = scheduler._batchTimerDeadline;
+
+      scheduler._scheduleVisibilityRetry(scheduler.translationSessionId, scheduler.sessionContext);
+
+      expect(scheduler.batchTimer).toBe(timer);
+      expect(scheduler._batchTimerDeadline).toBe(deadline);
+      expect(scheduler.isVisibilityRetryTimer).toBe(false);
+    });
+
+    it('converts a pending concurrency retry to visibility recovery without extending it', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.settings.maxConcurrentFlushes = 1;
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const batchItems = visible ? queue.slice(0, config.chunkSize) : [];
+        return { batchItems, remainingItems: queue.slice(batchItems.length), hasVisibleEligibleItems: visible };
+      });
+      let resolveConfig;
+      scheduler._getBatchConfig.mockImplementation(() => new Promise(resolve => { resolveConfig = resolve; }));
+      const task = enqueueTimed('delayed-concurrency-worker');
+      scheduler._clearBatchTimer();
+      const worker = scheduler.flush();
+      await Promise.resolve();
+      await scheduler.flush();
+      expect(scheduler._batchTimerDeadline).toBe(300);
+
+      await vi.advanceTimersByTimeAsync(100);
+      resolveConfig({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      scheduler._getBatchConfig.mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      await worker;
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(scheduler._visibilityRetryDeadline).toBe(300);
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(200);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handoffs.map(({ at }) => at)).toEqual([300]);
+      expect(scheduler.batchTimer).toBeNull();
+      await task;
+      scheduler.stop();
+    });
+
+    it('rearms an expired concurrency timer while config is pending, then recovers at that deadline', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.settings.maxConcurrentFlushes = 1;
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const batchItems = visible ? queue.slice(0, config.chunkSize) : [];
+        return { batchItems, remainingItems: queue.slice(batchItems.length), hasVisibleEligibleItems: visible };
+      });
+      let resolveConfig;
+      scheduler._getBatchConfig.mockImplementation(() => new Promise(resolve => { resolveConfig = resolve; }));
+      const task = enqueueTimed('pending-config-recovery');
+      scheduler._clearBatchTimer();
+      const worker = scheduler.flush();
+      await Promise.resolve();
+      await scheduler.flush();
+      const firstConcurrencyTimer = scheduler.batchTimer;
+      expect(scheduler._batchTimerDeadline).toBe(300);
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(scheduler.batchTimer).not.toBe(firstConcurrencyTimer);
+      expect(scheduler._batchTimerDeadline).toBe(600);
+
+      await vi.advanceTimersByTimeAsync(100);
+      resolveConfig({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      scheduler._getBatchConfig.mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250, maxChars: 1_000_000, parallelExecution: false, lazyLoading: true });
+      await worker;
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(scheduler._visibilityRetryDeadline).toBe(600);
+
+      visible = true;
+      await vi.advanceTimersByTimeAsync(200);
+      await task;
+      expect(handoffs.map(({ at }) => at)).toEqual([600]);
+      expect(scheduler.batchTimer).toBeNull();
+      scheduler.stop();
+    });
+
+    it('releases an expired timer handle before an early-returning flush', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.queue.push({ text: 'will-be-cleared', score: 1, isHighPriority: true, resolve: vi.fn() });
+      scheduler._scheduleFlush(1);
+      const expiredTimer = scheduler.batchTimer;
+      scheduler.queue = [];
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.batchTimer).toBeNull();
+
+      scheduler.queue.push({ text: 'blocked', score: 0, isHighPriority: false, resolve: vi.fn() });
+      scheduler.isWaitingForVisibility = true;
+      scheduler._scheduleVisibilityRetry(scheduler.translationSessionId, scheduler.sessionContext);
+      expect(scheduler.batchTimer).not.toBe(expiredTimer);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(scheduler._visibilityRetryDeadline).toBe(1800);
+    });
+
+    it('stops a provider worker loop when its parallel sibling classifies the remaining queue as blocked', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      scheduler.settings.maxConcurrentFlushes = 2;
+      scheduler._clearBatchTimer();
+      scheduler.queue = [
+        { id: 'eligible', text: 'eligible', score: 1, isHighPriority: true, resolve: vi.fn() },
+        { id: 'blocked', text: 'blocked', score: 0, isHighPriority: false, resolve: vi.fn() },
+      ];
+      scheduler._getBatchConfig.mockResolvedValue({
+        providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 1,
+        maxChars: 1_000_000, parallelExecution: true, lazyLoading: true,
+      });
+      let finishProvider;
+      safeSendMessage.mockImplementation(() => new Promise(resolve => { finishProvider = resolve; }));
+      PageTranslationFluidFilter.process.mockImplementation(queue => queue[0].text === 'eligible'
+        ? { batchItems: [queue[0]], remainingItems: queue.slice(1), hasVisibleEligibleItems: true }
+        : { batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false });
+
+      const worker = scheduler.flush();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(finishProvider).toBeTypeOf('function');
+      expect(scheduler.isWaitingForVisibility).toBe(true);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+      finishProvider({ success: true, translatedText: JSON.stringify([{ id: 'eligible', text: 'translated' }]) });
+      await vi.advanceTimersByTimeAsync(0);
+      await worker;
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(2);
+      scheduler.stop();
+    });
+
+    it('uses a fresh visibility revision for each provider worker selection', async () => {
+      configureTimedQueue({ lazyLoading: true, chunkSize: 1 });
+      scheduler.settings.maxConcurrentFlushes = 2;
+      const visibleItems = new Set(['initial']);
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(item => visibleItems.has(item.id));
+      PageTranslationFluidFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return {
+          batchItems,
+          remainingItems: queue.filter(item => !batchSet.has(item)),
+          hasVisibleEligibleItems: selected.length > 0,
+        };
+      });
+      scheduler._getBatchConfig.mockResolvedValue({
+        providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 1,
+        maxChars: 1_000_000, parallelExecution: true, lazyLoading: true,
+      });
+      const providerRequests = [];
+      safeSendMessage.mockImplementation(message => new Promise(resolve => {
+        const items = JSON.parse(message.data.text);
+        providerRequests.push({
+          ids: items.map(item => item.id),
+          resolve: () => resolve({
+            success: true,
+            translatedText: JSON.stringify(items.map(item => ({ id: item.id, text: `translated:${item.text}` }))),
+          }),
+        });
+      }));
+      scheduler.queue = ['initial', 'recovered', 'after-recovery'].map(id => ({
+        id, text: id, score: 1, isHighPriority: true, resolve: vi.fn(),
+      }));
+
+      const initialWorker = scheduler.flush();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(providerRequests.map(({ ids }) => ids)).toEqual([['initial']]);
+      expect(scheduler.isWaitingForVisibility).toBe(true);
+
+      visibleItems.add('recovered');
+      visibleItems.add('after-recovery');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(providerRequests.map(({ ids }) => ids)).toEqual([['initial'], ['recovered']]);
+      expect(scheduler.activeFlushes).toBe(2);
+      expect(scheduler.isWaitingForVisibility).toBe(false);
+      expect(scheduler.queue.map(({ id }) => id)).toEqual(['after-recovery']);
+
+      providerRequests[0].resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(providerRequests.map(({ ids }) => ids)).toEqual([['initial'], ['recovered'], ['after-recovery']]);
+      expect(scheduler.activeFlushes).toBe(2);
+
+      providerRequests[1].resolve();
+      providerRequests[2].resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await initialWorker;
+      expect(scheduler.queue).toHaveLength(0);
+      expect(scheduler.activeFlushes).toBe(0);
+      expect(providerRequests.flatMap(({ ids }) => ids)).toEqual(['initial', 'recovered', 'after-recovery']);
+      scheduler.stop();
+    });
+
+    it('ignores pending config completion after stop, reset, or direct session replacement', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      for (const lifecycle of ['stop', 'reset', 'replace']) {
+        if (!scheduler.isTranslated) scheduler.setTranslationState(true, `session-${lifecycle}`, { lifecycle });
+        scheduler._clearBatchTimer();
+        scheduler.activeFlushes = 0;
+        scheduler.queue = [];
+        PageTranslationFluidFilter.process.mockClear();
+        scheduler.queue.push({ text: `stale-${lifecycle}`, score: 0, isHighPriority: false, resolve: vi.fn() });
+        let resolveConfig;
+        scheduler._getBatchConfig.mockImplementationOnce(() => new Promise(resolve => { resolveConfig = resolve; }));
+        const worker = scheduler.flush();
+        if (lifecycle === 'stop') scheduler.stop();
+        else if (lifecycle === 'reset') scheduler.reset();
+        else scheduler.setTranslationState(true, 'replacement-session', { replacement: true });
+        const activeFlushesAfterLifecycle = scheduler.activeFlushes;
+        resolveConfig({
+          providerRegistryId: 'google', targetLanguage: 'en', chunkSize: 250,
+          maxChars: 1_000_000, parallelExecution: false, lazyLoading: true,
+        });
+        await worker;
+        expect(PageTranslationFluidFilter.process).not.toHaveBeenCalled();
+        expect(scheduler.activeFlushes).toBe(activeFlushesAfterLifecycle);
+        expect(scheduler.batchTimer).toBeNull();
+      }
+    });
+
+    it('does not poll an empty batch when lazy loading is disabled', async () => {
+      configureTimedQueue({ lazyLoading: false });
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('non-lazy-empty');
+
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.queue).toHaveLength(1);
+      expect(scheduler.isWaitingForVisibility).toBe(false);
+      expect(scheduler.batchTimer).toBeNull();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(flushCalls).toEqual([800]);
+      expect(safeSendMessage).not.toHaveBeenCalled();
+    });
+
+    it('cancels On-Stop visibility retries during scrolling and rechecks at scroll stop', async () => {
+      configureTimedQueue({ translateAfterScrollStop: true, lazyLoading: true });
+      let visible = false;
+      PageTranslationHelper.isInViewportWithMargin.mockImplementation(() => visible);
+      PageTranslationQueueFilter.process.mockImplementation((queue, config) => {
+        const selected = queue.filter(item => PageTranslationHelper.isInViewportWithMargin(item.node || item.textNode || item, 0));
+        const batchItems = selected.slice(0, config.chunkSize);
+        const batchSet = new Set(batchItems);
+        return { batchItems, remainingItems: queue.filter(item => !batchSet.has(item)), hasVisibleEligibleItems: selected.length > 0, purgedCount: 0, ejectedItems: [] };
+      });
+      const task = enqueueTimed('on-stop-lazy');
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+
+      scheduler.signalScrollStart();
+      expect(scheduler.batchTimer).toBeNull();
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(flushCalls).toEqual([800]);
+
+      visible = true;
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+      await task;
+      expect(flushCalls).toEqual([800, 2300]);
+      expect(handoffs.map(({ texts }) => texts)).toEqual([['on-stop-lazy']]);
+    });
+
+    it('starts a fresh On-Stop visibility interval after a cancelled retry and delayed scroll stop', async () => {
+      configureTimedQueue({ translateAfterScrollStop: true, lazyLoading: true });
+      PageTranslationQueueFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      const task = enqueueTimed('on-stop-delayed-wake');
+      await vi.advanceTimersByTimeAsync(800);
+      expect(PageTranslationQueueFilter.process).toHaveBeenCalledTimes(1);
+
+      scheduler.signalScrollStart();
+      expect(scheduler.batchTimer).toBeNull();
+      await vi.advanceTimersByTimeAsync(1500);
+      scheduler.signalScrollStop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(flushCalls).toEqual([800, 2300]);
+      expect(PageTranslationQueueFilter.process).toHaveBeenCalledTimes(2);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(scheduler.batchTimerDelay).toBe(1000);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(PageTranslationQueueFilter.process).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(flushCalls).toEqual([800, 2300, 3300]);
+      expect(PageTranslationQueueFilter.process).toHaveBeenCalledTimes(3);
+      scheduler.stop();
+      await task;
+    });
+
+    it('invalidates pending visibility retries on stop and session replacement', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationHelper.isInViewportWithMargin.mockReturnValue(false);
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      enqueueTimed('old-session-item');
+      await vi.advanceTimersByTimeAsync(800);
+      const staleRetry = scheduler.batchTimer;
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+
+      scheduler.stop();
+      scheduler.setTranslationState(true, 'replacement-session', { replacement: true });
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [...queue], remainingItems: [],
+      }));
+      const replacement = enqueueTimed('replacement-item');
+      const replacementTimer = scheduler.batchTimer;
+      expect(replacementTimer).not.toBe(staleRetry);
+      await vi.advanceTimersByTimeAsync(800);
+      await replacement;
+      expect(handoffs.map(({ texts }) => texts)).toEqual([['replacement-item']]);
+    });
+
+    it('clears blocked visibility retry state on reset', async () => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      const task = enqueueTimed('reset-blocked-item');
+      await vi.advanceTimersByTimeAsync(800);
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      scheduler.reset();
+      await task;
+
+      expect(scheduler.batchTimer).toBeNull();
+      expect(scheduler._visibilityRetryDeadline).toBeNull();
+      const filterCalls = PageTranslationFluidFilter.process.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(filterCalls);
+    });
+
+    it.each(['stop', 'reset', 'replacement'])('invalidates a scheduled blocked retry on %s and allows fresh replacement work', async lifecycle => {
+      configureTimedQueue({ lazyLoading: true });
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [], remainingItems: [...queue], hasVisibleEligibleItems: false,
+      }));
+      const oldTask = enqueueTimed(`old-${lifecycle}`);
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(3000);
+      const staleDeadline = scheduler._visibilityRetryDeadline;
+      const oldFilterCount = PageTranslationFluidFilter.process.mock.calls.length;
+      expect(scheduler.isVisibilityRetryTimer).toBe(true);
+      expect(scheduler._visibilityRetryDelay).toBe(3000);
+
+      if (lifecycle === 'stop') scheduler.stop();
+      else if (lifecycle === 'reset') scheduler.reset();
+      else scheduler.setTranslationState(true, 'direct-replacement', { replacement: true });
+      expect(scheduler.batchTimer).toBeNull();
+      expect(scheduler._visibilityRetryDeadline).toBeNull();
+      expect(scheduler._visibilityRetryDelay).toBe(1000);
+      expect(scheduler.isWaitingForVisibility).toBe(false);
+      if (!scheduler.isTranslated) scheduler.setTranslationState(true, `fresh-${lifecycle}`, { fresh: true });
+
+      PageTranslationFluidFilter.process.mockImplementation(queue => ({
+        batchItems: [...queue], remainingItems: [], hasVisibleEligibleItems: true,
+      }));
+      const freshTask = enqueueTimed(`fresh-${lifecycle}`);
+      const replacementTimer = scheduler.batchTimer;
+      expect(replacementTimer).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(Math.max(0, staleDeadline - performance.now()));
+      await Promise.all([oldTask, freshTask]);
+      expect(scheduler.batchTimer).toBeNull();
+      expect(PageTranslationFluidFilter.process).toHaveBeenCalledTimes(oldFilterCount + 1);
+      expect(handoffs.at(-1).texts).toContain(`fresh-${lifecycle}`);
     });
 
     it('keeps flush invocation at 800ms distinct from the 200ms batch-config handoff delay', async () => {
@@ -637,6 +1973,7 @@ describe('PageTranslationScheduler', () => {
       await pending;
       expectSettlement(item.resolve, 'original');
       expect(getSettlement(item.resolve).state).toBe('cancelled');
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(0);
     });
   });
 
@@ -850,6 +2187,22 @@ describe('PageTranslationScheduler', () => {
       expect(onFatalError).toHaveBeenCalledOnce();
     });
 
+    it.each([
+      'API_KEY_MISSING', 'API_KEY_INVALID', 'API_CONFIG_INVALID',
+      'CIRCUIT_BREAKER_OPEN', 'EXTENSION_CONTEXT_INVALIDATED',
+    ])('uses the real matcher to immediately escalate canonical %s despite legacy SERVER_ERROR', async canonicalType => {
+      const matcher = await vi.importActual('@/shared/error-management/ErrorMatcher.js');
+      isFatalError.mockImplementation(matcher.isFatalError);
+      matchErrorToType.mockImplementation(matcher.matchErrorToType);
+      const error = Object.assign(new Error(canonicalType), { type: canonicalType });
+
+      await scheduler._handleBatchError(error, [{ text: canonicalType, resolve: vi.fn() }], 'SERVER_ERROR');
+
+      expect(scheduler.fatalErrorOccurred).toBe(true);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(0);
+      expect(onFatalError).toHaveBeenCalledOnce();
+    });
+
     it('uses internal provenance for context invalidation', () => {
       const item = { text: 'Context failure', resolve: vi.fn(), score: 1 };
       const error = Object.assign(new Error('context invalidated'), { type: 'EXTENSION_CONTEXT_INVALIDATED' });
@@ -909,6 +2262,289 @@ describe('PageTranslationScheduler', () => {
   });
 
   describe('Batch Execution (Fluid Mode)', () => {
+    const transientError = (type = 'NETWORK_ERROR') => Object.assign(new Error(type), { type });
+    const outcome = (error, index) => scheduler._handleBatchError(error, [{
+      id: `batch-${index}`, text: `item-${index}`, resolve: vi.fn(),
+    }], error.type);
+
+    it.each([1, 2])('keeps %i eligible network/server batch failures soft, then resets after success', async failureCount => {
+      for (let index = 0; index < failureCount; index++) {
+        await outcome(transientError(index % 2 ? 'SERVER_ERROR' : 'NETWORK_ERROR'), index);
+      }
+      expect(scheduler.fatalErrorOccurred).toBe(false);
+      expect(onFatalError).not.toHaveBeenCalled();
+
+      safeSendMessage.mockResolvedValue({ success: true, translatedText: '["same"]' });
+      const successfulItem = { text: 'same', resolve: vi.fn() };
+      await scheduler._executeBatchRequest([successfulItem], { providerRegistryId: 'google' }, scheduler.sessionContext, scheduler.translationSessionId);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(0);
+      expect(getSettlement(successfulItem.resolve).text).toBe('same');
+
+      await outcome(transientError('NETWORK_ERROR'), 3);
+      await outcome(transientError('SERVER_ERROR'), 4);
+      await outcome(transientError('NETWORK_ERROR'), 5);
+      expect(scheduler.fatalErrorOccurred).toBe(true);
+      expect(onFatalError).toHaveBeenCalledTimes(1);
+    });
+
+    it('escalates on the third failed batch, not on the number of failed items, and stops dispatch', async () => {
+      scheduler.settings.maxConcurrentFlushes = 1;
+      const items = Array.from({ length: 6 }, (_, index) => ({ text: `item-${index}`, resolve: vi.fn(), score: 1 }));
+      scheduler.queue.push(...items);
+      scheduler.totalTasks = items.length;
+      let selectedBatches = 0;
+      PageTranslationFluidFilter.process.mockImplementation(queue => {
+        const batchSize = selectedBatches++ === 0 ? 3 : 1;
+        return { batchItems: queue.slice(0, batchSize), remainingItems: queue.slice(batchSize) };
+      });
+      vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'fa' });
+      safeSendMessage.mockResolvedValue({ success: false, error: 'offline', errorType: 'NETWORK_ERROR' });
+
+      await scheduler.flush();
+
+      expect(safeSendMessage).toHaveBeenCalledTimes(3);
+      expect(scheduler.failedCount).toBe(5);
+      expect(scheduler.fatalErrorOccurred).toBe(true);
+      expect(onFatalError).toHaveBeenCalledTimes(1);
+      expect(items[5].resolve).not.toHaveBeenCalled();
+    });
+
+    it('uses completion order for concurrent AI workers when an older success follows two failures', async () => {
+      vi.useFakeTimers();
+      try {
+        scheduler.settings.maxConcurrentFlushes = 4;
+        const items = Array.from({ length: 4 }, (_, index) => ({ id: `worker-${index}`, text: `source-${index}`, resolve: vi.fn(), score: 1 }));
+        scheduler.queue.push(...items);
+        scheduler.totalTasks = items.length;
+        PageTranslationFluidFilter.process.mockImplementation(queue => ({ batchItems: queue.slice(0, 1), remainingItems: queue.slice(1) }));
+        vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({ providerRegistryId: 'custom', targetLanguage: 'ja', parallelExecution: true });
+        const responses = Array.from({ length: 4 }, () => {
+          let resolve;
+          return { promise: new Promise(done => { resolve = done; }), resolve };
+        });
+        safeSendMessage.mockImplementation(() => responses[safeSendMessage.mock.calls.length - 1].promise);
+
+        const flush = scheduler.flush();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(safeSendMessage).toHaveBeenCalledTimes(4);
+
+        responses[1].resolve({ success: false, error: 'temporary', errorType: 'NETWORK_ERROR' });
+        await vi.advanceTimersByTimeAsync(0);
+        responses[2].resolve({ success: false, error: 'temporary', errorType: 'SERVER_ERROR' });
+        await vi.advanceTimersByTimeAsync(0);
+        responses[0].resolve({ success: true, translatedText: '[{"id":"worker-0","text":"translated-0"}]' });
+        await vi.advanceTimersByTimeAsync(0);
+        responses[3].resolve({ success: false, error: 'temporary', errorType: 'NETWORK_ERROR' });
+        await vi.advanceTimersByTimeAsync(0);
+        await flush;
+        await vi.runAllTimersAsync();
+
+        expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+        expect(scheduler.fatalErrorOccurred).toBe(false);
+        expect(onFatalError).not.toHaveBeenCalled();
+        expect(getSettlement(items[0].resolve).text).toBe('translated-0');
+        expect(items.slice(1).map(item => getSettlement(item.resolve).state)).toEqual(['failed', 'failed', 'failed']);
+        getSettlement(items[0].resolve).settle('accepted');
+        expect(scheduler.translatedCount).toBe(1);
+        expect(scheduler.failedCount).toBe(3);
+        expect(items.map(item => item.resolve).every(resolve => resolve.mock.calls.length === 1)).toBe(true);
+      } finally {
+        scheduler.stop();
+        vi.useRealTimers();
+      }
+    });
+
+    it('escalates once at three concurrent failed workers and ignores late sibling outcomes', async () => {
+      vi.useFakeTimers();
+      try {
+        scheduler.settings.maxConcurrentFlushes = 5;
+        const items = Array.from({ length: 5 }, (_, index) => ({ id: `fatal-worker-${index}`, text: `source-${index}`, resolve: vi.fn(), score: 1 }));
+        scheduler.queue.push(...items);
+        scheduler.totalTasks = items.length;
+        PageTranslationFluidFilter.process.mockImplementation(queue => ({ batchItems: queue.slice(0, 1), remainingItems: queue.slice(1) }));
+        vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({ providerRegistryId: 'custom', targetLanguage: 'ja', parallelExecution: true });
+        const requests = Array.from({ length: 5 }, () => {
+          let resolve;
+          let reject;
+          const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+          return { promise, resolve, reject };
+        });
+        safeSendMessage.mockImplementation(() => requests[safeSendMessage.mock.calls.length - 1].promise);
+        onFatalError.mockImplementation(() => scheduler.stop());
+
+        const flush = scheduler.flush();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(safeSendMessage).toHaveBeenCalledTimes(5);
+        for (const index of [1, 2, 0]) {
+          requests[index].resolve({ success: false, error: 'offline', errorType: 'NETWORK_ERROR' });
+          await vi.advanceTimersByTimeAsync(0);
+        }
+        expect(scheduler.fatalErrorOccurred).toBe(true);
+        expect(onFatalError).toHaveBeenCalledOnce();
+
+        requests[3].resolve({ success: true, translatedText: '["too-late"]' });
+        requests[4].reject(new Error('late transport rejection'));
+        await vi.advanceTimersByTimeAsync(0);
+        await flush;
+        await vi.runAllTimersAsync();
+
+        expect(onFatalError).toHaveBeenCalledOnce();
+        expect(items.map(item => item.resolve.mock.calls.length)).toEqual([1, 1, 1, 1, 1]);
+        expect(getSettlement(items[3].resolve).state).toBe('cancelled');
+        expect(getSettlement(items[4].resolve).state).toBe('cancelled');
+        expect(scheduler.translatedCount).toBe(0);
+      } finally {
+        scheduler.stop();
+        vi.useRealTimers();
+      }
+    });
+
+    it('counts a batch outcome once and ignores noneligible soft failures for the streak', async () => {
+      const batch = [{ text: 'retry', resolve: vi.fn() }];
+      const first = transientError();
+      await scheduler._handleBatchError(first, batch, 'NETWORK_ERROR');
+      await scheduler._handleBatchError(first, batch, 'NETWORK_ERROR');
+      await outcome(Object.assign(new Error('rate limited'), { type: 'RATE_LIMIT_REACHED' }), 2);
+      await outcome(transientError('SERVER_ERROR'), 3);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(2);
+      expect(scheduler.fatalErrorOccurred).toBe(false);
+      expect(pageEventBus.emit.mock.calls.filter(([event]) => event === 'page-translation-internal-error')).toHaveLength(3);
+    });
+
+    it('does not reset the streak when translated DOM acceptance is pending', async () => {
+      await outcome(transientError(), 1);
+      const item = { text: 'source', resolve: vi.fn() };
+      safeSendMessage.mockResolvedValue({ success: true, translatedText: '["translated"]' });
+      await scheduler._executeBatchRequest([item], { providerRegistryId: 'google' }, scheduler.sessionContext, scheduler.translationSessionId);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(0);
+      expect(getSettlement(item.resolve).state).toBe('pending');
+      await outcome(transientError('SERVER_ERROR'), 2);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+      expect(getSettlement(item.resolve).state).toBe('pending');
+      expect(getSettlement(item.resolve).settle('accepted')).toBe(true);
+      expect(scheduler.translatedCount).toBe(1);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+    });
+
+    it('does not reset the streak for malformed successful responses', async () => {
+      await outcome(transientError(), 1);
+      safeSendMessage.mockResolvedValue({ success: true, translatedText: 'not-json' });
+      const item = { text: 'original', resolve: vi.fn() };
+
+      await scheduler._executeBatchRequest([item], { providerRegistryId: 'google' }, scheduler.sessionContext, scheduler.translationSessionId);
+
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+      expect(getSettlement(item.resolve).state).toBe('failed');
+    });
+
+    it('resets the streak for a valid all-skipped provider response', async () => {
+      await outcome(transientError(), 1);
+      safeSendMessage.mockResolvedValue({ success: true, translatedText: '[{"text":"original","isSkipped":true}]' });
+      const item = { text: 'original', resolve: vi.fn() };
+
+      await scheduler._executeBatchRequest([item], { providerRegistryId: 'google' }, scheduler.sessionContext, scheduler.translationSessionId);
+
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(0);
+      expect(getSettlement(item.resolve).state).toBe('failed');
+    });
+
+    it('does not let a duplicate successful batch outcome reset a later streak', async () => {
+      await outcome(transientError(), 1);
+      const item = { text: 'same', resolve: vi.fn() };
+      const batch = [item];
+      safeSendMessage.mockResolvedValue({ success: true, translatedText: '["translated"]' });
+      await scheduler._executeBatchRequest(batch, { providerRegistryId: 'google' }, scheduler.sessionContext, scheduler.translationSessionId);
+      await outcome(transientError('SERVER_ERROR'), 2);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+
+      await scheduler._executeBatchRequest(batch, { providerRegistryId: 'google' }, scheduler.sessionContext, scheduler.translationSessionId);
+
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+      expect(item.resolve).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['success', 'error'])('ignores stale %s after replacement without changing the new session streak', async lateOutcome => {
+      let resolveOld;
+      let rejectOld;
+      safeSendMessage.mockImplementationOnce(() => new Promise((resolve, reject) => {
+        resolveOld = resolve;
+        rejectOld = reject;
+      }));
+      const oldItem = { text: 'old', resolve: vi.fn() };
+      const oldSessionId = scheduler.translationSessionId;
+      const oldContext = scheduler.sessionContext;
+      const oldRequest = scheduler._executeBatchRequest([oldItem], { providerRegistryId: 'google' }, oldContext, oldSessionId);
+
+      scheduler.setTranslationState(true, 'replacement-session', { replacement: true });
+      await outcome(transientError(), 20);
+      const failedCount = scheduler.failedCount;
+      const notificationCount = onFatalError.mock.calls.length;
+      if (lateOutcome === 'success') resolveOld({ success: true, translatedText: '["stale"]' });
+      else rejectOld(transientError('NETWORK_ERROR'));
+      await oldRequest;
+
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+      expect(scheduler.failedCount).toBe(failedCount);
+      expect(onFatalError).toHaveBeenCalledTimes(notificationCount);
+      expect(getSettlement(oldItem.resolve).state).toBe('cancelled');
+    });
+
+    it('does not let a stopped request reset the next session streak when it succeeds late', async () => {
+      let resolveOld;
+      safeSendMessage.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+      const oldItem = { text: 'old', resolve: vi.fn() };
+      const oldRequest = scheduler._executeBatchRequest([oldItem], { providerRegistryId: 'google' }, scheduler.sessionContext, scheduler.translationSessionId);
+
+      scheduler.stop();
+      scheduler.setTranslationState(true, 'after-stop', { replacement: true });
+      await outcome(transientError(), 30);
+      resolveOld({ success: true, translatedText: '["stale"]' });
+      await oldRequest;
+
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+      expect(getSettlement(oldItem.resolve).state).toBe('cancelled');
+    });
+
+    it('resets the streak on replacement, stop, and reset but not redundant state updates', async () => {
+      await outcome(transientError(), 1);
+      const originalContext = scheduler.sessionContext;
+      scheduler.setTranslationState(true, 'test-session-123', originalContext);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+      scheduler.setTranslationState(true, 'replacement', {});
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(0);
+      await outcome(transientError(), 2);
+      scheduler.stop();
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(0);
+      scheduler.setTranslationState(true, 'after-stop', {});
+      await outcome(transientError(), 3);
+      scheduler.reset();
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(0);
+    });
+
+    it('keeps eligible failures soft through the threshold when fatality is explicitly false', async () => {
+      isFatalError.mockReturnValue(false);
+      await outcome(Object.assign(transientError(), { isFatal: false }), 1);
+      await outcome(Object.assign(transientError('SERVER_ERROR'), { isFatal: false }), 2);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(2);
+      expect(scheduler.fatalErrorOccurred).toBe(false);
+    });
+
+    it.each([
+      ['explicit fatal', Object.assign(transientError(), { isFatal: true })],
+      ['fatal HTTP status', Object.assign(transientError('SERVER_ERROR'), { statusCode: 403 })],
+      ['canonical fatal classification', Object.assign(transientError('SERVER_ERROR'), { canonicalFatal: true })],
+      ['context error', Object.assign(transientError(), { contextFailure: true })],
+    ])('lets %s classification take precedence over transient streak rules', async (_label, error) => {
+      isFatalError.mockImplementation(candidate => candidate?.statusCode === 403 || candidate?.canonicalFatal === true);
+      ExtensionContextManager.isContextError.mockImplementation(candidate => candidate?.contextFailure === true);
+
+      await outcome(error, 1);
+
+      expect(scheduler.fatalErrorOccurred).toBe(true);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(0);
+      expect(onFatalError).toHaveBeenCalledOnce();
+    });
+
     it('defers success accounting until settlement acceptance', async () => {
       const mockItem = { text: 'Hello', resolve: vi.fn(), score: 1 };
       scheduler.queue.push(mockItem);
@@ -1008,29 +2644,19 @@ describe('PageTranslationScheduler', () => {
       emitSpy.mockRestore();
     });
 
-    it('emits latest non-fatal structured cause for zero-result completion', async () => {
+    it.each([1, 2])('emits the latest eligible transient cause for zero-result completion after %i failed batches', async failureCount => {
       vi.useFakeTimers();
       try {
         const emitSpy = vi.spyOn(pageEventBus, 'emit');
-        const firstItem = { text: 'First', resolve: vi.fn(), score: 1 };
-        const lastItem = { text: 'Last', resolve: vi.fn(), score: 1 };
-        scheduler.totalTasks = 2;
-
-        await scheduler._handleBatchError(
-          Object.assign(new Error('Too many requests'), {
-            type: ErrorTypes.RATE_LIMIT_REACHED,
-            statusCode: 429,
-          }),
-          [firstItem],
-          ErrorTypes.RATE_LIMIT_REACHED
-        );
-        await scheduler._handleBatchError(
-          Object.assign(new Error('Model overloaded'), {
-            type: ErrorTypes.MODEL_OVERLOADED,
-          }),
-          [lastItem],
-          ErrorTypes.MODEL_OVERLOADED
-        );
+        scheduler.totalTasks = failureCount;
+        for (let index = 0; index < failureCount; index++) {
+          const type = index % 2 ? 'SERVER_ERROR' : 'NETWORK_ERROR';
+          await scheduler._handleBatchError(
+            transientError(type),
+            [{ text: `failed-${index}`, resolve: vi.fn() }],
+            type
+          );
+        }
 
         scheduler._checkCompletion();
         await vi.runAllTimersAsync();
@@ -1038,13 +2664,14 @@ describe('PageTranslationScheduler', () => {
         const completion = emitSpy.mock.calls.find(([event]) => event === MessageActions.PAGE_TRANSLATE_COMPLETE)?.[1];
         expect(completion).toMatchObject({
           translatedCount: 0,
-          failedCount: 2,
+          failedCount: failureCount,
           errorDetails: {
-            message: 'Model overloaded',
-            type: ErrorTypes.MODEL_OVERLOADED,
+            message: failureCount === 1 ? 'NETWORK_ERROR' : 'SERVER_ERROR',
+            type: failureCount === 1 ? 'NETWORK_ERROR' : 'SERVER_ERROR',
           },
         });
         expect(completion.errorDetails).not.toHaveProperty('statusCode');
+        expect(scheduler.translatedCount).toBe(0);
         emitSpy.mockRestore();
       } finally {
         vi.useRealTimers();
@@ -1287,7 +2914,7 @@ describe('PageTranslationScheduler', () => {
       expect(scheduler.failedCount).toBe(0);
     });
 
-    it('should handle batch errors and fallback to original text', async () => {
+    it('keeps a terminal server batch failure soft and falls back to original text', async () => {
       const mockItem = { text: 'Failed Text', resolve: vi.fn(), score: 1 };
       scheduler.queue.push(mockItem);
 
@@ -1308,14 +2935,9 @@ describe('PageTranslationScheduler', () => {
       const internalError = emitSpy.mock.calls.find(([event]) => event === 'page-translation-internal-error')?.[1];
       expect(internalError.error.type).toBe('SERVER_ERROR');
       expect(internalError.errorType).toBe('SERVER_ERROR');
-      expect(internalError.isFatal).toBe(true);
-      expect(onFatalError).toHaveBeenCalledWith(expect.objectContaining({
-        error: expect.objectContaining({ type: 'SERVER_ERROR' }),
-        errorType: 'SERVER_ERROR',
-        sessionId: 'test-session-123',
-        sessionContext: { pageTitle: 'Test Page' },
-        context: 'page-translation-batch',
-      }));
+      expect(internalError.isFatal).toBe(false);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(1);
+      expect(onFatalError).not.toHaveBeenCalled();
       emitSpy.mockRestore();
     });
 
@@ -1431,8 +3053,8 @@ describe('PageTranslationScheduler', () => {
       expect(internalError.error).not.toHaveProperty('cause');
       expect(internalError.error).not.toHaveProperty('arbitrary');
       expect(internalError.errorType).toBe('SERVER_ERROR');
-      expect(internalError.isFatal).toBe(true);
-      expect(scheduler.fatalErrorOccurred).toBe(true);
+      expect(internalError.isFatal).toBe(false);
+      expect(scheduler.fatalErrorOccurred).toBe(false);
        expectSettlement(mockItem.resolve, 'Failed Text');
       emitSpy.mockRestore();
     });
@@ -1463,6 +3085,23 @@ describe('PageTranslationScheduler', () => {
   });
 
   describe('Fault Tolerance & Integrity', () => {
+    it('escalates immediately when the internal error callback throws infrastructure failure', async () => {
+      const item = { text: 'Callback failure', resolve: vi.fn(), score: 1 };
+      scheduler.queue.push(item);
+      scheduler.totalTasks = 1;
+      PageTranslationFluidFilter.process.mockReturnValue({ batchItems: [item], remainingItems: [] });
+      vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({ providerRegistryId: 'google', targetLanguage: 'fa' });
+      safeSendMessage.mockResolvedValue({ success: false, error: 'offline', errorType: 'UNKNOWN' });
+      scheduler.onInternalError = vi.fn(() => { throw new Error('internal callback invariant failed'); });
+
+      await scheduler.flush();
+
+      expect(getSettlement(item.resolve).state).toBe('failed');
+      expect(scheduler.fatalErrorOccurred).toBe(true);
+      expect(onFatalError).toHaveBeenCalledOnce();
+      expect(scheduler.activeFlushes).toBe(0);
+    });
+
     it('should stop and mark fatal error', async () => {
       const mockItem = { text: 'Fatal', resolve: vi.fn(), score: 1 };
       scheduler.queue.push(mockItem);
@@ -1726,6 +3365,7 @@ describe('PageTranslationScheduler', () => {
       const queueBeforeStaleFailure = [...scheduler.queue];
       const activeBatchesBeforeStaleFailure = scheduler.activeBatches.size;
       const failedCountBeforeStaleFailure = scheduler.failedCount;
+      const transientFailuresBeforeStaleFailure = scheduler.consecutiveTransientBatchFailures;
       rejectOld(new Error('stale Session A failure'));
       await oldFlush;
 
@@ -1738,6 +3378,7 @@ describe('PageTranslationScheduler', () => {
       expect(scheduler.queue).toEqual(queueBeforeStaleFailure);
       expect(scheduler.activeBatches.size).toBe(activeBatchesBeforeStaleFailure);
       expect(scheduler.failedCount).toBe(failedCountBeforeStaleFailure);
+      expect(scheduler.consecutiveTransientBatchFailures).toBe(transientFailuresBeforeStaleFailure);
       expect(newItem.resolve).not.toHaveBeenCalled();
 
       resolveNew({ success: true, translatedText: JSON.stringify(['new']) });

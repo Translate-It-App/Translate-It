@@ -6,17 +6,20 @@ import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
  * Isolates scroll listening logic from the main Manager.
  */
 export class PageTranslationScrollTracker {
-  constructor(onScrollStopCallback, onScrollStartCallback) {
+  constructor(onScrollStopCallback, onScrollStartCallback, onViewportActivityCallback) {
     this.logger = getScopedLogger(LOG_COMPONENTS.PAGE_TRANSLATION, 'ScrollTracker');
     this.onScrollStopCallback = onScrollStopCallback;
     this.onScrollStartCallback = onScrollStartCallback;
+    this.onViewportActivityCallback = onViewportActivityCallback;
     this.scrollTimer = null;
     this.scrollStopDelay = 500;
     this._handleScroll = this._handleScroll.bind(this);
     this._handleScrollEnd = this._handleScrollEnd.bind(this);
     this._isActive = false;
     this._isScrolling = false;
-    this._lastActivityNotify = 0;
+    this._lastActivityNotify = null;
+    this._lastViewportActivityNotify = null;
+    this._handleResize = this._handleResize.bind(this);
   }
 
   /**
@@ -29,11 +32,14 @@ export class PageTranslationScrollTracker {
     }
     this._isActive = true;
     this.scrollStopDelay = Number(delay) || 500;
+    this._lastActivityNotify = null;
+    this._lastViewportActivityNotify = null;
     this.logger.debug('Starting scroll tracker with delay:', this.scrollStopDelay);
     
     // Always use manual debounce for custom delays
     // Native 'scrollend' doesn't support custom wait times
-    window.addEventListener('scroll', this._handleScroll, { passive: true });
+    window.addEventListener('scroll', this._handleScroll, { passive: true, capture: true });
+    window.addEventListener('resize', this._handleResize, { passive: true });
   }
 
   /**
@@ -54,6 +60,8 @@ export class PageTranslationScrollTracker {
   stop() {
     if (!this._isActive) return;
     this._isActive = false;
+    this._lastActivityNotify = null;
+    this._lastViewportActivityNotify = null;
     this.logger.debug('Stopping scroll tracker');
     
     if (this.scrollTimer) {
@@ -61,7 +69,8 @@ export class PageTranslationScrollTracker {
       this.scrollTimer = null;
     }
     this._isScrolling = false;
-    window.removeEventListener('scroll', this._handleScroll);
+    window.removeEventListener('scroll', this._handleScroll, true);
+    window.removeEventListener('resize', this._handleResize);
   }
 
   /**
@@ -74,7 +83,7 @@ export class PageTranslationScrollTracker {
     // Throttle activity notifications to once every 50ms 
     // to avoid resetting the timer thousands of times during initial bridge pass
     const now = Date.now();
-    if (this._lastActivityNotify && (now - this._lastActivityNotify < 50)) {
+    if (this._lastActivityNotify !== null && now - this._lastActivityNotify < 50) {
       return;
     }
     this._lastActivityNotify = now;
@@ -92,6 +101,8 @@ export class PageTranslationScrollTracker {
   }
 
   _handleScroll() {
+    if (!this._isActive) return;
+    this._notifyViewportActivity();
     if (!this._isScrolling) {
       this._isScrolling = true;
       if (this.onScrollStartCallback) {
@@ -100,6 +111,18 @@ export class PageTranslationScrollTracker {
     }
 
     this._resetTimer();
+  }
+
+  _handleResize() {
+    if (this._isActive) this._notifyViewportActivity();
+  }
+
+  _notifyViewportActivity() {
+    if (!this.onViewportActivityCallback) return;
+    const now = Date.now();
+    if (this._lastViewportActivityNotify !== null && now - this._lastViewportActivityNotify < 50) return;
+    this._lastViewportActivityNotify = now;
+    this.onViewportActivityCallback();
   }
 
   _resetTimer() {

@@ -382,7 +382,8 @@ export async function sendRegularMessage(message, options = {}) {
   } catch (error) {
     const errorType = matchErrorToType(error);
 
-    if (errorType === ErrorTypes.OPERATION_TIMEOUT && message.messageId && isTranslationAction(message.action)) {
+    if (errorType === ErrorTypes.OPERATION_TIMEOUT && message.messageId
+      && (isTranslationAction(message.action) || message.action === 'page-translate-batch')) {
       void browser.runtime.sendMessage({
         action: 'CANCEL_TRANSLATION',
         data: { messageId: message.messageId, reason: 'Translation timed out', timeout: true }

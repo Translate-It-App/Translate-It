@@ -3,11 +3,6 @@
  * Uses XML-like markers to protect newlines from being collapsed by providers or processors.
  */
 
-import { getScopedLogger } from '@/shared/logging/logger.js';
-import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
-
-const logger = getScopedLogger(LOG_COMPONENTS.TRANSLATION, 'NewlineManager');
-
 export const NewlineManager = {
   MARKERS: {
     SINGLE: '<n1/>', // Represents \n
@@ -21,8 +16,6 @@ export const NewlineManager = {
    */
   protect(text) {
     if (!text || typeof text !== 'string') return text;
-
-    // logger.debug('Protecting newlines in text', { length: text.length });
 
     // 1. Replace double (or more) newlines first
     let processed = text.replace(/\n\n+/g, (match) => {
@@ -45,8 +38,6 @@ export const NewlineManager = {
    */
   restore(text) {
     if (!text || typeof text !== 'string') return text;
-
-    logger.debug('Restoring newlines from markers', { length: text.length });
 
     let restored = text;
 

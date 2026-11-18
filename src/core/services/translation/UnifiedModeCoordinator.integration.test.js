@@ -9,7 +9,10 @@ vi.mock('webextension-polyfill', () => ({
     tabs: { sendMessage: vi.fn() },
     i18n: {
       getUILanguage: () => 'en',
-      detectLanguage: vi.fn(async text => ({ isReliable: true, languages: [{ language: /[\u3040-\u30ff]/.test(text) ? 'ja' : 'en', percentage: 100 }] })),
+      detectLanguage: vi.fn(async text => settings.detectionResult || ({
+        isReliable: true,
+        languages: [{ language: /[\u3040-\u30ff]/.test(text) ? 'ja' : /[\u0600-\u06ff]/.test(text) ? 'fa' : 'en', percentage: 100 }],
+      })),
     },
   },
 }));
@@ -22,14 +25,15 @@ vi.mock('@/shared/storage/core/StorageCore.js', () => ({
     set: vi.fn(),
   },
 }));
-const settings = vi.hoisted(() => ({ level: 5, keys: ['fixture-key'] }));
+const settings = vi.hoisted(() => ({ level: 5, keys: ['fixture-key'], bilingual: false, bilingualModes: {}, detectionResult: null, responseDelay: null }));
 vi.mock('@/shared/config/config.js', async importOriginal => ({
   ...await importOriginal(),
   getCustomApiKeysAsync: vi.fn(async () => settings.keys),
   getCustomApiUrlAsync: vi.fn(async () => 'https://fixture.invalid/v1/chat/completions'),
   getCustomApiModelAsync: vi.fn(async () => 'fixture-model'),
   getProviderOptimizationLevelAsync: vi.fn(async () => settings.level),
-  getBilingualTranslationEnabledAsync: vi.fn(async () => false),
+  getBilingualTranslationEnabledAsync: vi.fn(async () => settings.bilingual),
+  getBilingualTranslationModesAsync: vi.fn(async () => settings.bilingualModes),
   getAIConversationHistoryEnabledAsync: vi.fn(async () => false),
 }));
 vi.mock('@/shared/proxy/ProxyManager.js', () => ({
@@ -43,6 +47,7 @@ import { rateLimitManager } from '@/features/translation/core/RateLimitManager.j
 import { TranslationMode } from '@/shared/config/config.js';
 import { proxyManager } from '@/shared/proxy/ProxyManager.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
+import { LanguageDetectionService } from '@/shared/services/LanguageDetectionService.js';
 
 describe('Page → CustomProvider physical concurrency', () => {
   let coordinator, engine, state, active, maximum, attempts, completions, controllers;
@@ -54,6 +59,11 @@ describe('Page → CustomProvider physical concurrency', () => {
     rateLimitManager.providerStates.clear();
     settings.level = 5;
     settings.keys = ['fixture-key'];
+    settings.bilingual = false;
+    settings.bilingualModes = { [TranslationMode.Page]: false };
+    settings.detectionResult = null;
+    settings.responseDelay = null;
+    LanguageDetectionService.clearSessionCache();
     await rateLimitManager.reloadConfigurations();
     state = rateLimitManager.providerStates.get('Custom');
     clearCustomResponseFormatSupportCache();
@@ -83,13 +93,13 @@ describe('Page → CustomProvider physical concurrency', () => {
     vi.useRealTimers();
   });
 
-  const runBatch = (index, { sourceLanguage = 'en', alreadyTranslated = false } = {}) => coordinator.processRequest({
+  const runBatch = (index, { sourceLanguage = 'en', targetLanguage = 'ja', alreadyTranslated = false, text, texts } = {}) => coordinator.processRequest({
     mode: TranslationMode.Page,
     messageId: `request-${index}`,
     data: {
-      provider: 'custom', sourceLanguage, targetLanguage: 'ja', sessionId: 'page-session',
+      provider: 'custom', sourceLanguage, targetLanguage, sessionId: 'page-session',
       text: JSON.stringify([0, 1].map(unit => ({ id: `unit-${index}-${unit}`, text: alreadyTranslated
-        ? `すでに翻訳されたナビゲーション項目 ${index}/${unit}` : `Source ${index}/${unit}` }))),
+        ? `すでに翻訳されたナビゲーション項目 ${index}/${unit}` : texts?.[unit] ?? text ?? `Source ${index}/${unit}` }))),
     },
   }, { translationEngine: engine });
 
@@ -104,7 +114,7 @@ describe('Page → CustomProvider physical concurrency', () => {
       active++;
       maximum = Math.max(maximum, active);
       const attemptIndex = attempts.length - 1;
-      await new Promise(resolve => setTimeout(resolve, 100 + (4 - attemptIndex % 5) * 10));
+      await new Promise(resolve => setTimeout(resolve, settings.responseDelay ?? (100 + (4 - attemptIndex % 5) * 10)));
       active--;
       record.end = Date.now();
       completions.push(attemptIndex);
@@ -182,6 +192,97 @@ describe('Page → CustomProvider physical concurrency', () => {
     });
     expect(maximum).toBeGreaterThan(1);
     expect(maximum).toBeLessThanOrEqual(4);
+  });
+
+  it('locally resolves a reliable AUTO pair and fills physical capacity before the first response', async () => {
+    settings.responseDelay = 10000;
+    installHttp();
+    const provider = await engine.getProvider();
+    const calls = vi.spyOn(provider, 'translate');
+    const detections = vi.spyOn(LanguageDetectionService, 'detectDetailed');
+    const representativeText = 'A reliable English source sentence for page translation. '.repeat(8);
+    const pending = Array.from({ length: 8 }, (_, index) => runBatch(index, {
+      sourceLanguage: 'auto', text: representativeText,
+    }));
+
+    for (let step = 0; step < 20 && attempts.length < 4; step++) await advance(0);
+    expect(attempts).toHaveLength(4);
+    expect(attempts.every(attempt => attempt.end === null)).toBe(true);
+    expect(maximum).toBe(4);
+    expect(calls.mock.calls.slice(0, 4).map(call => call.slice(1, 3))).toEqual(Array(4).fill(['en', 'ja']));
+    expect(await detections.mock.results[0].value).toMatchObject({
+      language: 'en', provenance: 'statistical', confidence: 'high', reliable: true,
+    });
+
+    await advance(25000);
+    expect((await Promise.all(pending)).every(result => result.success)).toBe(true);
+    expect(attempts).toHaveLength(8);
+    expect(state.activeRequests).toBe(0);
+  });
+
+  it.each([
+    ['insufficient text', ' '],
+    ['unreliable browser detection', 'A reliable English source sentence. '.repeat(8)],
+    ['mixed-script text', 'English words mixed with 日本語 markers. '.repeat(8)],
+    ['ambiguous browser detection', 'A reliable English source sentence. '.repeat(8)],
+  ])('keeps the first provider AUTO gate for %s', async (reason, text) => {
+    if (reason === 'unreliable browser detection') {
+      settings.detectionResult = { isReliable: false, languages: [{ language: 'en', percentage: 70 }] };
+    }
+    if (reason === 'ambiguous browser detection') {
+      settings.detectionResult = { isReliable: false, languages: [
+        { language: 'en', percentage: 51 }, { language: 'fr', percentage: 49 },
+      ] };
+    }
+    installHttp();
+    const provider = await engine.getProvider();
+    const calls = vi.spyOn(provider, 'translate');
+    const texts = reason === 'mixed-script text'
+      ? ['English source text for the first unit. '.repeat(8), '日本語の本文です。'.repeat(30)]
+      : undefined;
+    const detections = vi.spyOn(LanguageDetectionService, 'detectDetailed');
+    const pending = Array.from({ length: 4 }, (_, index) => runBatch(index, { sourceLanguage: 'auto', text, texts }));
+
+    await advance(0);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0].end).toBeNull();
+    expect(calls.mock.calls[0].slice(1, 3)).toEqual(['auto', 'ja']);
+    const detection = await detections.mock.results[0].value;
+    if (reason === 'unreliable browser detection') {
+      expect(detection).toMatchObject({ language: 'en', confidence: 'medium', reliable: false, provenance: 'statistical' });
+    } else if (reason === 'ambiguous browser detection') {
+      expect(detection).toMatchObject({ language: 'en', confidence: 'medium', reliable: false, provenance: 'statistical' });
+    } else if (reason === 'mixed-script text') {
+      expect(detection).toMatchObject({ language: 'ja', provenance: 'statistical', confidence: 'high', reliable: true });
+    }
+    for (let step = 0; step < 20; step++) await advance(50);
+    expect((await Promise.all(pending)).every(result => result.success)).toBe(true);
+    expect(attempts).toHaveLength(4);
+    expect(state.activeRequests).toBe(0);
+  });
+
+  it('applies the locally resolved bilingual fa→en swap to the owner and siblings before HTTP', async () => {
+    settings.bilingual = true;
+    settings.bilingualModes = { [TranslationMode.Page]: true };
+    settings.responseDelay = 10000;
+    installHttp();
+    const provider = await engine.getProvider();
+    const calls = vi.spyOn(provider, 'translate');
+    const detections = vi.spyOn(LanguageDetectionService, 'detectDetailed');
+    const representativeText = 'متن فارسی برای تشخیص زبان و ترجمه صفحه. '.repeat(8);
+    const pending = Array.from({ length: 4 }, (_, index) => runBatch(index, {
+      sourceLanguage: 'auto', targetLanguage: 'fa', text: representativeText,
+    }));
+
+    for (let step = 0; step < 20 && attempts.length < 4; step++) await advance(0);
+    expect(attempts).toHaveLength(4);
+    expect(attempts.every(attempt => attempt.end === null)).toBe(true);
+    expect(calls.mock.calls.slice(0, 4).map(call => call.slice(1, 3))).toEqual(Array(4).fill(['fa', 'en']));
+    expect(await detections.mock.results[0].value).toMatchObject({ language: 'fa', provenance: 'statistical', confidence: 'high', reliable: true });
+    await advance(15000);
+    expect((await Promise.all(pending)).every(result => result.success)).toBe(true);
+    expect(attempts).toHaveLength(4);
+    expect(state.activeRequests).toBe(0);
   });
 
   it('bounds repeated successful no-pair AUTO handoffs to one transport per batch', async () => {

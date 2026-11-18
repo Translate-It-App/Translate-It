@@ -84,6 +84,7 @@ vi.mock('./PageTranslationHelper.js', () => ({
         this.sessionContext = null;
         this.signalScrollStop = vi.fn();
         this.signalScrollStart = vi.fn();
+        this.signalViewportActivity = vi.fn();
       }
     }
   }));
@@ -102,7 +103,8 @@ vi.mock('./PageTranslationBridge.js', () => ({
 
 vi.mock('./utils/PageTranslationScrollTracker.js', () => ({
   PageTranslationScrollTracker: class {
-    constructor() {
+    constructor(onScrollStop, onScrollStart, onViewportActivity) {
+      this.onViewportActivity = onViewportActivity;
       this.start = vi.fn();
       this.stop = vi.fn();
       this.destroy = vi.fn();
@@ -246,6 +248,11 @@ describe('PageTranslationManager', () => {
     // Setup standard DOM elements
     document.head.innerHTML = '';
     document.body.innerHTML = '<div>Original Content</div>';
+  });
+
+  it('wires tracker viewport activity to the scheduler', () => {
+    manager.scrollTracker.onViewportActivity();
+    expect(manager.scheduler.signalViewportActivity).toHaveBeenCalledOnce();
   });
 
   afterEach(async () => {
@@ -1051,6 +1058,61 @@ describe('PageTranslationManager', () => {
       expect(handleFatalError).toHaveBeenCalledWith(expect.any(Error), ErrorTypes.SERVER_ERROR, undefined, 'session-b');
     });
 
+    it.each([MessageActions.PAGE_TRANSLATE_COMPLETE, MessageActions.PAGE_TRANSLATE_IDLE])(
+      'handles accepted lazy-session fatal error after %s presentation settles', async (action) => {
+        const sessionContext = Symbol('lazy-session-context');
+        const controller = new AbortController();
+        manager.settings.lazyLoading = true;
+        manager.isTranslating = true;
+        manager.translationMessageId = 'lazy-session';
+        manager.acceptedLifecycleSessionId = 'lazy-session';
+        manager.sessionContext = sessionContext;
+        manager.scheduler.setTranslationState(true, 'lazy-session', sessionContext);
+        manager.scheduler.translatedCount = 2;
+        manager.abortController = controller;
+
+        manager.scheduler.onLifecycleEvent(action, {
+          sessionId: 'lazy-session', translatedCount: 2,
+        });
+        expect(manager.isTranslating).toBe(false);
+        expect(manager.isAutoTranslating).toBe(false);
+        expect(manager.scheduler.isTranslated).toBe(true);
+
+        const fatal = {
+          error: new Error('lazy fatal'),
+          errorType: ErrorTypes.SERVER_ERROR,
+          sessionId: 'lazy-session',
+          sessionContext,
+        };
+        expect(manager.scheduler.onFatalError(fatal)).toBe(true);
+        expect(manager.scheduler.onFatalError(fatal)).toBe(false);
+
+        expect(manager.scheduler.setTranslationState).toHaveBeenCalledWith(
+          false, undefined, undefined, 'operation-abort'
+        );
+        expect(controller.signal.aborted).toBe(true);
+        expect(manager.bridge.stopPersistence).toHaveBeenCalledOnce();
+        expect(manager.scrollTracker.stop).toHaveBeenCalledOnce();
+        expect(manager.bridge.restore).not.toHaveBeenCalled();
+        expect(manager.bridge.cleanup).not.toHaveBeenCalled();
+        expect(manager.isTranslated).toBe(true);
+        expect(manager.scheduler.translatedCount).toBe(2);
+        expect(manager.translationMessageId).toBeNull();
+        expect(manager.sessionContext).toBeNull();
+        expect(pageEventBus.emit).toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_ERROR, expect.objectContaining({
+          sessionId: 'lazy-session', translatedCount: 2, isFatal: true,
+        }));
+        expect(pageEventBus.emit.mock.calls.filter(([event]) => event === MessageActions.PAGE_TRANSLATE_ERROR)).toHaveLength(1);
+        await vi.waitFor(() => expect(ErrorHandler.getInstance().handle).toHaveBeenCalledTimes(1));
+        expect(sendRegularMessage).toHaveBeenCalledWith({
+          action: MessageActions.CANCEL_SESSION, data: { sessionId: 'lazy-session' },
+        });
+        expect(sendRegularMessage.mock.calls.filter(([message]) => (
+          message.action === MessageActions.CANCEL_SESSION && message.data?.sessionId === 'lazy-session'
+        ))).toHaveLength(1);
+      }
+    );
+
     it('ignores stale scheduler fatal callback from an older session', () => {
       const currentContext = Symbol('current-context');
       manager.isTranslating = true;
@@ -1094,6 +1156,44 @@ describe('PageTranslationManager', () => {
       })).toBe(false);
 
       expect(handleFatalError).not.toHaveBeenCalled();
+    });
+
+    it('rejects matching scheduler fatal callback after the scheduler has stopped', () => {
+      const sessionContext = Symbol('stopped-context');
+      manager.translationMessageId = 'stopped-session';
+      manager.sessionContext = sessionContext;
+      manager.scheduler.translationSessionId = 'stopped-session';
+      manager.scheduler.isTranslated = false;
+
+      expect(manager.scheduler.onFatalError({
+        error: new Error('late fatal'), sessionId: 'stopped-session', sessionContext,
+      })).toBe(false);
+    });
+
+    it.each(['stop', 'replacement'])('rejects settled-session fatal callback after %s', async (operation) => {
+      const oldContext = Symbol('old-context');
+      manager.isTranslated = true;
+      manager.translationMessageId = 'old-session';
+      manager.acceptedLifecycleSessionId = 'old-session';
+      manager.sessionContext = oldContext;
+      manager.scheduler.setTranslationState(true, 'old-session', oldContext);
+      const handleFatalError = vi.spyOn(manager, '_handleFatalError');
+      const lateFatal = {
+        error: new Error('late fatal'), sessionId: 'old-session', sessionContext: oldContext,
+      };
+
+      if (operation === 'stop') {
+        await manager.stopAutoTranslation({ cancellationReason: 'operation-abort' });
+      } else {
+        manager.translationMessageId = 'new-session';
+        manager.acceptedLifecycleSessionId = 'new-session';
+        manager.sessionContext = Symbol('new-context');
+        manager.scheduler.setTranslationState(true, 'new-session', manager.sessionContext);
+      }
+
+      expect(manager.scheduler.onFatalError(lateFatal)).toBe(false);
+      expect(handleFatalError).not.toHaveBeenCalled();
+      expect(pageEventBus.emit.mock.calls.some(([action]) => action === MessageActions.PAGE_TRANSLATE_ERROR)).toBe(false);
     });
 
     it('resolves Select Element conflict before Whole Page admission', async () => {

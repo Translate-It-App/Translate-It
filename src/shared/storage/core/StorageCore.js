@@ -288,11 +288,11 @@ class StorageCore extends ResourceTracker {
           const uncachedKeys = [];
 
           for (const key of keyList) {
-            if (this.cache.has(key)) {
-              cachedResult[key] = this.cache.get(key);
-            } else {
-              uncachedKeys.push(key);
-            }
+            const cachedValue = this.cache.hasValid(key)
+              ? this.cache.get(key)
+              : undefined;
+            if (cachedValue !== undefined) cachedResult[key] = cachedValue;
+            else uncachedKeys.push(key);
           }
 
           // If all keys are cached, return cached result
@@ -528,7 +528,9 @@ class StorageCore extends ResourceTracker {
   getCached(key, defaultValue = undefined) {
     // Ensure cache availability
     this._ensureCache();
-    return this.cache.has(key) ? this.cache.get(key) : defaultValue;
+    if (!this.cache.hasValid(key)) return defaultValue;
+    const cachedValue = this.cache.get(key);
+    return cachedValue === undefined ? defaultValue : cachedValue;
   }
 
   /**
@@ -539,7 +541,7 @@ class StorageCore extends ResourceTracker {
   hasCached(key) {
     // Ensure cache availability
     this._ensureCache();
-    return this.cache.has(key);
+    return this.cache.hasValid(key);
   }
 
   /**

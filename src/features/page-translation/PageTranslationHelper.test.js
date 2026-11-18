@@ -166,4 +166,50 @@ describe('PageTranslationHelper', () => {
       expect(mockRange.selectNodeContents).toHaveBeenCalledWith(textNode);
     });
   });
+
+  describe('classifyVisibility', () => {
+    const rect = (left, top, right, bottom) => ({ left, top, right, bottom, width: right - left, height: bottom - top });
+
+    it('classifies viewport edges inclusively and distinguishes buffer from offscreen', () => {
+      Object.defineProperty(window, 'innerHeight', { value: 100, configurable: true });
+      Object.defineProperty(window, 'innerWidth', { value: 100, configurable: true });
+      const element = document.createElement('div');
+      document.body.appendChild(element);
+      vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(rect(100, 100, 110, 110));
+      expect(PageTranslationHelper.classifyVisibility(element, 20)).toBe('viewport');
+      element.getBoundingClientRect.mockReturnValue(rect(110, 110, 120, 120));
+      expect(PageTranslationHelper.classifyVisibility(element, 20)).toBe('buffer');
+      element.getBoundingClientRect.mockReturnValue(rect(121, 121, 130, 130));
+      expect(PageTranslationHelper.classifyVisibility(element, 20)).toBe('offscreen');
+    });
+
+    it('uses ownerElement for attributes and treats disconnected nodes as offscreen', () => {
+      const element = document.createElement('div');
+      document.body.appendChild(element);
+      const getRect = vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(rect(1, 1, 2, 2));
+      element.setAttribute('id', 'x');
+      expect(PageTranslationHelper.classifyVisibility(element.getAttributeNode('id'), 0)).toBe('viewport');
+      expect(getRect).toHaveBeenCalledTimes(1);
+      element.remove();
+      expect(PageTranslationHelper.classifyVisibility(element, 0)).toBe('offscreen');
+      expect(getRect).toHaveBeenCalledTimes(1);
+    });
+
+    it('acquires text geometry once, using parent geometry only for a zero-size Range', () => {
+      PageTranslationHelper._sharedRange = null;
+      const parent = document.createElement('div');
+      const text = document.createTextNode('sample');
+      parent.appendChild(text);
+      document.body.appendChild(parent);
+      const parentRect = vi.spyOn(parent, 'getBoundingClientRect').mockReturnValue(rect(1, 1, 20, 20));
+      const range = { selectNodeContents: vi.fn(), getBoundingClientRect: vi.fn().mockReturnValue(rect(1, 1, 10, 10)) };
+      vi.spyOn(document, 'createRange').mockReturnValue(range);
+      expect(PageTranslationHelper.classifyVisibility(text, 0)).toBe('viewport');
+      expect(range.getBoundingClientRect).toHaveBeenCalledTimes(1);
+      expect(parentRect).not.toHaveBeenCalled();
+      range.getBoundingClientRect.mockReturnValue(rect(0, 0, 0, 0));
+      expect(PageTranslationHelper.classifyVisibility(text, 0)).toBe('viewport');
+      expect(parentRect).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -5,6 +5,7 @@ import { RequestStatus } from './TranslationRequestTracker.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import { TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS } from '@/shared/constants/translation.js';
 import { isFatalError, matchErrorToType } from '@/shared/error-management/ErrorMatcher.js';
+import { resolveOperationSourceLanguage } from '@/features/translation/core/OperationSourceLanguageResolver.js';
 
 // Mock RateLimitManager
 vi.mock('@/features/translation/core/RateLimitManager.js', () => ({
@@ -17,6 +18,13 @@ vi.mock('@/features/translation/core/RateLimitManager.js', () => ({
 
 // Mock ErrorMatcher
 vi.mock('@/shared/error-management/ErrorMatcher.js');
+vi.mock('@/features/translation/core/OperationSourceLanguageResolver.js', () => ({
+  resolveOperationSourceLanguage: vi.fn().mockResolvedValue({
+    canBypassSequentialGate: false,
+    effectiveSourceLanguage: 'auto',
+    effectiveTargetLanguage: 'fa',
+  }),
+}));
 
 describe('UnifiedModeCoordinator', () => {
   let coordinator;
@@ -24,6 +32,12 @@ describe('UnifiedModeCoordinator', () => {
 
   beforeEach(() => {
     coordinator = new UnifiedModeCoordinator();
+    resolveOperationSourceLanguage.mockClear();
+    resolveOperationSourceLanguage.mockResolvedValue({
+      canBypassSequentialGate: false,
+      effectiveSourceLanguage: 'auto',
+      effectiveTargetLanguage: 'fa',
+    });
     mockEngine = {
       getProvider: vi.fn(),
       handleTranslateMessage: vi.fn(),
@@ -434,6 +448,183 @@ describe('UnifiedModeCoordinator', () => {
     }
 
     describe('Concurrency race', () => {
+      it('resolves one local operation sample before dispatch and releases all same-session batches', async () => {
+        const provider = deferredProvider();
+        const detection = deferred();
+        resolveOperationSourceLanguage.mockReturnValue(detection.promise);
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const spy = spyAcquires(coordinator, ['s1']);
+
+        const owner = coordinator.processRequest(pageBatchRequest({ sessionId: 's1', messageId: 'm1' }), { translationEngine: mockEngine });
+        const waiter = coordinator.processRequest(pageBatchRequest({ sessionId: 's1', messageId: 'm2' }), { translationEngine: mockEngine });
+        await waitForAcquires(spy, 's1', 2);
+
+        expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(1);
+        expect(resolveOperationSourceLanguage).toHaveBeenCalledWith(expect.objectContaining({
+          items: [{ text: 'p1' }, { text: 'p2' }],
+          sourceLanguage: 'auto',
+          originalSourceLanguage: 'auto',
+          mode: TranslationMode.Page,
+        }));
+        expect(provider.sources).toEqual([]);
+
+        detection.resolve({
+          canBypassSequentialGate: true,
+          effectiveSourceLanguage: 'en',
+          effectiveTargetLanguage: 'ja',
+        });
+        await flush();
+        await flush();
+
+        expect(provider.sources).toEqual(['en', 'en']);
+        expect(provider.targets).toEqual(['ja', 'ja']);
+        expect(provider.options.map(({ languagePairResolved }) => languagePairResolved)).toEqual([true, true]);
+        expect(coordinator.pageSourceResolvers.get('s1')).toMatchObject({
+          effectiveSourceLanguage: 'en',
+          effectiveTargetLanguage: 'ja',
+        });
+
+        provider.pending.forEach(pending => pending.resolve(provider.success('en', 'en', 'ja')));
+        await Promise.all([owner, waiter]);
+        spy.restore();
+      });
+
+      it('preserves a locally resolved target-changing bilingual pair for owner and waiter', async () => {
+        const provider = deferredProvider();
+        resolveOperationSourceLanguage.mockResolvedValue({
+          canBypassSequentialGate: true,
+          effectiveSourceLanguage: 'fa',
+          effectiveTargetLanguage: 'en',
+        });
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const spy = spyAcquires(coordinator, ['bilingual']);
+
+        const owner = coordinator.processRequest(pageBatchRequest({ sessionId: 'bilingual', messageId: 'b1' }), { translationEngine: mockEngine });
+        const waiter = coordinator.processRequest(pageBatchRequest({ sessionId: 'bilingual', messageId: 'b2' }), { translationEngine: mockEngine });
+        await waitForAcquires(spy, 'bilingual', 3);
+        await flush();
+        await flush();
+
+        expect(provider.sources).toEqual(['fa', 'fa']);
+        expect(provider.targets).toEqual(['en', 'en']);
+        expect(provider.options.map(({ languagePairResolved }) => languagePairResolved)).toEqual([true, true]);
+        provider.pending.forEach(pending => pending.resolve(provider.success('fa', 'fa', 'en')));
+        await Promise.all([owner, waiter]);
+        spy.restore();
+      });
+
+      it('keeps local resolution isolated by session', async () => {
+        const providers = [deferredProvider(), deferredProvider()];
+        let detectionCalls = 0;
+        resolveOperationSourceLanguage.mockImplementation(async () => ({
+          canBypassSequentialGate: true,
+          effectiveSourceLanguage: ++detectionCalls === 1 ? 'en' : 'sv',
+          effectiveTargetLanguage: 'ja',
+        }));
+        mockEngine.getProvider.mockImplementation(async () => providers[mockEngine.getProvider.mock.calls.length - 1]);
+
+        const first = coordinator.processRequest(pageBatchRequest({ sessionId: 'session-a', messageId: 'sa' }), { translationEngine: mockEngine });
+        const second = coordinator.processRequest(pageBatchRequest({ sessionId: 'session-b', messageId: 'sb' }), { translationEngine: mockEngine });
+        await flush();
+        await flush();
+
+        expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(2);
+        expect(providers.map(provider => provider.sources)).toEqual([['en'], ['sv']]);
+        providers.forEach(provider => provider.pending[0].resolve(provider.success('en')));
+        await Promise.all([first, second]);
+      });
+
+      it('does not dispatch or restore a session after clearing during local resolution', async () => {
+        const detection = deferred();
+        const provider = deferredProvider();
+        resolveOperationSourceLanguage.mockReturnValue(detection.promise);
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const spy = spyAcquires(coordinator, ['cleared']);
+        const pending = coordinator.processRequest(pageBatchRequest({ sessionId: 'cleared', messageId: 'clear-local' }), { translationEngine: mockEngine });
+        await waitForAcquires(spy, 'cleared', 1);
+        coordinator.clearPageSourceLanguage('cleared');
+        await pending;
+        detection.resolve({ canBypassSequentialGate: true, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'ja' });
+        await flush();
+
+        expect(mockEngine.getProvider.mock.results).toHaveLength(1);
+        expect(provider.sources).toEqual([]);
+        expect(coordinator.pageSourceResolvers.has('cleared')).toBe(false);
+        spy.restore();
+      });
+
+      it('ignores local completion after owner cancellation', async () => {
+        const detection = deferred();
+        const provider = deferredProvider();
+        const controller = new AbortController();
+        resolveOperationSourceLanguage.mockReturnValue(detection.promise);
+        mockEngine.getProvider.mockResolvedValue(provider);
+        mockEngine.lifecycleRegistry.registerRequest.mockReturnValue(controller);
+        const spy = spyAcquires(coordinator, ['cancel-local']);
+        const pending = coordinator.processRequest(pageBatchRequest({ sessionId: 'cancel-local', messageId: 'cancel-local' }), { translationEngine: mockEngine });
+        await waitForAcquires(spy, 'cancel-local', 1);
+
+        controller.abort('user-cancelled');
+        await expect(pending).resolves.toMatchObject({ success: false });
+        detection.resolve({ canBypassSequentialGate: true, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'ja' });
+        await flush();
+
+        expect(coordinator.pageSourceResolvers.get('cancel-local')).toMatchObject({
+          localResolutionAttempted: true,
+          effectiveSourceLanguage: null,
+        });
+        expect(provider.sources).toEqual([]);
+        spy.restore();
+      });
+
+      it('requires a concrete local pair before bypassing AUTO', async () => {
+        const provider = deferredProvider();
+        resolveOperationSourceLanguage.mockResolvedValue({
+          canBypassSequentialGate: true,
+          effectiveSourceLanguage: 'auto',
+          effectiveTargetLanguage: 'ja',
+        });
+        mockEngine.getProvider.mockResolvedValue(provider);
+
+        const pending = coordinator.processRequest(pageBatchRequest({ sessionId: 'non-concrete', messageId: 'nc' }), { translationEngine: mockEngine });
+        await flush();
+        await flush();
+        expect(provider.sources).toEqual(['auto']);
+        expect(provider.options[0].languagePairResolved).toBeUndefined();
+        provider.pending[0].resolve(provider.success('en'));
+        await pending;
+      });
+
+      it('aborts pending local resolution at the existing batch deadline', async () => {
+        vi.useFakeTimers();
+        try {
+          const detection = deferred();
+          resolveOperationSourceLanguage.mockReturnValue(detection.promise);
+          const provider = deferredProvider();
+          mockEngine.getProvider.mockResolvedValue(provider);
+          const pending = coordinator.processRequest(pageBatchRequest({ sessionId: 'local-timeout', messageId: 'local-timeout' }), { translationEngine: mockEngine });
+          const result = pending.then(value => value);
+          for (let index = 0; index < 20 && !resolveOperationSourceLanguage.mock.calls.length; index++) {
+            await Promise.resolve();
+          }
+          expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS);
+          await expect(result).resolves.toMatchObject({ errorType: ErrorTypes.TRANSLATION_TIMEOUT });
+          expect(provider.sources).toEqual([]);
+          detection.resolve({ canBypassSequentialGate: true, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'ja' });
+          await Promise.resolve();
+          expect(provider.sources).toEqual([]);
+          expect(coordinator.pageSourceResolvers.get('local-timeout')).toMatchObject({
+            effectiveSourceLanguage: null,
+            localResolutionAttempted: true,
+          });
+          coordinator.clearPageSourceLanguage('local-timeout');
+          expect(coordinator.pageSourceResolvers.has('local-timeout')).toBe(false);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('issues exactly one concurrent "auto" call; waiters resume with the resolved language', async () => {
         const provider = deferredProvider();
         mockEngine.getProvider.mockResolvedValue(provider);
@@ -495,6 +686,37 @@ describe('UnifiedModeCoordinator', () => {
         await Promise.all([owner, waiter]);
         spy.restore();
       });
+
+      it('keeps a local pair when its owner provider call fails and reuses it for siblings', async () => {
+        const provider = deferredProvider();
+        resolveOperationSourceLanguage.mockResolvedValue({
+          canBypassSequentialGate: true,
+          effectiveSourceLanguage: 'en',
+          effectiveTargetLanguage: 'ja',
+        });
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const spy = spyAcquires(coordinator, ['local-provider-failure']);
+
+        const owner = coordinator.processRequest(pageBatchRequest({ sessionId: 'local-provider-failure', messageId: 'lp1' }), { translationEngine: mockEngine });
+        const waiter = coordinator.processRequest(pageBatchRequest({ sessionId: 'local-provider-failure', messageId: 'lp2' }), { translationEngine: mockEngine });
+        await waitForAcquires(spy, 'local-provider-failure', 3);
+        await flush();
+        await flush();
+        expect(provider.sources).toEqual(['en', 'en']);
+
+        provider.pending[0].reject(new Error('owner provider failed'));
+        await owner;
+        provider.pending[1].resolve(provider.success('en', 'en', 'ja'));
+        await waiter;
+        const sibling = coordinator.processRequest(pageBatchRequest({ sessionId: 'local-provider-failure', messageId: 'lp3' }), { translationEngine: mockEngine });
+        await flush();
+        expect(provider.sources).toEqual(['en', 'en', 'en']);
+        expect(provider.options.map(({ languagePairResolved }) => languagePairResolved)).toEqual([true, true, true]);
+        expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(1);
+        provider.pending[2].resolve(provider.success('en', 'en', 'ja'));
+        await sibling;
+        spy.restore();
+      });
     });
 
     describe('Ambiguous detection regression', () => {
@@ -546,6 +768,7 @@ describe('UnifiedModeCoordinator', () => {
         const results = await Promise.all(pending);
         expect(results.map(result => result.success)).toEqual([true, true, true, true]);
         expect(sources).toEqual(['auto', 'auto', 'en', 'en']);
+        expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(1);
         expect(provider.translate).toHaveBeenCalledTimes(4);
         expect(coordinator.pageSourceResolvers.get('handoff').effectiveSourceLanguage).toBe('en');
       });
@@ -568,6 +791,7 @@ describe('UnifiedModeCoordinator', () => {
         expect(results.every(result => result.success)).toBe(true);
         expect(provider.translate).toHaveBeenCalledTimes(8);
         expect(maximumAuto).toBe(1);
+        expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(1);
         expect(coordinator.pageSourceResolvers.get('all-unresolved').effectiveSourceLanguage).toBeNull();
         coordinator.clearPageSourceLanguage('all-unresolved');
         expect(coordinator.pageSourceResolvers.size).toBe(0);
@@ -614,16 +838,43 @@ describe('UnifiedModeCoordinator', () => {
 
         expect(ownerResult.success).toBe(false);
         expect(waiterResult.success).toBe(false);
-        expect(coordinator.pageSourceResolvers.has('s1')).toBe(false);
+        expect(coordinator.pageSourceResolvers.get('s1')).toMatchObject({
+          localResolutionAttempted: true,
+          resolutionPromise: null,
+        });
 
         // A later attempt may become resolver again.
         const retry = coordinator.processRequest(pageBatchRequest({ sessionId: 's1', messageId: 'm3' }), { translationEngine: mockEngine });
         await flush();
         await flush();
         expect(provider.sources).toEqual(['auto', 'auto']);
+        expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(1);
         provider.pending[1].resolve(provider.success('en'));
         await retry;
         expect(coordinator.pageSourceResolvers.get('s1').effectiveSourceLanguage).toBe('en');
+        spy.restore();
+      });
+
+      it('does not repeat a denied or failed local resolution across handoff and provider retry', async () => {
+        const provider = deferredProvider();
+        resolveOperationSourceLanguage.mockRejectedValueOnce(new Error('detector unavailable'));
+        mockEngine.getProvider.mockResolvedValue(provider);
+        const spy = spyAcquires(coordinator, ['fallback']);
+
+        const owner = coordinator.processRequest(pageBatchRequest({ sessionId: 'fallback', messageId: 'f1' }), { translationEngine: mockEngine });
+        const waiter = coordinator.processRequest(pageBatchRequest({ sessionId: 'fallback', messageId: 'f2' }), { translationEngine: mockEngine });
+        await waitForAcquires(spy, 'fallback', 2);
+        expect(provider.sources).toEqual(['auto']);
+        provider.pending[0].reject(new Error('provider down'));
+        await Promise.all([owner, waiter]);
+
+        const retry = coordinator.processRequest(pageBatchRequest({ sessionId: 'fallback', messageId: 'f3' }), { translationEngine: mockEngine });
+        await flush();
+        await flush();
+        expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(1);
+        expect(provider.sources).toEqual(['auto', 'auto']);
+        provider.pending[1].resolve(provider.success('en'));
+        await retry;
         spy.restore();
       });
     });
