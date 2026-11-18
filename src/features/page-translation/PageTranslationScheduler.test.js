@@ -1879,6 +1879,84 @@ describe('PageTranslationScheduler', () => {
       }
     });
 
+    it('enables Mock parallel workers in both queue modes without changing its batch config', async () => {
+      const config = await import('@/shared/config/config.js');
+      const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(3);
+      scheduler.setSettings({ translationApi: 'mock', targetLanguage: 'ja' });
+      try {
+        const batchConfig = await scheduler._getBatchConfig();
+        expect(batchConfig).toMatchObject({
+          parallelExecution: true,
+          isAI: false,
+          chunkSize: 25,
+          maxChars: 2000,
+        });
+        expect(scheduler.settings.maxConcurrentFlushes).toBe(5);
+
+        for (const translateAfterScrollStop of [false, true]) {
+          scheduler.reset();
+          scheduler.setTranslationState(true, `mock-${translateAfterScrollStop}`, { pageTitle: 'Test Page' });
+          scheduler.setSettings({
+            translationApi: 'mock',
+            targetLanguage: 'ja',
+            translateAfterScrollStop,
+            lazyLoading: false,
+          });
+          const items = Array.from({ length: 5 }, (_, index) => ({
+            id: `mock-item-${translateAfterScrollStop}-${index}`,
+            text: `source ${index}`,
+            resolve: vi.fn(),
+          }));
+          scheduler.queue = items;
+          const filter = translateAfterScrollStop ? PageTranslationQueueFilter : PageTranslationFluidFilter;
+          filter.process.mockImplementation(queue => ({
+            batchItems: queue.slice(0, 1),
+            remainingItems: queue.slice(1),
+          }));
+
+          const releases = [];
+          const initialDispatchCount = safeSendMessage.mock.calls.length;
+          let dispatchAll;
+          const allDispatched = new Promise(resolve => { dispatchAll = resolve; });
+          safeSendMessage.mockImplementation(message => {
+            const request = new Promise(resolve => releases.push(() => resolve({
+              success: true,
+              translatedText: JSON.stringify(JSON.parse(message.data.text).map(item => ({
+                ...item,
+                text: `translated:${item.text}`,
+              }))),
+            })));
+            expect(message.data.provider).toBe('mock');
+            expect(message.data.sourceLanguage).toBe('auto');
+            if (releases.length === 5) dispatchAll();
+            return request;
+          });
+
+          const flushCalls = [];
+          const flush = scheduler.flush.bind(scheduler);
+          const flushSpy = vi.spyOn(scheduler, 'flush').mockImplementation((...args) => {
+            const pending = flush(...args);
+            flushCalls.push(pending);
+            return pending;
+          });
+          try {
+            const initialFlush = scheduler.flush();
+            await allDispatched;
+            expect(safeSendMessage).toHaveBeenCalledTimes(initialDispatchCount + 5);
+            expect(scheduler.activeFlushes).toBe(5);
+            releases.forEach(release => release());
+            await Promise.all([initialFlush, ...flushCalls]);
+            expect(scheduler.activeFlushes).toBe(0);
+            expect(items.every(item => item.resolve.mock.calls.length === 1)).toBe(true);
+          } finally {
+            flushSpy.mockRestore();
+          }
+        }
+      } finally {
+        optimization.mockRestore();
+      }
+    });
+
     const configureBatches = (limit) => {
       vi.spyOn(scheduler, '_getBatchConfig').mockImplementation(async () => {
         scheduler.settings.maxConcurrentFlushes = limit;

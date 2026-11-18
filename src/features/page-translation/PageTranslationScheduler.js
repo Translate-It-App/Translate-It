@@ -1073,7 +1073,9 @@ export class PageTranslationScheduler extends ResourceTracker {
       providerRegistryId,
       targetLanguage,
       chunkSize: Math.max(chunkSize, 5), // Ensure at least 5 segments per batch
-      parallelExecution: isAI || isProviderType(providerName, ProviderTypes.CUSTOM),
+      parallelExecution: isAI
+        || isProviderType(providerName, ProviderTypes.CUSTOM)
+        || isProviderType(providerName, ProviderTypes.MOCK),
       isAI,
       lazyLoading: settings.lazyLoading,
       maxChars: isAI ? (providerConfig.batching?.maxBatchSizeChars || await getWholePageAiMaxCharsAsync()) : (providerConfig.batching?.characterLimit || await getWholePageMaxCharsAsync())
