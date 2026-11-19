@@ -1865,23 +1865,27 @@ describe('PageTranslationScheduler', () => {
   });
 
   describe('bounded independent AI batches', () => {
-    it.each([[1, false, 1], [3, true, 2], [5, true, 2]])('opts Google V2 into at most two Page workers at level %i, bounded by its optimization limit', async (level, parallelExecution, maxConcurrent) => {
+    it.each([1, 2, 3, 4, 5].flatMap(level => [false, true].map(translateAfterScrollStop => [level, translateAfterScrollStop])))('uses the effective Google V2 worker cap at level %i in %s mode', async (level, translateAfterScrollStop) => {
       const config = await import('@/shared/config/config.js');
+      const providerConfigurations = await import('@/features/translation/core/ProviderConfigurations.js');
       const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(level);
-      scheduler.setSettings({ translationApi: 'googlev2', targetLanguage: 'ja' });
+      scheduler.setSettings({ translationApi: 'googlev2', targetLanguage: 'ja', translateAfterScrollStop });
       try {
         const batchConfig = await scheduler._getBatchConfig();
-        expect(batchConfig.parallelExecution).toBe(parallelExecution);
-        expect(scheduler.settings.maxConcurrentFlushes).toBe(maxConcurrent);
+        const effectiveProviderLimit = providerConfigurations.getProviderConfiguration('GoogleTranslateV2', level).rateLimit.maxConcurrent;
+        const expectedWorkerCap = Math.max(1, Math.min(4, Math.floor(effectiveProviderLimit / 2)));
+        expect(batchConfig.parallelExecution).toBe(expectedWorkerCap > 1);
+        expect(scheduler.settings.maxConcurrentFlushes).toBe(expectedWorkerCap);
       } finally {
         optimization.mockRestore();
       }
     });
 
-    it('dispatches at most two Google V2 batches in Fluid and On-Stop, while traditional Google stays serial', async () => {
+    it('dispatches up to the Google V2 worker cap in Fluid and On-Stop, while traditional Google stays serial', async () => {
       vi.useFakeTimers();
       const config = await import('@/shared/config/config.js');
-      const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(5);
+      const providerConfigurations = await import('@/features/translation/core/ProviderConfigurations.js');
+      const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(1);
 
       const exerciseDispatch = async (provider, translateAfterScrollStop, expectedMaximum) => {
         scheduler.reset();
@@ -1944,24 +1948,14 @@ describe('PageTranslationScheduler', () => {
 
         try {
           const initialFlush = scheduler.flush();
-          if (expectedMaximum === 2) {
-            await waitForDispatches(2);
-            expect(active).toBe(2);
-            for (let count = 3; count <= items.length; count++) {
-              releases[count - 3]();
-              await waitForDispatches(count);
-              expect(active).toBe(2);
-            }
-          } else {
-            await waitForDispatches(1);
-            expect(active).toBe(1);
-            for (let count = 2; count <= items.length; count++) {
-              releases[count - 2]();
-              await waitForDispatches(count);
-              expect(active).toBe(1);
-            }
+          await waitForDispatches(expectedMaximum);
+          expect(active).toBe(expectedMaximum);
+          for (let count = expectedMaximum + 1; count <= items.length; count++) {
+            releases[count - expectedMaximum - 1]();
+            await waitForDispatches(count);
+            expect(active).toBe(expectedMaximum);
           }
-          releases.slice(expectedMaximum === 2 ? 4 : 5).forEach(release => release());
+          releases.slice(items.length - expectedMaximum).forEach(release => release());
           for (let turn = 0; turn < 40 && scheduler.activeFlushes !== 0; turn++) await pump();
           await Promise.all([initialFlush, ...flushCalls]);
           expect(maximum).toBe(expectedMaximum);
@@ -1975,8 +1969,13 @@ describe('PageTranslationScheduler', () => {
       };
 
       try {
-        await exerciseDispatch('googlev2', false, 2);
-        await exerciseDispatch('googlev2', true, 2);
+        for (const level of [1, 2, 3, 4, 5]) {
+          optimization.mockResolvedValue(level);
+          const maxConcurrent = providerConfigurations.getProviderConfiguration('GoogleTranslateV2', level).rateLimit.maxConcurrent;
+          const workerCap = Math.max(1, Math.min(4, Math.floor(maxConcurrent / 2)));
+          await exerciseDispatch('googlev2', false, workerCap);
+          await exerciseDispatch('googlev2', true, workerCap);
+        }
         await exerciseDispatch('google', false, 1);
       } finally {
         optimization.mockRestore();

@@ -1040,14 +1040,16 @@ export class PageTranslationScheduler extends ResourceTracker {
     const level = await getProviderOptimizationLevelAsync(providerName);
     const providerConfig = getProviderConfiguration(providerName, level);
     const supportsPageParallelExecution = findProviderById(providerRegistryId)?.supportsPageParallelExecution === true;
+    const maxConcurrent = providerConfig.rateLimit?.maxConcurrent;
+    const pageWorkerCap = supportsPageParallelExecution && maxConcurrent !== undefined
+      ? Math.max(1, Math.min(4, Math.floor(maxConcurrent / 2)))
+      : null;
 
     const isAI = isProviderType(providerName, ProviderTypes.AI);
 
     // Sync concurrency settings with optimization level
     if (providerConfig.rateLimit) {
-      settings.maxConcurrentFlushes = supportsPageParallelExecution
-        ? Math.min(2, providerConfig.rateLimit.maxConcurrent)
-        : providerConfig.rateLimit.maxConcurrent;
+      settings.maxConcurrentFlushes = pageWorkerCap ?? providerConfig.rateLimit.maxConcurrent;
     }
 
     // Dynamic Chunk Size Scaling (Optimization Level Alignment)
@@ -1080,7 +1082,7 @@ export class PageTranslationScheduler extends ResourceTracker {
       parallelExecution: isAI
         || isProviderType(providerName, ProviderTypes.CUSTOM)
         || isProviderType(providerName, ProviderTypes.MOCK)
-        || (supportsPageParallelExecution && providerConfig.rateLimit?.maxConcurrent > 1),
+        || (pageWorkerCap > 1),
       isAI,
       lazyLoading: settings.lazyLoading,
       maxChars: isAI ? (providerConfig.batching?.maxBatchSizeChars || await getWholePageAiMaxCharsAsync()) : (providerConfig.batching?.characterLimit || await getWholePageMaxCharsAsync())
