@@ -1,4 +1,4 @@
-export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'early-visible', 'in-window-visible', 'late-visible']);
+export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'dynamic-dom', 'early-visible', 'in-window-visible', 'late-visible']);
 export const COMPARISON_MODES = Object.freeze(['sliced', 'viewport']);
 export const MODE_DISCOVERY_FLAGS = Object.freeze({
   legacy: Object.freeze({ slicedDiscoveryEnabled: false, viewportFirstDiscoveryEnabled: false }),
@@ -27,6 +27,10 @@ export function parseScenarioSelection(value = 'small') {
     seen.add(scenario);
   }
   return scenarios;
+}
+
+export function settingsForScenario(settings, scenario) {
+  return Object.freeze({ ...settings, WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: scenario === 'dynamic-dom' });
 }
 
 export function modeOrder(selectedModes, scenarioIndex, measuredOrdinalIndex) {

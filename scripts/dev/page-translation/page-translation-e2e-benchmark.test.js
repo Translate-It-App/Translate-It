@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { classifyTransportRequest, mapEdgeResponse, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
+import { parseScenarioSelection, settingsForScenario } from './e2e-benchmark/scenario-plan.mjs';
+import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
+import { registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 
 describe('page translation benchmark measurements', () => {
   it('maps each actual Edge request source into the provider response shape', () => {
@@ -94,6 +97,61 @@ describe('page translation benchmark measurements', () => {
       expect(geometries[2].get(id)).toBe(geometries[0].get(id));
     }
     expect(fixtures[0].targets.map(target => target.id)).not.toEqual(fixtures[1].targets.map(target => target.id));
+  });
+
+  it('keeps dynamic DOM opt-in and leaves static fixture fields unchanged', () => {
+    expect(parseScenarioSelection('small,dynamic-dom')).toEqual(['small', 'dynamic-dom']);
+    const small = createFixture('small');
+    const dynamic = createFixture('dynamic-dom');
+    expect(small).not.toHaveProperty('dynamicCohorts');
+    expect(dynamic.targetCount).toBe(12);
+    expect(dynamic.targets).toEqual(small.targets);
+    expect(dynamic.html).toBe(small.html);
+    expect(dynamic.dynamicCohorts.map(cohort => cohort.targets)).toHaveLength(2);
+    const all = [...dynamic.targets, ...dynamic.dynamicCohorts.flatMap(cohort => cohort.targets)];
+    expect(new Set(all.map(target => target.id)).size).toBe(18);
+    expect(new Set(all.map(target => target.source)).size).toBe(18);
+    expect(dynamic.dynamicCohorts.flatMap(cohort => cohort.targets).every(target => !dynamic.html.includes(target.id))).toBe(true);
+  });
+
+  it('registers the complete cohort before insertion and tracks first/all latency once', () => {
+    const order = [];
+    const inserted = registerThenInsertCohort({
+      register: () => order.push('register'),
+      now: () => { order.push('timestamp'); return 100; },
+      insert: () => { order.push('insert'); return 'nodes'; },
+    });
+    expect(order).toEqual(['register', 'timestamp', 'insert']);
+    expect(inserted).toEqual({ insertedAt: 100, result: 'nodes' });
+    const cohort = { targetIds: ['a', 'b'], remainingIds: new Set(['a', 'b']), firstAcceptedAt: null, completionAt: null, acceptedAtById: {} };
+    expect(trackCohortAcceptedTarget(cohort, 'a', 110)).toBe(true);
+    expect(trackCohortAcceptedTarget(cohort, 'a', 115)).toBe(false);
+    expect(trackCohortAcceptedTarget(cohort, 'b', 140)).toBe(true);
+    expect(cohort).toMatchObject({ firstAcceptedAt: 110, completionAt: 140, acceptedAtById: { a: 110, b: 140 } });
+    expect(cohort.firstAcceptedAt - inserted.insertedAt).toBe(10);
+    expect(cohort.completionAt - inserted.insertedAt).toBe(40);
+  });
+
+  it('accounts dynamic provider targets exactly once and validates the persistent setting', () => {
+    const expectedIds = [...Array.from({ length: 12 }, (_, index) => `target-${index}`),
+      ...Array.from({ length: 6 }, (_, index) => `dynamic-${index < 3 ? 1 : 2}-${index % 3 + 1}`)];
+    const result = validateAcceptedMutationAccounting({
+      expectedIds, targetKinds: expectedIds.map(() => 'text'), acceptedIds: expectedIds,
+      mutationIds: expectedIds, duplicateAcceptances: 0, staleWrites: 0, unattributedWrites: 0,
+    });
+    expect(result.ok).toBe(true);
+    const base = { WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false, PROXY_ENABLED: false };
+    expect(settingsForScenario(base, 'small')).toEqual(base);
+    expect(settingsForScenario(base, 'dynamic-dom')).toEqual({ ...base, WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: true });
+    const expected = { targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: true };
+    expect(validateEffectiveSettings(expected, expected).ok).toBe(true);
+    expect(validateEffectiveSettings({ ...expected, autoTranslateOnDOMChanges: false }, expected).ok).toBe(false);
+    expect(validateEffectiveSettings({ ...expected, autoTranslateOnDOMChanges: false }, { ...expected, autoTranslateOnDOMChanges: false }).ok).toBe(true);
+  });
+
+  it('preserves the default Firefox provider probe target order', () => {
+    const expectedIds = Array.from({ length: 12 }, (_, index) => `target-${index}`);
+    expect(orderedAcceptedTargetIds(expectedIds, new Set([...expectedIds].reverse()))).toEqual(expectedIds);
   });
 
   it('keeps insufficient percentiles unavailable instead of implying samples', () => {

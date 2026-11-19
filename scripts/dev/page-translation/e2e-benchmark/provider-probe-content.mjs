@@ -14,8 +14,7 @@ const sameAttributes = (element, expected) => {
     && Object.entries(expected).every(([name, value]) => actual[name] === value);
 };
 
-export function validateAcceptedMutationAccounting({ targetKinds, acceptedIds, mutationIds, duplicateAcceptances, staleWrites, unattributedWrites }) {
-  const expectedIds = Array.from({ length: 12 }, (_, index) => `target-${index}`);
+export function validateAcceptedMutationAccounting({ targetKinds, acceptedIds, mutationIds, duplicateAcceptances, staleWrites, unattributedWrites, expectedIds = Array.from({ length: 12 }, (_, index) => `target-${index}`) }) {
   const expectedKinds = targetKinds;
   const actualIds = [...acceptedIds];
   const observedIds = [...mutationIds];
@@ -24,13 +23,17 @@ export function validateAcceptedMutationAccounting({ targetKinds, acceptedIds, m
     if (kind !== 'text' && kind !== 'title') return { ok: false, counts };
     counts[kind]++;
   }
-  const idsExactlyOnce = values => values.length === 12 && new Set(values).size === 12
+  const idsExactlyOnce = values => values.length === expectedIds.length && new Set(values).size === expectedIds.length
     && expectedIds.every(id => values.includes(id));
   return {
-    ok: expectedKinds.length === 12 && idsExactlyOnce(actualIds) && idsExactlyOnce(observedIds)
+    ok: expectedKinds.length === expectedIds.length && idsExactlyOnce(actualIds) && idsExactlyOnce(observedIds)
       && duplicateAcceptances === 0 && staleWrites === 0 && unattributedWrites === 0,
     counts,
   };
+}
+
+export function orderedAcceptedTargetIds(expectedIds, acceptedIds) {
+  return expectedIds.filter(id => acceptedIds.has(id));
 }
 
 export function installContentProviderProbe({ handler, report, fixtureUrl }) {
@@ -39,7 +42,7 @@ export function installContentProviderProbe({ handler, report, fixtureUrl }) {
     benchmarkTrace.schedulerBatchReporter = evidence => report('scheduler-batch', evidence);
     if (benchmarkTrace.pageTranslationE2E === true) benchmarkTrace.pageTranslationStartReporter = evidence => report('command-result', evidence);
   }
-  const elements = [...document.querySelectorAll('[data-bench-id]')];
+  let elements = [...document.querySelectorAll('[data-bench-id]')];
   const handlerCallbacks = handler?.handlers;
   const originalPageTranslate = handlerCallbacks?.get?.('page-translate');
   if (!handler || typeof handler.setPageTranslationManager !== 'function' || typeof originalPageTranslate !== 'function' || elements.length !== 12
@@ -53,6 +56,7 @@ export function installContentProviderProbe({ handler, report, fixtureUrl }) {
     markup: element.innerHTML,
     attrs: attributesOf(element),
   }]));
+  const expectedIds = elements.map(element => element.dataset.benchId);
   const metadataBaseline = new Map([...trackedAncestors].map(element => [element, attributesOf(element)]));
   const layoutStyle = !!document.getElementById('ti-translation-layout-fix');
   const accepted = new Set();
@@ -72,6 +76,26 @@ export function installContentProviderProbe({ handler, report, fixtureUrl }) {
   let lastActivity = Date.now();
   let deadlineTimer;
   let quietTimer;
+
+  if (benchmarkTrace) benchmarkTrace.registerProviderTargets = targets => {
+    if (!Array.isArray(targets) || !targets.length || targets.some(target => typeof target?.id !== 'string'
+        || typeof target?.source !== 'string' || baseline.has(target.id))) throw new Error('Invalid or duplicate dynamic provider-probe target registration.');
+    const registeredElements = [];
+    for (const target of targets) {
+      const element = document.createElement('p');
+      element.dataset.benchId = target.id;
+      element.textContent = target.source;
+      registeredElements.push(element);
+      elements.push(element);
+      expectedIds.push(target.id);
+      baseline.set(target.id, { text: target.source, markup: element.innerHTML, attrs: attributesOf(element) });
+      for (let parent = document.querySelector('main') ?? document.body; parent && parent.nodeType === Node.ELEMENT_NODE; parent = parent.parentElement) {
+        if (!metadataBaseline.has(parent)) metadataBaseline.set(parent, attributesOf(parent));
+      }
+    }
+    return registeredElements;
+  };
+  const elementForId = id => elements.find(element => element.dataset.benchId === id);
 
   const emitError = code => { void report('error', { code }).catch(() => {}); };
   if (benchmarkTrace?.pageTranslationE2E !== true) {
@@ -108,7 +132,7 @@ export function installContentProviderProbe({ handler, report, fixtureUrl }) {
     && !!document.getElementById('ti-translation-layout-fix') === layoutStyle;
 
   const finishTranslatedIfQuiet = () => {
-    if (!manager || sentTranslated || accepted.size !== 12 || !domMatchesTranslated()) return;
+    if (!manager || sentTranslated || accepted.size !== expectedIds.length || !domMatchesTranslated()) return;
     clearTimeout(quietTimer);
     quietTimer = setTimeout(() => {
       if (sentTranslated || manager.isTranslating === true || (manager.scheduler?.activeFlushes ?? 0) > 0
@@ -122,7 +146,7 @@ export function installContentProviderProbe({ handler, report, fixtureUrl }) {
         && [...acceptedSessions.values()].every(value => value === sessionId);
       const evidence = {
         sessionId,
-        acceptedTargetIds: [...accepted].sort((left, right) => targetIndex(left) - targetIndex(right)),
+        acceptedTargetIds: orderedAcceptedTargetIds(expectedIds, accepted),
         acceptedCount: accepted.size,
         duplicateAcceptances,
         staleWrites,
@@ -134,6 +158,7 @@ export function installContentProviderProbe({ handler, report, fixtureUrl }) {
       const accounting = validateAcceptedMutationAccounting({
         targetKinds: elements.map(element => element.dataset.benchKind === 'title' ? 'title' : 'text'),
         acceptedIds: accepted, mutationIds: acceptedMutationIds, duplicateAcceptances, staleWrites, unattributedWrites,
+        expectedIds,
       });
       const completeMutationAccounting = accounting.ok && accounting.counts.text === acceptedMutationCounts.text
         && accounting.counts.title === acceptedMutationCounts.title;
@@ -219,7 +244,7 @@ export function installContentProviderProbe({ handler, report, fixtureUrl }) {
     }
     const groups = groupMutationRecords(records, record => targetId(record.target));
     for (const { key: id, records: targetRecords } of groups) {
-      const element = elements[targetIndex(id)];
+      const element = elementForId(id);
       if (!element) { unattributedWrites++; continue; }
       const expectedText = element.dataset.benchKind === 'title'
         ? translation(baseline.get(id).attrs.title)

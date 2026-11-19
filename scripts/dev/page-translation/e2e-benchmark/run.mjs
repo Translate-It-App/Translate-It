@@ -11,8 +11,8 @@ import { launchChrome } from './chrome.mjs';
 import { writeBenchmarkArtifact } from './artifact-writer.mjs';
 import { classifyTransportRequest, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
-import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
-import { modeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './scenario-plan.mjs';
+import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
+import { modeOrder, mapProviderBatchIds, parseScenarioSelection, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
 
@@ -51,6 +51,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/chrome.mjs',
   'scripts/dev/page-translation/e2e-benchmark/worker-entry.mjs',
   'scripts/dev/page-translation/e2e-benchmark/content-entry.mjs',
+  'scripts/dev/page-translation/e2e-benchmark/provider-probe-content.mjs',
   'scripts/dev/page-translation/e2e-benchmark/trace.mjs',
   'scripts/dev/page-translation/e2e-benchmark/measurement-lifecycle.mjs',
   'scripts/dev/page-translation/e2e-benchmark/artifact-writer.mjs',
@@ -111,7 +112,13 @@ function findTrace(events, name, predicate = () => true) { return events.find(ev
 function deriveTimings(trial, workerTrace, contentTrace, contentEvents) {
   const workerEvents = traceEvents(workerTrace);
   contentEvents ??= Array.isArray(contentTrace?.events) ? contentTrace.events : [];
-  const acceptance = summarizeAcceptanceTimes(contentTrace?.firstAcceptedAtById, trial.fixture.visibleIds, trial.fixture.targets.map(target => target.id));
+  const initialTargetIds = trial.fixture.targets.map(target => target.id);
+  const expectedTargetIds = contentTrace?.expectedTargetIds
+    ?? [...initialTargetIds, ...(trial.fixture.dynamicCohorts ?? []).flatMap(cohort => cohort.targets.map(target => target.id))];
+  const acceptance = summarizeAcceptanceTimes(contentTrace?.firstAcceptedAtById, trial.fixture.visibleIds, expectedTargetIds);
+  const initialAcceptance = trial.scenario === 'dynamic-dom'
+    ? summarizeAcceptanceTimes(contentTrace?.firstAcceptedAtById, trial.fixture.visibleIds, initialTargetIds)
+    : acceptance;
   const backgroundAdmission = findTrace(workerEvents, 'background.translationRequest.entry');
   const queueAdmission = findTrace(workerEvents, 'queueManager.enqueue');
   const providerStart = findTrace(workerEvents, 'providerRequestEngine.executeApiCall.start');
@@ -147,7 +154,10 @@ function deriveTimings(trial, workerTrace, contentTrace, contentEvents) {
     visibleSetCompletionUnavailableReason: acceptance.visibleSetCompletionUnavailableReason,
     allAcceptedWrites: acceptance.allTargetsCompletionAt,
     allAcceptedWritesUnavailableReason: acceptance.allTargetsCompletionUnavailableReason,
+    initialAllAcceptedWrites: initialAcceptance.allTargetsCompletionAt,
+    initialAllAcceptedWritesUnavailableReason: initialAcceptance.allTargetsCompletionUnavailableReason,
     acceptance,
+    dynamicCohorts: (contentTrace?.dynamicCohorts ?? []).map(cohort => ({ ...cohort })),
     completion: trial.terminal?.receivedAt ?? null,
     restoreStart: trial.timestamps.restoreStarted,
     restoreEnd: trial.timestamps.restoreCompleted,
@@ -170,6 +180,7 @@ function measureMode(runs) {
     commandToFirstVisibleWrite: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.firstVisibleAcceptedWrite),
     commandToVisibleCompletion: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.visibleSetCompletion),
     commandToAllWrites: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.allAcceptedWrites),
+    commandToInitialAllWrites: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.initialAllAcceptedWrites),
     commandToCompletion: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.completion),
     commandToDiscoveryDrain: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.discoveryDrained),
     commandToFirstFlush: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.firstSchedulerFlush),
@@ -190,6 +201,12 @@ function measureMode(runs) {
     longTaskSamples: runs.map(run => run.derivedTimings?.longTasks ?? null),
     longTaskSummary,
     longTaskCalibration: runs.map(run => run.longTaskCalibration ?? { supported: false, reason: 'calibration was not run' }),
+    dynamicCohorts: Object.fromEntries([...new Set(runs.flatMap(run => (run.derivedTimings?.dynamicCohorts ?? []).map(cohort => cohort.id)))].map(id => [id, {
+      insertionToFirstAccepted: intervals(run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.insertedAt,
+        run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.firstAcceptedAt),
+      insertionToAllAccepted: intervals(run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.insertedAt,
+        run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.completionAt),
+    }]))
   };
 }
 function sessionIdFromStart(response) {
@@ -299,6 +316,7 @@ function validateHarnessBuildParity() {
 }
 
 async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null }) {
+  const trialSettings = settingsForScenario(settings, fixtureConfig.scenario);
   const trial = {
     mode, scenario: fixtureConfig.scenario, ordinal, globalRunOrder, phase, status: 'running',
     timestamps: { trialStart: now() },
@@ -309,12 +327,13 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       targetCount: fixtureConfig.targetCount,
       targets: fixtureConfig.targets,
       targetTexts: fixtureConfig.targetTexts,
+      dynamicCohorts: fixtureConfig.dynamicCohorts ?? [],
       visibleIds: fixtureConfig.visibleIds,
       viewport: fixtureConfig.viewport,
       scroll: fixtureConfig.scroll,
       responseDelayMs: fixtureConfig.responseDelayMs,
     },
-    settings,
+    settings: trialSettings,
   };
   let chrome;
   let fixture;
@@ -710,7 +729,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       return state.initialized && state.listener && state.engine && state.unified && state.traceReady;
     });
     await evaluate(chrome, workerSession,
-      `Promise.all([browser.storage.local.set(${JSON.stringify(settings)}),browser.storage.sync.set(${JSON.stringify(settings)}).catch(()=>{})])`);
+      `Promise.all([browser.storage.local.set(${JSON.stringify(trialSettings)}),browser.storage.sync.set(${JSON.stringify(trialSettings)}).catch(()=>{})])`);
     if (cancellationProbe || staleSuccessProbe) {
       const workerInstrumentation = await evaluate(chrome, workerSession,
         'globalThis.__pageTranslationBenchmark.enableCancellationProbe()');
@@ -819,6 +838,12 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     await evaluate(chrome, pageSession,
       'window.__benchEvents=[];window.addEventListener("__benchmark-runtime-event",e=>{const receivedAt=Date.now();window.__benchEvents.push({receivedAt,message:e.detail})});', contentContext);
     measurementState.attempted = true;
+    if (fixtureConfig.scenario === 'dynamic-dom') {
+      const expectedIds = [...fixtureConfig.targets, ...fixtureConfig.dynamicCohorts.flatMap(cohort => cohort.targets)].map(target => target.id);
+      const configured = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.setExpectedTargetIds(${JSON.stringify(expectedIds)})`, contentContext);
+      if (configured !== true) throw new Error('Dynamic expected target inventory could not be configured before measurement.');
+    }
     trial.measurementStart = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.startMeasurement()', contentContext);
     measurementState.started = true;
     if (trial.measurementStart.targetCount !== fixtureConfig.targetCount
@@ -835,6 +860,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.armSuccessfulReplyProbe()', contentContext);
     }
     trial.timestamps.translationCommand = now();
+    if (fixtureConfig.scenario === 'dynamic-dom') {
+      const enabled = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.enableDynamicDOMTracking()', contentContext);
+      if (enabled !== true) throw new Error('Dynamic DOM settlement instrumentation could not be installed.');
+    }
     const started = await evaluate(chrome, pageSession,
       `chrome.runtime.sendMessage(${JSON.stringify({ action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' } })})`, contentContext);
     trial.commands.push({ action: 'page-translate', sentAt: trial.timestamps.translationCommand, respondedAt: now(), response: started });
@@ -849,9 +878,32 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     });
     trial.effectiveSettingsObserved = managerCall.settings;
     trial.effectiveSettingsValidation = validateEffectiveSettings(managerCall.settings, {
-      targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: false,
+      targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: trialSettings.WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES,
     });
     if (!trial.effectiveSettingsValidation.ok) throw new Error(trial.effectiveSettingsValidation.issues.join('; '));
+
+    let dynamicCohortsInserted = 0;
+    const insertDynamicCohort = async index => {
+      const cohort = fixtureConfig.dynamicCohorts[index];
+      const inserted = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.insertDynamicCohort(${JSON.stringify(cohort)})`, contentContext);
+      dynamicCohortsInserted++;
+      originals.push(...cohort.targets.map(target => [target.id, target.source]));
+      for (const target of cohort.targets) originalById.set(target.id, target.source);
+      trial.rawDOM.original.push(...cohort.targets.map(target => [target.id, target.source]));
+      (trial.dynamicCohorts ??= []).push({ id: cohort.id, targetIds: cohort.targets.map(target => target.id), insertedAt: inserted.insertedAt });
+      return inserted;
+    };
+    if (fixtureConfig.scenario === 'dynamic-dom') {
+      if (trialSettings.WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES !== true
+          || managerCall.settings?.autoTranslateOnDOMChanges !== true) throw new Error('Dynamic DOM scenario did not enable production auto-translation on DOM changes.');
+      const translating = await until(async () => {
+        const snapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+        return snapshot?.translationSessionId === sessionId && snapshot.managerTranslating === true ? snapshot : null;
+      });
+      trial.dynamicBaseSessionAtFirstInsertion = translating;
+      await insertDynamicCohort(0);
+    }
 
     if (staleSuccessProbe) {
       const expectedIds = fixtureConfig.targets.map(target => target.id);
@@ -2003,13 +2055,34 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         const accepted = await until(async () => {
           const events = await evaluate(chrome, pageSession, 'window.__benchEvents??[]', contentContext, false);
           trial.lifecycle = events;
-          const terminal = events.find(event => ['page-translate-complete', 'page-translate-idle'].some(action => isSessionEvent(event, action, sessionId)));
+          const expectedCount = fixtureConfig.targets.length
+            + (fixtureConfig.dynamicCohorts?.reduce((total, cohort) => total + cohort.targets.length, 0) ?? 0);
+          const terminal = fixtureConfig.scenario === 'dynamic-dom'
+            ? findFinalTranslationTerminal(events, sessionId, expectedCount)
+            : events.find(event => ['page-translate-complete', 'page-translate-idle'].some(action => isSessionEvent(event, action, sessionId)));
           if (terminal) trial.terminal = terminal;
+          if (fixtureConfig.scenario === 'dynamic-dom' && dynamicCohortsInserted === 1) {
+            const snapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+            const baseIds = fixtureConfig.targets.map(target => target.id);
+            if (baseIds.every(id => snapshot.acceptedSettlementIds.includes(id) && snapshot.acceptedDomIds.includes(id))) {
+              await insertDynamicCohort(1);
+            }
+          }
+          if (fixtureConfig.scenario === 'dynamic-dom' && dynamicCohortsInserted !== fixtureConfig.dynamicCohorts.length) return null;
           if (!terminal) return null;
+          if (fixtureConfig.scenario === 'dynamic-dom') {
+            const acceptedSnapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+            const expectedIds = [...fixtureConfig.targets, ...fixtureConfig.dynamicCohorts.flatMap(cohort => cohort.targets)].map(target => target.id);
+            if (!expectedIds.every(id => acceptedSnapshot.acceptedSettlementIds.includes(id) && acceptedSnapshot.acceptedDomIds.includes(id))
+                || acceptedSnapshot.cohorts.some(cohort => cohort.completionAt === null)) return null;
+            const sessionState = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+            if (sessionState.translationSessionId !== sessionId || sessionState.managerTranslating !== false
+                || sessionState.activeFlushes !== 0 || sessionState.queueIds?.length !== 0) return null;
+          }
           const dom = await evaluate(chrome, pageSession,
             `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
           trial.rawDOM.translated = dom;
-          return dom.length === fixtureConfig.targetCount && dom.every(([id, value]) => {
+          return dom.length === originals.length && dom.every(([id, value]) => {
             const source = originalById.get(id);
             return source !== undefined && value === `\u200efixture translation: ${source}`;
           }) ? { terminal, dom } : null;
@@ -2044,7 +2117,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           const dom = await evaluate(chrome, pageSession,
             `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
           trial.rawDOM.restored = dom;
-          return dom.length === fixtureConfig.targetCount
+          return dom.length === originals.length
             && dom.every(([id, text]) => originalById.get(id) === text) ? { done, dom } : null;
         }, 30_000);
         return restored;
@@ -2052,6 +2125,37 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     });
     const contentTrace = lifecycle.measurement;
     trial.measurements.content = contentTrace;
+    if (fixtureConfig.scenario === 'dynamic-dom') {
+      const cohortMeasurements = contentTrace.dynamicCohorts ?? [];
+      const expectedCohorts = fixtureConfig.dynamicCohorts;
+      const cohortIssues = [];
+      if (cohortMeasurements.length !== expectedCohorts.length) cohortIssues.push(`expected ${expectedCohorts.length} dynamic cohorts, observed ${cohortMeasurements.length}`);
+      for (const expectedCohort of expectedCohorts) {
+        const observed = cohortMeasurements.find(cohort => cohort.id === expectedCohort.id);
+        if (!observed || observed.targetIds.length !== expectedCohort.targets.length
+            || expectedCohort.targets.some(target => !observed.targetIds.includes(target.id))) cohortIssues.push(`dynamic cohort ${expectedCohort.id} target registration is incomplete`);
+        else if (!Number.isFinite(observed.insertedAt) || !Number.isFinite(observed.firstAcceptedLatencyMs) || observed.firstAcceptedLatencyMs < 0
+            || !Number.isFinite(observed.completionLatencyMs) || observed.completionLatencyMs < observed.firstAcceptedLatencyMs
+            || Object.keys(observed.acceptedAtById).length !== expectedCohort.targets.length
+            || expectedCohort.targets.some(target => !Number.isFinite(observed.acceptedAtById[target.id]) || observed.acceptedAtById[target.id] < observed.insertedAt)) {
+          cohortIssues.push(`dynamic cohort ${expectedCohort.id} timing/acceptance evidence is incomplete`);
+        }
+      }
+      trial.dynamicCohortMeasurements = cohortMeasurements;
+      trial.dynamicCohortValidation = { ok: cohortIssues.length === 0, issues: cohortIssues };
+      if (cohortIssues.length) throw new Error(cohortIssues.join('; '));
+      const finalSnapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+      const expectedIds = [...fixtureConfig.targets, ...expectedCohorts.flatMap(cohort => cohort.targets)].map(target => target.id);
+      const settlementIdsValidation = validateExactTargetIds('scheduler accepted settlement', finalSnapshot.acceptedSettlementTransitions.map(({ id }) => id), expectedIds);
+      if (!settlementIdsValidation.ok) throw new Error(settlementIdsValidation.issues.join('; '));
+      const settlementCounts = new Map();
+      for (const { id, sessionId: owner } of finalSnapshot.acceptedSettlementTransitions) {
+        settlementCounts.set(id, (settlementCounts.get(id) ?? 0) + 1);
+        if (owner !== trial.sessionId) throw new Error(`Dynamic DOM acceptance ${id} was owned by session ${owner}, expected ${trial.sessionId}.`);
+      }
+      if (expectedIds.some(id => settlementCounts.get(id) !== 1)) throw new Error('Dynamic DOM targets were not accepted by exactly one scheduler settlement each.');
+      trial.dynamicAcceptanceSettlementTransitions = finalSnapshot.acceptedSettlementTransitions;
+    }
     trial.timestamps.restoreCompleted = lifecycle.restoreCompletedAt;
     const restoredLifecycle = lifecycle.restored;
     const [workerTrace, contentObservation] = await Promise.all([
@@ -2073,8 +2177,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const translatedFromDom = trial.rawDOM.translated;
     const providerSources = providerAttempts.flatMap(request => request.batchTexts ?? []);
     const expectedIds = originalsFromDom.map(([id]) => id);
-    const sourceToId = new Map(fixtureConfig.targets.map(target => [target.source, target.id]));
-    if (sourceToId.size !== fixtureConfig.targetCount) throw new Error('Fixture source texts are not unique; HTTP body-to-target order cannot be proven.');
+    const sourceToId = new Map(originals.map(([id, source]) => [source, id]));
+    if (sourceToId.size !== originals.length) throw new Error('Fixture source texts are not unique; HTTP body-to-target order cannot be proven.');
     const admissionIds = contentObservation.discoveryAdmissionOrder;
     if (contentObservation.admissionHookInstalled !== true) throw new Error('Per-session primitive-admission instrumentation was not installed.');
     const enqueuedIds = contentObservation.schedulerEnqueueOrder;
@@ -2134,7 +2238,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       translated: translatedFromDom,
       requests: providerSources,
       restored: new Map(restoredLifecycle.dom),
-      expectedCount: fixtureConfig.targetCount,
+      expectedCount: originals.length,
       acceptedIds,
       enqueuedIds,
       admittedIds: admissionIds,

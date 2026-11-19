@@ -5,7 +5,7 @@ import { PageTranslationBridge } from '../../../../src/features/page-translation
 import { MainFrameCoordinator } from '../../../../src/core/content-scripts/main/MainFrameCoordinator.js';
 import { PAGE_TRANSLATION_SLICED_DISCOVERY, PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY } from '../../../../src/features/page-translation/PageTranslationConstants.js';
 import { captureViewportWindow, installCallThrough, installPrimitiveAdmissionObserver } from './trace.mjs';
-import { drainAndDisconnectMeasurementObservers, groupMutationRecords, isDuplicateAcceptedMutation, trackAcceptedTarget } from './measurement-lifecycle.mjs';
+import { drainAndDisconnectMeasurementObservers, groupMutationRecords, isDuplicateAcceptedMutation, registerThenInsertCohort, trackAcceptedTarget, trackCohortAcceptedTarget } from './measurement-lifecycle.mjs';
 import { createCancellationLedger, installCancellationRuntimeMessageObserver, installTrustedLifecycleObserver, sessionIdForTranslationContext } from './cancellation-probes.mjs';
 import { createRawDOMMutationEvidence, installSuccessfulReplyProbe } from './successful-reply-probes.mjs';
 import { wrapPageTranslationStart } from './page-translation-start-probe.mjs';
@@ -75,9 +75,11 @@ const trace = {
   },
   captureSchedulerBatch(message) {
     const targetIds = this.selectedBatchMembers.at(-1);
+    const validTargetId = id => /^target-(?:[0-9]|1[01])$/.test(id)
+      || (this.dynamicDOMEnabled === true && /^dynamic-[12]-[1-3]$/.test(id));
     if (message?.action !== 'page-translate-batch' || typeof message.messageId !== 'string'
         || typeof message.data?.sessionId !== 'string' || !Array.isArray(targetIds) || !targetIds.length
-        || targetIds.some(id => !/^target-(?:[0-9]|1[01])$/.test(id))
+        || targetIds.some(id => !validTargetId(id))
         || this.schedulerRequests.some(item => item.messageId === message.messageId)) {
       this.schedulerBatchError = true;
       return false;
@@ -121,6 +123,7 @@ const trace = {
     const discovery = bridgeSession?.discovery ?? null;
     return {
       translationSessionId: scheduler.translationSessionId ?? null,
+      managerTranslating: manager.isTranslating === true,
       isTranslated: scheduler.isTranslated === true,
       translatedCount: scheduler.translatedCount ?? null,
       failedCount: scheduler.failedCount ?? null,
@@ -376,6 +379,34 @@ PageTranslationManager.prototype.restorePage = function(...args) {
   return result;
 };
 
+trace.acceptedSettlementIds = new Set();
+trace.acceptedSettlementTransitions = [];
+trace.enableDynamicDOMTracking = () => {
+  if (trace.dynamicDOMEnabled === true) return true;
+  const originalCreateSettlement = PageTranslationScheduler.prototype._createSettlement;
+  if (typeof originalCreateSettlement !== 'function') return false;
+  trace.discoveryAdmissionOrder = [];
+  const observedCreateSettlement = function (...args) {
+    const ownerSessionId = this.translationSessionId ?? null;
+    const settlement = originalCreateSettlement.apply(this, args);
+    const id = benchmarkTargetId(args[0]?.node);
+    const settle = settlement?.settle;
+    if (typeof settle === 'function') settlement.settle = function (outcome) {
+      const result = settle.call(this, outcome);
+      if (result === true && outcome === 'accepted' && id) {
+        trace.acceptedSettlementIds.add(id);
+        trace.acceptedSettlementTransitions.push({ id, sessionId: ownerSessionId, at: performance.now() });
+      }
+      return result;
+    };
+    return settlement;
+  };
+  observedCreateSettlement.__benchmarkAcceptedObserved = true;
+  PageTranslationScheduler.prototype._createSettlement = observedCreateSettlement;
+  trace.dynamicDOMEnabled = true;
+  return true;
+};
+
 installCallThrough(PageTranslationScheduler.prototype, 'enqueue', function (args) {
   const [text, , score, node] = args;
   const id = benchmarkTargetId(node);
@@ -392,7 +423,7 @@ installCallThrough(PageTranslationScheduler.prototype, '_executeBatchRequest', f
 });
 installCallThrough(PageTranslationBridge.prototype, 'translate', function () {
   trace.bridgeSession = this.session;
-  trace.discoveryAdmissionOrder = [];
+  if (trace.dynamicDOMEnabled !== true) trace.discoveryAdmissionOrder = [];
   trace.viewportWindowObservation = null;
   const session = this.session;
   const nodesTranslator = session?.domTranslator?.nodesTranslator;
@@ -430,6 +461,7 @@ installCallThrough(PageTranslationBridge.prototype, 'initialize', function (args
 });
 
 let measurement = null;
+let configuredExpectedTargetIds = null;
 const visible = element => {
   const rect = element.getBoundingClientRect();
   const style = getComputedStyle(element);
@@ -440,6 +472,12 @@ trace.startMeasurement = () => {
   const targets = [...document.querySelectorAll('[data-bench-id]')].map(element => ({
     id: element.dataset.benchId, source: element.textContent, visibleAtStart: visible(element), element,
   }));
+  const initialTargetIds = targets.map(target => target.id);
+  const expectedTargetIds = configuredExpectedTargetIds ?? initialTargetIds;
+  const dynamicTargetTracking = configuredExpectedTargetIds !== null;
+  if (initialTargetIds.some(id => !expectedTargetIds.includes(id))) throw new Error('Expected target inventory does not include every initial fixture target.');
+  const initialRemainingIds = dynamicTargetTracking ? new Set(initialTargetIds) : null;
+  const expectedRemainingIds = dynamicTargetTracking ? new Set(expectedTargetIds) : null;
   const targetByElement = new WeakMap(targets.map(target => [target.element, target]));
   const targetById = new Map(targets.map(target => [target.id, target]));
   const acceptedIds = new Set();
@@ -448,8 +486,13 @@ trace.startMeasurement = () => {
   const observerState = { recordCount: 0 };
   const firstAcceptedAtById = {};
   const visibleIds = new Set(targets.filter(target => target.visibleAtStart).map(target => target.id));
+  const visibleRemainingIds = dynamicTargetTracking ? new Set(visibleIds) : null;
   let firstVisibleAcceptedWriteAt = null;
-  const completionTimes = { visible: null, all: null };
+  const completionTimes = dynamicTargetTracking
+    ? { visible: null, initialAll: null, all: null, visibleMaxAcceptedAt: null, initialMaxAcceptedAt: null, allMaxAcceptedAt: null }
+    : { visible: null, all: null };
+  const dynamicCohorts = new Map();
+  const dynamicCohortByTargetId = new Map();
   const processMutations = records => {
     observerState.recordCount += records.length;
     const groups = groupMutationRecords(records, record => {
@@ -488,8 +531,12 @@ trace.startMeasurement = () => {
       const acceptedAt = Date.now();
       const firstObservation = trackAcceptedTarget({
         id: target.id, at: acceptedAt, acceptedIds, firstAcceptedAtById,
-        visibleIds: [...visibleIds], targetCount: targets.length, completionTimes,
+        visibleIds: [...visibleIds], targetCount: targets.length,
+        ...(dynamicTargetTracking ? { visibleRemainingIds, initialRemainingIds, expectedRemainingIds } : {}), completionTimes,
       });
+      const acceptedPerformanceAt = performance.now();
+      const cohort = dynamicCohortByTargetId.get(target.id);
+      if (cohort) trackCohortAcceptedTarget(cohort, target.id, acceptedPerformanceAt);
       if (firstObservation) trace.record('dom.acceptedWrite', { id: target.id, at: acceptedAt, visibleAtStart: target.visibleAtStart });
       if (target.visibleAtStart && firstVisibleAcceptedWriteAt === null) {
         firstVisibleAcceptedWriteAt = acceptedAt;
@@ -510,7 +557,7 @@ trace.startMeasurement = () => {
       longTaskObserver.observe({ type: 'longtask', buffered: false });
     } catch (error) { longTasksUnavailableReason = error.message; longTaskObserver = null; }
   }
-  measurement = { startedAt: Date.now(), targets, acceptedIds, duplicateAcceptedIds, mutations, observerState, firstAcceptedAtById, visibleIds, completionTimes, observer, processMutations, longTaskObserver, longTasks, longTasksUnavailableReason, firstVisible: () => firstVisibleAcceptedWriteAt };
+  measurement = { startedAt: Date.now(), targets, initialTargetIds, expectedTargetIds, targetByElement, targetById, acceptedIds, duplicateAcceptedIds, mutations, observerState, firstAcceptedAtById, visibleIds, completionTimes, dynamicCohorts, dynamicCohortByTargetId, observer, processMutations, longTaskObserver, longTasks, longTasksUnavailableReason, firstVisible: () => firstVisibleAcceptedWriteAt };
   trace.record('measurement.start', { targetCount: targets.length });
   return {
     startedAt: measurement.startedAt,
@@ -520,6 +567,58 @@ trace.startMeasurement = () => {
     longTasksUnavailableReason,
   };
 };
+trace.setExpectedTargetIds = ids => {
+  if (measurement || !Array.isArray(ids) || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string')) {
+    throw new Error('Expected target IDs must be configured once, before measurement, as a unique string list.');
+  }
+  configuredExpectedTargetIds = [...ids];
+  return true;
+};
+trace.insertDynamicCohort = cohort => {
+  if (trace.dynamicDOMEnabled !== true || !measurement || !Array.isArray(cohort?.targets) || typeof cohort.id !== 'string') throw new Error('Dynamic cohort registration requires enabled dynamic tracking, an active measurement and cohort targets.');
+  if (measurement.dynamicCohorts.has(cohort.id)) throw new Error(`Dynamic cohort already inserted: ${cohort.id}`);
+  const targetIds = cohort.targets.map(target => target.id);
+  if (!targetIds.length || new Set(targetIds).size !== targetIds.length
+      || cohort.targets.some(target => typeof target.id !== 'string' || typeof target.source !== 'string'
+        || measurement.targetById.has(target.id))) throw new Error(`Dynamic cohort has invalid or duplicate target IDs: ${cohort.id}`);
+  const prepared = cohort.targets.map(target => ({ ...target, visibleAtStart: false, element: null }));
+  const cohortTiming = { id: cohort.id, targetIds, remainingIds: new Set(targetIds), insertedAt: null, firstAcceptedAt: null, completionAt: null, acceptedAtById: {} };
+  // Register both observer and provider ledgers before making nodes discoverable to production.
+  const insertion = registerThenInsertCohort({
+    register: () => {
+      const registeredElements = trace.registerProviderTargets?.(prepared.map(({ id, source }) => ({ id, source })));
+      for (const [index, target] of prepared.entries()) {
+        const element = registeredElements?.[index] ?? document.createElement('p');
+        element.dataset.benchId = target.id;
+        element.textContent = target.source;
+        target.element = element;
+        measurement.targets.push(target);
+        measurement.targetByElement.set(element, target);
+        measurement.targetById.set(target.id, target);
+        measurement.dynamicCohortByTargetId.set(target.id, cohortTiming);
+      }
+      measurement.dynamicCohorts.set(cohort.id, cohortTiming);
+    },
+    now: () => performance.now(),
+    insert: () => {
+      const parent = document.querySelector('main') ?? document.body;
+      for (const target of prepared) parent.append(target.element);
+    },
+  });
+  cohortTiming.insertedAt = insertion.insertedAt;
+  trace.record('dynamic.cohort.inserted', { id: cohort.id, insertedAt: cohortTiming.insertedAt, targetIds });
+  return { id: cohort.id, insertedAt: cohortTiming.insertedAt, targetIds };
+};
+trace.dynamicSnapshot = () => ({
+  acceptedSettlementIds: [...trace.acceptedSettlementIds],
+  acceptedSettlementTransitions: trace.acceptedSettlementTransitions.map(transition => ({ ...transition })),
+  acceptedDomIds: measurement ? [...measurement.acceptedIds] : [],
+  cohorts: measurement ? [...measurement.dynamicCohorts.values()].map(cohort => ({
+    id: cohort.id, targetIds: [...cohort.targetIds], insertedAt: cohort.insertedAt,
+    firstAcceptedAt: cohort.firstAcceptedAt, completionAt: cohort.completionAt,
+    acceptedAtById: { ...cohort.acceptedAtById },
+  })) : [],
+});
 trace.stopMeasurement = () => {
   if (!measurement) return { available: false, reason: 'measurement not started' };
   const current = measurement;
@@ -538,12 +637,22 @@ trace.stopMeasurement = () => {
     available: true, startedAt: current.startedAt, stoppedAt: Date.now(), targetCount: current.targets.length,
     acceptedUniqueCount: current.acceptedIds.size, acceptedIds: [...current.acceptedIds], duplicateAcceptedIds: [...current.duplicateAcceptedIds],
     firstAcceptedAtById: current.firstAcceptedAtById,
+    expectedTargetIds: [...current.expectedTargetIds],
+    initialTargetIds: [...current.initialTargetIds],
     visibleIds: [...current.visibleIds], visibleSetCompletionAt: current.completionTimes.visible,
+    initialTargetsCompletionAt: current.completionTimes.initialAll,
     allTargetsCompletionAt: current.completionTimes.all,
     observerRecordCount: current.observerState.recordCount,
     firstVisibleAcceptedWriteAt: current.firstVisible(), mutations: current.mutations,
     longTasks: current.longTaskObserver ? current.longTasks : null,
     longTasksUnavailableReason: current.longTasksUnavailableReason,
+    dynamicCohorts: [...current.dynamicCohorts.values()].map(cohort => ({
+      id: cohort.id, targetIds: [...cohort.targetIds], insertedAt: cohort.insertedAt,
+      firstAcceptedAt: cohort.firstAcceptedAt, completionAt: cohort.completionAt,
+      firstAcceptedLatencyMs: cohort.firstAcceptedAt === null ? null : cohort.firstAcceptedAt - cohort.insertedAt,
+      completionLatencyMs: cohort.completionAt === null ? null : cohort.completionAt - cohort.insertedAt,
+      acceptedAtById: { ...cohort.acceptedAtById },
+    })),
   };
 };
 trace.calibrateLongTasks = async () => {
