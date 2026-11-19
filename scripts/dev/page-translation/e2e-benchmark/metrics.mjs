@@ -189,6 +189,10 @@ export function mapProviderHTTPRequestSequence(providerAttempts, sourceToId, pro
   }));
 }
 
+export function canonicalProviderSourceAttempts(providerAttempts) {
+  return providerAttempts.filter(request => !request.resilienceInjected503 && !request.resilienceInjected429);
+}
+
 export function validateRunGate(options = {}) {
   const input = options && typeof options === 'object' ? options : {};
   const { legacyResults, measuredSamples, allResults, expectedModes, expectedScenarios, expectedSamples, expectedWarmups, buildParity } = input;

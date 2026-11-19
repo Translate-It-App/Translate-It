@@ -11,6 +11,7 @@ import { BaseProvider } from '../../../../src/features/translation/providers/Bas
 import { MicrosoftEdgeProvider } from '../../../../src/features/translation/providers/MicrosoftEdgeProvider.js';
 import { makeTrace, installCallThrough, installTimedCallThrough } from './trace.mjs';
 import { createCancellationLedger, matchProviderPhysicalRoot } from './cancellation-probes.mjs';
+import { projectRateLimitQueueItems } from './rate-limit-queue.mjs';
 import { observeControllerAbort } from '../e2e-firefox/controller-abort-observer.mjs';
 
 const trace = makeTrace('worker');
@@ -96,12 +97,14 @@ function installResilienceQueueInstrumentation() {
       providerName: item?.providerName ?? null, context: item?.context ?? null,
       attemptNumber: Number.isInteger(item?.attempts) ? item.attempts + 1 : null,
       previousErrorType: item?.lastError?.type ?? null,
+      retryAt: item?.lastError?.retryAt ?? null,
       attemptLimit: item?.getRetryStrategy?.().maxRetries ?? null, retryScheduledAt,
     };
     trace.record('queueManager.processItem.start', {
       queueItemId: token.queueItemId, messageId: token.messageId, providerName: token.providerName,
       context: token.context, attemptNumber: token.attemptNumber, previousErrorType: token.previousErrorType,
       attemptLimit: token.attemptLimit, retryScheduledAt: token.retryScheduledAt,
+      retryAt: token.retryAt,
     });
     return token;
   }, token => {
@@ -116,6 +119,7 @@ function installResilienceQueueInstrumentation() {
       providerName: token?.providerName ?? null, attemptNumber: token?.attemptNumber ?? null,
       attempts: item?.attempts ?? null, attemptLimit: item?.getRetryStrategy?.().maxRetries ?? null,
       status, lastErrorType: item?.lastError?.type ?? null, retryTimerActive, retryScheduledAt,
+      retryAt: item?.lastError?.retryAt ?? null,
     });
     if (status === 'completed' || status === 'failed') retryScheduledAtById.delete(item?.id);
   });
@@ -237,7 +241,11 @@ const marker = {
       sessionId,
       ledger: cancellationLedger.snapshot(sessionId),
       instrumentationErrors: [...cancellationInstrumentationErrors],
-      providerRoots: roots.map(root => ({ messageId: root.messageId, sessionId: root.sessionId, texts: root.operation.texts, status: root.operation.status, controllerAborted: root.controller?.signal?.aborted ?? null, errorName: root.operation.errorName ?? null, error: root.operation.error ?? null, settledSequence: root.operation.settledSequence ?? null })),
+      providerRoots: roots.map(root => ({ messageId: root.messageId, sessionId: root.sessionId,
+        texts: root.operation?.texts ?? root.texts, status: root.operation?.status ?? root.status,
+        controllerAborted: root.controller?.signal?.aborted ?? null,
+        errorName: root.operation?.errorName ?? null, error: root.operation?.error ?? null,
+        settledSequence: root.operation?.settledSequence ?? null })),
       controllers: [...lifecycleControllers.entries()].map(([messageId, entry]) => ({
         messageId, context: entry.context, aborted: entry.controller.signal.aborted,
         sessionId: providerRoots.find(root => root.messageId === messageId)?.sessionId ?? null,
@@ -292,9 +300,15 @@ const marker = {
       } : null,
       rateLimit: rateAvailable
         ? Object.fromEntries([...rateLimitManager.providerStates].map(([provider, state]) => [provider, {
+          now: Date.now(),
+          retryAt: state.retryAt ?? null,
+          capacity: state.config?.maxConcurrent ?? null,
           activeRequests: state.activeRequests ?? null,
           queuedRequests: state.queues && typeof state.queues === 'object'
             ? Object.values(state.queues).reduce((count, queue) => count + (Array.isArray(queue) ? queue.length : 0), 0)
+            : null,
+          queueItems: state.queues && typeof state.queues === 'object'
+            ? projectRateLimitQueueItems(state.queues, tracker?.requests)
             : null,
           isProcessingQueue: state.isProcessingQueue ?? null,
         }]))

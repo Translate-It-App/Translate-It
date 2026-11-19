@@ -56,6 +56,20 @@ BENCH_RESILIENCE_PROBES=googlev2-503 \
 
 The separate `*-resilience-googlev2-503.json` artifact preserves raw physical attempts, Page/root/QueueManager message and item IDs, resolver state, queue start/settlement status, retry error type/attempt limit/timer state, retry delay, resource cleanup, DOM and Restore evidence. The observed retry delay must be 950–2050ms, allowing 50ms timestamp tolerance around the production SERVER_ERROR 1–2s jitter window. The selector fails closed when the resolver is not concrete or the request cannot be tied to exactly one provider root and fixture target set. This is an offline deterministic harness response, not a live Google service/latency test.
 
+### Isolated Custom 429 shared-cooldown resilience probe (Phase 2.3.2)
+
+This opt-in probe selects the Custom synthetic adapter at Optimization Level 3 with Fluid scheduling, waits for a concrete AUTO resolver, then injects one `429` with `Retry-After: 5`. It uses the blank-key strict Custom fixture and does not send live traffic. It shares the production QueueManager, RateLimitManager and limiter, and writes a separate `*-resilience-custom-429.json` raw artifact without performance summaries or comparisons.
+
+```sh
+BENCH_RESILIENCE_PROBES=custom-429 \
+  BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/custom-429-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+After the initial visible band is accepted, the probe records a concrete AUTO resolver/session and arms only for later bands. It claims and holds two disjoint same-session Fetch requests (A/B), injects the 429 into A, and observes the typed QueueManager settlement plus server/limiter deadlines. Because both Page scheduler flush slots are occupied, it fulfills B once the cooldown is established; B must complete Network and worker settlement before the unchanged deadline. The newly freed slot lets the next normal Page batch P enter the real Custom limiter queue, where the probe verifies same-session ownership, spare capacity, and that P remains queued before the deadline. No physical request may start prematurely. The validator also requires one successful A retry retaining its QueueManager item/message, exact 1,000-target DOM/Restore/session evidence, and logical/physical concurrency no greater than two. Any timeout fails closed and settles held Fetches once; partial evidence is retained in the raw artifact. This is an offline resilience correctness check, not a live Custom service or latency test.
+
 ### Custom provider offline matrix
 
 This opt-in lane exercises the production `CustomProvider` and parser through the real scheduler and provider pipeline. The harness intercepts the exact synthetic `https://benchmark-custom.invalid/v1/chat/completions` POST only when `BENCH_PROVIDER=custom` selects this lane; requests to that endpoint are blocked in discovery runs and other provider lanes. The fixed model is `benchmark-custom-model`; the harness sets `CUSTOM_API_KEY` blank, rejects Authorization headers, validates the actual JSON request, and returns reversed structured translations with the exact wire IDs. No credentials or live provider traffic are used. HTTP sequence `ids` are fixture target IDs mapped from request texts; Custom parser wire IDs are recorded separately as `wireIds`. Each successful trial requires one HTTP request per observed logical batch, exact source and DOM accounting, and correlated terminal network outcomes; retries or structured-recovery requests fail the trial.

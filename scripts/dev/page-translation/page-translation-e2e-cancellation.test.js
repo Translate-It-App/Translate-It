@@ -194,6 +194,30 @@ describe('Sliced discovery cancellation probe evidence', () => {
     expect(chromeClosed).toBe(true);
   });
 
+  it('tracks unreserved Custom handlers through Fetch-disable and reports a bounded drain failure', async () => {
+    const events = [];
+    const lifecycle = createCancellationRequestLifecycle(async () => ({ ok: true }));
+    let releaseHandler;
+    const handler = lifecycle.trackHandler(null, new Promise(resolve => { releaseHandler = resolve; }));
+    const draining = lifecycle.closeAndDrain({
+      timeoutMs: 500,
+      disableFetch: async () => {
+        events.push('Fetch.disable');
+        releaseHandler();
+      },
+    });
+    handler.then(() => events.push('handler-settled'));
+    const result = await draining;
+    expect(events).toEqual(['Fetch.disable', 'handler-settled']);
+    expect(result).toMatchObject({ ok: true, closing: true, handlerCount: 0, reservationCount: 0 });
+
+    const stuckLifecycle = createCancellationRequestLifecycle(async () => ({ ok: true }));
+    stuckLifecycle.trackHandler(null, new Promise(() => {}));
+    const stuck = await stuckLifecycle.closeAndDrain({ timeoutMs: 20, disableFetch: async () => {} });
+    expect(stuck.ok).toBe(false);
+    expect(stuck.errors.join(' ')).toContain('Request handlers did not drain');
+  });
+
   it('keeps promises registered during a drain and preserves origin session attribution', () => {
     const ledger = createCancellationLedger();
     const root = ledger.begin('provider-root', 'A', { messageId: 'batch-A' });

@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, measureScenarioRuns, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
+import { canonicalProviderSourceAttempts, classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, measureScenarioRuns, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
+import { projectRateLimitQueueItems } from './e2e-benchmark/rate-limit-queue.mjs';
 import { decodeGoogleV2Request, GOOGLE_V2_DELIMITER, mapGoogleV2Response } from './e2e-benchmark/google-v2-fixture.mjs';
 import { CUSTOM_FIXTURE_ENDPOINT, CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL, decodeCustomRequest, mapCustomResponse } from './e2e-benchmark/custom-fixture.mjs';
 import { decodeGeminiRequest, GEMINI_FIXTURE_KEY, GEMINI_FIXTURE_MODEL, GEMINI_FIXTURE_URL, mapGeminiResponse } from './e2e-benchmark/gemini-fixture.mjs';
@@ -12,23 +14,38 @@ import { registryIdToName } from '../../../src/features/translation/providers/Pr
 import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
 import { AIResponseParser } from '../../../src/features/translation/providers/utils/AIResponseParser.js';
 import { ResponseFormat } from '../../../src/features/translation/core/ProviderConfigurations.js';
-import { parseResilienceProbeSelection, selectResolvedGoogleAttempt, shouldEnableResilienceQueueProbe, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
+import { findSessionOwnedPendingRequest, parseResilienceProbeSelection, selectResolvedGoogleAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom429Evidence, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
 
 describe('page translation benchmark measurements', () => {
+  it('includes the queue projector in provenance and keeps Google resilience injection Google-only 503', () => {
+    const source = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
+    expect(source).toContain("'scripts/dev/page-translation/e2e-benchmark/rate-limit-queue.mjs'");
+    expect(source).toContain('const handlerLifecycle = cancellationControl?.requestLifecycle ?? requestLifecycle;');
+    expect(source).toContain('handlerLifecycle.trackHandler(reservation, job)');
+    const googleBranch = source.split("if (resilienceProbe && classification.provider === 'googlev2')")[1]?.split("if (custom429Protocol && classification.provider === 'custom')")[0];
+    expect(googleBranch).toContain('responseCode: 503');
+    expect(googleBranch).not.toMatch(/custom-429|Retry-After|retryAfterSeconds|status: 429/);
+  });
+
   it('selects only a first Google V2 attempt after concrete AUTO source resolution and validates retry accounting', () => {
     expect(parseResilienceProbeSelection(undefined)).toEqual([]);
     expect(parseResilienceProbeSelection('googlev2-503')).toEqual(['googlev2-503']);
+    expect(parseResilienceProbeSelection('custom-429')).toEqual(['custom-429']);
     expect(() => parseResilienceProbeSelection('googlev2-503,other')).toThrow();
     expect(shouldEnableResilienceQueueProbe(null)).toBe(false);
     expect(shouldEnableResilienceQueueProbe('googlev2-503')).toBe(true);
+    expect(shouldEnableResilienceQueueProbe('custom-429')).toBe(true);
     expect(validateResilienceProbeIsolation({ selected: true, provider: 'googlev2', optimizationLevel: 3, modes: 'sliced', scenario: 'scroll-through', schedulingMode: 'fluid' })).toBe(true);
     expect(() => validateResilienceProbeIsolation({ selected: true, provider: 'googlev2', optimizationLevel: 3, modes: 'legacy', scenario: 'scroll-through', schedulingMode: 'fluid' })).toThrow();
     expect(() => validateResilienceProbeIsolation({ selected: true, provider: 'googlev2', optimizationLevel: 3, competingProbe: true })).toThrow();
+    expect(validateResilienceProbeIsolation({ selected: true, probe: 'custom-429', provider: 'custom', optimizationLevel: 3, modes: 'sliced', scenario: 'scroll-through', schedulingMode: 'fluid' })).toBe(true);
+    expect(() => validateResilienceProbeIsolation({ selected: true, probe: 'custom-429', provider: 'googlev2', optimizationLevel: 3 })).toThrow();
     const request = { networkId: 'net-1', sourceLanguage: 'en' };
     const classification = { kind: 'provider-translation', provider: 'googlev2' };
     expect(selectResolvedGoogleAttempt({ request, classification, resolver: { present: true, resolutionPending: true, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' }, failedCount: 0 }).selected).toBe(false);
     expect(selectResolvedGoogleAttempt({ request, classification, resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'auto', effectiveTargetLanguage: 'fr' }, failedCount: 0 }).selected).toBe(false);
     expect(selectResolvedGoogleAttempt({ request, classification, resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' }, failedCount: 0 })).toMatchObject({ selected: true, source: 'en', target: 'fr' });
+    expect(selectResolvedCustomAttempt({ request, classification: { kind: 'provider-translation', provider: 'custom' }, resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' }, failedCount: 0 })).toMatchObject({ selected: true, source: 'en', target: 'fr' });
     expect(selectResolvedGoogleAttempt({ request: { ...request, sourceLanguage: 'nl' }, classification, resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' }, failedCount: 0 }).selected).toBe(false);
     expect(selectResolvedGoogleAttempt({ request, classification, resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' }, failedCount: 1 }).selected).toBe(false);
     const failed = { attemptId: 'failed', networkId: 'network-1', logicalMessageId: 'message-1', pageSessionId: 'session-1', targetIds: ['a'], texts: ['one'], status: 503 };
@@ -46,6 +63,19 @@ describe('page translation benchmark measurements', () => {
     expect(validateQueueRetryEvidence(queueEvents.map(event => event.name.endsWith('.end') && event.status === 'retrying' ? { ...event, lastErrorType: 'NETWORK_ERROR' } : event), { messageId: 'message-1' }).ok).toBe(false);
     expect(validateQueueRetryEvidence(queueEvents.map(event => event.name.endsWith('.end') ? { ...event, attemptLimit: 2 } : event), { messageId: 'message-1' }).ok).toBe(false);
     expect(validateQueueRetryEvidence(queueEvents.map(event => event.name.endsWith('.start') && event.at === 2_510 ? { ...event, queueItemId: 'other-queue-item' } : event), { messageId: 'message-1' }).ok).toBe(false);
+    const rateLimitEvents = queueEvents.map(event => ({
+      ...event, attemptLimit: event.name.endsWith('.start') && event.at === 1_000 ? 2 : 5,
+      lastErrorType: event.name.endsWith('.end') && event.status === 'retrying' ? 'RATE_LIMIT_REACHED' : event.lastErrorType,
+      previousErrorType: event.attemptNumber === 2 ? 'RATE_LIMIT_REACHED' : event.previousErrorType,
+      retryAt: event.name.endsWith('.end') && event.status === 'retrying' ? 6_000 : event.retryAt,
+      at: event.at === 2_510 ? 6_000 : event.at,
+      retryScheduledAt: event.name.endsWith('.end') && event.status === 'retrying'
+        || event.name.endsWith('.start') && event.at === 2_510 ? 1_010 : event.retryScheduledAt,
+    }));
+    expect(validateQueueRetryEvidence(rateLimitEvents, {
+      messageId: 'message-1', expectedErrorType: 'RATE_LIMIT_REACHED', minDelayMs: 4_900,
+      maxDelayMs: Number.MAX_SAFE_INTEGER, expectedAttemptLimit: 5,
+    })).toMatchObject({ ok: true, observed: { attempts: [1, 2], attemptLimit: 5, errorType: 'RATE_LIMIT_REACHED', serverRetryAt: 6_000, backoffMs: 4_990 } });
     const evidence = {
       injected503: [failed],
       attempts: [failed, { ...failed, attemptId: 'retry', networkId: 'network-2', retryOf: 'failed', status: 200 }],
@@ -60,6 +90,77 @@ describe('page translation benchmark measurements', () => {
     expect(validateResilienceAccounting({ ...evidence, injected503: [{ ...failed, status: 200 }] }).ok).toBe(false);
     expect(validateResilienceAccounting({ ...evidence, attempts: [failed, { ...failed, networkId: 'network-2', retryOf: 'failed', status: 200, logicalMessageId: null }] }).ok).toBe(false);
   });
+  it('correlates pending limiter queue items to roots owned by the requested page session', () => {
+    const queueItems = [{ messageId: 'pending-page' }, { messageId: 'pending-other' }, { messageId: 'excluded' }];
+    const ownedQueueItems = queueItems.map((item, index) => ({
+      ...item, sessionId: ['session-a', 'session-b', 'session-a'][index],
+    }));
+
+    expect(findSessionOwnedPendingRequest(ownedQueueItems, 'session-a', ['excluded'])).toBe(ownedQueueItems[0]);
+    expect(findSessionOwnedPendingRequest([ownedQueueItems[1]], 'session-a')).toBeNull();
+    expect(findSessionOwnedPendingRequest([{ messageId: 'unowned', sessionId: null }], 'session-a')).toBeNull();
+  });
+  it('requires complete Custom 429 cooldown, sibling, limiter queue and physical-start evidence', () => {
+    const failed = { attemptId: 'failed', status: 429, retryAfterSeconds: 5, retryAfterHeader: '5', logicalMessageId: 'message-a',
+      queueItemId: 'item-a', pageSessionId: 'session-a', targetIds: ['target-a'], texts: ['a'],
+      physicalStartedWallMs: 800, physicalStartedMonoMs: 80, responseWallMs: 1_000, responseMonoMs: 280, queueRetryAt: 6_000 };
+    const retry = { attemptId: 'retry', retryOf: 'failed', status: 200, logicalMessageId: 'message-a',
+      queueItemId: 'item-a', pageSessionId: 'session-a', targetIds: ['target-a'], texts: ['a'],
+      physicalStartedWallMs: 6_100, physicalStartedMonoMs: 6_100 };
+    const evidence = {
+      injected429: [failed], attempts: [failed, retry],
+      arm: { sessionId: 'session-a', resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' } },
+      roles: {
+        A: { attemptId: 'failed', networkId: 'net-a', messageId: 'message-a', sessionId: 'session-a', targetIds: ['target-a'], physicalStartedWallMs: 800, physicalStartedMonoMs: 80, source: 'en', target: 'fr', fetchHeldAt429: true },
+        B: { networkId: 'net-b', messageId: 'message-b', sessionId: 'session-a', targetIds: ['target-b'], physicalStartedWallMs: 900, physicalStartedMonoMs: 90, source: 'en', target: 'fr', responseReleasedWallMs: 1_200, responseReleasedMonoMs: 380, heldThroughCooldownEstablished: true },
+      },
+      serverRetryAt: 6_000, limiterRetryAt: 6_100, limiterRetryAtAfterSibling: 6_100,
+      cooldown: { establishedWallMs: 1_100, establishedMonoMs: 380, limiterRetryAt: 6_100,
+        limiterRetryAtMonoMs: 5_380, retainedAfterSiblingSuccess: true },
+      sibling: { success: true, messageId: 'message-b', sessionId: 'session-a', completedWallMs: 1_500, queueSettledAt: 1_450, rootStatus: 'fulfilled' },
+      pendingLimiterSibling: { messageId: 'message-p', sessionId: 'session-a', observedAtWallMs: 1_600, activeRequests: 1, capacity: 2 },
+      pendingStillQueuedAfterSibling: true,
+      prematurePhysicalStarts: [], queueRetryEvidence: { ok: true },
+      translation: { exact: true, duplicates: 0, targetCount: 1000, sourceCount: 1000, restoreExact: true, terminal: true,
+        sessionOwner: 'session-a', duplicateAcceptedIds: [], acceptedTargetCount: 1000 },
+      pageSchedulerAfterRestore: { translationSessionId: null },
+      concurrency: { peakPhysical: 2, peakLogical: 2 }, cleanup: { ok: true },
+    };
+    evidence.queueRetryEvidence = { ok: true, observed: { errorType: 'RATE_LIMIT_REACHED', attemptLimit: 5,
+      attempts: [1, 2], queueItemId: 'item-a', serverRetryAt: 6_000 } };
+    expect(() => JSON.stringify(evidence)).not.toThrow();
+    expect(evidence.injected429[0]).not.toHaveProperty('requestRecord');
+    expect(evidence.injected429[0]).not.toHaveProperty('root');
+    expect(evidence.injected429[0]).not.toHaveProperty('responseBody');
+    expect(validateCustom429Evidence(evidence).ok).toBe(true);
+    expect(evidence.translation.sessionOwner).toBe(evidence.roles.A.sessionId);
+    expect(evidence.pageSchedulerAfterRestore.translationSessionId).toBeNull();
+    expect(validateCustom429Evidence({ ...evidence, prematurePhysicalStarts: [retry] }).ok).toBe(false);
+    expect(validateCustom429Evidence({
+      ...evidence,
+      attempts: [...evidence.attempts, {
+        attemptId: 'early-after-response',
+        physicalStartedWallMs: failed.responseWallMs + 7.664,
+        physicalStartedMonoMs: failed.responseMonoMs + 7.664,
+      }],
+    })).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining(['physical provider request started before the shared cooldown deadline']),
+    });
+    expect(validateCustom429Evidence({ ...evidence, pendingLimiterSibling: null }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, limiterRetryAt: 5_999 }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, attempts: [failed, { ...retry, queueItemId: 'wrong' }] }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, attempts: [failed, { ...retry, physicalStartedWallMs: 6_099, physicalStartedMonoMs: 5_376 }] }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, sibling: { ...evidence.sibling, completedWallMs: 6_100 } }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, roles: { ...evidence.roles, B: { ...evidence.roles.B, targetIds: ['target-a'] } } }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, roles: { ...evidence.roles, B: { ...evidence.roles.B, physicalStartedMonoMs: null } } }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, pendingStillQueuedAfterSibling: false }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, limiterRetryAtAfterSibling: 6_101 }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, serverRetryAt: 5_996 }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, concurrency: { peakPhysical: 3, peakLogical: 2 } }).ok).toBe(false);
+    expect(validateCustom429Evidence({ ...evidence, translation: { ...evidence.translation, restoreExact: false } }).ok).toBe(false);
+  });
+
   it('validates Edge and Google V2 lanes without changing legacy selection', () => {
     expect(parseProviderLane({})).toBeNull();
     expect(() => parseProviderLane({ BENCH_LANE: 'provider' })).toThrow('BENCH_PROVIDER');
@@ -889,6 +990,45 @@ describe('page translation benchmark measurements', () => {
     ]);
     expect(mapProviderHTTPRequestSequence(attempts, sourceToId, 'edge')).toEqual([
       { at: 12, ids: ['target-B', 'target-A'], bodyBytes: 42 },
+    ]);
+  });
+
+  it('excludes only the injected failure from exact sources while retaining every physical attempt', () => {
+    const sourceToId = new Map([['text A', 'target-A'], ['text B', 'target-B']]);
+    const failed = { batchTexts: ['text A'], resilienceCorrelation: { logicalMessageId: 'message-A' }, resilienceInjected429: true };
+    const sibling = { batchTexts: ['text B'], resilienceCorrelation: { logicalMessageId: 'message-B' } };
+    const retry = { batchTexts: ['text A'], resilienceCorrelation: { logicalMessageId: 'message-A', retryOf: 'resilience-15' } };
+    const unrelated = { batchTexts: ['text A'], resilienceCorrelation: { logicalMessageId: 'message-A', retryOf: 'resilience-16' } };
+    const attempts = [failed, sibling, retry, unrelated];
+
+    expect(canonicalProviderSourceAttempts(attempts)).toEqual([sibling, retry, unrelated]);
+    expect(mapProviderHTTPRequestSequence(attempts, sourceToId, 'custom').map(request => request.ids))
+      .toEqual([['target-A'], ['target-B'], ['target-A'], ['target-A']]);
+    expect(validateResilienceAccounting({
+      injected503: [{ attemptId: 'resilience-15', status: 503, logicalMessageId: 'message-A', pageSessionId: 'session-A', targetIds: ['target-A'], texts: ['text A'] }],
+      attempts: [
+        { attemptId: 'resilience-15', status: 503, logicalMessageId: 'message-A', pageSessionId: 'session-A', targetIds: ['target-A'], texts: ['text A'] },
+        { attemptId: 'resilience-16', retryOf: 'resilience-15', status: 200, logicalMessageId: 'message-A', pageSessionId: 'session-A', targetIds: ['target-A'], texts: ['text A'] },
+        { attemptId: 'resilience-17', status: 200, logicalMessageId: 'message-A', pageSessionId: 'session-A', targetIds: ['target-A'], texts: ['text A'] },
+      ],
+      unnecessaryRetransmits: [{ attemptId: 'resilience-17' }],
+      siblingRequests: [{ status: 200 }],
+      translation: { exact: true, duplicates: 0 }, cleanup: { ok: true }, queueRetryEvidence: { ok: true },
+    }).ok).toBe(false);
+  });
+
+  it('projects limiter-queued request ownership from the tracked translation request', () => {
+    const request = { options: { messageId: 'queued' }, context: 'page' };
+    const tracker = new Map([
+      ['queued', { data: { sessionId: 'session-P' }, metadata: { sessionId: 'metadata-P' } }],
+      ['direct', { data: { sessionId: 'tracked-session' } }],
+    ]);
+    expect(projectRateLimitQueueItems({ provider: [request, {
+      options: { messageId: 'direct', sessionId: 'direct-session' },
+    }, { options: { messageId: 'other' } }] }, tracker)).toEqual([
+      { messageId: 'queued', sessionId: 'session-P', context: 'page' },
+      { messageId: 'direct', sessionId: 'direct-session', context: null },
+      { messageId: 'other', sessionId: null, context: null },
     ]);
   });
 

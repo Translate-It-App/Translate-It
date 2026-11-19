@@ -9,7 +9,7 @@ import { buildBenchmarkExtension } from './build.mjs';
 import { validateBuildParity } from './build-environment.mjs';
 import { launchChrome } from './chrome.mjs';
 import { writeBenchmarkArtifact } from './artifact-writer.mjs';
-import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership, measureScenarioRuns } from './metrics.mjs';
+import { canonicalProviderSourceAttempts, classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership, measureScenarioRuns } from './metrics.mjs';
 import { decodeGoogleV2Request, GOOGLE_V2_ENDPOINT, mapGoogleV2Response } from './google-v2-fixture.mjs';
 import { CUSTOM_FIXTURE_ENDPOINT, decodeCustomRequest, mapCustomResponse } from './custom-fixture.mjs';
 import { decodeGeminiRequest, mapGeminiResponse } from './gemini-fixture.mjs';
@@ -18,7 +18,7 @@ import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, find
 import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, modeOrder, mapProviderBatchIds, parseProviderLane, providerLaneSettings, providerLaneFinalization, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
-import { parseResilienceProbeSelection, selectResolvedGoogleAttempt, shouldEnableResilienceQueueProbe, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './resilience-probes.mjs';
+import { findSessionOwnedPendingRequest, parseResilienceProbeSelection, selectResolvedGoogleAttempt, shouldEnableResilienceQueueProbe, validateCustom429Evidence, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './resilience-probes.mjs';
 
 const root = process.cwd();
 const providerLane = parseProviderLane(process.env);
@@ -30,6 +30,7 @@ if ([cancellationProbes, staleSuccessProbes, resilienceProbes].filter(items => i
 const isolatedProbes = cancellationProbes.length ? cancellationProbes : staleSuccessProbes.length ? staleSuccessProbes : resilienceProbes;
 validateResilienceProbeIsolation({
   selected: resilienceProbes.length > 0, provider: providerLane?.provider,
+  probe: resilienceProbes[0],
   optimizationLevel: providerLane?.optimizationLevel, modes: process.env.BENCH_MODES,
   scenario: process.env.BENCH_SCENARIOS, schedulingMode: process.env.BENCH_SCROLL_SCHEDULING,
   competingProbe: cancellationProbes.length > 0 || staleSuccessProbes.length > 0,
@@ -80,6 +81,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/provider-probe-content.mjs',
   'scripts/dev/page-translation/e2e-benchmark/trace.mjs',
   'scripts/dev/page-translation/e2e-benchmark/measurement-lifecycle.mjs',
+  'scripts/dev/page-translation/e2e-benchmark/rate-limit-queue.mjs',
   'scripts/dev/page-translation/e2e-benchmark/artifact-writer.mjs',
   'scripts/dev/page-translation/e2e-benchmark/scenario-plan.mjs',
   'scripts/dev/page-translation/e2e-benchmark/cancellation-probes.mjs',
@@ -415,7 +417,54 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
   const networkEventUnsubscribes = new Map();
   const providerNetworkEvents = new Map();
   const providerPhysicalAttempts = [];
-  const resilienceEvidence = resilienceProbe ? { injected503: [], attempts: [], unnecessaryRetransmits: [], siblingRequests: [] } : null;
+  const resilienceEvidence = resilienceProbe ? { injected503: [], injected429: [], attempts: [], unnecessaryRetransmits: [], siblingRequests: [] } : null;
+  if (resilienceEvidence) trial.resilience = resilienceEvidence;
+  const custom429Protocol = resilienceProbe === 'custom-429' ? {
+    armed: false, roles: new Map(), releaseStates: new Map(), error: null, evidence: { events: [] },
+  } : null;
+  const releaseCustomPaused = async (role, status, body, headers = [{ name: 'Content-Type', value: 'application/json' }]) => {
+    if (!custom429Protocol || custom429Protocol.releaseStates.has(role)) throw new Error(`Custom 429 ${role} Fetch already has a settlement in progress or completed.`);
+    const claim = custom429Protocol.roles.get(role);
+    if (!claim) throw new Error(`Custom 429 ${role} Fetch is not claimed.`);
+    custom429Protocol.releaseStates.set(role, 'fulfill-in-flight');
+    claim.settlementPromise = Promise.resolve().then(() => sendBySession.get(claim.event.sessionId)('Fetch.fulfillRequest', {
+      requestId: claim.event.params.requestId, responseCode: status, responseHeaders: headers,
+      body: Buffer.from(JSON.stringify(body)).toString('base64'),
+    }, claim.event.sessionId)).then(() => {
+      custom429Protocol.releaseStates.set(role, 'fulfilled');
+      claim.requestRecord.response = { status, retryAfter: status === 429 ? '5' : null, endedAt: now() };
+    }, error => {
+      custom429Protocol.releaseStates.set(role, 'fulfill-failed');
+      claim.requestRecord.releaseError = error?.message ?? String(error);
+      custom429Protocol.evidence.events.push({ type: 'fulfill-send-failed', role, at: now(), message: claim.requestRecord.releaseError });
+      throw error;
+    });
+    await claim.settlementPromise;
+    return claim;
+  };
+  const failCustomHeldFetches = async reason => {
+    if (!custom429Protocol) return;
+    for (const [role, claim] of custom429Protocol.roles) {
+      let state = custom429Protocol.releaseStates.get(role);
+      if (state === 'fulfill-in-flight') {
+        await claim.settlementPromise?.catch(() => {});
+        state = custom429Protocol.releaseStates.get(role);
+      }
+      if (state === 'fulfilled' || state === 'failed' || state === 'fail-in-flight' || state === 'fail-failed') continue;
+      custom429Protocol.releaseStates.set(role, 'fail-in-flight');
+      try {
+        await sendBySession.get(claim.event.sessionId)?.('Fetch.failRequest', {
+          requestId: claim.event.params.requestId, errorReason: 'Aborted',
+        }, claim.event.sessionId);
+        custom429Protocol.releaseStates.set(role, 'failed');
+        claim.requestRecord.response = { failed: true, reason, endedAt: now() };
+      } catch (error) {
+        custom429Protocol.releaseStates.set(role, 'fail-failed');
+        claim.requestRecord.releaseError ??= error?.message ?? String(error);
+        custom429Protocol.evidence.events.push({ type: 'fail-send-failed', role, at: now(), message: claim.requestRecord.releaseError });
+      }
+    }
+  };
   let providerAttemptSequence = 0;
   const providerNetworkObserver = event => {
     const params = event.params ?? {};
@@ -432,10 +481,14 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
             || (url.origin === GOOGLE_V2_ENDPOINT.origin && url.pathname === GOOGLE_V2_ENDPOINT.pathname)
             || (url.origin === CUSTOM_FIXTURE_ENDPOINT.origin && url.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname)
             || (url.origin === 'https://benchmark-gemini.invalid' && url.pathname === '/v1beta/models/benchmark-gemini-model:generateContent'))) return;
-      entry = { sessionId, networkId: id, startedAt: Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null };
+       entry = { sessionId, networkId: id, startedAt: Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null,
+         wallTime: Number.isFinite(params.wallTime) ? params.wallTime * 1000 : null };
       providerNetworkEvents.set(key, entry);
     } else if (entry && event.method === 'Network.responseReceived') {
       entry.status = params.response?.status ?? null;
+      entry.responseAtMonoMs = Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null;
+      entry.responseWallTime = Number.isFinite(entry.wallTime) && Number.isFinite(entry.startedAt) && Number.isFinite(entry.responseAtMonoMs)
+        ? entry.wallTime + entry.responseAtMonoMs - entry.startedAt : null;
     } else if (entry && event.method === 'Network.loadingFinished') {
       entry.settledAt = Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null;
       entry.outcome = 'finished';
@@ -446,6 +499,27 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     }
   };
   const requestHandlerJobs = new Set();
+  const requestLifecycle = createCancellationRequestLifecycle(async (reservation, action, detail) => {
+    const send = sendBySession.get(reservation.sessionId);
+    if (!send) throw new Error(`No CDP session remains for held Fetch ${reservation.requestId}.`);
+    if (action === 'continue') {
+      await send('Fetch.continueRequest', { requestId: reservation.requestId }, reservation.sessionId);
+      reservation.requestRecord.response = { continued: true, endedAt: now(), releasedDuringCleanup: detail?.reason === 'teardown' };
+    } else if (action === 'fail') {
+      await send('Fetch.failRequest', { requestId: reservation.requestId, errorReason: detail?.errorReason ?? 'Aborted' }, reservation.sessionId);
+    } else if (action === 'fulfill') {
+      const bodyString = JSON.stringify(detail?.body);
+      await send('Fetch.fulfillRequest', {
+        requestId: reservation.requestId, responseCode: detail?.responseCode ?? 200,
+        responseHeaders: detail?.responseHeaders ?? [{ name: 'Content-Type', value: 'application/json' }],
+        body: Buffer.from(bodyString).toString('base64'),
+      }, reservation.sessionId);
+      reservation.requestRecord.response = { status: detail?.responseCode ?? 200, body: detail?.body, endedAt: now(), releasedAfterPause: reservation.held };
+    } else {
+      throw new TypeError(`Unsupported Fetch release action: ${action}`);
+    }
+    return { ok: true, action, requestId: reservation.requestId };
+  });
   let staleContextDisposed = false;
   const cancellationControl = cancellationProbe || staleSuccessProbe ? {
     probe: cancellationProbe ?? 'stale-success',
@@ -457,27 +531,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     replacementSessionId: null,
     releaseReplacement: false,
     heldRequests: [],
-    requestLifecycle: createCancellationRequestLifecycle(async (reservation, action, detail) => {
-      const send = sendBySession.get(reservation.sessionId);
-      if (!send) throw new Error(`No CDP session remains for held Fetch ${reservation.requestId}.`);
-      if (action === 'continue') {
-        await send('Fetch.continueRequest', { requestId: reservation.requestId }, reservation.sessionId);
-        reservation.requestRecord.response = { continued: true, endedAt: now(), releasedDuringCleanup: detail?.reason === 'teardown' };
-      } else if (action === 'fail') {
-        await send('Fetch.failRequest', { requestId: reservation.requestId, errorReason: detail?.errorReason ?? 'Aborted' }, reservation.sessionId);
-      } else if (action === 'fulfill') {
-        const bodyString = JSON.stringify(detail?.body);
-        await send('Fetch.fulfillRequest', {
-          requestId: reservation.requestId, responseCode: detail?.responseCode ?? 200,
-          responseHeaders: detail?.responseHeaders ?? [{ name: 'Content-Type', value: 'application/json' }],
-          body: Buffer.from(bodyString).toString('base64'),
-        }, reservation.sessionId);
-        reservation.requestRecord.response = { status: detail?.responseCode ?? 200, body: detail?.body, endedAt: now(), releasedAfterPause: reservation.held };
-      } else {
-        throw new TypeError(`Unsupported Fetch release action: ${action}`);
-      }
-      return { ok: true, action, requestId: reservation.requestId };
-    }),
+    requestLifecycle,
   } : null;
   if (cancellationProbe) trial.cancellation = {
     probe: cancellationProbe,
@@ -576,6 +630,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         requestRecord.fixtureDelayMs = fixtureConfig.responseDelayMs;
         if (resilienceProbe && classification.provider === 'googlev2') {
           const networkId = event.params.networkId ?? null;
+          const network = networkId ? providerNetworkEvents.get(`${event.sessionId}:${networkId}`) : null;
           const resources = trial.sessionId ? await evaluate(chrome, workerSession,
             `globalThis.__pageTranslationBenchmark.resourceSnapshot([],[${JSON.stringify(trial.sessionId)}])`, undefined, false) : null;
           const resolver = resources?.sourceResolvers?.[trial.sessionId];
@@ -585,29 +640,196 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
             && sameProviderTexts(root.texts, body));
           const logicalRoots = [...new Map(matchingRoots.map(root => [root.messageId, root])).values()];
           const root = logicalRoots.length === 1 ? logicalRoots[0] : null;
-          const selection = selectResolvedGoogleAttempt({
-            request: { networkId, sourceLanguage: requestRecord.sourceLanguageQuery }, classification, resolver, failedCount: resilienceEvidence.injected503.length,
-          });
+          const selection = selectResolvedGoogleAttempt({ request: { networkId, sourceLanguage: requestRecord.sourceLanguageQuery }, classification, resolver, failedCount: resilienceEvidence.injected503.length });
           const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
           const base = { attemptId: `resilience-${resilienceEvidence.attempts.length + 1}`, networkId,
             pageSessionId: trial.sessionId, logicalMessageId: root?.messageId ?? null, texts: body, targetIds,
+            physicalStartedWallMs: network?.wallTime ?? null,
             source: resolver?.effectiveSourceLanguage ?? null, sourceLanguageQuery: requestRecord.sourceLanguageQuery ?? null,
             target: resolver?.effectiveTargetLanguage ?? null };
-          if (resilienceEvidence.injected503.length && sameProviderTexts(resilienceEvidence.injected503[0].texts, body)) {
-            base.retryOf = resilienceEvidence.injected503[0].attemptId;
+          const injected = resilienceEvidence.injected503;
+          if (injected.length && sameProviderTexts(injected[0].texts, body)) {
+            base.retryOf = injected[0].attemptId;
           }
           resilienceEvidence.attempts.push(base);
           requestRecord.resilienceCorrelation = { ...base, resolver, matchingRootCount: logicalRoots.length, selection };
           if (selection.selected) {
             if (!root || !targetIds.length || targetIds.some(id => id === null)) throw new Error('Resolved Google request lacks unique QueueManager/logical target correlation.');
             const failure = { ...base, status: 503, selectedAt: now() };
+            base.status = failure.status;
             resilienceEvidence.injected503.push(failure);
             requestRecord.resilienceInjected503 = failure;
             const send = sendBySession.get(event.sessionId);
             await send('Fetch.fulfillRequest', { requestId, responseCode: 503,
               responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
               body: Buffer.from(JSON.stringify({ error: { code: 503, message: 'Benchmark injected transient failure' } })).toString('base64') }, event.sessionId);
-            requestRecord.response = { status: 503, endedAt: now() };
+            requestRecord.response = { status: 503, retryAfter: null, endedAt: now() };
+            return;
+          }
+        }
+        if (custom429Protocol && classification.provider === 'custom') {
+          if (requestRecord.custom429Role && fixtureConfig.scenario === 'scroll-through' && pageSession && contentContext) {
+            const requestViewport = await evaluate(chrome, pageSession,
+              `(()=>{const sources=${JSON.stringify(body)};return {at:performance.now(),scrollY,targets:sources.map(source=>{const el=[...document.querySelectorAll('[data-bench-id]')].find(node=>node.textContent===source);if(!el)return {source,id:null,classification:'unmapped'};const r=el.getBoundingClientRect();const visible=r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth;const buffered=r.bottom>-50&&r.top<innerHeight+50&&r.right>-50&&r.left<innerWidth+50;return {source,id:el.dataset.benchId,classification:visible?'viewport':buffered?'permitted-50px-buffer':'outside-buffer'}})}})()`, contentContext, false);
+            requestRecord.requestViewport = requestViewport;
+          }
+          const networkId = event.params.networkId ?? null;
+          const resources = await evaluate(chrome, workerSession,
+            `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false);
+          const resolver = resources?.sourceResolvers?.[trial.sessionId];
+          const roots = await evaluate(chrome, workerSession,
+            'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
+          const matchingRoots = (roots?.providerRoots ?? []).filter(root => root.sessionId === trial.sessionId
+            && sameProviderTexts(root.texts, body));
+          const logicalRoots = [...new Map(matchingRoots.map(root => [root.messageId, root])).values()];
+          const root = logicalRoots.length === 1 ? logicalRoots[0] : null;
+          const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
+          const base = { attemptId: `resilience-${resilienceEvidence.attempts.length + 1}`, networkId,
+            pageSessionId: trial.sessionId, logicalMessageId: root?.messageId ?? null, texts: body, targetIds,
+            physicalStartedWallMs: providerNetworkEvents.get(`${event.sessionId}:${networkId}`)?.wallTime ?? null,
+            physicalStartedMonoMs: providerNetworkEvents.get(`${event.sessionId}:${networkId}`)?.startedAt ?? null,
+            source: resolver?.effectiveSourceLanguage ?? null, target: resolver?.effectiveTargetLanguage ?? null };
+          const failed = resilienceEvidence.injected429[0];
+          if (failed && sameProviderTexts(failed.texts, body)) base.retryOf = failed.attemptId;
+          resilienceEvidence.attempts.push(base);
+          requestRecord.resilienceCorrelation = { ...base, resolver, matchingRootCount: logicalRoots.length };
+          const role = requestRecord.custom429Role;
+          if (!role) {
+            if (requestRecord.response?.status === 200) base.status = 200;
+          } else {
+            const claim = custom429Protocol.roles.get(role);
+            claim.correlation = { ...base, root, resolver, responseBody, requestRecord };
+            const matchingClaims = ['A', 'B'].map(name => custom429Protocol.roles.get(name));
+            if (matchingClaims.every(item => item?.correlation)) {
+              const [a, b] = matchingClaims;
+              const distinct = a.networkId !== b.networkId && a.event.sessionId === b.event.sessionId
+                && a.correlation.root?.messageId && b.correlation.root?.messageId
+                && a.correlation.root.messageId !== b.correlation.root.messageId
+                && a.targetIds.every(id => !b.targetIds.includes(id));
+              const resolved = [a, b].every(item => item.correlation.resolver?.present
+                && item.correlation.resolver.resolutionPending === false
+                && item.correlation.resolver.effectiveSourceLanguage
+                && item.correlation.resolver.effectiveSourceLanguage !== 'auto'
+                && item.correlation.resolver.effectiveTargetLanguage);
+              if (!distinct || !resolved) throw new Error('Custom 429 roles A/B lack distinct same-session physical/root/target/AUTO correlation.');
+              custom429Protocol.evidence.roles = {
+                A: { attemptId: a.correlation.attemptId, networkId: a.networkId, messageId: a.correlation.root.messageId,
+                  sessionId: a.correlation.root.sessionId, targetIds: a.targetIds, physicalStartedWallMs: a.correlation.physicalStartedWallMs,
+                  physicalStartedMonoMs: a.correlation.physicalStartedMonoMs,
+                  source: a.correlation.resolver.effectiveSourceLanguage, target: a.correlation.resolver.effectiveTargetLanguage,
+                  fetchHeldAt429: true },
+                B: { attemptId: b.correlation.attemptId, networkId: b.networkId, messageId: b.correlation.root.messageId,
+                  sessionId: b.correlation.root.sessionId, targetIds: b.targetIds, physicalStartedWallMs: b.correlation.physicalStartedWallMs,
+                  physicalStartedMonoMs: b.correlation.physicalStartedMonoMs,
+                  source: b.correlation.resolver.effectiveSourceLanguage, target: b.correlation.resolver.effectiveTargetLanguage,
+                  heldThroughCooldownEstablished: true },
+              };
+              custom429Protocol.evidence.events.push({ type: 'roles-correlated', at: now() });
+            }
+            await until(() => {
+              if (custom429Protocol.error) throw custom429Protocol.error;
+              return custom429Protocol.roles.get('A')?.correlation && custom429Protocol.roles.get('B')?.correlation;
+            }, 10_000);
+            if (role === 'A') {
+              const a = custom429Protocol.roles.get('A');
+              const failure = {
+                attemptId: a.correlation.attemptId, networkId: a.networkId,
+                pageSessionId: a.correlation.root.sessionId, logicalMessageId: a.correlation.root.messageId,
+                texts: [...a.correlation.texts], targetIds: [...a.targetIds],
+                physicalStartedWallMs: a.correlation.physicalStartedWallMs,
+                physicalStartedMonoMs: a.correlation.physicalStartedMonoMs,
+                source: a.correlation.resolver.effectiveSourceLanguage,
+                target: a.correlation.resolver.effectiveTargetLanguage,
+                status: 429, retryAfterSeconds: 5,
+              };
+              resilienceEvidence.injected429.push(failure);
+              a.requestRecord.resilienceInjected429 = failure;
+              await releaseCustomPaused('A', 429, { error: { code: 429, message: 'Benchmark injected rate limit' } },
+                [{ name: 'Content-Type', value: 'application/json' }, { name: 'Retry-After', value: '5' }]);
+              failure.retryAfterHeader = a.requestRecord.response?.retryAfter ?? null;
+              const responseNetwork = await until(() => {
+                const network = providerNetworkEvents.get(`${a.event.sessionId}:${a.networkId}`);
+                return network?.status === 429 && Number.isFinite(network.responseWallTime)
+                  ? network : null;
+              }, 10_000);
+              failure.responseWallMs = responseNetwork.responseWallTime;
+              failure.responseMonoMs = responseNetwork.responseAtMonoMs;
+              custom429Protocol.evidence.responseWallMs = failure.responseWallMs;
+              const cooldown = await until(async () => {
+                const [snapshot, trace] = await Promise.all([
+                  evaluate(chrome, workerSession,
+                    `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false),
+                  evaluate(chrome, workerSession, 'globalThis.__pageTranslationBenchmark.snapshot()', undefined, false),
+                ]);
+                const itemEnd = trace?.events?.find(item => item.name === 'queueManager.processItem.end'
+                  && item.messageId === a.correlation.root.messageId && item.status === 'retrying'
+                  && item.lastErrorType === 'RATE_LIMIT_REACHED');
+                const rate = snapshot?.rateLimit?.Custom;
+                return itemEnd && Number.isFinite(itemEnd.retryAt) && Number.isFinite(rate?.retryAt)
+                  ? { itemEnd, rate } : null;
+              }, 10_000);
+              custom429Protocol.evidence.serverRetryAt = cooldown.itemEnd.retryAt;
+              custom429Protocol.evidence.limiterRetryAt = cooldown.rate.retryAt;
+              custom429Protocol.evidence.cooldownEstablishedWallMs = cooldown.itemEnd.at;
+              custom429Protocol.evidence.cooldownCapacity = {
+                activeRequests: cooldown.rate.activeRequests, capacity: cooldown.rate.capacity,
+                observedAtWallMs: cooldown.rate.now,
+              };
+              failure.queueRetryAt = cooldown.itemEnd.retryAt;
+              failure.queueItemId = cooldown.itemEnd.queueItemId;
+              const b = custom429Protocol.roles.get('B');
+              custom429Protocol.evidence.roles.B.responseReleasedWallMs = now();
+              custom429Protocol.evidence.roles.B.responseReleasedMonoMs =
+                b.correlation.physicalStartedMonoMs + custom429Protocol.evidence.roles.B.responseReleasedWallMs
+                  - b.correlation.physicalStartedWallMs;
+              await releaseCustomPaused('B', 200, b.correlation.responseBody);
+              const limiterDeadline = cooldown.rate.retryAt;
+              const sibling = await until(async () => {
+                const [network, snapshot, state] = await Promise.all([
+                  Promise.resolve(providerNetworkEvents.get(`${b.event.sessionId}:${b.networkId}`)),
+                  evaluate(chrome, workerSession,
+                    `globalThis.__pageTranslationBenchmark.cancellationSnapshot()`, undefined, false),
+                  evaluate(chrome, workerSession, 'globalThis.__pageTranslationBenchmark.snapshot()', undefined, false),
+                ]);
+                const end = state?.events?.find(item => item.name === 'queueManager.processItem.end'
+                  && item.messageId === b.correlation.root.messageId && item.status === 'completed');
+                const rootState = state?.events?.length && (await evaluate(chrome, workerSession,
+                  `globalThis.__pageTranslationBenchmark.cancellationSnapshot()`, undefined, false))
+                  ?.providerRoots?.find(item => item.messageId === b.correlation.root.messageId);
+                if (network?.status === 200 && network.outcome === 'finished' && end && rootState?.status === 'fulfilled') {
+                  const completedWallMs = network.wallTime + network.settledAt - network.startedAt;
+                  if (completedWallMs >= limiterDeadline) throw new Error('Custom 429 B settled at or after unchanged limiter deadline.');
+                  return { network, end, rootState, completedWallMs };
+                }
+                return null;
+              }, 10_000);
+              custom429Protocol.evidence.sibling = {
+                success: true, messageId: b.correlation.root.messageId, sessionId: trial.sessionId,
+                networkId: b.networkId, completedWallMs: sibling.completedWallMs,
+                queueSettledAt: sibling.end.at, rootStatus: sibling.rootState.status,
+              };
+              const after = await until(async () => {
+                const snapshot = await evaluate(chrome, workerSession,
+                  `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false);
+                const rate = snapshot?.rateLimit?.Custom;
+                const pending = findSessionOwnedPendingRequest(rate?.queueItems, trial.sessionId,
+                  [a.correlation.root.messageId, b.correlation.root.messageId]);
+                if (!pending || !Number.isFinite(rate?.retryAt) || rate.retryAt !== limiterDeadline
+                    || !(rate.activeRequests < rate.capacity) || !(rate.now < limiterDeadline)) return null;
+                return { rate, pending };
+              }, 10_000);
+              custom429Protocol.evidence.pending = { ...after.pending, observedAtWallMs: after.rate.now,
+                activeRequests: after.rate.activeRequests, capacity: after.rate.capacity };
+              custom429Protocol.evidence.pendingObservedBeforeDeadline = after.rate.now < limiterDeadline;
+              custom429Protocol.evidence.limiterRetryAtAfterSibling = after.rate.retryAt;
+              custom429Protocol.evidence.pendingStillQueuedAfterSibling = !!after.rate.queueItems?.some(item =>
+                item.messageId === after.pending.messageId && item.sessionId === trial.sessionId);
+              custom429Protocol.evidence.events.push({ type: 'B-settled', at: now() });
+              resilienceEvidence.cooldownObserved = custom429Protocol.evidence;
+              resilienceEvidence.pendingLimiterSibling = custom429Protocol.evidence.pending;
+              resilienceEvidence.siblingObserved = custom429Protocol.evidence.sibling;
+            }
+            base.status = role === 'A' ? 429 : 200;
             return;
           }
         }
@@ -825,6 +1047,14 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         else await send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, event.sessionId);
       }
     } catch (error) {
+      if (custom429Protocol && requestRecord.custom429Role) {
+        custom429Protocol.error = error;
+        custom429Protocol.evidence.events.push({ type: 'protocol-error', role: requestRecord.custom429Role, at: now(), message: error.message });
+        await failCustomHeldFetches('custom-429-protocol-error');
+        if (custom429Protocol.releaseStates.has(requestRecord.custom429Role)) {
+          requestRecord.response ??= { failed: true, reason: 'custom-429-protocol-error', endedAt: now() };
+        }
+      }
       requestRecord.blocked = true;
       requestRecord.error ??= error.message;
       trial.transportErrors ??= [];
@@ -855,6 +1085,36 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       initiator: request.initiator ?? null,
     };
     trial.requests.push(requestRecord);
+    if (custom429Protocol?.armed && custom429Protocol.roles.size < 2) {
+      const classification = classifyTransportRequest(request, {
+        fixtureOrigin: new URL(trial.fixture.url).origin,
+        extensionOrigin: extensionOriginBySession.get(event.sessionId),
+        selectedProvider: 'custom',
+      });
+      if (classification.kind === 'provider-translation' && classification.provider === 'custom'
+          && event.params.networkId) {
+        try {
+          const network = providerNetworkEvents.get(`${event.sessionId}:${event.params.networkId}`);
+          if (Number.isFinite(network?.wallTime) && network.wallTime >= custom429Protocol.armedWallMs) {
+          const decoded = decodeCustomRequest({
+            method: request.method, url: request.url, body: request.postData ?? '',
+            headers: request.headers ?? {}, expectedTexts: fixtureConfig.targetTexts,
+          });
+          const targetIds = decoded.texts.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
+          const claimedIds = new Set([...custom429Protocol.roles.values()].flatMap(role => role.targetIds));
+          if (targetIds.every(Boolean) && !targetIds.some(id => custom429Protocol.initialTargetIds.has(id))
+              && targetIds.every(id => !claimedIds.has(id))) {
+            const role = custom429Protocol.roles.size === 0 ? 'A' : 'B';
+            custom429Protocol.roles.set(role, { event, requestRecord, networkId: event.params.networkId, targetIds, texts: decoded.texts });
+            requestRecord.custom429Role = role;
+            custom429Protocol.evidence.events.push({ type: 'claimed', role, at: now(), networkId: event.params.networkId, targetIds });
+          }
+          }
+        } catch (error) {
+          custom429Protocol.evidence.events.push({ type: 'claim-rejected', at: now(), reason: error.message });
+        }
+      }
+    }
     const reservation = cancellationControl?.requestLifecycle.reserve({
       requestId,
       sessionId: event.sessionId,
@@ -862,8 +1122,9 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       requestRecord,
     }) ?? null;
     const job = processRequestPaused(event, requestRecord, reservation);
-    if (reservation) {
-      const trackedJob = cancellationControl.requestLifecycle.trackHandler(reservation, job);
+    {
+      const handlerLifecycle = cancellationControl?.requestLifecycle ?? requestLifecycle;
+      const trackedJob = handlerLifecycle.trackHandler(reservation, job);
       requestHandlerJobs.add(trackedJob);
       trackedJob.then(
         () => requestHandlerJobs.delete(trackedJob),
@@ -1136,6 +1397,29 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
         return initialIds.every(id => state?.acceptedIds.includes(id)) ? state : null;
       }, 60_000), bandAcceptance: [] };
+      if (custom429Protocol) {
+        const armed = await until(async () => {
+          const [resources, pageState] = await Promise.all([
+            evaluate(chrome, workerSession,
+              `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(sessionId)}])`, undefined, false),
+            evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+          ]);
+          const resolver = resources?.sourceResolvers?.[sessionId];
+          if (!resolver?.present || resolver.resolutionPending !== false
+              || !resolver.effectiveSourceLanguage || resolver.effectiveSourceLanguage === 'auto'
+              || !resolver.effectiveTargetLanguage || pageState?.translationSessionId !== sessionId) return null;
+          return { resolver, pageState };
+        }, 60_000);
+        custom429Protocol.armed = true;
+        custom429Protocol.armedWallMs = now();
+        custom429Protocol.initialTargetIds = new Set(initialIds);
+        custom429Protocol.evidence.armed = {
+          atWallMs: custom429Protocol.armedWallMs, sessionId,
+          resolver: armed.resolver, pageTranslationSessionId: armed.pageState.translationSessionId,
+          initialAcceptedTargetIds: initialIds,
+        };
+        resilienceEvidence.arm = custom429Protocol.evidence.armed;
+      }
       const phases = [];
       const bandedProviderLane = usesBandedProviderScroll(providerLane?.provider);
       for (const [label, y, bandIndex, waitBeforeMs] of scrollThroughPhases(bandedProviderLane)) {
@@ -2735,6 +3019,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       },
     });
     const contentTrace = lifecycle.measurement;
+    const successfulProviderAttempts = canonicalProviderSourceAttempts(
+      trial.requests.filter(request => request.category === 'provider-translation'));
     trial.measurements.content = contentTrace;
     if (fixtureConfig.scenario === 'scroll-through') {
       const scrollValidation = validateScrollThroughEvidence({
@@ -2747,7 +3033,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         terminalAt: trial.terminal?.performanceAt,
         acceptedIds: contentTrace.acceptedIds,
         duplicateAcceptedIds: contentTrace.duplicateAcceptedIds,
-        providerRequests: trial.requests.filter(request => request.category === 'provider-translation'),
+        providerRequests: canonicalProviderSourceAttempts(
+          trial.requests.filter(request => request.category === 'provider-translation')),
         schedulerState: trial.scrollThrough.finalSchedulerState,
         restoreOriginals: lifecycle.restored?.dom,
         expectedOriginals: originals,
@@ -2846,7 +3133,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     trial.providerBatchSizes = providerAttempts.map(request => request.batchSize);
     const originalsFromDom = trial.rawDOM.original;
     const translatedFromDom = trial.rawDOM.translated;
-    const providerSources = providerAttempts.filter(request => !request.resilienceInjected503)
+    const providerSources = successfulProviderAttempts
       .flatMap(request => request.batchTexts ?? []);
     const expectedIds = originalsFromDom.map(([id]) => id);
     const sourceToId = new Map(originals.map(([id, source]) => [source, id]));
@@ -2901,18 +3188,20 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
 
     trial.providerRequestOrder = mapProviderBatchIds(providerAttempts.map(request => request.batchTexts ?? []), sourceToId);
     const providerRequestIds = trial.providerRequestOrder.flat();
-    const successfulProviderRequestIds = resilienceProbe
-      ? mapProviderBatchIds(providerAttempts.filter(request => !request.resilienceInjected503)
-        .map(request => request.batchTexts ?? []), sourceToId).flat()
-      : providerRequestIds;
-    const providerOrderValidation = validateExactTargetIds('provider request source', successfulProviderRequestIds, expectedIds);
+    const canonicalSourceIds = mapProviderBatchIds(canonicalProviderSourceAttempts(providerAttempts)
+      .map(request => request.batchTexts ?? []), sourceToId).flat();
+    const providerOrderValidation = validateExactTargetIds('provider request source', canonicalSourceIds, expectedIds);
     if (!providerOrderValidation.ok) throw new Error(providerOrderValidation.issues.join('; '));
     trial.providerRequestOrderValidation = providerOrderValidation;
     trial.providerHTTPRequestSequence = mapProviderHTTPRequestSequence(providerAttempts, sourceToId, providerLane?.provider);
     if (providerLane) {
       trial.providerLogicalBatches = summarizeLogicalProviderBatches(contentObservation.logicalBatchIntervals, trial.sessionId);
       if (!trial.providerLogicalBatches.ok) throw new Error(trial.providerLogicalBatches.issues.join('; '));
-      if (providerLane.provider === 'custom' && providerAttempts.length !== trial.providerLogicalBatches.logicalBatchCount) {
+      if (providerLane.provider === 'custom' && resilienceProbe === 'custom-429'
+          && providerAttempts.length !== trial.providerLogicalBatches.logicalBatchCount + 1) {
+        throw new Error(`Custom 429 probe must observe one extra physical retry: ${providerAttempts.length}/${trial.providerLogicalBatches.logicalBatchCount + 1}`);
+      }
+      if (providerLane.provider === 'custom' && !resilienceProbe && providerAttempts.length !== trial.providerLogicalBatches.logicalBatchCount) {
         throw new Error(`Custom physical request count must equal logical batch count (no retries/recovery): ${providerAttempts.length}/${trial.providerLogicalBatches.logicalBatchCount}`);
       }
       trial.providerHTTPAttempts = providerAttempts.map(request => ({
@@ -2961,9 +3250,14 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       if (!trial.providerSchedulerValidation.ok) throw new Error(trial.providerSchedulerValidation.issues.join('; '));
     }
     if (resilienceProbe) {
+      const terminalMessageIds = resilienceProbe === 'custom-429'
+        ? ['A', 'B'].map(role => custom429Protocol.evidence.roles?.[role]?.messageId)
+          .concat(custom429Protocol.evidence.pending?.messageId).filter(id => typeof id === 'string')
+        : [];
+      resilienceEvidence.terminalMessageIds = terminalMessageIds;
       const [resources, pageScheduler] = await Promise.all([
         evaluate(chrome, workerSession,
-          `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(sessionId)}])`, undefined, false),
+          `globalThis.__pageTranslationBenchmark.resourceSnapshot(${JSON.stringify(terminalMessageIds)}, [${JSON.stringify(sessionId)}])`, undefined, false),
         evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
       ]);
       const logicalByTexts = new Map();
@@ -2973,47 +3267,154 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         logicalByTexts.get(key).push(attempt);
       }
       for (const attempts of logicalByTexts.values()) {
-        const failedAttemptId = resilienceEvidence.injected503[0]?.attemptId;
+        const failedAttemptId = (resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0] : resilienceEvidence.injected503[0])?.attemptId;
         if (attempts.length > 1 && attempts.some(attempt => attempt.attemptId !== failedAttemptId
             && attempt.retryOf !== failedAttemptId)) {
           resilienceEvidence.unnecessaryRetransmits.push({ texts: attempts[0].texts, attempts });
         }
       }
-      const failedIds = new Set(resilienceEvidence.injected503[0]?.targetIds ?? []);
+        const failedIds = new Set((resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0] : resilienceEvidence.injected503[0])?.targetIds ?? []);
+      const failedAttemptId = (resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0] : resilienceEvidence.injected503[0])?.attemptId;
       for (const attempt of resilienceEvidence.attempts) {
-        if (attempt.attemptId === resilienceEvidence.injected503[0]?.attemptId
-            || attempt.retryOf === resilienceEvidence.injected503[0]?.attemptId) continue;
+        if (attempt.attemptId === failedAttemptId || attempt.retryOf === failedAttemptId) continue;
         const overlap = attempt.targetIds?.filter(id => failedIds.has(id)) ?? [];
         if (overlap.length) resilienceEvidence.unnecessaryRetransmits.push({ texts: attempt.texts, targetIds: overlap, attemptId: attempt.attemptId });
       }
       const translated = trial.rawDOM.translated ?? [];
       const expectedTranslated = fixtureConfig.targets.map(({ id, source }) => [id, `\u200efixture translation: ${source}`]);
       const failedTargetIds = failedIds;
+      const failed = resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0] : resilienceEvidence.injected503[0];
+      if (resilienceProbe === 'custom-429') {
+        for (const attempt of resilienceEvidence.attempts) {
+          const request = providerAttempts.find(item => item.resilienceCorrelation?.attemptId === attempt.attemptId);
+          const physical = request?.physicalAttempt;
+          if (physical && Number.isFinite(physical.startedAt) && Number.isFinite(physical.settledAt)) {
+            const network = providerNetworkEvents.get(`${request.targetSessionId}:${request.networkId}`);
+            attempt.physicalEndedWallMs = Number.isFinite(network?.wallTime)
+              ? network.wallTime + physical.settledAt - physical.startedAt : null;
+          }
+          const queueEvents = traceEvents(workerTrace).filter(event => event.messageId === attempt.logicalMessageId
+            && event.name === 'queueManager.processItem.start');
+          attempt.queueItemId = queueEvents.find(event => event.attemptNumber === (attempt.retryOf ? 2 : 1))?.queueItemId ?? null;
+        }
+      }
       resilienceEvidence.siblingRequests = resilienceEvidence.attempts.filter(attempt => attempt.status === 200
-        && attempt.pageSessionId === resilienceEvidence.injected503[0]?.pageSessionId
+        && attempt.pageSessionId === failed?.pageSessionId
         && attempt.targetIds?.length && attempt.targetIds.every(id => !failedTargetIds.has(id)));
-      const resourceValidation = validateRuntimeResources(resources, { sessionIds: [sessionId], final: true });
+      const resourceRate = resources?.rateLimit?.Custom;
+      if (resilienceProbe === 'custom-429') {
+        const itemEvent = traceEvents(workerTrace).find(event => event.messageId === failed?.logicalMessageId
+          && event.name === 'queueManager.processItem.end' && event.status === 'retrying');
+        const itemId = itemEvent?.queueItemId ?? null;
+        failed.queueItemId = itemId;
+        failed.queueRetryAt = itemEvent?.retryAt ?? null;
+        for (const attempt of resilienceEvidence.attempts) {
+          const start = traceEvents(workerTrace).find(event => event.messageId === failed?.logicalMessageId
+            && event.name === 'queueManager.processItem.start' && event.attemptNumber === 2);
+          if (attempt.retryOf === failed?.attemptId) {
+            attempt.queueItemId = start?.queueItemId ?? itemId;
+            attempt.physicalStartedWallMs ??= null;
+          }
+        }
+        const customQueueEvidence = validateQueueRetryEvidence(traceEvents(workerTrace), {
+          messageId: failed?.logicalMessageId, expectedErrorType: 'RATE_LIMIT_REACHED',
+          minDelayMs: 4900, maxDelayMs: Number.MAX_SAFE_INTEGER, expectedAttemptLimit: 5,
+        });
+        resilienceEvidence.queueRetryEvidence = customQueueEvidence;
+        resilienceEvidence.pendingLimiterSibling ??= resourceRate?.queueItems?.find(item =>
+          item.messageId !== failed?.logicalMessageId && item.sessionId === sessionId) ?? null;
+        resilienceEvidence.cooldown = {
+          establishedWallMs: itemEvent?.at ?? null,
+          establishedMonoMs: Number.isFinite(failed?.responseMonoMs) && Number.isFinite(itemEvent?.at)
+            ? failed.responseMonoMs + itemEvent.at - failed.responseWallMs : null,
+          limiterRetryAt: resilienceEvidence.cooldownObserved?.limiterRetryAt ?? null,
+          limiterRetryAtMonoMs: Number.isFinite(failed?.responseMonoMs)
+            && Number.isFinite(resilienceEvidence.cooldownObserved?.limiterRetryAt)
+            ? failed.responseMonoMs + resilienceEvidence.cooldownObserved.limiterRetryAt - failed.responseWallMs : null,
+          retainedAfterSiblingSuccess: resilienceEvidence.cooldownObserved?.limiterRetryAtAfterSibling
+            === resilienceEvidence.cooldownObserved?.limiterRetryAt,
+        };
+        const sibling = resilienceEvidence.siblingRequests.find(attempt => attempt.physicalEndedWallMs != null);
+        resilienceEvidence.sibling = resilienceEvidence.siblingObserved
+          ?? (sibling ? { success: true, completedWallMs: sibling.physicalEndedWallMs, attemptId: sibling.attemptId } : null);
+        const retryAttempt = resilienceEvidence.attempts.find(attempt => attempt.retryOf === failed?.attemptId);
+        if (retryAttempt) retryAttempt.physicalStartedWallMs ??= null;
+        resilienceEvidence.prematurePhysicalStarts = resilienceEvidence.attempts.filter(attempt =>
+          Number.isFinite(attempt.physicalStartedMonoMs)
+          && attempt.physicalStartedMonoMs >= failed.responseMonoMs
+          && attempt.physicalStartedMonoMs < resilienceEvidence.cooldown.limiterRetryAtMonoMs
+          && attempt.attemptId !== failed?.attemptId);
+        resilienceEvidence.pendingLimiterSibling ??= resourceRate?.queueItems?.find(item =>
+          item.messageId !== failed?.logicalMessageId && item.sessionId === sessionId) ?? null;
+        resilienceEvidence.roles = custom429Protocol.evidence.roles;
+        resilienceEvidence.serverRetryAt = custom429Protocol.evidence.serverRetryAt;
+        resilienceEvidence.limiterRetryAt = custom429Protocol.evidence.limiterRetryAt;
+        resilienceEvidence.limiterRetryAtAfterSibling = custom429Protocol.evidence.limiterRetryAtAfterSibling;
+        resilienceEvidence.pendingStillQueuedAfterSibling = custom429Protocol.evidence.pendingStillQueuedAfterSibling;
+        resilienceEvidence.cooldown.establishedWallMs = custom429Protocol.evidence.cooldownEstablishedWallMs;
+        resilienceEvidence.cooldown.limiterRetryAt = custom429Protocol.evidence.limiterRetryAt;
+        const physicalSummary = summarizePhysicalProviderAttempts(providerPhysicalAttempts.map(attempt => {
+          const network = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
+          return { ...attempt, startedAt: network?.startedAt ?? null, settledAt: network?.settledAt ?? null,
+            status: network?.status ?? null, outcome: network?.outcome ?? null };
+        }));
+        resilienceEvidence.concurrency = {
+          peakPhysical: physicalSummary.peakPhysicalConcurrency,
+          peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
+        };
+      }
+      const resourceValidation = validateRuntimeResources(resources, { terminalMessageIds, sessionIds: [sessionId], final: true });
       const cleanupOk = resourceValidation.ok
         && pageScheduler?.managerTranslating === false
         && pageScheduler.activeFlushes === 0 && pageScheduler.queueIds?.length === 0
         && pageScheduler.pendingSettlementCount === 0 && pageScheduler.batchTimerActive === false
         && pageScheduler.completionTimerActive === false;
-      const queueRetryEvidence = validateQueueRetryEvidence(traceEvents(workerTrace), {
+      const queueRetryEvidence = resilienceProbe === 'custom-429' ? resilienceEvidence.queueRetryEvidence : validateQueueRetryEvidence(traceEvents(workerTrace), {
         messageId: resilienceEvidence.injected503[0]?.logicalMessageId,
       });
       trial.resilience = { ...resilienceEvidence, resources, pageScheduler, queueRetryEvidence, translation: {
         exact: JSON.stringify(translated) === JSON.stringify(expectedTranslated),
         duplicates: translated.length - new Set(translated.map(([id]) => id)).size,
+        targetCount: originals.length,
+        sourceCount: providerSources.length,
+        restoreExact: trial.validation.ok && restoredLifecycle.dom.length === originals.length,
+        terminal: !!trial.terminal?.receivedAt,
+        sessionOwner: resilienceProbe === 'custom-429'
+          ? trial.scrollThrough?.finalSchedulerState?.translationSessionId ?? null : sessionId,
+        duplicateAcceptedIds: trial.duplicateAcceptedWriteIds ?? [],
+        acceptedTargetCount: acceptedIds?.length ?? null,
         expectedTargetIds: expectedTranslated.map(([id]) => id), observed: translated,
       }, cleanup: { ok: cleanupOk, runtimeResources: resourceValidation } };
+      if (custom429Protocol) trial.resilience.protocol = custom429Protocol.evidence;
       trial.resilience.validation = validateResilienceAccounting(trial.resilience);
+      if (resilienceProbe === 'custom-429') {
+        trial.resilience.validation = validateCustom429Evidence({
+          ...trial.resilience, injected429: resilienceEvidence.injected429,
+          pendingLimiterSibling: resilienceEvidence.pendingLimiterSibling,
+          cooldown: resilienceEvidence.cooldown, sibling: resilienceEvidence.sibling,
+          prematurePhysicalStarts: resilienceEvidence.prematurePhysicalStarts,
+          serverRetryAt: resilienceEvidence.serverRetryAt, limiterRetryAt: resilienceEvidence.limiterRetryAt,
+          limiterRetryAtAfterSibling: resilienceEvidence.limiterRetryAtAfterSibling,
+          pendingStillQueuedAfterSibling: resilienceEvidence.pendingStillQueuedAfterSibling,
+          roles: resilienceEvidence.roles, concurrency: resilienceEvidence.concurrency,
+        });
+      }
       if (!trial.resilience.validation.ok) throw new Error(trial.resilience.validation.issues.join('; '));
     }
     trial.status = 'passed';
   } catch (error) {
     trial.status = 'failed';
+    if (resilienceEvidence) trial.resilience = { ...resilienceEvidence,
+      ...(custom429Protocol ? { protocol: custom429Protocol.evidence } : {}),
+      failureStage: trial.stage ?? null };
     trial.error = { name: error.name, message: error.message, stack: error.stack };
   } finally {
+    if (custom429Protocol) {
+      await failCustomHeldFetches('trial-cleanup');
+      for (const [role, state] of custom429Protocol.releaseStates) {
+        if (state === 'fail-failed') trial.cleanupErrors.push(`Custom 429 ${role} held Fetch could not be failed: ${custom429Protocol.roles.get(role)?.requestRecord.releaseError ?? 'unknown release error'}`);
+      }
+    }
     trial.stage ??= 'cleanup';
     if (providerLane && chrome) {
       try {
@@ -3159,6 +3560,26 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         if (trial.staleSuccess.rawMutationCaptureStarted && !trial.staleSuccess.rawMutationEvidence) {
           trial.cleanupErrors.push('Raw DOM mutation evidence could not be drained before unsafe-context disposal.');
         }
+      }
+    }
+    if (custom429Protocol && !cancellationControl) {
+      try {
+        const requestCleanup = await requestLifecycle.closeAndDrain({
+          timeoutMs: 8_000,
+          disableFetch: async () => {
+            if (!chrome || !guardSessions.size) throw new Error('Fetch target sessions unavailable while closing request admission.');
+            const sessions = [...guardSessions];
+            const results = await Promise.allSettled(sessions.map(sessionId => chrome.send('Fetch.disable', {}, sessionId)));
+            const failures = results.flatMap((result, index) => result.status === 'rejected'
+              ? [`${sessions[index]}: ${result.reason?.message ?? String(result.reason)}`] : []);
+            if (failures.length) throw new AggregateError(failures.map(message => new Error(message)), `Fetch.disable failed for ${failures.length} target(s).`);
+          },
+        });
+        custom429Protocol.evidence.cleanup = { requestLifecycle: requestCleanup };
+        trial.cleanupErrors.push(...requestCleanup.errors.map(error => `Custom 429 request cleanup: ${error}`));
+      } catch (error) {
+        custom429Protocol.evidence.cleanup = { requestLifecycle: { ok: false, errors: [error?.message ?? String(error)] } };
+        trial.cleanupErrors.push(`Custom 429 request cleanup failed: ${error?.message ?? String(error)}`);
       }
     }
     if (cancellationControl) {
@@ -3340,26 +3761,29 @@ try {
     fileSha256: Object.fromEntries(await Promise.all(sourcePaths.map(async path => [path, await hashFile(path)]))),
   };
   if (resilienceProbes.length) {
-    harness.command = 'BENCH_RESILIENCE_PROBES=googlev2-503 BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid node scripts/dev/page-translation/e2e-benchmark/run.mjs';
+    const probe = resilienceProbes[0];
+    const custom429 = probe === 'custom-429';
+    const provider = custom429 ? 'custom' : 'googlev2';
+    harness.command = `BENCH_RESILIENCE_PROBES=${probe} BENCH_LANE=provider BENCH_PROVIDER=${provider} BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
     harness.warmups = 0;
     harness.measuredSamples = 0;
-    harness.resilienceProbe = { requested: 'googlev2-503', scenario: 'scroll-through', schedulingMode: 'fluid', status: 'running' };
+    harness.resilienceProbe = { requested: probe, scenario: 'scroll-through', schedulingMode: 'fluid', status: 'running' };
     const extensionPath = await compileMode('sliced');
     validateHarnessBuildParity();
     await runNetworkGuardNegativeProbe(extensionPath, 'sliced');
     const run = await runTrial({
       mode: 'sliced', scenario: 'scroll-through', ordinal: 1, globalRunOrder: ++globalRunOrder,
-      phase: 'isolated-googlev2-503-resilience', extensionPath, resilienceProbe: 'googlev2-503',
+      phase: `isolated-${probe}-resilience`, extensionPath, resilienceProbe: probe,
       fixtureConfig: createFixture('scroll-through', { providerLane: true }), schedulingMode: 'fluid',
     });
     harness.results.push(run);
-    const rawPath = `${artifactPath.replace(/\.json$/i, '')}-resilience-googlev2-503.json`;
+    const rawPath = `${artifactPath.replace(/\.json$/i, '')}-resilience-${probe}.json`;
     await mkdir(dirname(rawPath), { recursive: true });
     await writeFile(rawPath, JSON.stringify({ command: harness.command, status: run.status, run }, null, 2));
-    harness.resilienceProbe = { requested: 'googlev2-503', status: run.status, artifactPath: rawPath,
+    harness.resilienceProbe = { requested: probe, status: run.status, artifactPath: rawPath,
       validation: run.resilience?.validation ?? null };
     harness.comparisonGate = { comparisonsAllowed: false, reason: 'Isolated retry resilience probe; no performance aggregation.' };
-    if (run.status !== 'passed') throw new Error(run.error?.message ?? 'Google V2 resilience probe failed.');
+    if (run.status !== 'passed') throw new Error(run.error?.message ?? `${probe} resilience probe failed.`);
     harness.status = 'passed';
   } else if (providerLane) {
     harness.command = `BENCH_LANE=provider BENCH_PROVIDER=${providerLane.provider} BENCH_OPTIMIZATION_LEVEL=${providerLane.optimizationLevel} BENCH_MODES=sliced node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
