@@ -1865,6 +1865,124 @@ describe('PageTranslationScheduler', () => {
   });
 
   describe('bounded independent AI batches', () => {
+    it.each([1, 2, 3, 4, 5].flatMap(level => [false, true].map(translateAfterScrollStop => [level, translateAfterScrollStop])))('uses the effective Google V2 worker cap at level %i in %s mode', async (level, translateAfterScrollStop) => {
+      const config = await import('@/shared/config/config.js');
+      const providerConfigurations = await import('@/features/translation/core/ProviderConfigurations.js');
+      const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(level);
+      scheduler.setSettings({ translationApi: 'googlev2', targetLanguage: 'ja', translateAfterScrollStop });
+      try {
+        const batchConfig = await scheduler._getBatchConfig();
+        const effectiveProviderLimit = providerConfigurations.getProviderConfiguration('GoogleTranslateV2', level).rateLimit.maxConcurrent;
+        const expectedWorkerCap = Math.max(1, Math.min(4, Math.floor(effectiveProviderLimit / 2)));
+        expect(batchConfig.parallelExecution).toBe(expectedWorkerCap > 1);
+        expect(scheduler.settings.maxConcurrentFlushes).toBe(expectedWorkerCap);
+      } finally {
+        optimization.mockRestore();
+      }
+    });
+
+    it('dispatches up to the Google V2 worker cap in Fluid and On-Stop, while traditional Google stays serial', async () => {
+      vi.useFakeTimers();
+      const config = await import('@/shared/config/config.js');
+      const providerConfigurations = await import('@/features/translation/core/ProviderConfigurations.js');
+      const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(1);
+
+      const exerciseDispatch = async (provider, translateAfterScrollStop, expectedMaximum) => {
+        scheduler.reset();
+        safeSendMessage.mockClear();
+        scheduler.setTranslationState(true, `${provider}-${translateAfterScrollStop}`, { pageTitle: 'Test Page' });
+        scheduler.setSettings({
+          translationApi: provider,
+          targetLanguage: 'ja',
+          translateAfterScrollStop,
+          lazyLoading: false,
+        });
+        const items = Array.from({ length: 6 }, (_, index) => ({
+          id: `${provider}-${translateAfterScrollStop}-${index}`,
+          text: `source ${index}`,
+          resolve: vi.fn(),
+        }));
+        scheduler.queue = items;
+        const filter = translateAfterScrollStop ? PageTranslationQueueFilter : PageTranslationFluidFilter;
+        filter.process.mockImplementation(queue => ({
+          batchItems: queue.slice(0, 1),
+          remainingItems: queue.slice(1),
+        }));
+
+        let active = 0;
+        let maximum = 0;
+        const releases = [];
+        safeSendMessage.mockImplementation(message => {
+          expect(message.data.provider).toBe(provider);
+          const batch = JSON.parse(message.data.text);
+          maximum = Math.max(maximum, ++active);
+          return new Promise(resolve => {
+            let released = false;
+            releases.push(() => {
+              if (released) return;
+              released = true;
+              active--;
+              resolve({
+                success: true,
+                translatedText: JSON.stringify(batch.map(item => ({ ...item, text: `translated:${item.text}` }))),
+              });
+            });
+          });
+        });
+
+        const flushCalls = [];
+        const flush = scheduler.flush.bind(scheduler);
+        const flushSpy = vi.spyOn(scheduler, 'flush').mockImplementation((...args) => {
+          const pending = flush(...args);
+          flushCalls.push(pending);
+          return pending;
+        });
+        const pump = async () => {
+          await vi.dynamicImportSettled();
+          await vi.advanceTimersByTimeAsync(0);
+        };
+        const waitForDispatches = async count => {
+          for (let turn = 0; turn < 40 && safeSendMessage.mock.calls.length < count; turn++) await pump();
+          expect(safeSendMessage).toHaveBeenCalledTimes(count);
+        };
+
+        try {
+          const initialFlush = scheduler.flush();
+          await waitForDispatches(expectedMaximum);
+          expect(active).toBe(expectedMaximum);
+          for (let count = expectedMaximum + 1; count <= items.length; count++) {
+            releases[count - expectedMaximum - 1]();
+            await waitForDispatches(count);
+            expect(active).toBe(expectedMaximum);
+          }
+          releases.slice(items.length - expectedMaximum).forEach(release => release());
+          for (let turn = 0; turn < 40 && scheduler.activeFlushes !== 0; turn++) await pump();
+          await Promise.all([initialFlush, ...flushCalls]);
+          expect(maximum).toBe(expectedMaximum);
+          expect(active).toBe(0);
+          expect(scheduler.activeFlushes).toBe(0);
+          expect(items.every(item => item.resolve.mock.calls.length === 1)).toBe(true);
+        } finally {
+          releases.forEach(release => release());
+          flushSpy.mockRestore();
+        }
+      };
+
+      try {
+        for (const level of [1, 2, 3, 4, 5]) {
+          optimization.mockResolvedValue(level);
+          const maxConcurrent = providerConfigurations.getProviderConfiguration('GoogleTranslateV2', level).rateLimit.maxConcurrent;
+          const workerCap = Math.max(1, Math.min(4, Math.floor(maxConcurrent / 2)));
+          await exerciseDispatch('googlev2', false, workerCap);
+          await exerciseDispatch('googlev2', true, workerCap);
+        }
+        await exerciseDispatch('google', false, 1);
+      } finally {
+        optimization.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
     it.each([[3, 25, 2], [5, 10, 4]])('enables Custom workers at level %i without changing its existing batch size', async (level, chunkSize, limit) => {
       const config = await import('@/shared/config/config.js');
       const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(level);

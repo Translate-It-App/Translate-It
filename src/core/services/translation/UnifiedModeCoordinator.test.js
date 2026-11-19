@@ -149,6 +149,27 @@ describe('UnifiedModeCoordinator', () => {
       expect(JSON.parse(result.translatedText)).toEqual([{ id: 'original-unit', text: 'translated' }]);
     });
 
+    it('passes manifest Page parallel capability to Google V2 only in Page mode', async () => {
+      const providerInstance = {
+        constructor: { isAI: false },
+        translate: vi.fn().mockResolvedValue({ translatedText: ['translated'], sourceLanguage: 'en', targetLanguage: 'ja' }),
+      };
+      mockEngine.getProvider.mockResolvedValue(providerInstance);
+      await coordinator.processRequest({
+        mode: TranslationMode.Page,
+        messageId: 'page-googlev2',
+        data: { provider: 'googlev2', sourceLanguage: 'en', targetLanguage: 'ja', text: JSON.stringify([{ id: 'unit', text: 'source' }]) },
+      }, { translationEngine: mockEngine });
+      expect(providerInstance.translate.mock.calls[0][3].parallelExecution).toBe(true);
+
+      await coordinator.processRequest({
+        mode: TranslationMode.Subtitle,
+        messageId: 'selection-googlev2',
+        data: { provider: 'googlev2', sourceLanguage: 'en', targetLanguage: 'ja', items: [{ id: 'cue', text: 'source' }] },
+      }, { translationEngine: mockEngine });
+      expect(providerInstance.translate.mock.calls[1][3]).not.toHaveProperty('parallelExecution');
+    });
+
     it('retains the ordinary lane for AI Subtitle batches', async () => {
       const providerInstance = { constructor: { isAI: true }, translate: vi.fn().mockResolvedValue(['translated']) };
       mockEngine.getProvider.mockResolvedValue(providerInstance);

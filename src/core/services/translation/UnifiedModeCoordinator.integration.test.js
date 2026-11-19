@@ -32,6 +32,7 @@ vi.mock('@/shared/config/config.js', async importOriginal => ({
   getCustomApiUrlAsync: vi.fn(async () => 'https://fixture.invalid/v1/chat/completions'),
   getCustomApiModelAsync: vi.fn(async () => 'fixture-model'),
   getProviderOptimizationLevelAsync: vi.fn(async () => settings.level),
+  getGoogleTranslateV2UrlAsync: vi.fn(async () => 'https://translate.google.com/translate_a/single'),
   getBilingualTranslationEnabledAsync: vi.fn(async () => settings.bilingual),
   getBilingualTranslationModesAsync: vi.fn(async () => settings.bilingualModes),
   getAIConversationHistoryEnabledAsync: vi.fn(async () => false),
@@ -42,6 +43,7 @@ vi.mock('@/shared/proxy/ProxyManager.js', () => ({
 
 import { UnifiedModeCoordinator } from './UnifiedModeCoordinator.js';
 import { CustomProvider, clearCustomResponseFormatSupportCache } from '@/features/translation/providers/CustomProvider.js';
+import { GoogleTranslateV2Provider } from '@/features/translation/providers/GoogleTranslateV2Provider.js';
 import { queueManager } from '@/features/translation/core/QueueManager.js';
 import { rateLimitManager } from '@/features/translation/core/RateLimitManager.js';
 import { TranslationMode } from '@/shared/config/config.js';
@@ -374,5 +376,273 @@ describe('Page → CustomProvider physical concurrency', () => {
     });
     expect(attempts).toHaveLength(8);
     expect(maximum).toBe(4);
+  });
+});
+
+describe('Page → GoogleTranslateV2Provider physical concurrency', () => {
+  let coordinator, engine, providerState, active, maximum, attempts, completions, releases, controllers, failureSource;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    queueManager.cleanup();
+    rateLimitManager.providerStates.forEach(providerState => clearTimeout(providerState.nextProcessTimer));
+    rateLimitManager.providerStates.clear();
+    settings.level = 3;
+    settings.keys = ['fixture-key'];
+    settings.bilingual = false;
+    settings.bilingualModes = { [TranslationMode.Page]: false };
+    settings.detectionResult = null;
+    settings.responseDelay = null;
+    LanguageDetectionService.clearSessionCache();
+    await rateLimitManager.reloadConfigurations();
+    coordinator = new UnifiedModeCoordinator();
+    const provider = new GoogleTranslateV2Provider();
+    controllers = new Map();
+    failureSource = null;
+    engine = {
+      getProvider: async () => provider,
+      lifecycleRegistry: {
+        registerRequest: messageId => {
+          const controller = new AbortController();
+          controllers.set(messageId, controller);
+          return controller;
+        },
+        unregisterRequest: vi.fn(),
+      },
+    };
+    providerState = rateLimitManager.providerStates.get('GoogleTranslateV2');
+    active = 0;
+    maximum = 0;
+    attempts = [];
+    completions = [];
+    releases = [];
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    proxyManager.fetch.mockImplementation(async (_url, options) => {
+      const source = new URLSearchParams(options.body).get('q');
+      const record = { source, start: Date.now(), end: null };
+      attempts.push(record);
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise(resolve => releases.push(resolve));
+      active--;
+      record.end = Date.now();
+      completions.push(record.source);
+      const failed = source === failureSource;
+      return {
+        ok: !failed,
+        status: failed ? 401 : 200,
+        statusText: failed ? 'Unauthorized' : 'OK',
+        headers: new Map([['content-type', 'application/json']]),
+        json: async () => failed
+          ? { error: { message: 'Invalid API key' } }
+          : [[[`translated:${source}`, source]], null, 'en'],
+        clone() { return this; },
+      };
+    });
+  });
+
+  afterEach(() => {
+    releases.forEach(release => release());
+    queueManager.cleanup();
+    rateLimitManager.providerStates.forEach(state => clearTimeout(state.nextProcessTimer));
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const pageRequest = (messageId, { sessionId = 'google-page-session', sourceLanguage = 'en', text = messageId } = {}) => coordinator.processRequest({
+    mode: TranslationMode.Page,
+    messageId,
+    data: {
+      provider: 'googlev2',
+      sessionId,
+      sourceLanguage,
+      targetLanguage: 'ja',
+      text: JSON.stringify([{ id: messageId, text }]),
+    },
+  }, { translationEngine: engine });
+
+  const pumpUntil = async predicate => {
+    for (let turn = 0; turn < 40 && !predicate(); turn++) {
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(predicate(), JSON.stringify({
+      active,
+      maximum,
+      attempts: attempts.map(attempt => ({ source: attempt.source, end: attempt.end })),
+      providerActiveRequests: providerState.activeRequests,
+      sourceResolvers: [...coordinator.pageSourceResolvers.entries()].map(([key, state]) => ({
+        key, source: state.effectiveSourceLanguage, target: state.effectiveTargetLanguage,
+      })),
+    })).toBe(true);
+  };
+
+  it('overlaps Page batches across sessions, shares provider capacity, and maps reverse completions', async () => {
+    const batchRows = [
+      ['session-a', 'a-1', 'source-a-1'],
+      ['session-a', 'a-2', 'source-a-2'],
+      ['session-b', 'b-1', 'source-b-1'],
+      ['session-b', 'b-2', 'source-b-2'],
+      ['session-a', 'a-3', 'source-a-3'],
+      ['session-b', 'b-3', 'source-b-3'],
+    ];
+    const runBatch = ([sessionId, id, text]) => coordinator.processRequest({
+      mode: TranslationMode.Page,
+      messageId: id,
+      data: {
+        provider: 'googlev2',
+        sessionId,
+        sourceLanguage: 'en',
+        targetLanguage: 'ja',
+        text: JSON.stringify([{ id, text }]),
+      },
+    }, { translationEngine: engine });
+    const requests = batchRows.slice(0, 4).map(runBatch);
+
+    for (let turn = 0; turn < 40 && attempts.length < 4; turn++) {
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    const limit = providerState.config.maxConcurrent;
+    expect(limit).toBe(4);
+    expect(attempts).toHaveLength(4);
+    expect(active).toBe(4);
+    expect(maximum).toBe(limit);
+    expect(providerState.activeRequests).toBe(limit);
+    expect(attempts.every(attempt => attempt.end === null)).toBe(true);
+    const initiallyInFlightSources = attempts.map(attempt => attempt.source);
+    expect(initiallyInFlightSources.filter(source => source.startsWith('source-a-'))).toHaveLength(2);
+    expect(initiallyInFlightSources.filter(source => source.startsWith('source-b-'))).toHaveLength(2);
+    requests.push(...batchRows.slice(4).map(runBatch));
+
+    releases[0]();
+    for (let turn = 0; turn < 40 && attempts.length < 5; turn++) {
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(attempts).toHaveLength(5);
+    expect(active).toBe(limit);
+    expect(maximum).toBe(limit);
+    releases[4]();
+    for (let turn = 0; turn < 40 && attempts.length < 6; turn++) {
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(attempts).toHaveLength(6);
+    expect(active).toBe(limit);
+
+    for (let index = releases.length - 1; index >= 1; index--) {
+      releases[index]();
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    for (let turn = 0; turn < 40 && providerState.activeRequests !== 0; turn++) {
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    const results = await Promise.all(requests);
+    expect(completions).toEqual([
+      attempts[0].source,
+      attempts[4].source,
+      attempts[5].source,
+      ...attempts.slice(1, 4).map(attempt => attempt.source).reverse(),
+    ]);
+    expect(results.map(result => JSON.parse(result.translatedText))).toEqual([
+      [{ id: 'a-1', text: 'translated:source-a-1' }],
+      [{ id: 'a-2', text: 'translated:source-a-2' }],
+      [{ id: 'b-1', text: 'translated:source-b-1' }],
+      [{ id: 'b-2', text: 'translated:source-b-2' }],
+      [{ id: 'a-3', text: 'translated:source-a-3' }],
+      [{ id: 'b-3', text: 'translated:source-b-3' }],
+    ]);
+    expect(attempts).toHaveLength(6);
+    expect(maximum).toBe(limit);
+    expect(active).toBe(0);
+    expect(providerState.activeRequests).toBe(0);
+    expect(queueManager.getQueueStatus('GoogleTranslateV2::parallel').total).toBe(0);
+  });
+
+  it('keeps unresolved AUTO sibling batches behind the first Google V2 provider batch', async () => {
+    const detection = vi.spyOn(LanguageDetectionService, 'detectDetailed')
+      .mockResolvedValueOnce({ language: null, confidence: 'unknown', provenance: 'unknown', reliable: false })
+      .mockResolvedValue({ language: 'en', confidence: 'high', provenance: 'statistical', reliable: true });
+    const finalizePair = vi.spyOn(coordinator, '_finalizePageSourceResolution');
+    const requests = [
+      pageRequest('auto-first', { sourceLanguage: 'auto', text: 'x' }),
+      pageRequest('auto-sibling-1', { sourceLanguage: 'auto', text: 'y' }),
+      pageRequest('auto-sibling-2', { sourceLanguage: 'auto', text: 'z' }),
+    ];
+
+    await pumpUntil(() => attempts.length === 1);
+    expect(attempts[0].source).toBe('x');
+    expect(providerState.activeRequests).toBe(1);
+    releases[0]();
+    await pumpUntil(() => attempts.length === 3);
+    expect(detection).toHaveBeenCalledTimes(2);
+    expect(finalizePair).toHaveBeenCalledWith(expect.any(String), expect.anything(), expect.objectContaining({
+      sourceLanguage: 'en', targetLanguage: 'ja',
+    }));
+
+    releases.slice(1).forEach(release => release());
+    await pumpUntil(() => providerState.activeRequests === 0);
+    const results = await Promise.all(requests);
+    expect(results.map(result => JSON.parse(result.translatedText))).toEqual([
+      [{ id: 'auto-first', text: 'translated:x' }],
+      [{ id: 'auto-sibling-1', text: 'translated:y' }],
+      [{ id: 'auto-sibling-2', text: 'translated:z' }],
+    ]);
+  });
+
+  it('cancels queued Google V2 parallel work without taking or leaking a physical slot', async () => {
+    const requests = Array.from({ length: 5 }, (_, index) => pageRequest(`cancel-${index}`, {
+      sessionId: 'cancel-session', text: `cancel-source-${index}`,
+    }));
+    await pumpUntil(() => attempts.length === 4);
+    expect(providerState.activeRequests).toBe(4);
+
+    controllers.get('cancel-4').abort('user-cancelled');
+    const cancelled = await requests[4];
+    expect(cancelled.success).toBe(false);
+    expect(attempts).toHaveLength(4);
+    expect(providerState.activeRequests).toBe(4);
+
+    releases[0]();
+    await pumpUntil(() => providerState.activeRequests === 3);
+    await vi.dynamicImportSettled();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toHaveLength(4);
+    expect(maximum).toBe(4);
+
+    releases.slice(1, 4).forEach(release => release());
+    await pumpUntil(() => providerState.activeRequests === 0);
+    const completed = await Promise.all(requests.slice(0, 4));
+    expect(completed.every(result => result.success)).toBe(true);
+    expect(providerState.activeRequests).toBe(0);
+    expect(queueManager.getQueueStatus('GoogleTranslateV2::parallel').total).toBe(0);
+  });
+
+  it('keeps a Google V2 HTTP failure typed without corrupting successful siblings or limiter cleanup', async () => {
+    failureSource = 'failure-source';
+    const failedRequest = pageRequest('failure', { sessionId: 'failure-session', text: failureSource });
+    const siblingRequest = pageRequest('sibling', { sessionId: 'failure-session', text: 'sibling-source' });
+    await pumpUntil(() => attempts.length === 2);
+    expect(active).toBe(2);
+
+    releases[1]();
+    releases[0]();
+    await pumpUntil(() => providerState.activeRequests === 0);
+    const [failed, sibling] = await Promise.all([failedRequest, siblingRequest]);
+    expect(failed).toMatchObject({ success: false, errorType: ErrorTypes.API_KEY_INVALID });
+    expect(sibling).toMatchObject({ success: true });
+    expect(JSON.parse(sibling.translatedText)).toEqual([{ id: 'sibling', text: 'translated:sibling-source' }]);
+    expect(completions).toEqual(['sibling-source', 'failure-source']);
+    expect(active).toBe(0);
+    expect(providerState.activeRequests).toBe(0);
+    expect(queueManager.getQueueStatus('GoogleTranslateV2::parallel').status).toMatchObject({
+      pending: 0, processing: 0, retrying: 0,
+    });
   });
 });

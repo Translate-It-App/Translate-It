@@ -557,8 +557,9 @@ export class UnifiedModeCoordinator {
             instruction,
             rawJsonPayload: true,
             executionContext,
-            // Page batches have no conversation-history dependency; the shared AI limiter owns HTTP capacity.
-            ...(mode === TranslationMode.Page && providerInstance.constructor.isAI && { parallelExecution: true }),
+            // Page batches without history dependency may use provider-declared parallel execution.
+            ...(mode === TranslationMode.Page && (providerInstance.constructor.isAI
+              || findProviderById(nameToRegistryId(provider) || provider)?.supportsPageParallelExecution === true) && { parallelExecution: true }),
             ...(languagePairResolved && { languagePairResolved: true }),
         }),
         terminalPromise
