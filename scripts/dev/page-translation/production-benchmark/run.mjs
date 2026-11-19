@@ -94,7 +94,7 @@ const mocks = {
   '/mock/logConstants.js': `export const LOG_COMPONENTS={PAGE_TRANSLATION:'page-translation'};`,
   '/mock/direction.js': `export const applyNodeDirection=()=>{};export const isRTL=()=>false;export const restoreElementDirection=()=>{};export const BIDI_MARKS={RLM:'\\u200f',LRM:'\\u200e'};`,
   '/mock/hover.js': `export const hoverPreviewLookup={clear(){},add(){},remove(){}};`,
-  '/mock/fonts.js': `export const getTranslationFontTarget=()=>null;`,
+  '/mock/fonts.js': `export const getTranslationFontTarget=()=>null;export const getSelectElementMixedFontTarget=()=>null;`,
   '/mock/ui.js': `export const NOTIFICATION_TIME={WARNING:1,FATAL:1};export const UI_HOST_IDS={TOOLTIP:'x',MAIN:'x',IFRAME:'x'};`,
   '/mock/translation.js': `export const TRANSLATION_HTML={IGNORE_CLASS:'ignore',NO_TRANSLATE_CLASS:'no-translate',NO_TRANSLATE_VALUE:'no'};`,
 };
