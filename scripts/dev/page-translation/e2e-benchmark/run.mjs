@@ -12,7 +12,7 @@ import { writeBenchmarkArtifact } from './artifact-writer.mjs';
 import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
-import { deriveScrollAggregateMetrics, modeOrder, mapProviderBatchIds, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './scenario-plan.mjs';
+import { deriveScrollAggregateMetrics, modeOrder, mapProviderBatchIds, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
 
@@ -347,6 +347,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       targets: fixtureConfig.targets,
       targetTexts: fixtureConfig.targetTexts,
       dynamicCohorts: fixtureConfig.dynamicCohorts ?? [],
+      shadowTargets: fixtureConfig.shadowTargets ?? [],
       visibleIds: fixtureConfig.visibleIds,
       viewport: fixtureConfig.viewport,
       scroll: fixtureConfig.scroll,
@@ -842,17 +843,41 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
 
     trial.scrollState = await evaluate(chrome, pageSession,
       `(()=>{window.scrollTo(${fixtureConfig.scroll.x},${fixtureConfig.scroll.y});return {x:window.scrollX,y:window.scrollY}})()`, undefined, false);
-    const actualGeometry = await evaluate(chrome, pageSession,
+    let shadowOracle = null;
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      shadowOracle = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.enableShadowDOMTracking(${JSON.stringify(fixtureConfig.shadowTargets)})`, contentContext);
+      if (JSON.stringify(shadowOracle.targetIds) !== JSON.stringify(fixtureConfig.targets.map(target => target.id))) throw new Error('Shadow DOM initial target oracle mismatch.');
+    }
+    const actualGeometry = fixtureConfig.scenario === 'shadow-dom' ? {
+      ...await evaluate(chrome, pageSession,
+        `(()=>{const trace=window.__pageTranslationBenchmark;const ids=${JSON.stringify(fixtureConfig.targets.map(target => target.id))};const entries=ids.map(id=>[id,trace.shadowTargetById.get(id)]);const visible=entries.filter(([,el])=>{if(!el)return false;const r=el.getBoundingClientRect(),s=getComputedStyle(el);return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth}).map(([id])=>id);return {targetCount:entries.filter(([,el])=>!!el).length,visibleIds:visible,viewport:{width:innerWidth,height:innerHeight},scroll:{x:scrollX,y:scrollY}}})()`, contentContext, false),
+    } : await evaluate(chrome, pageSession,
       `(()=>{const targets=[...document.querySelectorAll('[data-bench-id]')];const visible=targets.filter(element=>{const rect=element.getBoundingClientRect();const style=getComputedStyle(element);return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>0&&rect.height>0&&rect.bottom>0&&rect.right>0&&rect.top<innerHeight&&rect.left<innerWidth}).map(element=>element.dataset.benchId);return {targetCount:targets.length,visibleIds:visible,viewport:{width:innerWidth,height:innerHeight},scroll:{x:scrollX,y:scrollY}}})()`, undefined, false);
     trial.actualGeometry = actualGeometry;
-    trial.fixtureGeometryValidation = validateFixtureGeometry(fixtureConfig, actualGeometry);
-    if (!trial.fixtureGeometryValidation.ok) throw new Error(trial.fixtureGeometryValidation.issues.join('; '));
-    const originals = fixtureConfig.targets.map(target => [target.id, target.source]);
+    if (fixtureConfig.scenario !== 'shadow-dom') {
+      trial.fixtureGeometryValidation = validateFixtureGeometry(fixtureConfig, actualGeometry);
+      if (!trial.fixtureGeometryValidation.ok) throw new Error(trial.fixtureGeometryValidation.issues.join('; '));
+    }
+    let originals = fixtureConfig.targets.map(target => [target.id, target.source]);
     const originalById = new Map(originals);
-    trial.rawDOM.original = await evaluate(chrome, pageSession,
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      trial.rawDOM.original = await evaluate(chrome, pageSession,
+        `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;return ${JSON.stringify(fixtureConfig.targets.map(target => target.id))}.map(id=>{const el=t.get(id);return [id,el?.dataset.benchKind==='title'?el.getAttribute('title'):el?.textContent]})})()`, contentContext, false);
+      trial.fixtureGeometryValidation = validateShadowInitialObservations({ fixture: fixtureConfig, observedTargets: trial.rawDOM.original, observedGeometry: actualGeometry });
+      if (!trial.fixtureGeometryValidation.ok) throw new Error(trial.fixtureGeometryValidation.issues.join('; '));
+      originals = trial.rawDOM.original;
+      originalById.clear();
+      for (const [id, source] of originals) originalById.set(id, source);
+      trial.shadowDOM = await evaluate(chrome, pageSession,
+        `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;const state=el=>{const s=getComputedStyle(el);return {inlineDirection:el.style.direction,inlineUnicodeBidi:el.style.unicodeBidi,computedDirection:s.direction,computedUnicodeBidi:s.unicodeBidi,markers:Object.fromEntries(['data-page-translated','data-has-original','data-dir-original-saved','data-translate-dir'].map(name=>[name,el.getAttribute(name)]))}};return {metadata:[...t].map(([id,el])=>[id,[...el.attributes].map(a=>[a.name,a.value])]),targetStates:[...t].map(([id,el])=>[id,state(el)])}})()`, contentContext);
+      Object.assign(trial.shadowDOM, await evaluate(chrome, pageSession,
+        `(()=>{const o=window.__shadowBenchmarkOracle;return {directText:[...o.initialRoot.childNodes].some(n=>n.nodeType===3&&n.nodeValue==='SHADOW_DIRECT_TEXT_SENTINEL'),closedText:o.closedSentinel.textContent,closedRootInaccessible:o.closedHost.shadowRoot===null}})()`));
+      if (!trial.shadowDOM.directText || trial.shadowDOM.closedText !== 'SHADOW_CLOSED_ROOT_SENTINEL' || !trial.shadowDOM.closedRootInaccessible) throw new Error('Shadow DOM omission sentinels were not intact before translation.');
+    } else trial.rawDOM.original = await evaluate(chrome, pageSession,
       `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.dataset.benchKind==='title'?el.getAttribute('title'):el.textContent])`, contentContext);
-    if (trial.rawDOM.original.length !== fixtureConfig.targetCount
-        || JSON.stringify(trial.rawDOM.original) !== JSON.stringify(originals)) {
+    if (fixtureConfig.scenario !== 'shadow-dom' && (trial.rawDOM.original.length !== fixtureConfig.targetCount
+        || JSON.stringify(trial.rawDOM.original) !== JSON.stringify(originals))) {
       throw new Error(`Pre-translation fixture DOM does not exactly match ${fixtureConfig.targetCount} source targets.`);
     }
     trial.longTaskCalibration = await evaluate(chrome, pageSession,
@@ -864,17 +889,18 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     await evaluate(chrome, pageSession,
       'window.__benchEvents=[];window.addEventListener("__benchmark-runtime-event",e=>{const receivedAt=Date.now();const performanceAt=performance.now();window.__benchEvents.push({receivedAt,performanceAt,message:e.detail})});', contentContext);
     measurementState.attempted = true;
-    if (fixtureConfig.scenario === 'dynamic-dom') {
-      const expectedIds = [...fixtureConfig.targets, ...fixtureConfig.dynamicCohorts.flatMap(cohort => cohort.targets)].map(target => target.id);
+    if (fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'shadow-dom') {
+      const expectedIds = [...fixtureConfig.targets, ...(fixtureConfig.dynamicCohorts ?? []).flatMap(cohort => cohort.targets)].map(target => target.id);
+      if (fixtureConfig.scenario === 'shadow-dom') expectedIds.splice(fixtureConfig.targets.length, 0, ...fixtureConfig.shadowTargets.slice(3).map(target => target.id));
       const configured = await evaluate(chrome, pageSession,
         `window.__pageTranslationBenchmark.setExpectedTargetIds(${JSON.stringify(expectedIds)})`, contentContext);
       if (configured !== true) throw new Error('Dynamic expected target inventory could not be configured before measurement.');
     }
     trial.measurementStart = await evaluate(chrome, pageSession,
-      `window.__pageTranslationBenchmark.startMeasurement(${JSON.stringify({ scrollThrough: fixtureConfig.scenario === 'scroll-through' })})`, contentContext);
+      `window.__pageTranslationBenchmark.startMeasurement(${JSON.stringify({ scrollThrough: fixtureConfig.scenario === 'scroll-through', shadowDom: fixtureConfig.scenario === 'shadow-dom' })})`, contentContext);
     measurementState.started = true;
-    if (trial.measurementStart.targetCount !== fixtureConfig.targetCount
-        || JSON.stringify(trial.measurementStart.visibleIds) !== JSON.stringify(actualGeometry.visibleIds)) {
+    if (fixtureConfig.scenario !== 'shadow-dom' && (trial.measurementStart.targetCount !== fixtureConfig.targetCount
+        || JSON.stringify(trial.measurementStart.visibleIds) !== JSON.stringify(actualGeometry.visibleIds))) {
       throw new Error('MutationObserver target/visible-ID snapshot does not match actual viewport geometry.');
     }
     if (fixtureConfig.scenario === 'spa-navigation') {
@@ -892,7 +918,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.armSuccessfulReplyProbe()', contentContext);
     }
     trial.timestamps.translationCommand = now();
-    if (fixtureConfig.scenario === 'dynamic-dom') {
+    if (fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'shadow-dom') {
       const enabled = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.enableDynamicDOMTracking()', contentContext);
       if (enabled !== true) throw new Error('Dynamic DOM settlement instrumentation could not be installed.');
     }
@@ -955,6 +981,19 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       (trial.dynamicCohorts ??= []).push({ id: cohort.id, targetIds: cohort.targets.map(target => target.id), insertedAt: inserted.insertedAt });
       return inserted;
     };
+    const insertShadowTarget = async (id, phase) => {
+      const inserted = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.insertShadowTarget(${JSON.stringify(id)},${JSON.stringify(phase)})`, contentContext);
+      const target = fixtureConfig.shadowTargets.find(item => item.id === id);
+      if (inserted.source !== target.source) throw new Error(`Observed dynamic Shadow DOM source mismatch: ${id}`);
+      originalById.set(id, inserted.source);
+      trial.rawDOM.original.push([id, inserted.source]);
+      (trial.dynamicCohorts ??= []).push({ id: `shadow-${phase}`, targetIds: [id], insertedAt: inserted.insertedAt });
+      trial.shadowDOM.metadata.push([id, inserted.originalAttributes]);
+      trial.shadowDOM.targetStates.push([id, { ...inserted.directionState, markers: inserted.markers }]);
+      dynamicCohortsInserted++;
+      return inserted;
+    };
     if (fixtureConfig.scenario === 'dynamic-dom') {
       if (trialSettings.WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES !== true
           || managerCall.settings?.autoTranslateOnDOMChanges !== true) throw new Error('Dynamic DOM scenario did not enable production auto-translation on DOM changes.');
@@ -964,6 +1003,40 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       });
       trial.dynamicBaseSessionAtFirstInsertion = translating;
       await insertDynamicCohort(0);
+    }
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      if (managerCall.settings?.autoTranslateOnDOMChanges !== true || trialSettings.WHOLE_PAGE_LAZY_LOADING !== false) throw new Error('Shadow DOM scenario settings are not auto-DOM-only.');
+      trial.shadowDOM.initialDiscoveryDrain = await until(async () => {
+        const [state, accepted, contentEvents] = await Promise.all([
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false),
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.events', contentContext, false),
+        ]);
+        const initialIds = fixtureConfig.targets.map(target => target.id);
+        const [primitiveAdmissions, schedulerEnqueues] = await Promise.all([
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.discoveryAdmissionOrder', contentContext, false),
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.schedulerEnqueueOrder', contentContext, false),
+        ]);
+        const transitions = accepted?.acceptedSettlementTransitions ?? [];
+        const bridgeDiscoveryDrained = typeof state?.bridgeDiscoveryPending === 'boolean'
+          ? state.bridgeDiscoveryPending === false && state.bridgeDiscoveryRunning === false
+            && state.bridgeDiscoveryStarting === false && state.bridgeDiscoveryQueueDepth === 0 && state.bridgeDiscoveryFailed === false
+          : mode === 'legacy' ? true
+            : contentEvents?.some(event => event.name === 'bridge.discovery.pending' && event.pending === false
+              && event.bridgePending === false && event.queueDepth === 0 && event.running === false) === true;
+        const readiness = shadowInitialTranslationReadiness({ expectedIds: initialIds, expectedSessionId: sessionId,
+          observedSessionId: state?.translationSessionId, schedulerState: state, bridgeDiscoveryDrained,
+          admissions: primitiveAdmissions, enqueues: schedulerEnqueues, settlements: transitions,
+          acceptedDomIds: accepted?.acceptedDomIds });
+        trial.shadowDOM.latestInitialDrainObservation = { scheduler: state, acceptedSettlementTransitions: transitions,
+          acceptedDomIds: accepted?.acceptedDomIds ?? [], bridgeDiscoveryDrained,
+          bridgeEvents: contentEvents?.filter(event => event.name === 'bridge.discovery.pending') ?? [],
+          primitiveAdmissions, schedulerEnqueues, readiness };
+        if (!readiness.ready) return null;
+        return { scheduler: state, acceptedSettlementTransitions: transitions,
+          acceptedDomIds: accepted.acceptedDomIds };
+      });
+      await insertShadowTarget('shadow-dynamic-host', 'detached-host');
     }
 
     if (staleSuccessProbe) {
@@ -2307,9 +2380,9 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         const accepted = await until(async () => {
           const events = await evaluate(chrome, pageSession, 'window.__benchEvents??[]', contentContext, false);
           trial.lifecycle = events;
-          const expectedCount = fixtureConfig.targets.length
-            + (fixtureConfig.dynamicCohorts?.reduce((total, cohort) => total + cohort.targets.length, 0) ?? 0);
-          const terminal = fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'scroll-through'
+          const expectedCount = fixtureConfig.scenario === 'shadow-dom' ? fixtureConfig.shadowTargets.length
+            : fixtureConfig.targets.length + (fixtureConfig.dynamicCohorts?.reduce((total, cohort) => total + cohort.targets.length, 0) ?? 0);
+          const terminal = fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'shadow-dom' || fixtureConfig.scenario === 'scroll-through'
             ? findFinalTranslationTerminal(events, sessionId, expectedCount)
             : events.find(event => ['page-translate-complete', 'page-translate-idle'].some(action => isSessionEvent(event, action, sessionId)));
           if (terminal) trial.terminal = terminal;
@@ -2320,7 +2393,16 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
               await insertDynamicCohort(1);
             }
           }
+          if (fixtureConfig.scenario === 'shadow-dom' && dynamicCohortsInserted === 1) {
+            const snapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+            const initialIds = fixtureConfig.targets.map(target => target.id);
+            if (initialIds.every(id => snapshot.acceptedSettlementIds.includes(id) && snapshot.acceptedDomIds.includes(id))
+                && snapshot.acceptedSettlementIds.includes('shadow-dynamic-host') && snapshot.acceptedDomIds.includes('shadow-dynamic-host')) {
+              await insertShadowTarget('shadow-dynamic-root', 'later-root-content');
+            }
+          }
           if (fixtureConfig.scenario === 'dynamic-dom' && dynamicCohortsInserted !== fixtureConfig.dynamicCohorts.length) return null;
+          if (fixtureConfig.scenario === 'shadow-dom' && dynamicCohortsInserted !== 2) return null;
           if (!terminal) return null;
           if (fixtureConfig.scenario === 'scroll-through') {
             const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
@@ -2340,8 +2422,27 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
             if (sessionState.translationSessionId !== sessionId || sessionState.managerTranslating !== false
                 || sessionState.activeFlushes !== 0 || sessionState.queueIds?.length !== 0) return null;
           }
+          if (fixtureConfig.scenario === 'shadow-dom') {
+            const acceptedSnapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+            const expectedIds = fixtureConfig.shadowTargets.map(target => target.id);
+            if (!expectedIds.every(id => acceptedSnapshot.acceptedSettlementIds.includes(id) && acceptedSnapshot.acceptedDomIds.includes(id))) return null;
+            const acceptedStates = await evaluate(chrome, pageSession,
+              `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;const state=el=>{const s=getComputedStyle(el);return {inlineDirection:el.style.direction,inlineUnicodeBidi:el.style.unicodeBidi,computedDirection:s.direction,computedUnicodeBidi:s.unicodeBidi,markers:Object.fromEntries(['data-page-translated','data-has-original','data-dir-original-saved','data-translate-dir'].map(name=>[name,el.getAttribute(name)]))}};return ${JSON.stringify(expectedIds)}.map(id=>[id,state(t.get(id))])})()`, contentContext, false);
+            const baseline = new Map(trial.shadowDOM.targetStates);
+            for (const [id, state] of acceptedStates) {
+              const originalState = baseline.get(id);
+              if (!originalState || Object.keys(originalState).filter(key => key.startsWith('inline') || key.startsWith('computed'))
+                .some(key => state[key] !== originalState[key])) throw new Error(`French Shadow DOM translation unexpectedly changed direction state: ${id}`);
+              const target = fixtureConfig.shadowTargets.find(item => item.id === id);
+              if (target.kind === 'text' && state.markers['data-page-translated'] !== 'true') throw new Error(`Translated Shadow DOM text lacks its production marker: ${id}`);
+              if (state.markers['data-page-translated'] !== null && state.markers['data-page-translated'] !== 'true') throw new Error(`Unexpected translated marker value: ${id}`);
+            }
+            trial.shadowDOM.acceptedTargetStates = acceptedStates;
+          }
           const dom = await evaluate(chrome, pageSession,
-            `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
+            fixtureConfig.scenario === 'shadow-dom'
+              ? `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;return ${JSON.stringify(fixtureConfig.shadowTargets.map(target => target.id))}.map(id=>{const el=t.get(id);return [id,el?.dataset.benchKind==='title'?el.getAttribute('title'):el?.textContent]})})()`
+              : `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
           trial.rawDOM.translated = dom;
           return dom.length === originals.length && dom.every(([id, value]) => {
             const source = originalById.get(id);
@@ -2376,8 +2477,29 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           if (done) trial.restoreTerminal = done;
           if (!done) return null;
           const dom = await evaluate(chrome, pageSession,
-            `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
+            fixtureConfig.scenario === 'shadow-dom'
+              ? `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;return ${JSON.stringify(fixtureConfig.shadowTargets.map(target => target.id))}.map(id=>{const el=t.get(id);return [id,el?.dataset.benchKind==='title'?el.getAttribute('title'):el?.textContent]})})()`
+              : `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
           trial.rawDOM.restored = dom;
+          if (fixtureConfig.scenario === 'shadow-dom') {
+            const restoredProof = await evaluate(chrome, pageSession,
+              `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;const state=el=>{const s=getComputedStyle(el);return {inlineDirection:el.style.direction,inlineUnicodeBidi:el.style.unicodeBidi,computedDirection:s.direction,computedUnicodeBidi:s.unicodeBidi,markers:Object.fromEntries(['data-page-translated','data-has-original','data-dir-original-saved','data-translate-dir'].map(name=>[name,el.getAttribute(name)]))}};return {metadata:[...t].map(([id,el])=>[id,[...el.attributes].map(a=>[a.name,a.value])]),targetStates:[...t].map(([id,el])=>[id,state(el)]),session:window.__pageTranslationBenchmark.pageSessionSnapshot()}})()`, contentContext, false);
+            Object.assign(restoredProof, await evaluate(chrome, pageSession,
+              `(()=>{const o=window.__shadowBenchmarkOracle;return {directText:[...o.initialRoot.childNodes].some(n=>n.nodeType===3&&n.nodeValue==='SHADOW_DIRECT_TEXT_SENTINEL'),closedText:o.closedSentinel.textContent,closedRootInaccessible:o.closedHost.shadowRoot===null}})()`, undefined, false));
+            trial.shadowDOM.restoreProof = restoredProof;
+            const originalMeta = new Map(trial.shadowDOM.metadata);
+            const originalStates = new Map(trial.shadowDOM.targetStates);
+            if (!restoredProof.directText || restoredProof.closedText !== trial.shadowDOM.closedText || !restoredProof.closedRootInaccessible
+                || restoredProof.metadata.length !== fixtureConfig.shadowTargets.length
+                || restoredProof.metadata.some(([id, attrs]) => JSON.stringify(attrs) !== JSON.stringify(originalMeta.get(id)))
+                || restoredProof.targetStates.some(([id, state]) => {
+                  const baseline = originalStates.get(id);
+                  return !baseline || Object.keys(baseline).some(key => JSON.stringify(state[key]) !== JSON.stringify(baseline[key]));
+                })
+                || restoredProof.session?.managerTranslating !== false || restoredProof.session?.activeFlushes !== 0
+                || restoredProof.session?.queueIds?.length !== 0 || restoredProof.session?.pendingSettlementCount !== 0
+                || restoredProof.session?.bridgeSessionActive === true || restoredProof.session?.bridgeSessionOwned === true) return null;
+          }
           return dom.length === originals.length
             && dom.every(([id, text]) => originalById.get(id) === text) ? { done, dom } : null;
         }, 30_000);
@@ -2441,12 +2563,37 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       if (expectedIds.some(id => settlementCounts.get(id) !== 1)) throw new Error('Dynamic DOM targets were not accepted by exactly one scheduler settlement each.');
       trial.dynamicAcceptanceSettlementTransitions = finalSnapshot.acceptedSettlementTransitions;
     }
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      if (contentTrace.shadowDom?.observerDisconnected !== true || contentTrace.shadowDom.observedRootCount !== 3
+          || contentTrace.shadowDom.observedTargetCount !== 1) throw new Error('Shadow DOM measurement observers did not disconnect after observing exactly three fixture-owned open roots and the owned light-DOM target.');
+      const expectedIds = fixtureConfig.shadowTargets.map(target => target.id);
+      const finalSnapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+      const settlementValidation = validateExactTargetIds('scheduler settlement', finalSnapshot.acceptedSettlementTransitions.map(({ id }) => id), expectedIds);
+      if (!settlementValidation.ok) throw new Error(settlementValidation.issues.join('; '));
+      if (finalSnapshot.acceptedSettlementTransitions.some(item => item.sessionId !== trial.sessionId)
+          || expectedIds.some(id => finalSnapshot.acceptedSettlementTransitions.filter(item => item.id === id).length !== 1)) {
+        throw new Error('Shadow DOM accepted settlements do not have one consistent translation-session owner.');
+      }
+      const batches = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.schedulerBatchSessions', contentContext, false) ?? [];
+      if (!batches.length || batches.some(batch => batch.sessionId !== trial.sessionId)) throw new Error('Shadow DOM scheduler batches do not share the accepted translation session.');
+      trial.shadowDOM = { ...trial.shadowDOM, expectedIds, settlementTransitions: finalSnapshot.acceptedSettlementTransitions, schedulerBatches: batches };
+      const initialTimes = expectedIds.slice(0, 3).map(id => contentTrace.acceptedPerformanceAtById?.[id]);
+      const initialAcceptedAt = initialTimes.every(Number.isFinite) ? Math.max(...initialTimes) : null;
+      const measurementStartedAt = trial.measurementStart?.startedPerformanceAt;
+      const dynamicLatency = Object.fromEntries((contentTrace.dynamicCohorts ?? []).map(cohort => [cohort.targetIds[0],
+        Number.isFinite(cohort.insertedAt) && Number.isFinite(cohort.firstAcceptedAt) ? cohort.firstAcceptedAt - cohort.insertedAt : null]));
+      trial.shadowDOM.timing = { clock: 'performance.now() in the fixture document', measurementStartedAt, initialAcceptedAt,
+        measurementToInitialAcceptanceMs: Number.isFinite(measurementStartedAt) && Number.isFinite(initialAcceptedAt) ? initialAcceptedAt - measurementStartedAt : null,
+        dynamicInsertionToAcceptedWriteMsById: dynamicLatency };
+      if (!Number.isFinite(trial.shadowDOM.timing.measurementToInitialAcceptanceMs)
+          || expectedIds.slice(3).some(id => !Number.isFinite(dynamicLatency[id]))) throw new Error('Shadow DOM acceptance timing evidence is incomplete.');
+    }
     trial.timestamps.restoreCompleted = lifecycle.restoreCompletedAt;
     const restoredLifecycle = lifecycle.restored;
     const [workerTrace, contentObservation] = await Promise.all([
       evaluate(chrome, workerSession, 'globalThis.__pageTranslationBenchmark.snapshot()'),
       evaluate(chrome, pageSession,
-        `(()=>{const trace=window.__pageTranslationBenchmark;return {events:trace.events.map(event=>({...event})),discoveryFlags:trace.discoveryFlags,admissionHookInstalled:trace.admissionHookInstalled,discoveryAdmissionOrder:trace.discoveryAdmissionOrder,schedulerEnqueueOrder:trace.schedulerEnqueueOrder,selectedBatchMembers:trace.selectedBatchMembers,viewportWindowObservation:trace.viewportWindowObservation}})()`, contentContext),
+        `(()=>{const trace=window.__pageTranslationBenchmark;return {events:trace.events.map(event=>({...event})),discoveryFlags:trace.discoveryFlags,admissionHookInstalled:trace.admissionHookInstalled,discoveryAdmissionOrder:trace.discoveryAdmissionOrder,schedulerEnqueueOrder:trace.schedulerEnqueueOrder,selectedBatchMembers:trace.selectedBatchMembers,schedulerBatchSessions:trace.schedulerBatchSessions,viewportWindowObservation:trace.viewportWindowObservation}})()`, contentContext),
     ]);
     const contentEvents = contentObservation.events;
     trial.contentObservation = contentObservation;
@@ -2455,6 +2602,17 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const calibratedLongTasks = validatedLongTaskObservation(trial.longTaskCalibration, contentTrace.longTasks);
     const verifiedContentTrace = { ...contentTrace, longTasks: calibratedLongTasks.entries, longTasksUnavailableReason: calibratedLongTasks.unavailableReason };
     trial.derivedTimings = deriveTimings(trial, workerTrace, verifiedContentTrace, contentEvents);
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      const tasks = trial.derivedTimings.longTasks;
+      const terminalAt = trial.terminal?.performanceAt;
+      trial.shadowDOM.longTasks = {
+        measurementToTerminal: longTasksWithinInterval(tasks, trial.measurementStart?.startedPerformanceAt, terminalAt),
+        dynamicInsertionToAcceptedWriteById: Object.fromEntries((contentTrace.dynamicCohorts ?? []).map(cohort => [cohort.targetIds[0],
+          longTasksWithinInterval(tasks, cohort.insertedAt, cohort.firstAcceptedAt)])),
+        boundary: 'Calibrated captured PerformanceObserver tasks whose complete intervals are inside the listed performance.now() bounds.',
+        unavailableReason: tasks === null ? calibratedLongTasks.unavailableReason : null,
+      };
+    }
     const providerAttempts = trial.requests.filter(request => request.category === 'provider-translation');
     trial.providerTranslationAttempts = providerAttempts.length;
     trial.providerBatchSizes = providerAttempts.map(request => request.batchSize);

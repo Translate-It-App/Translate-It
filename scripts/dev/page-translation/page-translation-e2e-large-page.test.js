@@ -11,6 +11,7 @@ describe('large-page benchmark plan and geometry checks', () => {
     expect(parseScenarioSelection('early-visible,in-window-visible,late-visible')).toEqual([
       'early-visible', 'in-window-visible', 'late-visible',
     ]);
+    expect(parseScenarioSelection('shadow-dom')).toEqual(['shadow-dom']);
     expect(() => parseScenarioSelection('early-visible,early-visible')).toThrow('Duplicate');
     expect(() => parseScenarioSelection('not-a-fixture')).toThrow('Unsupported');
   });
@@ -119,6 +120,8 @@ describe('large-page benchmark plan and geometry checks', () => {
     expect(settingsForScenario({}, 'scroll-through', 'on-stop')).toMatchObject({ WHOLE_PAGE_LAZY_LOADING: true, WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: true });
     expect(settingsForScenario({}, 'small')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false });
     expect(() => settingsForScenario({}, 'small', 'fluid')).toThrow('only supported');
+    expect(settingsForScenario({}, 'shadow-dom')).toMatchObject({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: true });
+    expect(settingsForScenario({}, 'shadow-dom')).not.toHaveProperty('WHOLE_PAGE_LAZY_LOADING');
   });
 
   it('records first acceptance and complete visible/all sets, leaving incomplete timing unavailable', () => {

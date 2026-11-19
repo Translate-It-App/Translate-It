@@ -11,6 +11,29 @@ const largeTargetCount = 1000;
 const visibleTargetIndexes = [500, 501, 502, 503];
 
 export function createFixture(scenario = 'small') {
+  if (scenario === 'shadow-dom') {
+    const targets = [
+      { id: 'shadow-light', source: 'Shadow fixture light DOM source.', kind: 'text', visible: true },
+      { id: 'shadow-open', source: 'Shadow fixture open-root source.', kind: 'text', visible: true },
+      { id: 'shadow-nested-title', source: 'Shadow fixture nested title source.', kind: 'title', visible: true },
+      { id: 'shadow-dynamic-host', source: 'Shadow fixture inserted-host source.', kind: 'text', visible: true },
+      { id: 'shadow-dynamic-root', source: 'Shadow fixture later-root source.', kind: 'text', visible: true },
+    ];
+    const html = `<!doctype html><meta charset="utf-8"><title>Shadow DOM benchmark</title><main><p data-bench-id="shadow-light" data-bench-kind="text">${targets[0].source}</p><div id="shadow-initial-host"></div><div id="shadow-closed-host"></div></main><script>
+      const initialHost=document.getElementById('shadow-initial-host');
+      const initialRoot=initialHost.attachShadow({mode:'open'});
+      const openTarget=document.createElement('p');openTarget.dataset.benchId='shadow-open';openTarget.dataset.benchKind='text';openTarget.style.direction='rtl';openTarget.style.unicodeBidi='isolate';openTarget.textContent=${JSON.stringify(targets[1].source)};initialRoot.append(openTarget);
+      const nestedHost=document.createElement('div');nestedHost.id='shadow-nested-host';initialRoot.append(nestedHost);
+      const nestedRoot=nestedHost.attachShadow({mode:'open'});
+      const nestedTitle=document.createElement('p');nestedTitle.dataset.benchId='shadow-nested-title';nestedTitle.dataset.benchKind='title';nestedTitle.style.minHeight='1px';nestedTitle.setAttribute('title',${JSON.stringify(targets[2].source)});nestedRoot.append(nestedTitle);
+      initialRoot.append(document.createTextNode('SHADOW_DIRECT_TEXT_SENTINEL'));
+      const closedRoot=document.getElementById('shadow-closed-host').attachShadow({mode:'closed'});
+      const closedSentinel=document.createElement('p');closedSentinel.textContent='SHADOW_CLOSED_ROOT_SENTINEL';closedRoot.append(closedSentinel);
+      window.__shadowBenchmarkOracle={initialHost,initialRoot,openTarget,nestedHost,nestedRoot,nestedTitle,closedHost:document.getElementById('shadow-closed-host'),closedSentinel};
+    </script>`;
+    return { scenario, targetCount: 3, targetTexts: targets.slice(0, 3).map(target => target.source), targets: targets.slice(0, 3), shadowTargets: targets,
+      visibleIds: targets.slice(0, 3).map(target => target.id), html, viewport: { width: 1280, height: 900 }, scroll: { x: 0, y: 0 }, responseDelayMs: 50 };
+  }
   if (scenario !== 'small' && scenario !== 'dynamic-dom' && scenario !== 'spa-navigation' && scenario !== 'scroll-through' && !largeScenarios.has(scenario)) throw new TypeError(`Unknown benchmark fixture scenario: ${scenario}`);
 
   const texts = scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' || scenario === 'scroll-through'

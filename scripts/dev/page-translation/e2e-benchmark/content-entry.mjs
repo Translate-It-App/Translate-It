@@ -23,6 +23,7 @@ const trace = {
   discoveryAdmissionOrder: null,
   schedulerEnqueueOrder: [],
   selectedBatchMembers: [],
+  schedulerBatchSessions: [],
   schedulerRequests: [],
   pageTranslationE2E: false,
   pageTranslationStartReporter: null,
@@ -77,7 +78,7 @@ const trace = {
   captureSchedulerBatch(message) {
     const targetIds = this.selectedBatchMembers.at(-1);
     const validTargetId = id => /^target-(?:[0-9]|1[01])$/.test(id)
-      || (this.dynamicDOMEnabled === true && /^dynamic-[12]-[1-3]$/.test(id));
+      || (this.dynamicDOMEnabled === true && (/^dynamic-[12]-[1-3]$/.test(id) || this.shadowManifest?.has(id)));
     if (message?.action !== 'page-translate-batch' || typeof message.messageId !== 'string'
         || typeof message.data?.sessionId !== 'string' || !Array.isArray(targetIds) || !targetIds.length
         || targetIds.some(id => !validTargetId(id))
@@ -481,7 +482,7 @@ const benchmarkTargetId = node => {
   const element = node?.nodeType === Node.ELEMENT_NODE
     ? node
     : node?.nodeType === Node.ATTRIBUTE_NODE ? node.ownerElement : node?.parentElement;
-  return element?.closest?.('[data-bench-id]')?.dataset?.benchId ?? null;
+  return trace.benchmarkIdsByElement?.get(element) ?? element?.closest?.('[data-bench-id]')?.dataset?.benchId ?? null;
 };
 
 const recordScrollStage = (name, id) => {
@@ -586,6 +587,7 @@ installCallThrough(PageTranslationScheduler.prototype, 'flush', function () {
 installCallThrough(PageTranslationScheduler.prototype, '_executeBatchRequest', function ([batch]) {
   const targetIds = Array.isArray(batch) ? batch.map(item => benchmarkTargetId(item?.node)) : null;
   trace.selectedBatchMembers.push(targetIds);
+  trace.schedulerBatchSessions.push({ sessionId: this.translationSessionId ?? null, targetIds });
   if (trace.scrollThroughStages) trace.scrollThroughStages.selectionViewport.push({
     at: performance.now(), isScrolling: this.isScrolling,
     targetIds, targets: Array.isArray(batch) ? batch.map(item => scrollSelectionTarget(item?.node)) : null,
@@ -631,7 +633,12 @@ installCallThrough(PageTranslationBridge.prototype, 'initialize', function (args
   if (typeof callbacks?.onDiscoveryStateChange !== 'function' || callbacks.onDiscoveryStateChange.__benchmarkWrapped) return;
   const original = callbacks.onDiscoveryStateChange;
   const wrapped = function (...callbackArgs) {
-    trace.record('bridge.discovery.pending', { pending: callbackArgs[0] === true });
+    const discovery = trace.bridgeSession?.discovery;
+    const queueDepth = Array.isArray(discovery?.queue) && Number.isInteger(discovery.head)
+      ? Math.max(0, discovery.queue.length - discovery.head) : null;
+    trace.record('bridge.discovery.pending', { pending: callbackArgs[0] === true,
+      bridgePending: typeof discovery?.pending === 'boolean' ? discovery.pending : null, queueDepth,
+      running: typeof discovery?.running === 'boolean' ? discovery.running : null });
     return original.apply(this, callbackArgs);
   };
   wrapped.__benchmarkWrapped = true;
@@ -646,10 +653,16 @@ const visible = element => {
   return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
     && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
 };
-trace.startMeasurement = ({ scrollThrough = false } = {}) => {
-  const targets = [...document.querySelectorAll('[data-bench-id]')].map(element => ({
+trace.startMeasurement = ({ scrollThrough = false, shadowDom = false } = {}) => {
+  const shadowElements = shadowDom ? [...trace.shadowTargetById.values()] : null;
+  const targets = (shadowElements ?? [...document.querySelectorAll('[data-bench-id]')]).map(element => ({
     id: element.dataset.benchId, source: element.textContent, visibleAtStart: visible(element), element,
   }));
+  if (shadowDom) for (const target of targets) {
+    const manifest = trace.shadowManifest.get(target.id);
+    target.source = manifest.source;
+    target.kind = manifest.kind;
+  }
   const initialTargetIds = targets.map(target => target.id);
   trace.scrollThroughStages = scrollThrough ? {
     expectedIds: [...initialTargetIds],
@@ -686,16 +699,18 @@ trace.startMeasurement = ({ scrollThrough = false } = {}) => {
   const processMutations = records => {
     observerState.recordCount += records.length;
     const groups = groupMutationRecords(records, record => {
-      const element = (record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement)?.closest('[data-bench-id]');
-      return targetByElement.get(element)?.id;
+      const element = record.target.nodeType === Node.ELEMENT_NODE ? record.target
+        : record.target.nodeType === Node.ATTRIBUTE_NODE ? record.target.ownerElement : record.target.parentElement;
+      return targetByElement.get(element)?.id ?? targetByElement.get(element?.closest?.('[data-bench-id]'))?.id;
     });
     for (const group of groups) {
       const target = targetById.get(group.key);
       const expectedText = `\u200e${trace.translationPrefix} ${target.source}`;
-      const acceptedWrite = target.element.textContent === expectedText;
+      const resultingValue = target.kind === 'title' ? target.element.getAttribute('title') : target.element.textContent;
+      const acceptedWrite = resultingValue === expectedText;
       const duplicateAcceptedWrite = isDuplicateAcceptedMutation({
         wasAlreadyAccepted: acceptedIds.has(target.id), expectedText,
-        resultingText: target.element.textContent, records: group.records,
+        resultingText: resultingValue, records: group.records,
       });
       mutations.push({ at: Date.now(), id: target.id, recordCount: group.records.length, types: [...new Set(group.records.map(record => record.type))], acceptedWrite, duplicateAcceptedWrite });
       if (trace.cancellationLedger && acceptedWrite) {
@@ -725,7 +740,7 @@ trace.startMeasurement = ({ scrollThrough = false } = {}) => {
         ...(dynamicTargetTracking ? { visibleRemainingIds, initialRemainingIds, expectedRemainingIds } : {}), completionTimes,
       });
       const acceptedPerformanceAt = performance.now();
-      if (scrollThrough) acceptedPerformanceAtById[target.id] ??= acceptedPerformanceAt;
+      acceptedPerformanceAtById[target.id] ??= acceptedPerformanceAt;
       const cohort = dynamicCohortByTargetId.get(target.id);
       if (cohort) trackCohortAcceptedTarget(cohort, target.id, acceptedPerformanceAt);
       if (firstObservation) trace.record('dom.acceptedWrite', { id: target.id, at: acceptedAt, visibleAtStart: target.visibleAtStart });
@@ -737,7 +752,14 @@ trace.startMeasurement = ({ scrollThrough = false } = {}) => {
   };
   const longTasks = [];
   const observer = new MutationObserver(processMutations);
-  observer.observe(document.body, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
+  const observedRoots = new Set(shadowDom ? trace.shadowRoots : []);
+  const observedTargets = new Set();
+  if (shadowDom) {
+    for (const root of observedRoots) observer.observe(root, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true, attributeOldValue: true });
+    const lightTarget = trace.shadowTargetById.get('shadow-light');
+    observer.observe(lightTarget, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true, attributeOldValue: true });
+    observedTargets.add(lightTarget);
+  } else observer.observe(document.body, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
   if (scrollThrough) {
     viewportObserver = new IntersectionObserver(entries => {
       for (const entry of entries) {
@@ -758,10 +780,10 @@ trace.startMeasurement = ({ scrollThrough = false } = {}) => {
       longTaskObserver.observe({ type: 'longtask', buffered: false });
     } catch (error) { longTasksUnavailableReason = error.message; longTaskObserver = null; }
   }
-  measurement = { startedAt: Date.now(), scrollThrough, targets, initialTargetIds, expectedTargetIds, targetByElement, targetById, acceptedIds, duplicateAcceptedIds, mutations, observerState, firstAcceptedAtById, acceptedPerformanceAtById, viewportEntryAtById, viewportObserver, visibleIds, completionTimes, dynamicCohorts, dynamicCohortByTargetId, observer, processMutations, longTaskObserver, longTasks, longTasksUnavailableReason, firstVisible: () => firstVisibleAcceptedWriteAt };
+  measurement = { startedAt: Date.now(), startedPerformanceAt: performance.now(), scrollThrough, shadowDom, observedRoots, observedTargets, targets, initialTargetIds, expectedTargetIds, targetByElement, targetById, acceptedIds, duplicateAcceptedIds, mutations, observerState, firstAcceptedAtById, acceptedPerformanceAtById, viewportEntryAtById, viewportObserver, visibleIds, completionTimes, dynamicCohorts, dynamicCohortByTargetId, observer, processMutations, longTaskObserver, longTasks, longTasksUnavailableReason, firstVisible: () => firstVisibleAcceptedWriteAt };
   trace.record('measurement.start', { targetCount: targets.length });
   return {
-    startedAt: measurement.startedAt,
+    startedAt: measurement.startedAt, startedPerformanceAt: measurement.startedPerformanceAt,
     targetCount: targets.length,
     visibleIds: targets.filter(target => target.visibleAtStart).map(target => target.id),
     longTasksSupported: !!longTaskObserver,
@@ -775,6 +797,82 @@ trace.setExpectedTargetIds = ids => {
   }
   configuredExpectedTargetIds = [...ids];
   return true;
+};
+trace.enableShadowDOMTracking = targets => {
+  if (trace.shadowManifest || measurement || !Array.isArray(targets) || targets.length !== 5) throw new Error('Shadow DOM target oracle must be installed once before measurement.');
+  trace.shadowManifest = new Map(targets.map(target => [target.id, target]));
+  const initialRoot = document.getElementById('shadow-initial-host')?.shadowRoot;
+  const nestedRoot = initialRoot?.querySelector('#shadow-nested-host')?.shadowRoot;
+  const initialElements = new Map([['shadow-light', document.querySelector('[data-bench-id="shadow-light"]')],
+    ['shadow-open', initialRoot?.querySelector('[data-bench-id="shadow-open"]')],
+    ['shadow-nested-title', nestedRoot?.querySelector('[data-bench-id="shadow-nested-title"]')]]);
+  trace.shadowTargetById = new Map(targets.slice(0, 3).map(target => {
+    const element = initialElements.get(target.id);
+    if (!element) throw new Error(`Initial Shadow DOM target is unavailable: ${target.id}`);
+    return [target.id, element];
+  }));
+  trace.shadowRoots = new Set([initialRoot, nestedRoot]);
+  if (trace.shadowRoots.has(null)) throw new Error('Fixture-owned initial open ShadowRoots are unavailable.');
+  trace.benchmarkIdsByElement = new WeakMap([...trace.shadowTargetById].map(([id, element]) => [element, id]));
+  return { targetIds: [...trace.shadowTargetById.keys()] };
+};
+trace.insertShadowTarget = (id, phase) => {
+  const target = trace.shadowManifest?.get(id);
+  if (!target || !measurement?.shadowDom || measurement.targetById.has(id)) throw new Error(`Invalid Shadow DOM dynamic target: ${id}`);
+  let element;
+  let originalState;
+  let originalAttributes;
+  let originalValue;
+  let insertedRoot;
+  const item = { ...target, element: null, visibleAtStart: false };
+  const cohort = { id: `shadow-${phase}`, targetIds: [id], remainingIds: new Set([id]), insertedAt: null, firstAcceptedAt: null, completionAt: null, acceptedAtById: {} };
+  const inserted = registerThenInsertCohort({
+    register: () => {
+      element = document.createElement('p');
+      element.dataset.benchId = id;
+      element.dataset.benchKind = target.kind;
+      element.style.direction = 'rtl';
+      element.style.unicodeBidi = 'isolate';
+      element.textContent = target.source;
+      originalValue = target.kind === 'title' ? element.getAttribute('title') : element.textContent;
+      if (phase === 'detached-host') {
+        const host = document.createElement('div');
+        insertedRoot = host.attachShadow({ mode: 'open' });
+        measurement.shadowInsertedHost = host;
+        measurement.shadowInsertedRoot = insertedRoot;
+        measurement.observedRoots.add(insertedRoot);
+        measurement.observer.observe(insertedRoot, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true, attributeOldValue: true });
+      } else insertedRoot = measurement.shadowInsertedRoot;
+      trace.benchmarkIdsByElement.set(element, id);
+      trace.shadowTargetById.set(id, element);
+      item.element = element;
+      measurement.targets.push(item);
+      measurement.targetByElement.set(element, item);
+      measurement.targetById.set(id, item);
+      measurement.dynamicCohortByTargetId.set(id, cohort);
+      measurement.dynamicCohorts.set(cohort.id, cohort);
+      originalAttributes = [...element.attributes].map(attribute => [attribute.name, attribute.value]);
+      const style = getComputedStyle(element);
+      originalState = { inlineDirection: element.style.direction, inlineUnicodeBidi: element.style.unicodeBidi,
+        computedDirection: style.direction, computedUnicodeBidi: style.unicodeBidi,
+        markers: Object.fromEntries(['data-page-translated', 'data-has-original', 'data-dir-original-saved', 'data-translate-dir']
+          .map(name => [name, element.getAttribute(name)])) };
+      if (phase === 'detached-host') insertedRoot.append(element);
+    },
+    now: () => performance.now(),
+    insert: () => {
+      if (phase === 'detached-host') {
+        (document.querySelector('main') ?? document.body).append(measurement.shadowInsertedHost);
+      } else {
+        if (!measurement.shadowInsertedRoot?.isConnected) throw new Error('Inserted open ShadowRoot is not connected.');
+        measurement.shadowInsertedRoot.append(element);
+      }
+    },
+  });
+  cohort.insertedAt = inserted.insertedAt;
+  return { id, insertedAt: cohort.insertedAt, source: originalValue,
+    originalAttributes, directionState: originalState && Object.fromEntries(Object.entries(originalState).filter(([key]) => ['inlineDirection', 'inlineUnicodeBidi'].includes(key))),
+    markers: originalState?.markers };
 };
 trace.insertDynamicCohort = cohort => {
   if (trace.dynamicDOMEnabled !== true || !measurement || !Array.isArray(cohort?.targets) || typeof cohort.id !== 'string') throw new Error('Dynamic cohort registration requires enabled dynamic tracking, an active measurement and cohort targets.');
@@ -824,6 +922,7 @@ trace.dynamicSnapshot = () => ({
 trace.stopMeasurement = () => {
   if (!measurement) return { available: false, reason: 'measurement not started' };
   const current = measurement;
+  let observersDisconnected = false;
   try {
     current.viewportObserver?.disconnect();
     drainAndDisconnectMeasurementObservers({
@@ -832,18 +931,21 @@ trace.stopMeasurement = () => {
       longTaskObserver: current.longTaskObserver,
       processLongTasks: entries => current.longTasks.push(...entries.map(entry => ({ startTime: entry.startTime, duration: entry.duration }))),
     });
+    observersDisconnected = true;
   } finally {
     measurement = null;
   }
   trace.record('measurement.stop');
   return {
-    available: true, startedAt: current.startedAt, stoppedAt: Date.now(), targetCount: current.targets.length,
+    available: true, startedAt: current.startedAt, startedPerformanceAt: current.startedPerformanceAt, stoppedAt: Date.now(), targetCount: current.targets.length,
+    shadowDom: current.shadowDom ? { observedRootCount: current.observedRoots.size, observedTargetCount: current.observedTargets.size, observerDisconnected: observersDisconnected } : undefined,
     acceptedUniqueCount: current.acceptedIds.size, acceptedIds: [...current.acceptedIds], duplicateAcceptedIds: [...current.duplicateAcceptedIds],
     firstAcceptedAtById: current.firstAcceptedAtById,
     ...(current.scrollThrough ? {
       acceptedPerformanceAtById: current.acceptedPerformanceAtById,
       viewportEntryAtById: current.viewportEntryAtById,
     } : {}),
+    ...(current.shadowDom ? { acceptedPerformanceAtById: current.acceptedPerformanceAtById } : {}),
     scrollThroughStages: trace.scrollThroughStages ? structuredClone(trace.scrollThroughStages) : null,
     expectedTargetIds: [...current.expectedTargetIds],
     initialTargetIds: [...current.initialTargetIds],

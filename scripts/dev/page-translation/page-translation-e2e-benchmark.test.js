@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
-import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, parseScenarioSelection, settingsForScenario, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './e2e-benchmark/scenario-plan.mjs';
+import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, parseScenarioSelection, settingsForScenario, shadowInitialTranslationReadiness, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
 import { registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 import { matchesAutoTranslateRule } from '../../../src/utils/ui/exclusion.js';
@@ -140,6 +140,60 @@ describe('page translation benchmark measurements', () => {
     expect(matchesAutoTranslateRule('http://127.0.0.1:43127/', routeRule)).toBe(false);
   });
 
+  it('defines the five exact Shadow DOM targets and enables only DOM-change translation', () => {
+    const small = createFixture('small');
+    const shadow = createFixture('shadow-dom');
+    expect(parseScenarioSelection('shadow-dom')).toEqual(['shadow-dom']);
+    expect(shadow.targetCount).toBe(3);
+    expect(shadow.targets.map(({ id, source, kind }) => ({ id, source, kind }))).toEqual([
+      { id: 'shadow-light', source: 'Shadow fixture light DOM source.', kind: 'text' },
+      { id: 'shadow-open', source: 'Shadow fixture open-root source.', kind: 'text' },
+      { id: 'shadow-nested-title', source: 'Shadow fixture nested title source.', kind: 'title' },
+    ]);
+    expect(shadow.shadowTargets).toHaveLength(5);
+    expect(new Set(shadow.shadowTargets.map(target => target.id)).size).toBe(5);
+    expect(new Set(shadow.shadowTargets.map(target => target.source)).size).toBe(5);
+    expect(shadow.html).toContain('SHADOW_DIRECT_TEXT_SENTINEL');
+    expect(shadow.html).toContain('SHADOW_CLOSED_ROOT_SENTINEL');
+    expect(shadow.html).toContain("mode:'closed'");
+    expect(shadow.html).toContain("openTarget.style.direction='rtl';openTarget.style.unicodeBidi='isolate'");
+    expect(small.html).not.toContain('shadow-dom');
+    expect(settingsForScenario({}, 'shadow-dom')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: true });
+    expect(settingsForScenario({}, 'shadow-dom')).not.toHaveProperty('WHOLE_PAGE_LAZY_LOADING');
+    expect(settingsForScenario({}, 'small')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false });
+  });
+
+  it('requires exact drained initial-session accounting before Shadow DOM insertion', () => {
+    const expectedIds = ['a', 'b', 'c'];
+    const args = {
+      expectedIds, expectedSessionId: 'session-1', observedSessionId: 'session-1',
+      schedulerState: { discoveryPending: false, pendingSettlementCount: 0, queueIds: [], activeFlushes: 0 },
+      bridgeDiscoveryDrained: true, admissions: expectedIds, enqueues: expectedIds,
+      settlements: expectedIds.map(id => ({ id, sessionId: 'session-1' })), acceptedDomIds: expectedIds,
+    };
+    expect(shadowInitialTranslationReadiness(args).ready).toBe(true);
+    expect(shadowInitialTranslationReadiness({ ...args, acceptedDomIds: ['a', 'b'] }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, settlements: args.settlements.slice(0, 2) }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, schedulerState: { ...args.schedulerState, discoveryPending: true } }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, bridgeDiscoveryDrained: false }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, observedSessionId: 'session-2' }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, admissions: ['a', 'a', 'c'] }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, settlements: [...args.settlements, args.settlements[0]] }).ready).toBe(false);
+  });
+
+  it('validates observed Shadow DOM sources and measured initial geometry against fixture oracles', () => {
+    const fixture = createFixture('shadow-dom');
+    const observedTargets = fixture.targets.map(({ id, source }) => [id, source]);
+    const observedGeometry = { targetCount: fixture.targetCount, visibleIds: fixture.visibleIds,
+      viewport: fixture.viewport, scroll: fixture.scroll };
+    expect(validateShadowInitialObservations({ fixture, observedTargets, observedGeometry }).ok).toBe(true);
+    expect(validateShadowInitialObservations({ fixture, observedTargets: observedTargets.map(([id, source]) =>
+      [id, id === 'shadow-open' ? 'wrong source' : source]), observedGeometry }).issues).toContain('observed initial source mismatch: shadow-open');
+    expect(validateShadowInitialObservations({ fixture, observedTargets: observedTargets.slice(1), observedGeometry }).ok).toBe(false);
+    expect(validateShadowInitialObservations({ fixture, observedTargets,
+      observedGeometry: { ...observedGeometry, viewport: { width: 1024, height: 768 } } }).ok).toBe(false);
+  });
+
   it('accepts only same-document advanced SPA cursors and consistent same-clock timings', () => {
     const input = {
       cursorA: { documentEpoch: 4, routeRevision: 2, url: 'http://127.0.0.1:1234/' },
@@ -244,12 +298,13 @@ describe('page translation benchmark measurements', () => {
 
   it('registers the complete cohort before insertion and tracks first/all latency once', () => {
     const order = [];
+    const mockObserver = { observe: root => order.push(`observe:${root}`) };
     const inserted = registerThenInsertCohort({
-      register: () => order.push('register'),
+      register: () => { order.push('register'); mockObserver.observe('fixture-root'); },
       now: () => { order.push('timestamp'); return 100; },
-      insert: () => { order.push('insert'); return 'nodes'; },
+      insert: () => { order.push('append-host'); return 'nodes'; },
     });
-    expect(order).toEqual(['register', 'timestamp', 'insert']);
+    expect(order).toEqual(['register', 'observe:fixture-root', 'timestamp', 'append-host']);
     expect(inserted).toEqual({ insertedAt: 100, result: 'nodes' });
     const cohort = { targetIds: ['a', 'b'], remainingIds: new Set(['a', 'b']), firstAcceptedAt: null, completionAt: null, acceptedAtById: {} };
     expect(trackCohortAcceptedTarget(cohort, 'a', 110)).toBe(true);

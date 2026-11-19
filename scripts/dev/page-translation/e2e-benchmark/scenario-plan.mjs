@@ -1,4 +1,4 @@
-export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'dynamic-dom', 'spa-navigation', 'early-visible', 'in-window-visible', 'late-visible', 'scroll-through']);
+export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'dynamic-dom', 'shadow-dom', 'spa-navigation', 'early-visible', 'in-window-visible', 'late-visible', 'scroll-through']);
 export const SCROLL_SCHEDULING_MODES = Object.freeze(['fluid', 'on-stop']);
 export const COMPARISON_MODES = Object.freeze(['sliced', 'viewport']);
 export const MODE_DISCOVERY_FLAGS = Object.freeze({
@@ -39,7 +39,7 @@ export function parseScrollSchedulingMode(value) {
 export function settingsForScenario(settings, scenario, schedulingMode = null) {
   if (scenario !== 'scroll-through' && schedulingMode !== null) throw new TypeError('Scroll scheduling is only supported by the scroll-through scenario.');
   if (scenario === 'scroll-through' && !SCROLL_SCHEDULING_MODES.includes(schedulingMode)) throw new TypeError('scroll-through requires BENCH_SCROLL_SCHEDULING=fluid or on-stop.');
-  return Object.freeze({ ...settings, WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: scenario === 'dynamic-dom',
+  return Object.freeze({ ...settings, WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: scenario === 'dynamic-dom' || scenario === 'shadow-dom',
     ...(scenario === 'scroll-through' ? {
       WHOLE_PAGE_LAZY_LOADING: true,
       WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: schedulingMode === 'on-stop',
@@ -192,6 +192,42 @@ export function validateFixtureGeometry(fixture, observed) {
     if (observed.targetCount !== fixture?.targetCount) issues.push(`actual page target count mismatch: ${observed.targetCount}/${fixture?.targetCount}`);
   }
   return { ok: issues.length === 0, issues };
+}
+
+export function validateShadowInitialObservations({ fixture, observedTargets, observedGeometry }) {
+  const issues = [];
+  const expected = fixture?.targets ?? [];
+  const observed = Array.isArray(observedTargets) ? observedTargets : [];
+  issues.push(...validateExactTargetIds('observed initial source', observed.map(target => target?.[0]), expected.map(target => target.id)).issues);
+  for (const [id, source] of observed) {
+    const target = expected.find(item => item.id === id);
+    if (target && source !== target.source) issues.push(`observed initial source mismatch: ${id}`);
+  }
+  const geometry = validateFixtureGeometry(fixture, observedGeometry);
+  issues.push(...geometry.issues);
+  return { ok: issues.length === 0, issues, geometry };
+}
+
+export function shadowInitialTranslationReadiness({ expectedIds, expectedSessionId, observedSessionId, schedulerState,
+  bridgeDiscoveryDrained, admissions, enqueues, settlements, acceptedDomIds }) {
+  const issues = [];
+  if (typeof expectedSessionId !== 'string' || !expectedSessionId || observedSessionId !== expectedSessionId) {
+    issues.push('initial translation session does not match the expected session');
+  }
+  if (schedulerState?.discoveryPending !== false || schedulerState?.pendingSettlementCount !== 0
+      || !Array.isArray(schedulerState?.queueIds) || schedulerState.queueIds.length !== 0
+      || schedulerState?.activeFlushes !== 0) issues.push('scheduler discovery or settlement work is not drained');
+  if (bridgeDiscoveryDrained !== true) issues.push('Bridge discovery is not drained');
+  for (const [name, ids] of [['initial admission', admissions], ['initial enqueue', enqueues], ['accepted DOM write', acceptedDomIds]]) {
+    issues.push(...validateExactTargetIds(name, ids, expectedIds ?? []).issues);
+  }
+  if (!Array.isArray(settlements)) issues.push('initial accepted settlements unavailable');
+  else {
+    const settlementIds = settlements.map(item => item?.id);
+    issues.push(...validateExactTargetIds('accepted settlement', settlementIds, expectedIds ?? []).issues);
+    if (settlements.some(item => item?.sessionId !== expectedSessionId)) issues.push('accepted settlements do not belong to the expected session');
+  }
+  return { ready: issues.length === 0, issues };
 }
 
 export function validateExactTargetIds(name, observedIds, expectedIds) {
