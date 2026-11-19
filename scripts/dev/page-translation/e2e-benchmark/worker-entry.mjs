@@ -271,6 +271,7 @@ const marker = {
       providerName,
       optimizationLevel: state.optimizationLevel,
       maxConcurrent: state.config?.maxConcurrent ?? null,
+      limiterCapacity: state.config?.maxConcurrent ?? null,
       configuredMaxConcurrent: configuration?.rateLimit?.maxConcurrent ?? null,
       batching: configuration?.batching ?? null,
       expectedBatching: expectedConfiguration?.batching ?? null,

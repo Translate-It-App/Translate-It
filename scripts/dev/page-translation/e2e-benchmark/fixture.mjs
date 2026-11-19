@@ -10,7 +10,7 @@ const scrollBandTops = [20, 1120, 2220];
 const largeTargetCount = 1000;
 const visibleTargetIndexes = [500, 501, 502, 503];
 
-export function createFixture(scenario = 'small') {
+export function createFixture(scenario = 'small', { providerLane = false } = {}) {
   if (scenario === 'shadow-dom') {
     const targets = [
       { id: 'shadow-light', source: 'Shadow fixture light DOM source.', kind: 'text', visible: true },
@@ -36,11 +36,13 @@ export function createFixture(scenario = 'small') {
   }
   if (scenario !== 'small' && scenario !== 'dynamic-dom' && scenario !== 'spa-navigation' && scenario !== 'scroll-through' && !largeScenarios.has(scenario)) throw new TypeError(`Unknown benchmark fixture scenario: ${scenario}`);
 
-  const texts = scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' || scenario === 'scroll-through'
+  const texts = scenario === 'scroll-through' && providerLane
+    ? Array.from({ length: largeTargetCount }, (_, index) => `Benchmark target ${String(index + 1).padStart(4, '0')} has stable fixture content.`)
+    : scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' || scenario === 'scroll-through'
     ? targetTexts
     : Array.from({ length: largeTargetCount }, (_, index) => `Benchmark target ${String(index + 1).padStart(4, '0')} has stable fixture content.`);
   const count = texts.length;
-  const visibleIndexes = scenario === 'scroll-through' ? [0, 1, 2, 3]
+  const visibleIndexes = scenario === 'scroll-through' ? Array.from({ length: providerLane ? 334 : 4 }, (_, index) => index)
     : scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' ? texts.map((_, index) => index) : visibleTargetIndexes;
   let indexes = texts.map((_, index) => index);
   if (scenario === 'early-visible') indexes = [...visibleIndexes, ...indexes.filter(index => !visibleIndexes.includes(index))];
@@ -57,7 +59,7 @@ export function createFixture(scenario = 'small') {
     const position = scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation'
       ? ''
       : scenario === 'scroll-through'
-        ? `position:absolute;left:20px;top:${scrollBandTops[Math.floor(targetIndex / 4)] + (targetIndex % 4) * 30}px;width:900px;height:24px;`
+        ? `position:absolute;left:20px;top:${scrollBandTops[providerLane ? (targetIndex < 334 ? 0 : targetIndex < 667 ? 1 : 2) : Math.floor(targetIndex / 4)] + (providerLane ? (targetIndex - (targetIndex < 334 ? 0 : targetIndex < 667 ? 334 : 667)) : (targetIndex % 4) * 30)}px;width:900px;height:${providerLane ? 1 : 24}px;`
         : `position:absolute;left:20px;top:${target.visible ? 20 + visibleIndexes.indexOf(targetIndex) * 30 : 2000 + targetIndex * 30}px;width:900px;height:24px;`;
     const style = [position, target.kind === 'title' ? 'min-height:1px;' : ''].filter(Boolean).join('');
     return target.kind === 'title'
@@ -97,7 +99,9 @@ export function createFixture(scenario = 'small') {
     responseDelayMs: 50,
     ...(dynamicCohorts ? { dynamicCohorts } : {}),
     ...(scenario === 'spa-navigation' ? { spaChangedIds: ['target-1', 'target-5', 'target-9'], spaSources: targetTexts.map((_, index) => `SPA route B sentence ${index + 1} has distinct stable content.`) } : {}),
-    ...(scenario === 'scroll-through' ? { scrollBands: scrollBandTops.map((top, band) => ({ band, top, ids: targets.slice(band * 4, band * 4 + 4).map(target => target.id) })) } : {}),
+    ...(scenario === 'scroll-through' ? { scrollBands: providerLane
+      ? [[0, 334], [334, 667], [667, 1000]].map(([start, end], index) => ({ band: index + 1, top: scrollBandTops[index], ids: targets.slice(start, end).map(target => target.id) }))
+      : scrollBandTops.map((top, band) => ({ band, top, ids: targets.slice(band * 4, band * 4 + 4).map(target => target.id) })) } : {}),
   };
 }
 

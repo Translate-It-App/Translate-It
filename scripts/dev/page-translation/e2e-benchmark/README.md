@@ -2,7 +2,7 @@
 
 > **Issue #406 final results:** see the [final benchmark report](../../../../docs/technical/benchmarks/whole-page-issue-406-final-2026-11-19.md) for the complete performance matrix, correctness probes, limitations, and reproduction commands.
 
-Run the real MV3 background/content entries against a local synthetic page. Translation requests pass through the actual scheduler, background routing, Unified Translation Service, provider and fetch transport; only the outbound Edge HTTP response is supplied by CDP. The exact startup Edge voice-list metadata `GET` is separately fulfilled with `[]`, which the production `TTSVoiceService` accepts and caches. Other unexpected external HTTP(S) requests are blocked and fail the run. Chrome DevTools Fetch guards the test extension service worker before it resumes and the top-level fixture page before navigation, including the content isolated world; iframes and Chrome process/component-extension traffic outside these targets are not covered.
+Run the real MV3 background/content entries against a local synthetic page. Translation requests pass through the actual scheduler, background routing, Unified Translation Service, provider and fetch transport; the selected Edge or Google V2 outbound response is supplied synthetically by CDP. The exact startup Edge voice-list metadata `GET` is separately fulfilled with `[]`, which the production `TTSVoiceService` accepts and caches. Other unexpected external HTTP(S) requests are blocked and fail the run. Chrome DevTools Fetch guards the test extension service worker before it resumes and the top-level fixture page before navigation, including the content isolated world; iframes and Chrome process/component-extension traffic outside these targets are not covered.
 
 ```sh
 pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
@@ -15,15 +15,32 @@ BENCH_MODES=legacy,sliced,viewport BENCH_SCENARIOS=small,early-visible,in-window
 
 `BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `dynamic-dom`, `shadow-dom`, `spa-navigation`, `early-visible`, `in-window-visible`, `late-visible`, and `scroll-through`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
 
-## Opt-in provider lane (Issue #432 initial increment)
+## Opt-in Edge and Google V2 provider lanes (Issue #432)
 
 ```sh
-BENCH_LANE=provider BENCH_PROVIDER=edge BENCH_OPTIMIZATION_LEVEL=3 \
+BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
   BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
   pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
 ```
 
-The lane requires an explicit provider and optimization level (`1`, `3`, or `5`), and forces the production-default Sliced discovery build. If `BENCH_MODES` is set, it must be `sliced`; conflicting discovery modes are rejected. Edge is the only implemented provider adapter; Google V2, Custom, and Gemini are recognized IDs but fail clearly before build/Chrome launch. It uses the existing local Edge fixture response, so these are synthetic intercepted requests: no live provider, external provider traffic, provider latency, or translation-quality measurement is involved. Accounting follows CDP `Network.requestWillBeSent` through `loadingFinished`/`loadingFailed`; reported physical-request overlap is not scheduler logical-batch count or worker concurrency. The provider lane writes a separately named artifact and does not produce Legacy comparison artifacts.
+The lane supports only Edge and Google V2, requires an explicit optimization level (`1`, `3`, or `5`), and forces production-default Sliced discovery. Custom and Gemini remain rejected; if `BENCH_MODES` is set it must be `sliced`. Google V2 runs require the scroll-through fixture and one scheduling mode. The default/discovery and Edge scroll-through remain 12 targets and preserve the original burst/settled scroll sequence. Only Google V2 uses 1,000 unique targets in three bands (334/333/333), spaced 1px apart so each entire band is safely inside the viewport at the runner's existing native scroll offsets; it verifies exact visible membership and waits for each band's exact accepted-write set before scrolling onward.
+
+For the six-run Google V2 matrix (optimization levels 1/3/5 × `fluid`/`on-stop`), run once per row with 3 measured trials plus 1 discarded warmup:
+
+```sh
+for level in 1 3 5; do
+  for scheduling in fluid on-stop; do
+    BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL="$level" \
+      BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING="$scheduling" \
+      BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+      BENCH_OUTPUT="/tmp/opencode/googlev2-level-${level}-${scheduling}.json" \
+      pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+  done
+done
+```
+
+This is the minimal matrix spanning all requested optimizer levels and both scroll scheduling modes, with one representative 1,000-target scenario rather than multiplying fixture variants. Provider artifacts persist `scenarioSummaries[scenario].sliced`, aggregated from measured trials only; warmups are excluded. Synthetic Fetch interception returns deterministic parser-compatible legacy Google arrays; it does not contact Google or measure live provider latency/quality. Google V2's configured endpoint is exactly `https://translate.google.com/translate_a/single` POST. The actual `sl` query is recorded per request and is not overridden: the Page AUTO resolver may choose a source code such as `nl` even for this English-language fixture. The fixture's deterministic response metadata reports detected language `en`; this is synthetic parser metadata, separate from and not evidence of the request's `sl` value. Reports record observed provider optimizer/rate-limiter capacity, scheduler chunk/maxChars/parallel execution and Page worker limit, logical batch intervals/sizes/peak overlap, and separately correlated physical HTTP count/peak overlap, each request's latency and terminal settlement, first accepted translation, and total completion. Logical batches are not assumed to map 1:1 to HTTP requests, nor are configured limits presented as observed physical parallelism. With fewer than 40 valid samples, p95 remains unavailable.
 
 ## Opt-in lazy scroll-through scheduling
 

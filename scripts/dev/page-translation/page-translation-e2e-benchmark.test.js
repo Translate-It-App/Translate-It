@@ -1,19 +1,21 @@
-import { describe, expect, it } from 'vitest';
-import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
+import { describe, expect, it, vi } from 'vitest';
+import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, measureScenarioRuns, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
+import { decodeGoogleV2Request, GOOGLE_V2_DELIMITER, mapGoogleV2Response } from './e2e-benchmark/google-v2-fixture.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
-import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizePhysicalProviderAttempts, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './e2e-benchmark/scenario-plan.mjs';
+import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
 import { registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 import { matchesAutoTranslateRule } from '../../../src/utils/ui/exclusion.js';
 import { registryIdToName } from '../../../src/features/translation/providers/ProviderConstants.js';
+import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
 
 describe('page translation benchmark measurements', () => {
-  it('validates the explicit Edge provider lane without changing legacy selection', () => {
+  it('validates Edge and Google V2 lanes without changing legacy selection', () => {
     expect(parseProviderLane({})).toBeNull();
     expect(() => parseProviderLane({ BENCH_LANE: 'provider' })).toThrow('BENCH_PROVIDER');
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'nope', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('BENCH_PROVIDER');
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'google-v2', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('BENCH_PROVIDER');
-    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('not implemented');
+    expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3' })).toMatchObject({ provider: 'googlev2', optimizationLevel: 3 });
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'gemini', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('not implemented');
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'edge', BENCH_OPTIMIZATION_LEVEL: '2' })).toThrow('BENCH_OPTIMIZATION_LEVEL');
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'edge', BENCH_OPTIMIZATION_LEVEL: '3', BENCH_MODES: 'legacy,sliced' })).toThrow('production-default sliced');
@@ -27,7 +29,41 @@ describe('page translation benchmark measurements', () => {
         action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' },
       });
     }
+    const google = parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '5' });
+    expect(providerLaneSettings({ TARGET_LANGUAGE: 'fr' }, google)).toMatchObject({ TRANSLATION_API: 'googlev2', PROVIDER_OPTIMIZATION_LEVELS: { googlev2: 5 } });
+    expect(pageTranslationStartMessage(google.provider).data.provider).toBe('googlev2');
     expect(pageTranslationStartMessage()).toEqual({ action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' } });
+  });
+
+  it('decodes strict Google V2 form requests and creates parser-compatible single/multi-segment legacy responses', async () => {
+    const url = 'https://translate.google.com/translate_a/single?sl=auto&tl=fr&dt=t';
+    const encoded = new URLSearchParams({ q: `Benchmark sentence 1 has stable fixture content.${GOOGLE_V2_DELIMITER}Benchmark sentence 2 has stable fixture content.` }).toString();
+    expect(decodeGoogleV2Request({ method: 'POST', url, body: encoded })).toMatchObject({
+      sourceLanguage: 'auto', texts: ['Benchmark sentence 1 has stable fixture content.', 'Benchmark sentence 2 has stable fixture content.'],
+    });
+    const [segments, metadata, detectedLanguage] = mapGoogleV2Response(['one', 'two']);
+    expect(metadata).toBeNull();
+    expect(detectedLanguage).toBe('en');
+    expect(segments).toEqual([
+      ['fixture translation: one', 'one', null, null, 1],
+      [GOOGLE_V2_DELIMITER, GOOGLE_V2_DELIMITER],
+      ['fixture translation: two', 'two', null, null, 1],
+    ]);
+    expect(mapGoogleV2Response(['one'])[0]).toEqual([['fixture translation: one', 'one', null, null, 1]]);
+    const productionProvider = new GoogleTranslateV2Provider();
+    vi.spyOn(productionProvider, '_executeApiCall').mockImplementation(async options => options.extractResponse(mapGoogleV2Response(['one', 'two'])));
+    const providerOptions = { providerMetadataRef: { metadata: {} } };
+    await expect(productionProvider._translateChunk(['one', 'two'], 'auto', 'fr', 'page', null, 0, 2, 0, 1, providerOptions))
+      .resolves.toEqual(['fixture translation: one', 'fixture translation: two']);
+    expect(providerOptions.providerMetadataRef.metadata.detectedLanguage).toBe('en');
+    for (const body of ['q=one&q=two', 'q=', 'q=one%ZZ', 'q=one&broken', 'q=unknown']) {
+      expect(() => decodeGoogleV2Request({ method: 'POST', url, body })).toThrow();
+    }
+    expect(() => decodeGoogleV2Request({ method: 'GET', url, body: 'q=one' })).toThrow('endpoint or method');
+    expect(() => decodeGoogleV2Request({ method: 'POST', url: 'https://translate.google.com/translate_a/single/wrong?sl=auto', body: 'q=one' })).toThrow('endpoint or method');
+    expect(() => decodeGoogleV2Request({ method: 'POST', url: 'https://translate.google.com/translate_a/single?sl=auto%ZZ&tl=fr', body: 'q=one' })).toThrow('query');
+    expect(() => decodeGoogleV2Request({ method: 'POST', url, body: 'q=one&extra=field' })).toThrow('exactly one');
+    expect(() => decodeGoogleV2Request({ method: 'POST', url, body: 'q=Benchmark+sentence+1+has+stable+fixture+content.%0A%5B%5B---%5D%5D%0A' })).toThrow('empty or unknown');
   });
 
   it('validates observed provider runtime configuration rather than the requested settings echo', () => {
@@ -60,6 +96,18 @@ describe('page translation benchmark measurements', () => {
       }).ok).toBe(false);
     }
     expect(validateProviderSchedulerRuntime({ provider: 'edge', optimizationLevel: 3, providerRuntime, scheduler: null }).ok).toBe(false);
+    for (const [optimizationLevel, characterLimit, maxConcurrent, pageWorkers, chunkSize, parallelExecution] of [
+      [1, 7500, 1, 1, 50, false], [3, 5000, 4, 2, 25, true], [5, 3000, 8, 4, 10, true],
+    ]) {
+      const runtime = { provider: 'googlev2', optimizationLevel, batching: { characterLimit }, expectedBatching: { characterLimit }, maxConcurrent, configuredMaxConcurrent: maxConcurrent };
+      expect(validateProviderRuntime({ requestedProvider: 'googlev2', requestedOptimizationLevel: optimizationLevel, snapshot: runtime }).ok).toBe(true);
+      const scheduler = { providerRegistryId: 'googlev2', chunkSize, maxChars: characterLimit, parallelExecution,
+        maxConcurrentFlushes: pageWorkers, pageWorkerLimit: pageWorkers };
+      expect(validateProviderSchedulerRuntime({ provider: 'googlev2', optimizationLevel, providerRuntime: runtime, scheduler }).ok).toBe(true);
+      expect(validateProviderSchedulerRuntime({ provider: 'googlev2', optimizationLevel, providerRuntime: runtime, scheduler: { ...scheduler, pageWorkerLimit: pageWorkers + 1 } }).ok).toBe(false);
+      expect(validateProviderRuntime({ requestedProvider: 'googlev2', requestedOptimizationLevel: optimizationLevel,
+        snapshot: { ...runtime, batching: { characterLimit: characterLimit - 1 } } }).ok).toBe(false);
+    }
   });
 
   it('correlates provider Fetch requests to Network records by event session and request ID', () => {
@@ -110,6 +158,133 @@ describe('page translation benchmark measurements', () => {
       expect.stringContaining('failed'), expect.stringContaining('lacks valid terminal settlement'),
       expect.stringContaining('lacks correlated response status'),
     ]));
+  });
+
+  it('measures logical batch intervals separately from physical request accounting', () => {
+    const batches = [
+      { sessionId: 'page-1', at: 0, settledAt: 10, outcome: 'fulfilled', targetIds: ['a', 'b'] },
+      { sessionId: 'page-1', at: 5, settledAt: 15, outcome: 'fulfilled', targetIds: ['c'] },
+    ];
+    expect(summarizeLogicalProviderBatches(batches, 'page-1')).toMatchObject({
+      ok: true, logicalBatchCount: 2, logicalBatchSizes: [2, 1], peakLogicalBatchConcurrency: 2,
+    });
+    expect(summarizeLogicalProviderBatches([{ ...batches[0], sessionId: 'other' }], 'page-1').ok).toBe(false);
+    expect(summarizePhysicalProviderAttempts([{ attemptId: 'http', networkSessionId: 'worker', networkId: 'n',
+      startedAt: 1, settledAt: 2, status: 200, outcome: 'finished' }]).physicalRequestCount).toBe(1);
+  });
+
+  it('aggregates SPA provider logical intervals with terminal settlement and exact session/count ownership', () => {
+    const observed = [
+      { sessionId: 'A', targetIds: ['a'], at: 1 },
+      { sessionId: 'B', targetIds: ['b', 'c'], at: 3 },
+    ];
+    const intervals = [
+      { ...observed[0], settledAt: 2, outcome: 'fulfilled' },
+      { ...observed[1], settledAt: 5, outcome: 'fulfilled' },
+    ];
+    expect(summarizeSpaLogicalProviderBatches(intervals, observed, 'A', 'B')).toMatchObject({
+      ok: true, logicalBatchCount: 2, logicalBatchSizes: [1, 2], peakLogicalBatchConcurrency: 1,
+    });
+    expect(summarizeSpaLogicalProviderBatches([{ ...intervals[0], settledAt: undefined, outcome: undefined }, intervals[1]],
+      observed, 'A', 'B').issues).toContain('logical batch 0 lacks interval/terminal settlement');
+    expect(summarizeSpaLogicalProviderBatches([
+      intervals[0], { ...intervals[1], sessionId: null },
+    ], observed, 'A', 'B').issues).toEqual(expect.arrayContaining([
+      'SPA logical batch intervals include missing or unexpected Page session ownership',
+      'SPA logical batch count mismatch for B: expected 1, got 0',
+    ]));
+    expect(summarizeSpaLogicalProviderBatches([intervals[1]], observed, 'A', 'B').ok).toBe(false);
+    expect(summarizeSpaLogicalProviderBatches([intervals[0]], observed, 'A', 'B').ok).toBe(false);
+    expect(summarizeSpaLogicalProviderBatches(intervals, observed.filter(batch => batch.sessionId !== 'A'), 'A', 'B')
+      .issues).toContain('SPA logical batch count mismatch for A: expected 0, got 1');
+    expect(summarizeSpaLogicalProviderBatches(intervals, observed.filter(batch => batch.sessionId !== 'B'), 'A', 'B')
+      .issues).toContain('SPA logical batch count mismatch for B: expected 0, got 1');
+  });
+
+  it('retains the legacy discovery/Edge scroll choreography while isolating Google V2 band acceptance', () => {
+    expect(scrollThroughPhases(false)).toEqual([
+      ['burst-band-2', 900, null, 0], ['burst-band-3', 2000, null, 150],
+      ['settled-band-3', 2000, null, 750], ['revisit-band-2', 900, 1, 0], ['revisit-initial', 0, null, 0],
+    ]);
+    expect(scrollThroughPhases(true).map(([label]) => label)).toEqual([
+      'band-2', 'band-3', 'revisit-band-2', 'revisit-initial',
+    ]);
+  });
+
+  it('validates observed Google V2 1000-target concurrency against actual worker and limiter caps', () => {
+    for (const [optimizationLevel, peak] of [[1, 1], [3, 2], [5, 3]]) {
+      const result = validateProviderConcurrencyObservations({
+        provider: 'googlev2', optimizationLevel, targetCount: 1000,
+        logical: { peakLogicalBatchConcurrency: peak }, physical: { peakPhysicalConcurrency: peak },
+        pageWorkerLimit: optimizationLevel === 1 ? 1 : optimizationLevel === 3 ? 2 : 4,
+        providerLimiterCapacity: optimizationLevel === 1 ? 1 : optimizationLevel === 3 ? 4 : 8,
+      });
+      expect(result.ok).toBe(true);
+    }
+    expect(validateProviderConcurrencyObservations({
+      provider: 'googlev2', optimizationLevel: 3, targetCount: 1000,
+      logical: { peakLogicalBatchConcurrency: 3 }, physical: { peakPhysicalConcurrency: 5 },
+      pageWorkerLimit: 2, providerLimiterCapacity: 4,
+    }).issues).toEqual(expect.arrayContaining([
+      expect.stringContaining('exceeds Page worker limit'), expect.stringContaining('exceeds provider limiter capacity'),
+    ]));
+    expect(validateProviderConcurrencyObservations({
+      provider: 'googlev2', optimizationLevel: 1, targetCount: 1000,
+      logical: { peakLogicalBatchConcurrency: 1 }, physical: { peakPhysicalConcurrency: 2 },
+      pageWorkerLimit: 1, providerLimiterCapacity: 1,
+    }).ok).toBe(false);
+    expect(validateProviderConcurrencyObservations({
+      provider: 'googlev2', optimizationLevel: 5, targetCount: 999,
+      logical: { peakLogicalBatchConcurrency: 2 }, physical: { peakPhysicalConcurrency: 2 },
+      pageWorkerLimit: 4, providerLimiterCapacity: 8,
+    }).ok).toBe(false);
+  });
+
+  it('requires observed Edge concurrency evidence for SPA workload trials without exempting probes', () => {
+    const valid = { provider: 'edge', optimizationLevel: 3, targetCount: 12,
+      logical: { peakLogicalBatchConcurrency: 2 }, physical: { peakPhysicalConcurrency: 2 },
+      pageWorkerLimit: 4, providerLimiterCapacity: 4 };
+    expect(validateProviderConcurrencyObservations(valid).ok).toBe(true);
+    expect(validateProviderConcurrencyObservations({ ...valid, logical: null }).issues)
+      .toContain('observed logical batch concurrency unavailable');
+    expect(validateProviderConcurrencyObservations({ ...valid, physical: null }).issues)
+      .toContain('observed physical HTTP concurrency unavailable');
+    expect(validateProviderConcurrencyObservations({ ...valid, providerLimiterCapacity: null }).issues)
+      .toContain('observed provider limiter capacity unavailable');
+    expect(validateProviderConcurrencyObservations({ ...valid, pageWorkerLimit: 1 }).issues)
+      .toContain('observed logical batch concurrency exceeds Page worker limit: 2/1');
+    expect(isProviderWorkloadTrial({ phase: 'measured', scenario: 'spa-navigation', provider: 'edge' })).toBe(true);
+    expect(isProviderWorkloadTrial({ phase: 'non-performance-network-guard-probe', networkGuardProbe: true })).toBe(false);
+  });
+
+  it('uses the observed Edge scheduler flush cap as Page limit only when the explicit worker limit is absent', () => {
+    const scheduler = { maxConcurrentFlushes: 3 };
+    expect(observedPageWorkerLimit(scheduler)).toBe(3);
+    expect(observedPageWorkerLimit({ ...scheduler, pageWorkerLimit: 2 })).toBe(2);
+    expect(observedPageWorkerLimit({})).toBeNull();
+    const evidence = { provider: 'edge', optimizationLevel: 3, targetCount: 12,
+      logical: { peakLogicalBatchConcurrency: 2 }, physical: { peakPhysicalConcurrency: 2 }, providerLimiterCapacity: 3 };
+    expect(validateProviderConcurrencyObservations({ ...evidence, pageWorkerLimit: observedPageWorkerLimit(scheduler) }).ok).toBe(true);
+    expect(validateProviderConcurrencyObservations({ ...evidence, pageWorkerLimit: observedPageWorkerLimit({}) }).issues)
+      .toContain('observed Page worker limit unavailable');
+  });
+
+  it('summarizes only measured provider runs and preserves the established p95 sample threshold', () => {
+    const runs = [
+      { scenario: 'spa-navigation', mode: 'sliced', phase: 'warmup', value: 999 },
+      ...[1, 2, 3].map(value => ({ scenario: 'spa-navigation', mode: 'sliced', phase: 'measured', value })),
+    ];
+    const summary = measureScenarioRuns(runs, 'spa-navigation', 'sliced', measured => ({
+      n: measured.length, values: measured.map(run => run.value), p95: summarize(measured.map(run => run.value)).p95,
+    }));
+    expect(summary).toEqual({ n: 3, values: [1, 2, 3], p95: null });
+  });
+
+  it('skips workload concurrency validation for negative and isolated probe trials', () => {
+    expect(isProviderWorkloadTrial({ phase: 'measured' })).toBe(true);
+    expect(isProviderWorkloadTrial({ networkGuardProbe: true, phase: 'non-performance-network-guard-probe' })).toBe(false);
+    expect(isProviderWorkloadTrial({ cancellationProbe: 'stop', phase: 'non-performance-cancellation-probe' })).toBe(false);
+    expect(isProviderWorkloadTrial({ staleSuccessProbe: 'stop', phase: 'non-performance-stale-success-probe' })).toBe(false);
   });
 
   it('maps each actual Edge request source into the provider response shape', () => {
@@ -476,10 +651,40 @@ describe('page translation benchmark measurements', () => {
     expect(classifyTransportRequest({ method: 'GET', url: `https://speech.platform.bing.com/other${startupVoicesEndpoint.pathname}` }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'GET', url: 'https://example.test/other' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'POST', url: 'http://edge.microsoft.com/translate/translatetext' }).kind).toBe('blocked');
+    const googleRequest = { method: 'POST', url: 'https://translate.google.com/translate_a/single?sl=auto' };
+    expect(classifyTransportRequest(googleRequest).kind).toBe('blocked');
+    expect(classifyTransportRequest(googleRequest, { selectedProvider: 'edge' }).kind).toBe('blocked');
+    expect(classifyTransportRequest(googleRequest, { selectedProvider: 'googlev2' })).toMatchObject({ kind: 'provider-translation', provider: 'googlev2' });
+    const edgeRequest = { method: 'POST', url: 'https://edge.microsoft.com/translate/translatetext' };
+    expect(classifyTransportRequest(edgeRequest).kind).toBe('provider-translation');
+    expect(classifyTransportRequest(edgeRequest, { selectedProvider: 'edge' }).kind).toBe('provider-translation');
+    expect(classifyTransportRequest(edgeRequest, { selectedProvider: 'googlev2' })).toMatchObject({ kind: 'blocked' });
+    expect(classifyTransportRequest({ method: 'GET', url: 'https://translate.google.com/translate_a/single' }, { selectedProvider: 'googlev2' }).kind).toBe('blocked');
+    expect(classifyTransportRequest({ method: 'POST', url: 'https://translate.google.com/translate_a/single/extra' }, { selectedProvider: 'googlev2' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'GET', url: 'http://127.0.0.1:1234/' }, { fixtureOrigin: 'http://127.0.0.1:1234' }).kind).toBe('local');
     expect(classifyTransportRequest({ method: 'GET', url: 'http://127.0.0.1:1234/other' }, { fixtureOrigin: 'http://127.0.0.1:4321' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'GET', url: 'chrome-extension://fixture-id/chunks/asset.js' }, { extensionOrigin: 'chrome-extension://fixture-id' }).kind).toBe('local');
     expect(classifyTransportRequest({ method: 'GET', url: 'chrome-extension://invalid/' }, { extensionOrigin: 'chrome-extension://fixture-id' }).kind).toBe('invalid-extension-placeholder');
+  });
+
+  it('keeps default 12-target scroll fixture intact and enables a 1000-target provider variant in three scroll bands', () => {
+    const discovery = createFixture('scroll-through');
+    const large = createFixture('scroll-through', { providerLane: true });
+    expect(discovery.targetCount).toBe(12);
+    expect(discovery.scrollBands.map(band => band.ids.length)).toEqual([4, 4, 4]);
+    expect(large.targetCount).toBe(1000);
+    expect(large.scrollBands.map(band => band.ids.length)).toEqual([334, 333, 333]);
+    expect(large.visibleIds).toEqual(large.scrollBands[0].ids);
+    expect(large.scrollBands.flatMap(band => band.ids)).toHaveLength(1000);
+    expect(new Set(large.targetTexts).size).toBe(1000);
+    const tops = new Map([...large.html.matchAll(/<p data-bench-id="(target-\d+)"[^>]*style="([^"]+)"/g)]
+      .map(([, id, style]) => [id, Number(style.match(/top:(\d+(?:\.\d+)?)px/)?.[1])]));
+    for (const [bandIndex, scrollY] of [0, 900, 2000].entries()) {
+      const band = large.scrollBands[bandIndex];
+      const viewportTops = band.ids.map(id => tops.get(id) - scrollY);
+      expect(viewportTops).toHaveLength(band.ids.length);
+      expect(viewportTops.every(top => Number.isFinite(top) && top >= 0 && top + 1 <= large.viewport.height - 100)).toBe(true);
+    }
   });
 
   it('gates comparisons on every Legacy and measured correctness run', () => {

@@ -7,9 +7,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { serializeBenchmarkArtifact, writeBenchmarkArtifact } from './e2e-benchmark/artifact-writer.mjs';
 import { validateBuildParity } from './e2e-benchmark/build-environment.mjs';
 import { createCancellationRequestLifecycle, promoteRequestDiagnostics } from './e2e-benchmark/cancellation-probes.mjs';
-import { validateRunGate } from './e2e-benchmark/metrics.mjs';
+import { measureScenarioRuns, summarize, validateRunGate } from './e2e-benchmark/metrics.mjs';
+import { providerLaneFinalization } from './e2e-benchmark/scenario-plan.mjs';
 
-async function runActualFinalization({ failAt = null, cleanupFailure = false, measureFailureAfter = null, trialCleanupErrors = [], trialCleanupReport = null, trialDiagnostics = null } = {}) {
+async function runActualFinalization({ failAt = null, cleanupFailure = false, measureFailureAfter = null, trialCleanupErrors = [], trialCleanupReport = null, trialDiagnostics = null, providerLane = null, providerSamples = 4 } = {}) {
   const runner = await readFile(new URL('./e2e-benchmark/run.mjs', import.meta.url), 'utf8');
   const start = runner.indexOf('let globalRunOrder = 0;');
   expect(start).toBeGreaterThanOrEqual(0);
@@ -29,15 +30,15 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
   const context = {
     harness,
     artifactPath: path,
-    providerLane: null,
-    requestedModes: ['legacy', 'sliced', 'viewport'],
+    providerLane,
+    requestedModes: providerLane ? ['sliced'] : ['legacy', 'sliced', 'viewport'],
     cancellationProbes: [],
     staleSuccessProbes: [],
     isolatedProbes: [],
-    modes: ['legacy', 'sliced', 'viewport'],
+    modes: providerLane ? ['sliced'] : ['legacy', 'sliced', 'viewport'],
     scenarios: ['small'],
     scrollSchedulingMode: null,
-    samples: 4,
+    samples: providerLane ? providerSamples : 4,
     warmups: 1,
     sourcePaths: [],
     buildDirs: [],
@@ -47,6 +48,8 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
     createFixture: fixture,
     validateSampleCount: () => 4,
     validateRunGate,
+    measureScenarioRuns,
+    providerLaneFinalization,
     validateBuildParity,
     validateHarnessBuildParity: () => {
       harness.buildParity = context.validateBuildParity(harness.builds, context.modes);
@@ -60,6 +63,14 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
     measureMode: runs => {
       measuredSummaryCalls++;
       if (measureFailureAfter === measuredSummaryCalls) throw new Error('synthetic summary failure');
+      if (providerLane) return {
+        n: runs.length,
+        times: { sampleValue: summarize(runs.map(run => run.sampleValue)) },
+        providerExecution: {
+          logicalBatchCounts: runs.map(run => run.providerLogicalBatches.logicalBatchCount),
+          peakLogicalBatchConcurrency: runs.map(run => run.providerLogicalBatches.peakLogicalBatchConcurrency),
+        },
+      };
       return { n: runs.length, times: {} };
     },
     compileMode: async mode => {
@@ -73,6 +84,13 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
       const failed = failAt && options.mode === failAt.mode && options.phase === failAt.phase && options.ordinal === failAt.ordinal;
       const run = {
         ...options,
+        ...(providerLane ? {
+          sampleValue: options.phase === 'warmup' ? 999 : options.ordinal,
+          providerLogicalBatches: {
+            logicalBatchCount: options.phase === 'warmup' ? 999 : options.ordinal,
+            peakLogicalBatchConcurrency: options.phase === 'warmup' ? 999 : options.ordinal,
+          },
+        } : {}),
         status: failed || trialCleanupErrors.length ? 'failed' : 'passed',
         cleanupErrors: [...(failed ? ['fixture cleanup error'] : []), ...trialCleanupErrors],
         ...(trialCleanupReport ? { cancellation: { cleanup: { requestLifecycle: trialCleanupReport } } } : {}),
@@ -174,6 +192,45 @@ describe('streamed benchmark artifact serialization', () => {
     expect(artifact.results.filter(run => run.phase === 'measured').slice(0, 6).map(run => run.mode)).toEqual([
       'legacy', 'sliced', 'viewport', 'sliced', 'viewport', 'legacy',
     ]);
+  });
+
+  it('persists a measured-only provider-lane scenario summary through the artifact writer', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'benchmark-provider-summary-'));
+    const path = join(directory, 'artifact.json');
+    try {
+      const results = [
+        { scenario: 'small', mode: 'sliced', phase: 'warmup', value: 999 },
+        { scenario: 'small', mode: 'sliced', phase: 'measured', value: 3 },
+      ];
+      const harness = { scenarioSummaries: { small: { sliced: measureScenarioRuns(results, 'small', 'sliced',
+        measured => ({ n: measured.length, values: measured.map(run => run.value) })) } } };
+      await writeBenchmarkArtifact(path, harness);
+      expect(JSON.parse(await readFile(path, 'utf8')).scenarioSummaries).toEqual({
+        small: { sliced: { n: 1, values: [3] } },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('generates and persists provider-lane summaries from measured trials only', async () => {
+    const { artifact, writes, compiles } = await runActualFinalization({
+      providerLane: { lane: 'provider', provider: 'edge', optimizationLevel: 3 },
+      providerSamples: 3,
+    });
+    expect(artifact.status).toBe('passed');
+    expect(artifact.results.map(run => run.phase)).toEqual(['warmup', 'measured', 'measured', 'measured']);
+    expect(artifact.scenarioSummaries.small.sliced).toMatchObject({
+      n: 3,
+      times: { sampleValue: { n: 3, p50: 2, p95: null } },
+      providerExecution: {
+        logicalBatchCounts: [1, 2, 3],
+        peakLogicalBatchConcurrency: [1, 2, 3],
+      },
+    });
+    expect(artifact.scenarioSummaries.small.sliced.providerExecution.logicalBatchCounts).not.toContain(999);
+    expect(writes).toEqual([{ count: 4, status: 'passed' }]);
+    expect(compiles).toEqual(['sliced']);
   });
 
   it('persists a failed rotated Legacy measured trial after its candidate trials and gates comparisons', async () => {

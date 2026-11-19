@@ -1,3 +1,9 @@
+import { GOOGLE_V2_ENDPOINT } from './google-v2-fixture.mjs';
+
+export function measureScenarioRuns(results, scenario, mode, measureMode) {
+  return measureMode(results.filter(run => run.scenario === scenario && run.mode === mode && run.phase === 'measured'));
+}
+
 export function validateTranslation({ originals, translated, requests, restored, expectedCount = originals.length, acceptedIds, admittedIds, enqueuedIds }) {
   const issues = [];
   const expected = new Map();
@@ -135,11 +141,16 @@ export function mapEdgeResponse(body) {
   return body.map(text => ({ translations: [{ text: `fixture translation: ${text}` }] }));
 }
 
-export function classifyTransportRequest({ method, url }, { fixtureOrigin, extensionOrigin } = {}) {
+export function classifyTransportRequest({ method, url }, { fixtureOrigin, extensionOrigin, selectedProvider } = {}) {
   let parsed;
   try { parsed = new URL(url); } catch { return { kind: 'blocked', reason: 'invalid URL' }; }
   if (parsed.protocol === 'https:' && parsed.hostname === 'edge.microsoft.com' && parsed.pathname === '/translate/translatetext') {
+    if (selectedProvider && selectedProvider !== 'edge') return { kind: 'blocked', reason: `unexpected Edge endpoint for selected ${selectedProvider} provider` };
     return method === 'POST' ? { kind: 'provider-translation' } : { kind: 'blocked', reason: `unexpected Edge method: ${method}` };
+  }
+  if (selectedProvider === 'googlev2' && parsed.origin === GOOGLE_V2_ENDPOINT.origin && parsed.pathname === GOOGLE_V2_ENDPOINT.pathname) {
+    return method === GOOGLE_V2_ENDPOINT.method ? { kind: 'provider-translation', provider: 'googlev2' }
+      : { kind: 'blocked', reason: `unexpected Google V2 method: ${method}` };
   }
   if (parsed.protocol === 'https:' && parsed.hostname === 'speech.platform.bing.com' && parsed.pathname === '/consumer/speech/synthesize/readaloud/voices/list') {
     return method === 'GET' ? { kind: 'startup-metadata-fixture' } : { kind: 'blocked', reason: `unexpected voice metadata method: ${method}` };

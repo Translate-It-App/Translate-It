@@ -4,7 +4,7 @@ import { PageTranslationScheduler } from '../../../../src/features/page-translat
 import { PageTranslationBridge } from '../../../../src/features/page-translation/PageTranslationBridge.js';
 import { MainFrameCoordinator } from '../../../../src/core/content-scripts/main/MainFrameCoordinator.js';
 import { PAGE_TRANSLATION_SLICED_DISCOVERY, PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY } from '../../../../src/features/page-translation/PageTranslationConstants.js';
-import { captureViewportWindow, installCallThrough, installPrimitiveAdmissionObserver } from './trace.mjs';
+import { captureViewportWindow, installCallThrough, installPrimitiveAdmissionObserver, installTimedCallThrough } from './trace.mjs';
 import { drainAndDisconnectMeasurementObservers, groupMutationRecords, isDuplicateAcceptedMutation, registerThenInsertCohort, trackAcceptedTarget, trackCohortAcceptedTarget } from './measurement-lifecycle.mjs';
 import { createCancellationLedger, installCancellationRuntimeMessageObserver, installTrustedLifecycleObserver, sessionIdForTranslationContext } from './cancellation-probes.mjs';
 import { createRawDOMMutationEvidence, installSuccessfulReplyProbe } from './successful-reply-probes.mjs';
@@ -24,9 +24,11 @@ const trace = {
   schedulerEnqueueOrder: [],
   selectedBatchMembers: [],
   schedulerBatchSessions: [],
+  logicalBatchIntervals: [],
   schedulerRequests: [],
   schedulerBatchConfig: null,
   providerRuntimeProbeEnabled: false,
+  providerBatchTimingInstalled: false,
   pageTranslationE2E: false,
   pageTranslationStartReporter: null,
   viewportWindowObservation: null,
@@ -79,7 +81,7 @@ const trace = {
   },
   captureSchedulerBatch(message) {
     const targetIds = this.selectedBatchMembers.at(-1);
-    const validTargetId = id => /^target-(?:[0-9]|1[01])$/.test(id)
+    const validTargetId = id => /^target-\d+$/.test(id)
       || (this.dynamicDOMEnabled === true && (/^dynamic-[12]-[1-3]$/.test(id) || this.shadowManifest?.has(id)));
     if (message?.action !== 'page-translate-batch' || typeof message.messageId !== 'string'
         || typeof message.data?.sessionId !== 'string' || !Array.isArray(targetIds) || !targetIds.length
@@ -154,7 +156,23 @@ const trace = {
       bridgeDiscoveryFailed: typeof discovery?.failed === 'boolean' ? discovery.failed : null,
     };
   },
-  enableProviderRuntimeProbe() { trace.providerRuntimeProbeEnabled = true; return true; },
+  enableProviderRuntimeProbe() {
+    if (!trace.providerBatchTimingInstalled) {
+      trace.providerRuntimeProbeEnabled = true;
+      trace.providerBatchTimingInstalled = installTimedCallThrough(PageTranslationScheduler.prototype, '_executeBatchRequest',
+        function ([batch, , , sessionId]) {
+          const operation = { at: performance.now(), sessionId: sessionId ?? this.translationSessionId ?? null,
+            targetIds: Array.isArray(batch) ? batch.map(item => benchmarkTargetId(item?.node)) : [] };
+          trace.logicalBatchIntervals.push(operation);
+          return operation;
+        },
+        function (operation, error) {
+          if (operation) Object.assign(operation, { settledAt: performance.now(), outcome: error ? 'rejected' : 'fulfilled' });
+        });
+      if (!trace.providerBatchTimingInstalled) return false;
+    }
+    return true;
+  },
   viewportEntrySnapshot() { return measurement ? { ...measurement.viewportEntryAtById } : null; },
   schedulerSelectionSnapshot() { return trace.scrollThroughStages ? structuredClone(trace.scrollThroughStages.selectionViewport) : null; },
   measurementSnapshot() { return measurement ? { acceptedIds: [...measurement.acceptedIds], acceptedPerformanceAtById: { ...measurement.acceptedPerformanceAtById }, viewportEntryAtById: { ...measurement.viewportEntryAtById } } : null; },
@@ -594,6 +612,7 @@ if (typeof originalGetBatchConfig === 'function') {
       trace.schedulerBatchConfig = {
         ...config,
         maxConcurrentFlushes: this.settings?.maxConcurrentFlushes ?? null,
+        pageWorkerLimit: this.settings?.maxConcurrentFlushes ?? null,
       };
       return config;
     });
