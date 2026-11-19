@@ -1,5 +1,7 @@
 # Whole-page translation Chrome E2E benchmark
 
+> **Issue #406 final results:** see the [final benchmark report](../../../../docs/technical/benchmarks/whole-page-issue-406-final-2026-11-19.md) for the complete performance matrix, correctness probes, limitations, and reproduction commands.
+
 Run the real MV3 background/content entries against a local synthetic page. Translation requests pass through the actual scheduler, background routing, Unified Translation Service, provider and fetch transport; only the outbound Edge HTTP response is supplied by CDP. The exact startup Edge voice-list metadata `GET` is separately fulfilled with `[]`, which the production `TTSVoiceService` accepts and caches. Other unexpected external HTTP(S) requests are blocked and fail the run. Chrome DevTools Fetch guards the test extension service worker before it resumes and the top-level fixture page before navigation, including the content isolated world; iframes and Chrome process/component-extension traffic outside these targets are not covered.
 
 ```sh
