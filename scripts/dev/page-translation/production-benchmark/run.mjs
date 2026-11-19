@@ -59,7 +59,14 @@ const prefixNodes = Number(process.env.BENCH_PREFIX_NODES ?? 1200);
 if (!Number.isInteger(samples) || samples < 1 || !Number.isInteger(prefixNodes) || prefixNodes < 200) {
   throw new Error('BENCH_SAMPLES must be >=1 and BENCH_PREFIX_NODES >=200.');
 }
-const fixtures = ['late-dom', 'flat'];
+const availableFixtures = ['late-dom', 'flat', 'attribute-heavy'];
+const fixtures = (process.env.BENCH_FIXTURES ?? 'late-dom,flat').split(',');
+if (fixtures.length < 1 || fixtures.some(fixture => !availableFixtures.includes(fixture)) || new Set(fixtures).size !== fixtures.length) {
+  throw new Error(`BENCH_FIXTURES must be a unique comma-separated subset of ${availableFixtures.join(',')}.`);
+}
+if (fixtures.includes('attribute-heavy') && modes.includes('viewport')) {
+  throw new Error('attribute-heavy only supports legacy,sliced modes; set BENCH_MODES=legacy,sliced (Viewport-first is excluded).');
+}
 const latencyProfiles = [0, 50];
 const binaries = [process.env.CHROME_BIN, '/usr/bin/chromium', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome'].filter(Boolean);
 const located = spawnSync('sh', ['-lc', 'command -v chromium chromium-browser google-chrome google-chrome-stable'], { encoding: 'utf8' }).stdout?.trim().split('\n') ?? [];
@@ -94,7 +101,7 @@ const mocks = {
   '/mock/logConstants.js': `export const LOG_COMPONENTS={PAGE_TRANSLATION:'page-translation'};`,
   '/mock/direction.js': `export const applyNodeDirection=()=>{};export const isRTL=()=>false;export const restoreElementDirection=()=>{};export const BIDI_MARKS={RLM:'\\u200f',LRM:'\\u200e'};`,
   '/mock/hover.js': `export const hoverPreviewLookup={clear(){},add(){},remove(){}};`,
-  '/mock/fonts.js': `export const getTranslationFontTarget=()=>null;`,
+  '/mock/fonts.js': `export const getTranslationFontTarget=()=>null;export const getSelectElementMixedFontTarget=()=>null;`,
   '/mock/ui.js': `export const NOTIFICATION_TIME={WARNING:1,FATAL:1};export const UI_HOST_IDS={TOOLTIP:'x',MAIN:'x',IFRAME:'x'};`,
   '/mock/translation.js': `export const TRANSLATION_HTML={IGNORE_CLASS:'ignore',NO_TRANSLATE_CLASS:'no-translate',NO_TRANSLATE_VALUE:'no'};`,
 };
@@ -347,14 +354,14 @@ try {
     method: {
       productionPath: 'Actual PageTranslationBridge, GuardedNodesTranslator, and installed domtranslator; flags overlaid in memory by module graph.',
       providerBoundary: 'Direct deterministic Bridge callback with fixed 0ms/50ms resolution delay; no scheduler, batching, queue, or external provider transport.',
-      fixture: { prefixNodes, tailNodes: 64, viewportTargets: 16, lateDom: 'fixed viewport-spanning panel follows offscreen prefix in DOM order.', flat: 'same panel precedes offscreen prefix in DOM order.' },
-      targetValidation: 'All eligible prefix, tail, and viewport targets carry unique IDs; every ID must be admitted exactly once and translated exactly once.',
+      fixture: { prefixNodes, tailNodes: 64, viewportTargets: 16, lateDom: 'fixed viewport-spanning panel follows offscreen prefix in DOM order.', flat: 'same panel precedes offscreen prefix in DOM order.', attributeHeavy: '48 repeated groups; each has paragraph text, a title paragraph, img alt, readonly text-input placeholder, and aria-label button (240 targets). Each group also contains absent supported attributes and present excluded data attributes.' },
+      targetValidation: 'Every eligible text or attribute primitive has a unique ID and must be admitted exactly once, settle accepted exactly once, and reach its exact expected DOM value.',
       sliceCaps: { maxSteps: 100, budgetMs: 8 },
       viewportWindowCaps: { enumerationSteps: 100, candidates: 100, geometryChecks: 100 },
       samplesPerModeLatencyFixture: samples,
       warmupsPerModeLatencyFixture: 1,
       ordering: 'All modes warm up before measured rounds; mode order reverses on alternating rounds.',
-      firstVisibleAcceptedWrite: 'MutationObserver sees expected translated DOM text for a viewport target; not a paint metric.',
+      firstVisibleAcceptedWrite: 'MutationObserver sees the expected translated write for a target initially intersecting the viewport; text or attribute mutation for attribute-heavy; not a paint metric.',
       discoveryDrain: 'Elapsed invocation-to-drain callback; legacy synchronous translate invocation duration. Not active traversal CPU time.',
       mainThreadLongTasks: 'PerformanceObserver longtask entries (browser threshold, generally >=50ms); per-trial count, maximum duration, and total duration are filtered to overlap the interval from scheduled translate invocation through last accepted write.',
       mainThreadLongTaskBoundary: 'translate() executes inside a native scheduled macrotask after setup. A task intersecting either interval boundary is counted at its full reported duration because Long Task entries cannot be split; observer delivery is drained after completion.',

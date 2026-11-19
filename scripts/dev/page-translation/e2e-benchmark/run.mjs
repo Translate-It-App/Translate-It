@@ -9,10 +9,10 @@ import { buildBenchmarkExtension } from './build.mjs';
 import { validateBuildParity } from './build-environment.mjs';
 import { launchChrome } from './chrome.mjs';
 import { writeBenchmarkArtifact } from './artifact-writer.mjs';
-import { classifyTransportRequest, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
+import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
-import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
-import { modeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './scenario-plan.mjs';
+import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
+import { deriveScrollAggregateMetrics, modeOrder, mapProviderBatchIds, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
 
@@ -30,6 +30,8 @@ if (isolatedProbes.length && process.env.BENCH_SCENARIOS && process.env.BENCH_SC
 }
 const modes = isolatedProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
 const scenarios = isolatedProbes.length ? ['early-visible'] : parseScenarioSelection(process.env.BENCH_SCENARIOS ?? 'small');
+const scrollSchedulingMode = parseScrollSchedulingMode(process.env.BENCH_SCROLL_SCHEDULING);
+if (scenarios.includes('scroll-through') !== (scrollSchedulingMode !== null)) throw new TypeError('BENCH_SCENARIOS=scroll-through requires BENCH_SCROLL_SCHEDULING=fluid or on-stop, and scheduling is only valid with scroll-through.');
 const samples = Number(process.env.BENCH_SAMPLES ?? 5);
 const warmups = Number(process.env.BENCH_WARMUPS ?? 1);
 const defaultArtifact = `/tmp/opencode/page-translation-e2e-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}.json`;
@@ -51,6 +53,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/chrome.mjs',
   'scripts/dev/page-translation/e2e-benchmark/worker-entry.mjs',
   'scripts/dev/page-translation/e2e-benchmark/content-entry.mjs',
+  'scripts/dev/page-translation/e2e-benchmark/provider-probe-content.mjs',
   'scripts/dev/page-translation/e2e-benchmark/trace.mjs',
   'scripts/dev/page-translation/e2e-benchmark/measurement-lifecycle.mjs',
   'scripts/dev/page-translation/e2e-benchmark/artifact-writer.mjs',
@@ -59,6 +62,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-probes.mjs',
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-gate.mjs',
   'scripts/dev/page-translation/page-translation-e2e-runtime.test.js',
+  'scripts/dev/page-translation/page-translation-e2e-benchmark.test.js',
   'scripts/dev/page-translation/page-translation-e2e-measurement.test.js',
   'scripts/dev/page-translation/page-translation-e2e-large-page.test.js',
   'scripts/dev/page-translation/page-translation-e2e-artifact-writer.test.js',
@@ -111,7 +115,13 @@ function findTrace(events, name, predicate = () => true) { return events.find(ev
 function deriveTimings(trial, workerTrace, contentTrace, contentEvents) {
   const workerEvents = traceEvents(workerTrace);
   contentEvents ??= Array.isArray(contentTrace?.events) ? contentTrace.events : [];
-  const acceptance = summarizeAcceptanceTimes(contentTrace?.firstAcceptedAtById, trial.fixture.visibleIds, trial.fixture.targets.map(target => target.id));
+  const initialTargetIds = trial.fixture.targets.map(target => target.id);
+  const expectedTargetIds = contentTrace?.expectedTargetIds
+    ?? [...initialTargetIds, ...(trial.fixture.dynamicCohorts ?? []).flatMap(cohort => cohort.targets.map(target => target.id))];
+  const acceptance = summarizeAcceptanceTimes(contentTrace?.firstAcceptedAtById, trial.fixture.visibleIds, expectedTargetIds);
+  const initialAcceptance = trial.scenario === 'dynamic-dom'
+    ? summarizeAcceptanceTimes(contentTrace?.firstAcceptedAtById, trial.fixture.visibleIds, initialTargetIds)
+    : acceptance;
   const backgroundAdmission = findTrace(workerEvents, 'background.translationRequest.entry');
   const queueAdmission = findTrace(workerEvents, 'queueManager.enqueue');
   const providerStart = findTrace(workerEvents, 'providerRequestEngine.executeApiCall.start');
@@ -147,7 +157,10 @@ function deriveTimings(trial, workerTrace, contentTrace, contentEvents) {
     visibleSetCompletionUnavailableReason: acceptance.visibleSetCompletionUnavailableReason,
     allAcceptedWrites: acceptance.allTargetsCompletionAt,
     allAcceptedWritesUnavailableReason: acceptance.allTargetsCompletionUnavailableReason,
+    initialAllAcceptedWrites: initialAcceptance.allTargetsCompletionAt,
+    initialAllAcceptedWritesUnavailableReason: initialAcceptance.allTargetsCompletionUnavailableReason,
     acceptance,
+    dynamicCohorts: (contentTrace?.dynamicCohorts ?? []).map(cohort => ({ ...cohort })),
     completion: trial.terminal?.receivedAt ?? null,
     restoreStart: trial.timestamps.restoreStarted,
     restoreEnd: trial.timestamps.restoreCompleted,
@@ -170,6 +183,7 @@ function measureMode(runs) {
     commandToFirstVisibleWrite: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.firstVisibleAcceptedWrite),
     commandToVisibleCompletion: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.visibleSetCompletion),
     commandToAllWrites: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.allAcceptedWrites),
+    commandToInitialAllWrites: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.initialAllAcceptedWrites),
     commandToCompletion: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.completion),
     commandToDiscoveryDrain: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.discoveryDrained),
     commandToFirstFlush: intervals(run => run.timestamps.translationCommand, run => run.derivedTimings?.firstSchedulerFlush),
@@ -190,6 +204,28 @@ function measureMode(runs) {
     longTaskSamples: runs.map(run => run.derivedTimings?.longTasks ?? null),
     longTaskSummary,
     longTaskCalibration: runs.map(run => run.longTaskCalibration ?? { supported: false, reason: 'calibration was not run' }),
+    dynamicCohorts: Object.fromEntries([...new Set(runs.flatMap(run => (run.derivedTimings?.dynamicCohorts ?? []).map(cohort => cohort.id)))].map(id => [id, {
+      insertionToFirstAccepted: intervals(run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.insertedAt,
+        run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.firstAcceptedAt),
+      insertionToAllAccepted: intervals(run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.insertedAt,
+        run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.completionAt),
+    }])),
+    ...(runs.every(run => run.scenario === 'spa-navigation') ? (() => {
+      const longTaskSamples = runs.map(run => longTasksWithinInterval(run.derivedTimings?.longTasks,
+        run.spaNavigationTiming?.navStartedAt, run.spaNavigationTiming?.terminalAt));
+      const longTaskSummary = longTaskSamples.some(entries => entries === null)
+        ? { ...summarizeLongTasks(null), unavailableReason: 'One or more SPA trials lacked calibrated long-task observations or navigation boundaries.' }
+        : { ...summarizeLongTasks(longTaskSamples.flat()), unavailableReason: null };
+      return { spaNavigation: {
+        navigationToFirstAcceptedWrite: summarizeIntervals(runs.map(run => run.spaNavigationTiming?.navStartedAt), runs.map(run => run.spaNavigationTiming?.firstAcceptedAt)),
+        navigationToBCompletion: summarizeIntervals(runs.map(run => run.spaNavigationTiming?.navStartedAt), runs.map(run => run.spaNavigationTiming?.terminalAt)),
+        longTaskMeasurementBoundary: 'Calibrated fixture-document PerformanceObserver tasks whose full intervals fall between native pushState click start (performance.now) and B-session terminal receipt; excludes route A and Restore.',
+        longTaskSamples,
+        longTaskSummary,
+        longTaskCalibration: runs.map(run => run.longTaskCalibration ?? { supported: false, reason: 'calibration was not run' }),
+        rawTrials: runs.map(run => run.spaNavigationTiming ?? null),
+      } };
+    })() : {}),
   };
 }
 function sessionIdFromStart(response) {
@@ -298,9 +334,10 @@ function validateHarnessBuildParity() {
   return parity;
 }
 
-async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null }) {
+async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, schedulingMode = null }) {
+  const trialSettings = settingsForScenario(settings, fixtureConfig.scenario, schedulingMode);
   const trial = {
-    mode, scenario: fixtureConfig.scenario, ordinal, globalRunOrder, phase, status: 'running',
+    mode, scenario: fixtureConfig.scenario, ...(schedulingMode ? { schedulingMode } : {}), ordinal, globalRunOrder, phase, status: 'running',
     timestamps: { trialStart: now() },
     contexts: [], workerReadiness: [], contentReadiness: [], commands: [], lifecycle: [],
     console: [], exceptions: [], requests: [], rawDOM: {}, cleanupErrors: [],
@@ -309,12 +346,15 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       targetCount: fixtureConfig.targetCount,
       targets: fixtureConfig.targets,
       targetTexts: fixtureConfig.targetTexts,
+      dynamicCohorts: fixtureConfig.dynamicCohorts ?? [],
+      shadowTargets: fixtureConfig.shadowTargets ?? [],
       visibleIds: fixtureConfig.visibleIds,
       viewport: fixtureConfig.viewport,
       scroll: fixtureConfig.scroll,
       responseDelayMs: fixtureConfig.responseDelayMs,
+      scrollBands: fixtureConfig.scrollBands ?? [],
     },
-    settings,
+    settings: trialSettings,
   };
   let chrome;
   let fixture;
@@ -408,6 +448,11 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         requestRecord.batchSize = body.length;
         requestRecord.batchTexts = body;
         requestRecord.fixtureDelayMs = fixtureConfig.responseDelayMs;
+        if (fixtureConfig.scenario === 'scroll-through' && pageSession && contentContext) {
+          const requestViewport = await evaluate(chrome, pageSession,
+            `(()=>{const sources=${JSON.stringify(body)};return {at:performance.now(),scrollY,targets:sources.map(source=>{const el=[...document.querySelectorAll('[data-bench-id]')].find(node=>node.textContent===source);if(!el)return {source,id:null,classification:'unmapped'};const r=el.getBoundingClientRect();const visible=r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth;const buffered=r.bottom>-50&&r.top<innerHeight+50&&r.right>-50&&r.left<innerWidth+50;return {source,id:el.dataset.benchId,classification:visible?'viewport':buffered?'permitted-50px-buffer':'outside-buffer'}})}})()`, contentContext, false);
+          requestRecord.requestViewport = requestViewport;
+        }
         if (cancellationProbe || staleSuccessProbe) {
           const workerState = await evaluate(chrome, event.sessionId,
             'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
@@ -420,7 +465,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           if (staleSuccessProbe && !root) throw new Error(`Cannot map provider response to exactly one real Page root (matches=${roots.length}).`);
           const physicalCall = root && physical.find(operation => operation.messageId === root.messageId && operation.sessionId === root.sessionId);
           const controller = root && workerState.controllers?.find(candidate => candidate.messageId === root.messageId && candidate.sessionId === root.sessionId);
-          const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
+         const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id
+           ?? (fixtureConfig.spaSources?.includes(text) ? `target-${fixtureConfig.spaSources.indexOf(text)}` : null));
           if (staleSuccessProbe && (!physicalCall || !controller || targetIds.some(id => id === null))) {
             throw new Error('Cannot fulfill provider response without exact body/root/physical/controller fixture correlation.');
           }
@@ -710,7 +756,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       return state.initialized && state.listener && state.engine && state.unified && state.traceReady;
     });
     await evaluate(chrome, workerSession,
-      `Promise.all([browser.storage.local.set(${JSON.stringify(settings)}),browser.storage.sync.set(${JSON.stringify(settings)}).catch(()=>{})])`);
+      `Promise.all([browser.storage.local.set(${JSON.stringify(trialSettings)}),browser.storage.sync.set(${JSON.stringify(trialSettings)}).catch(()=>{})])`);
     if (cancellationProbe || staleSuccessProbe) {
       const workerInstrumentation = await evaluate(chrome, workerSession,
         'globalThis.__pageTranslationBenchmark.enableCancellationProbe()');
@@ -797,17 +843,41 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
 
     trial.scrollState = await evaluate(chrome, pageSession,
       `(()=>{window.scrollTo(${fixtureConfig.scroll.x},${fixtureConfig.scroll.y});return {x:window.scrollX,y:window.scrollY}})()`, undefined, false);
-    const actualGeometry = await evaluate(chrome, pageSession,
+    let shadowOracle = null;
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      shadowOracle = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.enableShadowDOMTracking(${JSON.stringify(fixtureConfig.shadowTargets)})`, contentContext);
+      if (JSON.stringify(shadowOracle.targetIds) !== JSON.stringify(fixtureConfig.targets.map(target => target.id))) throw new Error('Shadow DOM initial target oracle mismatch.');
+    }
+    const actualGeometry = fixtureConfig.scenario === 'shadow-dom' ? {
+      ...await evaluate(chrome, pageSession,
+        `(()=>{const trace=window.__pageTranslationBenchmark;const ids=${JSON.stringify(fixtureConfig.targets.map(target => target.id))};const entries=ids.map(id=>[id,trace.shadowTargetById.get(id)]);const visible=entries.filter(([,el])=>{if(!el)return false;const r=el.getBoundingClientRect(),s=getComputedStyle(el);return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth}).map(([id])=>id);return {targetCount:entries.filter(([,el])=>!!el).length,visibleIds:visible,viewport:{width:innerWidth,height:innerHeight},scroll:{x:scrollX,y:scrollY}}})()`, contentContext, false),
+    } : await evaluate(chrome, pageSession,
       `(()=>{const targets=[...document.querySelectorAll('[data-bench-id]')];const visible=targets.filter(element=>{const rect=element.getBoundingClientRect();const style=getComputedStyle(element);return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>0&&rect.height>0&&rect.bottom>0&&rect.right>0&&rect.top<innerHeight&&rect.left<innerWidth}).map(element=>element.dataset.benchId);return {targetCount:targets.length,visibleIds:visible,viewport:{width:innerWidth,height:innerHeight},scroll:{x:scrollX,y:scrollY}}})()`, undefined, false);
     trial.actualGeometry = actualGeometry;
-    trial.fixtureGeometryValidation = validateFixtureGeometry(fixtureConfig, actualGeometry);
-    if (!trial.fixtureGeometryValidation.ok) throw new Error(trial.fixtureGeometryValidation.issues.join('; '));
-    const originals = fixtureConfig.targets.map(target => [target.id, target.source]);
+    if (fixtureConfig.scenario !== 'shadow-dom') {
+      trial.fixtureGeometryValidation = validateFixtureGeometry(fixtureConfig, actualGeometry);
+      if (!trial.fixtureGeometryValidation.ok) throw new Error(trial.fixtureGeometryValidation.issues.join('; '));
+    }
+    let originals = fixtureConfig.targets.map(target => [target.id, target.source]);
     const originalById = new Map(originals);
-    trial.rawDOM.original = await evaluate(chrome, pageSession,
-      `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext);
-    if (trial.rawDOM.original.length !== fixtureConfig.targetCount
-        || JSON.stringify(trial.rawDOM.original) !== JSON.stringify(originals)) {
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      trial.rawDOM.original = await evaluate(chrome, pageSession,
+        `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;return ${JSON.stringify(fixtureConfig.targets.map(target => target.id))}.map(id=>{const el=t.get(id);return [id,el?.dataset.benchKind==='title'?el.getAttribute('title'):el?.textContent]})})()`, contentContext, false);
+      trial.fixtureGeometryValidation = validateShadowInitialObservations({ fixture: fixtureConfig, observedTargets: trial.rawDOM.original, observedGeometry: actualGeometry });
+      if (!trial.fixtureGeometryValidation.ok) throw new Error(trial.fixtureGeometryValidation.issues.join('; '));
+      originals = trial.rawDOM.original;
+      originalById.clear();
+      for (const [id, source] of originals) originalById.set(id, source);
+      trial.shadowDOM = await evaluate(chrome, pageSession,
+        `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;const state=el=>{const s=getComputedStyle(el);return {inlineDirection:el.style.direction,inlineUnicodeBidi:el.style.unicodeBidi,computedDirection:s.direction,computedUnicodeBidi:s.unicodeBidi,markers:Object.fromEntries(['data-page-translated','data-has-original','data-dir-original-saved','data-translate-dir'].map(name=>[name,el.getAttribute(name)]))}};return {metadata:[...t].map(([id,el])=>[id,[...el.attributes].map(a=>[a.name,a.value])]),targetStates:[...t].map(([id,el])=>[id,state(el)])}})()`, contentContext);
+      Object.assign(trial.shadowDOM, await evaluate(chrome, pageSession,
+        `(()=>{const o=window.__shadowBenchmarkOracle;return {directText:[...o.initialRoot.childNodes].some(n=>n.nodeType===3&&n.nodeValue==='SHADOW_DIRECT_TEXT_SENTINEL'),closedText:o.closedSentinel.textContent,closedRootInaccessible:o.closedHost.shadowRoot===null}})()`));
+      if (!trial.shadowDOM.directText || trial.shadowDOM.closedText !== 'SHADOW_CLOSED_ROOT_SENTINEL' || !trial.shadowDOM.closedRootInaccessible) throw new Error('Shadow DOM omission sentinels were not intact before translation.');
+    } else trial.rawDOM.original = await evaluate(chrome, pageSession,
+      `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.dataset.benchKind==='title'?el.getAttribute('title'):el.textContent])`, contentContext);
+    if (fixtureConfig.scenario !== 'shadow-dom' && (trial.rawDOM.original.length !== fixtureConfig.targetCount
+        || JSON.stringify(trial.rawDOM.original) !== JSON.stringify(originals))) {
       throw new Error(`Pre-translation fixture DOM does not exactly match ${fixtureConfig.targetCount} source targets.`);
     }
     trial.longTaskCalibration = await evaluate(chrome, pageSession,
@@ -817,13 +887,26 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       `typeof window.__pageTranslationBenchmark?.startMeasurement==='function'&&typeof window.__pageTranslationBenchmark?.stopMeasurement==='function'`, contentContext);
     if (!trial.traceAvailable) throw new Error('Measurement trace writer API is not ready; refusing to claim measured trial.');
     await evaluate(chrome, pageSession,
-      'window.__benchEvents=[];window.addEventListener("__benchmark-runtime-event",e=>{const receivedAt=Date.now();window.__benchEvents.push({receivedAt,message:e.detail})});', contentContext);
+      'window.__benchEvents=[];window.addEventListener("__benchmark-runtime-event",e=>{const receivedAt=Date.now();const performanceAt=performance.now();window.__benchEvents.push({receivedAt,performanceAt,message:e.detail})});', contentContext);
     measurementState.attempted = true;
-    trial.measurementStart = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.startMeasurement()', contentContext);
+    if (fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'shadow-dom') {
+      const expectedIds = [...fixtureConfig.targets, ...(fixtureConfig.dynamicCohorts ?? []).flatMap(cohort => cohort.targets)].map(target => target.id);
+      if (fixtureConfig.scenario === 'shadow-dom') expectedIds.splice(fixtureConfig.targets.length, 0, ...fixtureConfig.shadowTargets.slice(3).map(target => target.id));
+      const configured = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.setExpectedTargetIds(${JSON.stringify(expectedIds)})`, contentContext);
+      if (configured !== true) throw new Error('Dynamic expected target inventory could not be configured before measurement.');
+    }
+    trial.measurementStart = await evaluate(chrome, pageSession,
+      `window.__pageTranslationBenchmark.startMeasurement(${JSON.stringify({ scrollThrough: fixtureConfig.scenario === 'scroll-through', shadowDom: fixtureConfig.scenario === 'shadow-dom' })})`, contentContext);
     measurementState.started = true;
-    if (trial.measurementStart.targetCount !== fixtureConfig.targetCount
-        || JSON.stringify(trial.measurementStart.visibleIds) !== JSON.stringify(actualGeometry.visibleIds)) {
+    if (fixtureConfig.scenario !== 'shadow-dom' && (trial.measurementStart.targetCount !== fixtureConfig.targetCount
+        || JSON.stringify(trial.measurementStart.visibleIds) !== JSON.stringify(actualGeometry.visibleIds))) {
       throw new Error('MutationObserver target/visible-ID snapshot does not match actual viewport geometry.');
+    }
+    if (fixtureConfig.scenario === 'spa-navigation') {
+      trial.spaTrackingStart = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.enableSpaNavigationTracking(${JSON.stringify({ changedIds: fixtureConfig.spaChangedIds, sources: fixtureConfig.spaSources })})`, contentContext);
+      if (trial.spaTrackingStart?.identityCount !== fixtureConfig.targetCount) throw new Error('SPA target identity tracking failed to initialize.');
     }
     if (cancellationProbe) {
       trial.cancellation.initialDOMMetadata = await evaluate(chrome, pageSession,
@@ -835,6 +918,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.armSuccessfulReplyProbe()', contentContext);
     }
     trial.timestamps.translationCommand = now();
+    if (fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'shadow-dom') {
+      const enabled = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.enableDynamicDOMTracking()', contentContext);
+      if (enabled !== true) throw new Error('Dynamic DOM settlement instrumentation could not be installed.');
+    }
     const started = await evaluate(chrome, pageSession,
       `chrome.runtime.sendMessage(${JSON.stringify({ action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' } })})`, contentContext);
     trial.commands.push({ action: 'page-translate', sentAt: trial.timestamps.translationCommand, respondedAt: now(), response: started });
@@ -842,6 +929,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const sessionId = sessionIdFromStart(started);
     if (!sessionId) throw new Error('Successful PAGE_TRANSLATE response omitted its session ID.');
     trial.sessionId = sessionId;
+    if (fixtureConfig.scenario === 'spa-navigation') {
+      await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.spaNavigation.sessionA=${JSON.stringify(sessionId)};window.__pageTranslationBenchmark.spaNavigation.cursorA=window.__pageTranslationBenchmark.spaSnapshot().cursor`, contentContext);
+    }
     const managerCall = await until(async () => {
       const state = await evaluate(chrome, pageSession,
         'window.__pageTranslationBenchmark.calls.at(-1)??null', contentContext, false);
@@ -849,9 +940,104 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     });
     trial.effectiveSettingsObserved = managerCall.settings;
     trial.effectiveSettingsValidation = validateEffectiveSettings(managerCall.settings, {
-      targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: false,
+      targetLanguage: 'fr', lazyLoading: trialSettings.WHOLE_PAGE_LAZY_LOADING, translateAfterScrollStop: trialSettings.WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP, autoTranslateOnDOMChanges: trialSettings.WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES,
     });
     if (!trial.effectiveSettingsValidation.ok) throw new Error(trial.effectiveSettingsValidation.issues.join('; '));
+
+    if (fixtureConfig.scenario === 'scroll-through') {
+      const initialIds = fixtureConfig.scrollBands[0].ids;
+      trial.scrollThrough = { initialVisibleAcceptance: await until(async () => {
+        const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
+        return initialIds.every(id => state?.acceptedIds.includes(id)) ? state : null;
+      }, 60_000) };
+      const phases = [];
+      for (const [label, y] of [['burst-band-2', 900], ['burst-band-3', 2000], ['settled-band-3', 2000], ['revisit-band-2', 900], ['revisit-initial', 0]]) {
+        if (label === 'burst-band-3') await wait(150);
+        if (label === 'settled-band-3') await wait(750);
+        const phase = await evaluate(chrome, pageSession,
+          `(()=>new Promise(resolve=>{const done=()=>{requestAnimationFrame(()=>{requestAnimationFrame(()=>{const visible=[...document.querySelectorAll('[data-bench-id]')].filter(el=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth}).map(el=>el.dataset.benchId);resolve({x:scrollX,y:scrollY,visibleIds:visible,at:performance.now(),scheduler:window.__pageTranslationBenchmark.pageSessionSnapshot()})})})};addEventListener('scroll',done,{once:true});window.scrollTo(0,${y});if(scrollY===${y})done()}))()`, contentContext);
+        if (phase.y !== y) throw new Error(`Native scroll did not reach requested ${label} offset: ${phase.y}/${y}`);
+        phases.push({ label, ...phase });
+        if (label === 'revisit-band-2') {
+          await wait(750);
+          await until(async () => {
+            const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
+            return fixtureConfig.scrollBands[1].ids.every(id => state?.acceptedIds.includes(id)) ? true : null;
+          }, 30_000);
+        }
+      }
+      trial.scrollThrough = { ...trial.scrollThrough, phases, method: 'window.scrollTo with native scroll events and animation-frame settling; no scheduler signals or synthetic events' };
+    }
+
+    let dynamicCohortsInserted = 0;
+    const insertDynamicCohort = async index => {
+      const cohort = fixtureConfig.dynamicCohorts[index];
+      const inserted = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.insertDynamicCohort(${JSON.stringify(cohort)})`, contentContext);
+      dynamicCohortsInserted++;
+      originals.push(...cohort.targets.map(target => [target.id, target.source]));
+      for (const target of cohort.targets) originalById.set(target.id, target.source);
+      trial.rawDOM.original.push(...cohort.targets.map(target => [target.id, target.source]));
+      (trial.dynamicCohorts ??= []).push({ id: cohort.id, targetIds: cohort.targets.map(target => target.id), insertedAt: inserted.insertedAt });
+      return inserted;
+    };
+    const insertShadowTarget = async (id, phase) => {
+      const inserted = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.insertShadowTarget(${JSON.stringify(id)},${JSON.stringify(phase)})`, contentContext);
+      const target = fixtureConfig.shadowTargets.find(item => item.id === id);
+      if (inserted.source !== target.source) throw new Error(`Observed dynamic Shadow DOM source mismatch: ${id}`);
+      originalById.set(id, inserted.source);
+      trial.rawDOM.original.push([id, inserted.source]);
+      (trial.dynamicCohorts ??= []).push({ id: `shadow-${phase}`, targetIds: [id], insertedAt: inserted.insertedAt });
+      trial.shadowDOM.metadata.push([id, inserted.originalAttributes]);
+      trial.shadowDOM.targetStates.push([id, { ...inserted.directionState, markers: inserted.markers }]);
+      dynamicCohortsInserted++;
+      return inserted;
+    };
+    if (fixtureConfig.scenario === 'dynamic-dom') {
+      if (trialSettings.WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES !== true
+          || managerCall.settings?.autoTranslateOnDOMChanges !== true) throw new Error('Dynamic DOM scenario did not enable production auto-translation on DOM changes.');
+      const translating = await until(async () => {
+        const snapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+        return snapshot?.translationSessionId === sessionId && snapshot.managerTranslating === true ? snapshot : null;
+      });
+      trial.dynamicBaseSessionAtFirstInsertion = translating;
+      await insertDynamicCohort(0);
+    }
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      if (managerCall.settings?.autoTranslateOnDOMChanges !== true || trialSettings.WHOLE_PAGE_LAZY_LOADING !== false) throw new Error('Shadow DOM scenario settings are not auto-DOM-only.');
+      trial.shadowDOM.initialDiscoveryDrain = await until(async () => {
+        const [state, accepted, contentEvents] = await Promise.all([
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false),
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.events', contentContext, false),
+        ]);
+        const initialIds = fixtureConfig.targets.map(target => target.id);
+        const [primitiveAdmissions, schedulerEnqueues] = await Promise.all([
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.discoveryAdmissionOrder', contentContext, false),
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.schedulerEnqueueOrder', contentContext, false),
+        ]);
+        const transitions = accepted?.acceptedSettlementTransitions ?? [];
+        const bridgeDiscoveryDrained = typeof state?.bridgeDiscoveryPending === 'boolean'
+          ? state.bridgeDiscoveryPending === false && state.bridgeDiscoveryRunning === false
+            && state.bridgeDiscoveryStarting === false && state.bridgeDiscoveryQueueDepth === 0 && state.bridgeDiscoveryFailed === false
+          : mode === 'legacy' ? true
+            : contentEvents?.some(event => event.name === 'bridge.discovery.pending' && event.pending === false
+              && event.bridgePending === false && event.queueDepth === 0 && event.running === false) === true;
+        const readiness = shadowInitialTranslationReadiness({ expectedIds: initialIds, expectedSessionId: sessionId,
+          observedSessionId: state?.translationSessionId, schedulerState: state, bridgeDiscoveryDrained,
+          admissions: primitiveAdmissions, enqueues: schedulerEnqueues, settlements: transitions,
+          acceptedDomIds: accepted?.acceptedDomIds });
+        trial.shadowDOM.latestInitialDrainObservation = { scheduler: state, acceptedSettlementTransitions: transitions,
+          acceptedDomIds: accepted?.acceptedDomIds ?? [], bridgeDiscoveryDrained,
+          bridgeEvents: contentEvents?.filter(event => event.name === 'bridge.discovery.pending') ?? [],
+          primitiveAdmissions, schedulerEnqueues, readiness };
+        if (!readiness.ready) return null;
+        return { scheduler: state, acceptedSettlementTransitions: transitions,
+          acceptedDomIds: accepted.acceptedDomIds };
+      });
+      await insertShadowTarget('shadow-dynamic-host', 'detached-host');
+    }
 
     if (staleSuccessProbe) {
       const expectedIds = fixtureConfig.targets.map(target => target.id);
@@ -870,7 +1056,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       };
       const snapshotDom = async label => {
         const dom = await evaluate(chrome, pageSession,
-          `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
+          `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.dataset.benchKind==='title'?el.getAttribute('title'):el.textContent])`, contentContext, false);
         const metadata = await evaluate(chrome, pageSession,
           `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`, contentContext, false);
         const value = { at: now(), dom, metadata };
@@ -1996,6 +2182,197 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       return trial;
     }
 
+    if (fixtureConfig.scenario === 'spa-navigation') {
+      const ids = fixtureConfig.targets.map(target => target.id);
+      const changedIds = fixtureConfig.spaChangedIds;
+      const retainedIds = ids.filter(id => !changedIds.includes(id));
+      const routeSource = id => changedIds.includes(id) ? fixtureConfig.spaSources[Number(id.slice(7))] : originalById.get(id);
+      const readSpa = () => evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.spaSnapshot()', contentContext, false);
+      const readEvents = () => evaluate(chrome, pageSession, 'window.__benchEvents??[]', contentContext, false);
+      const translationTerminal = (list, owner, targetIds, acceptedAtById, acceptedIds, expectedAcceptedIds = targetIds) => list.find(event =>
+        validateSpaTerminal({ event, sessionId: owner, targetIds, acceptedAtById, acceptedIds, expectedAcceptedIds }).ok);
+      const expectedTranslation = (_id, source) => `\u200efixture translation: ${source}`;
+      const completedA = await until(async () => {
+        const [list, state, pageState] = await Promise.all([readEvents(), readSpa(), evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false)]);
+        const terminal = translationTerminal(list, sessionId, ids, undefined, state.acceptedIds);
+        const domOkay = state.dom.length === ids.length && state.dom.every(([id, text]) => text === expectedTranslation(id, originalById.get(id)));
+        const acceptedOkay = ids.every(id => state.acceptedIds.includes(id));
+        const idle = pageState?.translationSessionId === sessionId && pageState.managerTranslating === false
+          && pageState.activeFlushes === 0 && pageState.queueIds?.length === 0 && pageState.pendingSettlementCount === 0
+          && pageState.discoveryPending === false;
+        trial.spaRouteAProgress = { terminalObserved: !!terminal, domOkay, acceptedOkay, idle,
+          acceptedIds: state.acceptedIds, dom: state.dom, pageState };
+        return terminal && domOkay && acceptedOkay && idle ? { terminal, state, pageState } : null;
+      }, 60_000);
+      if (completedA.state.sessionA !== sessionId || !completedA.state.cursorA) throw new Error('Route A did not expose its real production navigation cursor/session.');
+      const providerARequests = trial.requests.filter(request => request.category === 'provider-translation')
+        .filter(request => (request.batchTexts ?? []).every(source => fixtureConfig.targets.some(target => target.source === source)))
+        .map(request => ({ ...request, targetIds: request.batchTexts.map(source => fixtureConfig.targets.find(target => target.source === source)?.id ?? null) }));
+      const providerAIds = providerARequests
+        .flatMap(request => request.batchTexts ?? []).map(source => fixtureConfig.targets.find(target => target.source === source)?.id ?? null);
+      const providerASettings = completedA.state.managerCalls.find(call => call.isAuto === false)?.settings;
+      const providerAValidation = validateExactTargetIds('route A provider request', providerAIds, ids);
+      if (!providerAValidation.ok) throw new Error(providerAValidation.issues.join('; '));
+      const providerARoute = validateSpaProviderRoute({ provider: providerASettings?.provider, requests: providerARequests, expectedIds: ids });
+      if (!providerARoute.ok) throw new Error(providerARoute.issues.join('; '));
+      trial.spaNavigation = { sessionA: sessionId, changedIds, retainedIds, routeA: completedA, cursorA: completedA.state.cursorA,
+        acceptedAIds: completedA.state.acceptedIds, pendingA: completedA.pageState, providerAIds, providerAValidation, providerARoute };
+
+      trial.spaNavigation.navStartedAt = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.beginSpaNavigation()', contentContext);
+      trial.timestamps.spaNavigationStartedAt = trial.spaNavigation.navStartedAt;
+      const invalidation = await until(async () => {
+        const state = await readSpa();
+        const event = state.events.find(item => item.name === 'spa.navigation.invalidated');
+        const routeSourcesUpdated = changedIds.every(id => state.sourceValues.find(([targetId]) => targetId === id)?.[1] === fixtureConfig.spaSources[Number(id.slice(7))]);
+        return event && state.sourceMutationAt > state.invalidatedAt && routeSourcesUpdated ? { state, event } : null;
+      }, 20_000);
+      trial.spaNavigation.invalidation = invalidation.event;
+      trial.spaNavigation.sourceMutationAt = invalidation.state.sourceMutationAt;
+      trial.spaNavigation.cursorB = invalidation.event.cursor;
+      const bStarted = await until(async () => {
+        const state = await readSpa();
+        const autoEntry = state.managerCallEvents.find(event => event.isAuto === true);
+        const current = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+        return autoEntry && current?.translationSessionId && current.translationSessionId !== sessionId
+          ? { state, current, autoEntry, sessionB: current.translationSessionId } : null;
+      }, 30_000);
+      if (trial.commands.filter(command => command.action === 'page-translate').length !== 1) throw new Error('SPA route B must be started only by the production auto-rule path.');
+      trial.spaNavigation.sessionB = bStarted.sessionB;
+      const bAccepted = await until(async () => {
+        const [list, state, pageState] = await Promise.all([readEvents(), readSpa(), evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false)]);
+        const terminal = translationTerminal(list, bStarted.sessionB, ids, state.acceptedAtById,
+          state.acceptedBySession[bStarted.sessionB] ?? [], changedIds);
+        const translatedDom = state.dom.length === ids.length && ids.every(id => state.dom.find(([targetId]) => targetId === id)?.[1] === expectedTranslation(id, changedIds.includes(id) ? fixtureConfig.spaSources[Number(id.slice(7))] : originalById.get(id)));
+        const acceptedChanged = changedIds.every(id => Number.isFinite(state.acceptedAtById[id]));
+        const idle = pageState?.translationSessionId === bStarted.sessionB && pageState.managerTranslating === false
+          && pageState.activeFlushes === 0 && pageState.queueIds?.length === 0 && pageState.pendingSettlementCount === 0
+          && pageState.discoveryPending === false;
+        return terminal && translatedDom && acceptedChanged && idle ? { terminal, state, pageState } : null;
+      }, 60_000);
+      const terminalAt = bAccepted.terminal.performanceAt;
+      const beforeRestore = bAccepted.state;
+      const requestedSources = trial.requests.filter(request => request.category === 'provider-translation')
+        .flatMap(request => request.batchTexts ?? []).filter(source => fixtureConfig.spaSources.includes(source));
+      const requestIds = requestedSources.map(source => `target-${fixtureConfig.spaSources.indexOf(source)}`);
+      const providerBRequests = trial.requests.filter(request => request.category === 'provider-translation')
+        .filter(request => (request.batchTexts ?? []).every(source => fixtureConfig.spaSources.includes(source)))
+        .map(request => ({ ...request, targetIds: request.batchTexts.map(source => `target-${fixtureConfig.spaSources.indexOf(source)}`) }));
+      const providerRequests = trial.requests.filter(request => request.category === 'provider-translation').map(request => ({
+        ...request,
+        targetIds: (request.batchTexts ?? []).map(source => fixtureConfig.targets.find(target => target.source === source)?.id
+          ?? (fixtureConfig.spaSources.includes(source) ? `target-${fixtureConfig.spaSources.indexOf(source)}` : null)),
+      }));
+      const settingsCalls = beforeRestore.managerCalls;
+      const settingsA = settingsCalls.find(call => call.isAuto === false)?.settings;
+      const settingsB = settingsCalls.find(call => call.isAuto === true)?.settings;
+      const providerRouteValidation = validateSpaProviderRoute({ provider: settingsA?.provider === 'edge' && settingsB?.provider === 'edge' ? 'edge' : null,
+        requests: providerRequests, expectedIds: [...ids, ...changedIds] });
+      const bEnqueues = beforeRestore.enqueues.filter(item => item.sessionId === bStarted.sessionB).map(item => item.id);
+      const bAdmissions = beforeRestore.admissions.filter(item => item.sessionId === bStarted.sessionB);
+      const discoveredIds = bAdmissions.map(item => item.id);
+      const bBatches = beforeRestore.batches.filter(batch => batch.sessionId === bStarted.sessionB);
+      const batchIds = bBatches.flatMap(batch => batch.targetIds ?? []);
+      const bEntries = beforeRestore.managerCallEvents.filter(event => event.isAuto === true);
+      const checkedProviderBRoute = validateSpaProviderRoute({ provider: settingsB?.provider, requests: providerBRequests, expectedIds: changedIds });
+      const exactChanged = validateExactTargetIds('B accepted write', Object.keys(beforeRestore.acceptedAtById), changedIds);
+      const exactBAccepted = validateExactTargetIds('B session acceptance ledger', beforeRestore.acceptedBySession[bStarted.sessionB] ?? [], changedIds);
+      const exactRequests = validateExactTargetIds('B provider request', requestIds, changedIds);
+      const exactBatches = validateExactTargetIds('B scheduler batch', batchIds, changedIds);
+      const exactAdmissions = validateExactTargetIds('B discovery scan', discoveredIds, ids);
+      const exactEnqueues = validateExactTargetIds('B scheduler enqueue', bEnqueues, changedIds);
+      const cursorValidation = validateSpaNavigation({ cursorA: trial.spaNavigation.cursorA, cursorB: trial.spaNavigation.cursorB,
+        navStartedAt: trial.spaNavigation.navStartedAt, stopAt: beforeRestore.stopAt, invalidatedAt: beforeRestore.invalidatedAt, sourceUpdatedAt: beforeRestore.sourceMutationAt,
+        firstAcceptedAtById: beforeRestore.acceptedAtById, terminalAt,
+        changedIds, retainedIds, requestedIds: requestIds, acceptedIds: beforeRestore.acceptedBySession[bStarted.sessionB] ?? [],
+        duplicateIds: beforeRestore.duplicateAcceptedIds, completionReady: validateSpaTerminal({ event: bAccepted.terminal,
+          sessionId: bStarted.sessionB, targetIds: ids, acceptedAtById: beforeRestore.acceptedAtById,
+          acceptedIds: beforeRestore.acceptedBySession[bStarted.sessionB] ?? [], expectedAcceptedIds: changedIds }).ok });
+      const sourceOrdered = beforeRestore.stopAt > trial.spaNavigation.navStartedAt
+        && beforeRestore.sourceMutationAt > beforeRestore.invalidatedAt
+        && bAdmissions.length > 0 && bAdmissions.every(item => item.at > beforeRestore.sourceMutationAt)
+        && retainedIds.every(id => !bEnqueues.includes(id) && !requestIds.includes(id))
+        && exactBAccepted.ok && retainedIds.every(id => !(beforeRestore.acceptedBySession[bStarted.sessionB] ?? []).includes(id));
+      const sessionValidation = validateSpaSessions({ settingsA, settingsB,
+        autoB: bEntries.length > 0 && bEntries.every(entry => entry.isAuto === true)
+          && settingsCalls.filter(call => call.isAuto === true).length >= 1,
+        sessionA: sessionId, sessionB: bStarted.sessionB });
+      const settingsSame = sessionValidation.ok;
+      const autoOnly = sessionValidation.ok;
+      const issues = [...exactChanged.issues, ...exactBAccepted.issues, ...exactRequests.issues, ...exactBatches.issues, ...exactAdmissions.issues, ...exactEnqueues.issues,
+        ...cursorValidation.issues, ...providerARoute.issues, ...checkedProviderBRoute.issues, ...providerRouteValidation.issues];
+      if (!sourceOrdered) issues.push('B sources/admissions violate invalidation-before-discovery ordering or retained-target invariants');
+      issues.push(...sessionValidation.issues);
+      if (!beforeRestore.identityPreserved) issues.push('Fixture target element identity changed across same-document navigation');
+      if (issues.length) throw new Error(issues.join('; '));
+
+      trial.spaNavigation = { ...trial.spaNavigation, sessionB: bStarted.sessionB, autoEntry: bStarted.autoEntry,
+        cursorB: trial.spaNavigation.cursorB, acceptedAtById: beforeRestore.acceptedAtById, BDiscoveryAdmissions: bAdmissions,
+        BEnqueues: beforeRestore.enqueues.filter(item => item.sessionId === bStarted.sessionB), BBatches: bBatches,
+        BProviderRequestIds: requestIds, duplicateAcceptedIds: beforeRestore.duplicateAcceptedIds,
+        providerBRoute: checkedProviderBRoute, providerRouteValidation,
+        completion: bAccepted.terminal, completionAt: terminalAt, finalDOM: beforeRestore.dom,
+        validation: { ok: true, issues: [], exactChanged, exactRequests, exactBatches, exactAdmissions, exactEnqueues, sourceOrdered, settingsSame, autoOnly, sessionValidation, cursorValidation } };
+      trial.spaNavigationTiming = { clock: 'performance.now() in the fixture document', navStartedAt: trial.spaNavigation.navStartedAt,
+        firstAcceptedAt: cursorValidation.firstAcceptedAt, terminalAt, navigationToFirstAcceptedMs: cursorValidation.navigationToFirstAcceptedMs,
+        navigationToCompletionMs: cursorValidation.navigationToCompletionMs, acceptedAtById: beforeRestore.acceptedAtById };
+      trial.derivedTimings = { ...(trial.derivedTimings ?? {}), spaNavigation: trial.spaNavigationTiming };
+      trial.rawDOM.translated = beforeRestore.dom;
+      trial.terminal = bAccepted.terminal;
+
+      trial.spaNavigation.spaObserverCleanup = await evaluate(chrome, pageSession,
+        'window.__pageTranslationBenchmark.finishSpaNavigationTracking()', contentContext);
+      if (!trial.spaNavigation.spaObserverCleanup?.drained || !trial.spaNavigation.spaObserverCleanup?.disconnected) {
+        throw new Error('SPA acceptance observer did not drain and disconnect before Restore.');
+      }
+      trial.spaNavigation.observersStoppedAt = now();
+      const contentTrace = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.stopMeasurement()', contentContext);
+      measurementState.stopped = contentTrace?.available === true;
+      measurementState.stopAttempts++;
+      trial.measurementStopAttempted = true;
+      trial.measurements = { content: contentTrace };
+      trial.spaNavigation.measurementObserverStoppedAt = now();
+      if (!contentTrace?.available) throw new Error(`SPA measurement stop failed before Restore: ${contentTrace?.reason ?? 'observer snapshot unavailable'}`);
+      const calibratedLongTasks = validatedLongTaskObservation(trial.longTaskCalibration, contentTrace.longTasks);
+      trial.derivedTimings.longTasks = calibratedLongTasks.entries;
+      trial.spaNavigation.longTaskUnavailableReason = calibratedLongTasks.unavailableReason;
+      trial.spaNavigation.observersStoppedBeforeRestore = true;
+
+      trial.timestamps.restoreStarted = now();
+      const observerRestoreOrder = validateSpaObserverRestoreOrder({ spaObserverStoppedAt: trial.spaNavigation.observersStoppedAt,
+        measurementObserverStoppedAt: trial.spaNavigation.measurementObserverStoppedAt, restoreStartedAt: trial.timestamps.restoreStarted });
+      if (!observerRestoreOrder.ok) throw new Error(observerRestoreOrder.issues.join('; '));
+      trial.spaNavigation.observerRestoreOrder = observerRestoreOrder;
+      const restoreResponse = await evaluate(chrome, pageSession,
+        `chrome.runtime.sendMessage(${JSON.stringify({ action: 'page-restore' })})`, contentContext);
+      trial.commands.push({ action: 'page-restore', sentAt: trial.timestamps.restoreStarted, respondedAt: now(), response: restoreResponse });
+      if (!restoreResponse?.success) throw new Error(formatCommandFailure('PAGE_RESTORE', restoreResponse));
+      const restored = await until(async () => {
+        const list = await readEvents();
+        const done = list.find(event => isSessionEvent(event, 'page-restore-complete', bStarted.sessionB));
+        if (!done) return null;
+        const dom = await evaluate(chrome, pageSession,
+          `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.dataset.benchKind==='title'?el.getAttribute('title'):el.textContent])`, contentContext, false);
+        const expected = ids.map(id => [id, routeSource(id)]);
+        return JSON.stringify(dom) === JSON.stringify(expected) ? { done, dom } : null;
+      }, 30_000);
+      trial.rawDOM.restored = restored.dom;
+      trial.restoreTerminal = restored.done;
+      trial.timestamps.restoreCompleted = now();
+      const sourceToId = new Map([...fixtureConfig.targets.map(target => [target.source, target.id]), ...fixtureConfig.spaSources.map((source, index) => [source, `target-${index}`])]);
+      const providerAttempts = trial.requests.filter(request => request.category === 'provider-translation');
+      trial.providerTranslationAttempts = providerAttempts.length;
+      trial.providerRequestOrder = mapProviderBatchIds(providerAttempts.map(request => request.batchTexts ?? []), sourceToId);
+      trial.providerBatchSizes = providerAttempts.map(request => request.batchSize);
+      trial.spaNavigation.restoreValidation = { ok: true, expected: ids.map(id => [id, routeSource(id)]), observed: restored.dom,
+        retainedSourceIds: retainedIds, changedSourceIds: changedIds };
+      trial.spaNavigationTiming.restoreCompletedAt = trial.timestamps.restoreCompleted;
+      if (trial.requests.some(request => request.category === 'blocked')) throw new Error('Unexpected external request blocked during SPA navigation trial.');
+      trial.status = 'passed';
+      return trial;
+    }
+
     const lifecycle = await completeTranslationMeasurement({
       state: measurementState,
       cleanupErrors: trial.cleanupErrors,
@@ -2003,13 +2380,71 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         const accepted = await until(async () => {
           const events = await evaluate(chrome, pageSession, 'window.__benchEvents??[]', contentContext, false);
           trial.lifecycle = events;
-          const terminal = events.find(event => ['page-translate-complete', 'page-translate-idle'].some(action => isSessionEvent(event, action, sessionId)));
+          const expectedCount = fixtureConfig.scenario === 'shadow-dom' ? fixtureConfig.shadowTargets.length
+            : fixtureConfig.targets.length + (fixtureConfig.dynamicCohorts?.reduce((total, cohort) => total + cohort.targets.length, 0) ?? 0);
+          const terminal = fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'shadow-dom' || fixtureConfig.scenario === 'scroll-through'
+            ? findFinalTranslationTerminal(events, sessionId, expectedCount)
+            : events.find(event => ['page-translate-complete', 'page-translate-idle'].some(action => isSessionEvent(event, action, sessionId)));
           if (terminal) trial.terminal = terminal;
+          if (fixtureConfig.scenario === 'dynamic-dom' && dynamicCohortsInserted === 1) {
+            const snapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+            const baseIds = fixtureConfig.targets.map(target => target.id);
+            if (baseIds.every(id => snapshot.acceptedSettlementIds.includes(id) && snapshot.acceptedDomIds.includes(id))) {
+              await insertDynamicCohort(1);
+            }
+          }
+          if (fixtureConfig.scenario === 'shadow-dom' && dynamicCohortsInserted === 1) {
+            const snapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+            const initialIds = fixtureConfig.targets.map(target => target.id);
+            if (initialIds.every(id => snapshot.acceptedSettlementIds.includes(id) && snapshot.acceptedDomIds.includes(id))
+                && snapshot.acceptedSettlementIds.includes('shadow-dynamic-host') && snapshot.acceptedDomIds.includes('shadow-dynamic-host')) {
+              await insertShadowTarget('shadow-dynamic-root', 'later-root-content');
+            }
+          }
+          if (fixtureConfig.scenario === 'dynamic-dom' && dynamicCohortsInserted !== fixtureConfig.dynamicCohorts.length) return null;
+          if (fixtureConfig.scenario === 'shadow-dom' && dynamicCohortsInserted !== 2) return null;
           if (!terminal) return null;
+          if (fixtureConfig.scenario === 'scroll-through') {
+            const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+            const measurementEvidence = await evaluate(chrome, pageSession,
+              'window.__pageTranslationBenchmark.viewportEntrySnapshot()', contentContext, false);
+            if (state.translationSessionId !== sessionId || state.managerTranslating !== false || state.activeFlushes !== 0
+                || state.queueIds?.length !== 0 || state.pendingSettlementCount !== 0 || state.discoveryPending !== false
+                || Object.keys(measurementEvidence ?? {}).length !== expectedCount) return null;
+            trial.scrollThrough.finalSchedulerState = state;
+          }
+          if (fixtureConfig.scenario === 'dynamic-dom') {
+            const acceptedSnapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+            const expectedIds = [...fixtureConfig.targets, ...fixtureConfig.dynamicCohorts.flatMap(cohort => cohort.targets)].map(target => target.id);
+            if (!expectedIds.every(id => acceptedSnapshot.acceptedSettlementIds.includes(id) && acceptedSnapshot.acceptedDomIds.includes(id))
+                || acceptedSnapshot.cohorts.some(cohort => cohort.completionAt === null)) return null;
+            const sessionState = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+            if (sessionState.translationSessionId !== sessionId || sessionState.managerTranslating !== false
+                || sessionState.activeFlushes !== 0 || sessionState.queueIds?.length !== 0) return null;
+          }
+          if (fixtureConfig.scenario === 'shadow-dom') {
+            const acceptedSnapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+            const expectedIds = fixtureConfig.shadowTargets.map(target => target.id);
+            if (!expectedIds.every(id => acceptedSnapshot.acceptedSettlementIds.includes(id) && acceptedSnapshot.acceptedDomIds.includes(id))) return null;
+            const acceptedStates = await evaluate(chrome, pageSession,
+              `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;const state=el=>{const s=getComputedStyle(el);return {inlineDirection:el.style.direction,inlineUnicodeBidi:el.style.unicodeBidi,computedDirection:s.direction,computedUnicodeBidi:s.unicodeBidi,markers:Object.fromEntries(['data-page-translated','data-has-original','data-dir-original-saved','data-translate-dir'].map(name=>[name,el.getAttribute(name)]))}};return ${JSON.stringify(expectedIds)}.map(id=>[id,state(t.get(id))])})()`, contentContext, false);
+            const baseline = new Map(trial.shadowDOM.targetStates);
+            for (const [id, state] of acceptedStates) {
+              const originalState = baseline.get(id);
+              if (!originalState || Object.keys(originalState).filter(key => key.startsWith('inline') || key.startsWith('computed'))
+                .some(key => state[key] !== originalState[key])) throw new Error(`French Shadow DOM translation unexpectedly changed direction state: ${id}`);
+              const target = fixtureConfig.shadowTargets.find(item => item.id === id);
+              if (target.kind === 'text' && state.markers['data-page-translated'] !== 'true') throw new Error(`Translated Shadow DOM text lacks its production marker: ${id}`);
+              if (state.markers['data-page-translated'] !== null && state.markers['data-page-translated'] !== 'true') throw new Error(`Unexpected translated marker value: ${id}`);
+            }
+            trial.shadowDOM.acceptedTargetStates = acceptedStates;
+          }
           const dom = await evaluate(chrome, pageSession,
-            `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
+            fixtureConfig.scenario === 'shadow-dom'
+              ? `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;return ${JSON.stringify(fixtureConfig.shadowTargets.map(target => target.id))}.map(id=>{const el=t.get(id);return [id,el?.dataset.benchKind==='title'?el.getAttribute('title'):el?.textContent]})})()`
+              : `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
           trial.rawDOM.translated = dom;
-          return dom.length === fixtureConfig.targetCount && dom.every(([id, value]) => {
+          return dom.length === originals.length && dom.every(([id, value]) => {
             const source = originalById.get(id);
             return source !== undefined && value === `\u200efixture translation: ${source}`;
           }) ? { terminal, dom } : null;
@@ -2042,9 +2477,30 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           if (done) trial.restoreTerminal = done;
           if (!done) return null;
           const dom = await evaluate(chrome, pageSession,
-            `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
+            fixtureConfig.scenario === 'shadow-dom'
+              ? `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;return ${JSON.stringify(fixtureConfig.shadowTargets.map(target => target.id))}.map(id=>{const el=t.get(id);return [id,el?.dataset.benchKind==='title'?el.getAttribute('title'):el?.textContent]})})()`
+              : `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
           trial.rawDOM.restored = dom;
-          return dom.length === fixtureConfig.targetCount
+          if (fixtureConfig.scenario === 'shadow-dom') {
+            const restoredProof = await evaluate(chrome, pageSession,
+              `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;const state=el=>{const s=getComputedStyle(el);return {inlineDirection:el.style.direction,inlineUnicodeBidi:el.style.unicodeBidi,computedDirection:s.direction,computedUnicodeBidi:s.unicodeBidi,markers:Object.fromEntries(['data-page-translated','data-has-original','data-dir-original-saved','data-translate-dir'].map(name=>[name,el.getAttribute(name)]))}};return {metadata:[...t].map(([id,el])=>[id,[...el.attributes].map(a=>[a.name,a.value])]),targetStates:[...t].map(([id,el])=>[id,state(el)]),session:window.__pageTranslationBenchmark.pageSessionSnapshot()}})()`, contentContext, false);
+            Object.assign(restoredProof, await evaluate(chrome, pageSession,
+              `(()=>{const o=window.__shadowBenchmarkOracle;return {directText:[...o.initialRoot.childNodes].some(n=>n.nodeType===3&&n.nodeValue==='SHADOW_DIRECT_TEXT_SENTINEL'),closedText:o.closedSentinel.textContent,closedRootInaccessible:o.closedHost.shadowRoot===null}})()`, undefined, false));
+            trial.shadowDOM.restoreProof = restoredProof;
+            const originalMeta = new Map(trial.shadowDOM.metadata);
+            const originalStates = new Map(trial.shadowDOM.targetStates);
+            if (!restoredProof.directText || restoredProof.closedText !== trial.shadowDOM.closedText || !restoredProof.closedRootInaccessible
+                || restoredProof.metadata.length !== fixtureConfig.shadowTargets.length
+                || restoredProof.metadata.some(([id, attrs]) => JSON.stringify(attrs) !== JSON.stringify(originalMeta.get(id)))
+                || restoredProof.targetStates.some(([id, state]) => {
+                  const baseline = originalStates.get(id);
+                  return !baseline || Object.keys(baseline).some(key => JSON.stringify(state[key]) !== JSON.stringify(baseline[key]));
+                })
+                || restoredProof.session?.managerTranslating !== false || restoredProof.session?.activeFlushes !== 0
+                || restoredProof.session?.queueIds?.length !== 0 || restoredProof.session?.pendingSettlementCount !== 0
+                || restoredProof.session?.bridgeSessionActive === true || restoredProof.session?.bridgeSessionOwned === true) return null;
+          }
+          return dom.length === originals.length
             && dom.every(([id, text]) => originalById.get(id) === text) ? { done, dom } : null;
         }, 30_000);
         return restored;
@@ -2052,12 +2508,92 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     });
     const contentTrace = lifecycle.measurement;
     trial.measurements.content = contentTrace;
+    if (fixtureConfig.scenario === 'scroll-through') {
+      const scrollValidation = validateScrollThroughEvidence({
+        expectedIds: fixtureConfig.targets.map(target => target.id),
+        viewportEntryAtById: contentTrace.viewportEntryAtById,
+        acceptedAtById: contentTrace.acceptedPerformanceAtById,
+        pipelineStages: contentTrace.scrollThroughStages,
+        checkpoints: trial.scrollThrough.phases,
+        selectionViewport: contentTrace.scrollThroughStages?.selectionViewport,
+        terminalAt: trial.terminal?.performanceAt,
+        acceptedIds: contentTrace.acceptedIds,
+        duplicateAcceptedIds: contentTrace.duplicateAcceptedIds,
+        providerRequests: trial.requests.filter(request => request.category === 'provider-translation'),
+        schedulerState: trial.scrollThrough.finalSchedulerState,
+        restoreOriginals: lifecycle.restored?.dom,
+        expectedOriginals: originals,
+        cleanupErrors: trial.cleanupErrors,
+      });
+      trial.scrollThrough.validation = scrollValidation;
+      trial.scrollThrough.viewportEntryToAcceptedWriteLatencyMsById = scrollValidation.viewportEntryToAcceptedWriteLatencyMsById;
+      trial.scrollThrough.productionStages = contentTrace.scrollThroughStages;
+      trial.scrollThrough.aggregateLatency = deriveScrollAggregateMetrics(
+        fixtureConfig.scrollBands, contentTrace.viewportEntryAtById, contentTrace.acceptedPerformanceAtById);
+      if (!scrollValidation.ok) throw new Error(scrollValidation.issues.join('; '));
+    }
+    if (fixtureConfig.scenario === 'dynamic-dom') {
+      const cohortMeasurements = contentTrace.dynamicCohorts ?? [];
+      const expectedCohorts = fixtureConfig.dynamicCohorts;
+      const cohortIssues = [];
+      if (cohortMeasurements.length !== expectedCohorts.length) cohortIssues.push(`expected ${expectedCohorts.length} dynamic cohorts, observed ${cohortMeasurements.length}`);
+      for (const expectedCohort of expectedCohorts) {
+        const observed = cohortMeasurements.find(cohort => cohort.id === expectedCohort.id);
+        if (!observed || observed.targetIds.length !== expectedCohort.targets.length
+            || expectedCohort.targets.some(target => !observed.targetIds.includes(target.id))) cohortIssues.push(`dynamic cohort ${expectedCohort.id} target registration is incomplete`);
+        else if (!Number.isFinite(observed.insertedAt) || !Number.isFinite(observed.firstAcceptedLatencyMs) || observed.firstAcceptedLatencyMs < 0
+            || !Number.isFinite(observed.completionLatencyMs) || observed.completionLatencyMs < observed.firstAcceptedLatencyMs
+            || Object.keys(observed.acceptedAtById).length !== expectedCohort.targets.length
+            || expectedCohort.targets.some(target => !Number.isFinite(observed.acceptedAtById[target.id]) || observed.acceptedAtById[target.id] < observed.insertedAt)) {
+          cohortIssues.push(`dynamic cohort ${expectedCohort.id} timing/acceptance evidence is incomplete`);
+        }
+      }
+      trial.dynamicCohortMeasurements = cohortMeasurements;
+      trial.dynamicCohortValidation = { ok: cohortIssues.length === 0, issues: cohortIssues };
+      if (cohortIssues.length) throw new Error(cohortIssues.join('; '));
+      const finalSnapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+      const expectedIds = [...fixtureConfig.targets, ...expectedCohorts.flatMap(cohort => cohort.targets)].map(target => target.id);
+      const settlementIdsValidation = validateExactTargetIds('scheduler accepted settlement', finalSnapshot.acceptedSettlementTransitions.map(({ id }) => id), expectedIds);
+      if (!settlementIdsValidation.ok) throw new Error(settlementIdsValidation.issues.join('; '));
+      const settlementCounts = new Map();
+      for (const { id, sessionId: owner } of finalSnapshot.acceptedSettlementTransitions) {
+        settlementCounts.set(id, (settlementCounts.get(id) ?? 0) + 1);
+        if (owner !== trial.sessionId) throw new Error(`Dynamic DOM acceptance ${id} was owned by session ${owner}, expected ${trial.sessionId}.`);
+      }
+      if (expectedIds.some(id => settlementCounts.get(id) !== 1)) throw new Error('Dynamic DOM targets were not accepted by exactly one scheduler settlement each.');
+      trial.dynamicAcceptanceSettlementTransitions = finalSnapshot.acceptedSettlementTransitions;
+    }
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      if (contentTrace.shadowDom?.observerDisconnected !== true || contentTrace.shadowDom.observedRootCount !== 3
+          || contentTrace.shadowDom.observedTargetCount !== 1) throw new Error('Shadow DOM measurement observers did not disconnect after observing exactly three fixture-owned open roots and the owned light-DOM target.');
+      const expectedIds = fixtureConfig.shadowTargets.map(target => target.id);
+      const finalSnapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
+      const settlementValidation = validateExactTargetIds('scheduler settlement', finalSnapshot.acceptedSettlementTransitions.map(({ id }) => id), expectedIds);
+      if (!settlementValidation.ok) throw new Error(settlementValidation.issues.join('; '));
+      if (finalSnapshot.acceptedSettlementTransitions.some(item => item.sessionId !== trial.sessionId)
+          || expectedIds.some(id => finalSnapshot.acceptedSettlementTransitions.filter(item => item.id === id).length !== 1)) {
+        throw new Error('Shadow DOM accepted settlements do not have one consistent translation-session owner.');
+      }
+      const batches = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.schedulerBatchSessions', contentContext, false) ?? [];
+      if (!batches.length || batches.some(batch => batch.sessionId !== trial.sessionId)) throw new Error('Shadow DOM scheduler batches do not share the accepted translation session.');
+      trial.shadowDOM = { ...trial.shadowDOM, expectedIds, settlementTransitions: finalSnapshot.acceptedSettlementTransitions, schedulerBatches: batches };
+      const initialTimes = expectedIds.slice(0, 3).map(id => contentTrace.acceptedPerformanceAtById?.[id]);
+      const initialAcceptedAt = initialTimes.every(Number.isFinite) ? Math.max(...initialTimes) : null;
+      const measurementStartedAt = trial.measurementStart?.startedPerformanceAt;
+      const dynamicLatency = Object.fromEntries((contentTrace.dynamicCohorts ?? []).map(cohort => [cohort.targetIds[0],
+        Number.isFinite(cohort.insertedAt) && Number.isFinite(cohort.firstAcceptedAt) ? cohort.firstAcceptedAt - cohort.insertedAt : null]));
+      trial.shadowDOM.timing = { clock: 'performance.now() in the fixture document', measurementStartedAt, initialAcceptedAt,
+        measurementToInitialAcceptanceMs: Number.isFinite(measurementStartedAt) && Number.isFinite(initialAcceptedAt) ? initialAcceptedAt - measurementStartedAt : null,
+        dynamicInsertionToAcceptedWriteMsById: dynamicLatency };
+      if (!Number.isFinite(trial.shadowDOM.timing.measurementToInitialAcceptanceMs)
+          || expectedIds.slice(3).some(id => !Number.isFinite(dynamicLatency[id]))) throw new Error('Shadow DOM acceptance timing evidence is incomplete.');
+    }
     trial.timestamps.restoreCompleted = lifecycle.restoreCompletedAt;
     const restoredLifecycle = lifecycle.restored;
     const [workerTrace, contentObservation] = await Promise.all([
       evaluate(chrome, workerSession, 'globalThis.__pageTranslationBenchmark.snapshot()'),
       evaluate(chrome, pageSession,
-        `(()=>{const trace=window.__pageTranslationBenchmark;return {events:trace.events.map(event=>({...event})),discoveryFlags:trace.discoveryFlags,admissionHookInstalled:trace.admissionHookInstalled,discoveryAdmissionOrder:trace.discoveryAdmissionOrder,schedulerEnqueueOrder:trace.schedulerEnqueueOrder,selectedBatchMembers:trace.selectedBatchMembers,viewportWindowObservation:trace.viewportWindowObservation}})()`, contentContext),
+        `(()=>{const trace=window.__pageTranslationBenchmark;return {events:trace.events.map(event=>({...event})),discoveryFlags:trace.discoveryFlags,admissionHookInstalled:trace.admissionHookInstalled,discoveryAdmissionOrder:trace.discoveryAdmissionOrder,schedulerEnqueueOrder:trace.schedulerEnqueueOrder,selectedBatchMembers:trace.selectedBatchMembers,schedulerBatchSessions:trace.schedulerBatchSessions,viewportWindowObservation:trace.viewportWindowObservation}})()`, contentContext),
     ]);
     const contentEvents = contentObservation.events;
     trial.contentObservation = contentObservation;
@@ -2066,6 +2602,17 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const calibratedLongTasks = validatedLongTaskObservation(trial.longTaskCalibration, contentTrace.longTasks);
     const verifiedContentTrace = { ...contentTrace, longTasks: calibratedLongTasks.entries, longTasksUnavailableReason: calibratedLongTasks.unavailableReason };
     trial.derivedTimings = deriveTimings(trial, workerTrace, verifiedContentTrace, contentEvents);
+    if (fixtureConfig.scenario === 'shadow-dom') {
+      const tasks = trial.derivedTimings.longTasks;
+      const terminalAt = trial.terminal?.performanceAt;
+      trial.shadowDOM.longTasks = {
+        measurementToTerminal: longTasksWithinInterval(tasks, trial.measurementStart?.startedPerformanceAt, terminalAt),
+        dynamicInsertionToAcceptedWriteById: Object.fromEntries((contentTrace.dynamicCohorts ?? []).map(cohort => [cohort.targetIds[0],
+          longTasksWithinInterval(tasks, cohort.insertedAt, cohort.firstAcceptedAt)])),
+        boundary: 'Calibrated captured PerformanceObserver tasks whose complete intervals are inside the listed performance.now() bounds.',
+        unavailableReason: tasks === null ? calibratedLongTasks.unavailableReason : null,
+      };
+    }
     const providerAttempts = trial.requests.filter(request => request.category === 'provider-translation');
     trial.providerTranslationAttempts = providerAttempts.length;
     trial.providerBatchSizes = providerAttempts.map(request => request.batchSize);
@@ -2073,8 +2620,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const translatedFromDom = trial.rawDOM.translated;
     const providerSources = providerAttempts.flatMap(request => request.batchTexts ?? []);
     const expectedIds = originalsFromDom.map(([id]) => id);
-    const sourceToId = new Map(fixtureConfig.targets.map(target => [target.source, target.id]));
-    if (sourceToId.size !== fixtureConfig.targetCount) throw new Error('Fixture source texts are not unique; HTTP body-to-target order cannot be proven.');
+    const sourceToId = new Map(originals.map(([id, source]) => [source, id]));
+    if (sourceToId.size !== originals.length) throw new Error('Fixture source texts are not unique; HTTP body-to-target order cannot be proven.');
     const admissionIds = contentObservation.discoveryAdmissionOrder;
     if (contentObservation.admissionHookInstalled !== true) throw new Error('Per-session primitive-admission instrumentation was not installed.');
     const enqueuedIds = contentObservation.schedulerEnqueueOrder;
@@ -2134,7 +2681,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       translated: translatedFromDom,
       requests: providerSources,
       restored: new Map(restoredLifecycle.dom),
-      expectedCount: fixtureConfig.targetCount,
+      expectedCount: originals.length,
       acceptedIds,
       enqueuedIds,
       admittedIds: admissionIds,
@@ -2491,13 +3038,14 @@ try {
     harness.status = harness.successfulStaleReplyGate.passed ? 'passed' : 'failed';
   } else {
     harness.comparisonOrdering = 'Legacy warmups qualify first. Every selected mode then receives complete discarded warmups before measured rounds; measured mode order is a deterministic cyclic rotation of all selected modes by scenario index plus zero-based measured ordinal.';
-    const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario) }));
+    const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null }));
+    harness.schedulingMode = scrollSchedulingMode;
     const legacyOutput = await compileMode('legacy');
     const legacyRuns = [];
     harness.scenarioSummaries = {};
     for (const plan of scenarioPlans) {
       for (let ordinal = 1; ordinal <= warmups; ordinal++) {
-        const run = await runRecordedTrial({ mode: 'legacy', scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: legacyOutput, fixtureConfig: plan.fixture });
+        const run = await runRecordedTrial({ mode: 'legacy', scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: legacyOutput, fixtureConfig: plan.fixture, schedulingMode: plan.schedulingMode });
         legacyRuns.push(run);
       }
     }
@@ -2521,7 +3069,7 @@ try {
       for (const mode of modes) {
         if (mode === 'legacy') continue;
         for (let ordinal = 1; ordinal <= warmups; ordinal++) {
-          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture });
+          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture, schedulingMode: plan.schedulingMode });
         }
       }
     }
@@ -2530,7 +3078,7 @@ try {
         const order = modeOrder(modes, plan.index, ordinal - 1);
         harness.plannedMeasuredOrder.push({ scenario: plan.scenario, ordinal, modes: order });
         for (const mode of order) {
-          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'measured', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture });
+          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'measured', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture, schedulingMode: plan.schedulingMode });
         }
       }
     }

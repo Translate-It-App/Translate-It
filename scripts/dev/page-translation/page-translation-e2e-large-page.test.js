@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { modeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './e2e-benchmark/scenario-plan.mjs';
+import { modeOrder, mapProviderBatchIds, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './e2e-benchmark/scenario-plan.mjs';
 import { createFixture } from './e2e-benchmark/fixture.mjs';
 import { summarizeAcceptanceTimes, isDuplicateAcceptedMutation, trackAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 import { captureViewportWindow, installPrimitiveAdmissionObserver } from './e2e-benchmark/trace.mjs';
@@ -11,6 +11,7 @@ describe('large-page benchmark plan and geometry checks', () => {
     expect(parseScenarioSelection('early-visible,in-window-visible,late-visible')).toEqual([
       'early-visible', 'in-window-visible', 'late-visible',
     ]);
+    expect(parseScenarioSelection('shadow-dom')).toEqual(['shadow-dom']);
     expect(() => parseScenarioSelection('early-visible,early-visible')).toThrow('Duplicate');
     expect(() => parseScenarioSelection('not-a-fixture')).toThrow('Unsupported');
   });
@@ -90,6 +91,37 @@ describe('large-page benchmark plan and geometry checks', () => {
     expect(scenarios[1].targets.slice(2, 6).map(target => target.id)).toEqual(expectedVisible);
     expect(scenarios[2].targets.slice(0, 100).some(target => target.visible)).toBe(false);
     expect(validateExactTargetIds('admission', ['target-500', 'target-500'], ['target-500']).issues).toContain('duplicate admission target ID: target-500');
+  });
+
+  it('defines exactly 12 unique scroll-through targets in three separated four-target bands', () => {
+    const fixture = createFixture('scroll-through');
+    expect(fixture.targetCount).toBe(12);
+    expect(new Set(fixture.targets.map(target => target.id)).size).toBe(12);
+    expect(new Set(fixture.targetTexts).size).toBe(12);
+    expect(fixture.visibleIds).toEqual(['target-0', 'target-1', 'target-2', 'target-3']);
+    expect(fixture.scrollBands.map(band => band.ids)).toEqual([
+      ['target-0', 'target-1', 'target-2', 'target-3'],
+      ['target-4', 'target-5', 'target-6', 'target-7'],
+      ['target-8', 'target-9', 'target-10', 'target-11'],
+    ]);
+    expect(fixture.scrollBands.map(({ top }) => top)).toEqual([20, 1120, 2220]);
+    expect(fixture.html).toContain('top:20px');
+    expect(fixture.html).toContain('top:1120px');
+    expect(fixture.html).toContain('top:2220px');
+    expect(validateFixtureGeometry(fixture, { targetCount: 12, visibleIds: fixture.visibleIds, viewport: fixture.viewport, scroll: fixture.scroll }).ok).toBe(true);
+  });
+
+  it('keeps opt-in lazy scheduling independent from discovery flags and defaults', () => {
+    expect(parseScenarioSelection('scroll-through')).toEqual(['scroll-through']);
+    expect(parseScrollSchedulingMode('fluid')).toBe('fluid');
+    expect(parseScrollSchedulingMode('on-stop')).toBe('on-stop');
+    expect(() => parseScrollSchedulingMode('other')).toThrow('Unsupported');
+    expect(settingsForScenario({}, 'scroll-through', 'fluid')).toMatchObject({ WHOLE_PAGE_LAZY_LOADING: true, WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: false });
+    expect(settingsForScenario({}, 'scroll-through', 'on-stop')).toMatchObject({ WHOLE_PAGE_LAZY_LOADING: true, WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: true });
+    expect(settingsForScenario({}, 'small')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false });
+    expect(() => settingsForScenario({}, 'small', 'fluid')).toThrow('only supported');
+    expect(settingsForScenario({}, 'shadow-dom')).toMatchObject({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: true });
+    expect(settingsForScenario({}, 'shadow-dom')).not.toHaveProperty('WHOLE_PAGE_LAZY_LOADING');
   });
 
   it('records first acceptance and complete visible/all sets, leaving incomplete timing unavailable', () => {
@@ -203,5 +235,45 @@ describe('large-page benchmark plan and geometry checks', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: false, expectedText, resultingText: host.textContent, records: childListRecords })).toBe(false);
     host.remove();
+  });
+
+  it('detects repeated accepted title writes from actual MutationObserver deliveries', async () => {
+    const target = document.createElement('div');
+    const expectedText = '\u200efixture translation: title';
+    target.title = 'source';
+    document.body.append(target);
+    const records = [];
+    const observer = new MutationObserver(delivered => records.push(...delivered));
+    observer.observe(target, { attributes: true, attributeOldValue: true });
+
+    target.title = expectedText;
+    target.title = expectedText;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const repeatedInDelivery = records.splice(0);
+    expect(repeatedInDelivery).toHaveLength(2);
+    expect(repeatedInDelivery.every(record => record.type === 'attributes' && record.attributeName === 'title')).toBe(true);
+    expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: false, expectedText, resultingText: target.title, records: repeatedInDelivery })).toBe(true);
+
+    target.title = 'source';
+    await new Promise(resolve => setTimeout(resolve, 0));
+    records.splice(0);
+    target.title = expectedText;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const firstAcceptance = records.splice(0);
+    expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: false, expectedText, resultingText: target.title, records: firstAcceptance })).toBe(false);
+
+    target.title = expectedText;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const laterRewrite = records.splice(0);
+    expect(laterRewrite).toHaveLength(1);
+    expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: true, expectedText, resultingText: target.title, records: laterRewrite })).toBe(true);
+
+    target.setAttribute('data-unrelated', 'changed');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const unrelatedAttribute = records.splice(0);
+    expect(unrelatedAttribute).toHaveLength(1);
+    expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: true, expectedText, resultingText: target.title, records: unrelatedAttribute })).toBe(false);
+    observer.disconnect();
+    target.remove();
   });
 });

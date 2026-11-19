@@ -1,5 +1,7 @@
 # Whole-page translation Chrome E2E benchmark
 
+> **Issue #406 final results:** see the [final benchmark report](../../../../docs/technical/benchmarks/whole-page-issue-406-final-2026-11-19.md) for the complete performance matrix, correctness probes, limitations, and reproduction commands.
+
 Run the real MV3 background/content entries against a local synthetic page. Translation requests pass through the actual scheduler, background routing, Unified Translation Service, provider and fetch transport; only the outbound Edge HTTP response is supplied by CDP. The exact startup Edge voice-list metadata `GET` is separately fulfilled with `[]`, which the production `TTSVoiceService` accepts and caches. Other unexpected external HTTP(S) requests are blocked and fail the run. Chrome DevTools Fetch guards the test extension service worker before it resumes and the top-level fixture page before navigation, including the content isolated world; iframes and Chrome process/component-extension traffic outside these targets are not covered.
 
 ```sh
@@ -11,7 +13,50 @@ BENCH_MODES=legacy,sliced,viewport BENCH_SCENARIOS=small,early-visible,in-window
   pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
 ```
 
-`BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `early-visible`, `in-window-visible`, and `late-visible`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
+`BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `dynamic-dom`, `shadow-dom`, `spa-navigation`, `early-visible`, `in-window-visible`, `late-visible`, and `scroll-through`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
+
+## Opt-in lazy scroll-through scheduling
+
+The separate `scroll-through` fixture contains 12 unique targets in three four-target vertical bands; only band one is initially visible. Discovery remains selected with `BENCH_MODES` (`legacy`, `sliced`, or `viewport`), independently of lazy scheduler selection. Select one scheduler mode per invocation with `BENCH_SCROLL_SCHEDULING=fluid` or `on-stop`; either setting enables production lazy loading, while `on-stop` additionally enables translate-after-scroll-stop. These flags are never enabled for other fixtures.
+
+```sh
+BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=on-stop \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The runner uses deterministic `window.scrollTo` calls and awaits native scroll events plus animation frames; it does not simulate physical input-to-acceptance latency, invoke scheduler signals, or dispatch synthetic scroll events. It records initial visible acceptance separately from actual viewport-entry (`IntersectionObserver` with a zero-pixel root margin) and first accepted DOM-write timestamps on the same renderer `performance.now()` clock. Each target reports viewport-entry-to-write milliseconds when the write follows entry; an earlier accepted write is classified as prefetch and has unavailable (`null`) latency, not a negative measurement. Reports include per-band measurable count, mean, median, maximum, and prefetch count, plus `max(acceptedAt) - max(viewportEntryAt)` for last-entry-to-full-acceptance; that completion delta is signed and may be negative if permitted prefetch completed before the last entry. Production pipeline stages are separately recorded per target: Bridge discovery handoff, `IntersectionScheduler.add` registration, that scheduler's actual observer callback, DOMTranslator primitive admission, and PageTranslationScheduler enqueue. The production observer callback is not inferred from viewport entry; its configured prefetch margin remains a separate stage. Scheduler `isScrolling` is captured at every scroll checkpoint and at each batch selection/dispatch; no value is forbidden because first-batch, emergency, or already-running work can validly dispatch during scrolling. Batch `selectionViewport` geometry is sampled synchronously from the selected nodes when the scheduler chooses the batch. This is distinct from `requestViewport`, which is sampled later when the physical provider request is observed; neither is substituted for actual viewport-entry timestamps. Both geometry ledgers classify targets as in-viewport, within the existing 50px buffer, or outside that buffer. Re-requested targets, incomplete stage/acceptance coverage, missing timestamps, a terminal preceding a write, queue/settlement not drained, Restore mismatch, or observer cleanup errors fail the trial. These are correctness/timing probes, not physical scrolling performance claims.
+
+The opt-in `dynamic-dom` fixture keeps the same 12-target initial page, enables production `WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES` only for that scenario, and inserts two deterministic three-target cohorts into the active session. Cohort one is inserted while the initial session is translating; cohort two is registered and inserted only after all 12 initial targets have both accepted settlements and accepted DOM writes. The report retains each cohort's raw IDs/timestamps and insertion-to-first/all accepted-write intervals. Static scenarios retain the existing setting (`false`) and fixture. The opt-in `spa-navigation` selection exposes a native `history.pushState` control and an exact local `/replacement` auto-rule (route A is not auto-started); its B-source mutation is gated on the real production invalidation callback.
+
+## Opt-in open Shadow DOM fixture
+
+Run the open-root traversal and automatic-mutation fixture in Legacy and Sliced modes:
+
+```sh
+BENCH_MODES=legacy,sliced BENCH_SCENARIOS=shadow-dom BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The fixture starts with exactly three targets: light-DOM text (`shadow-light`), open-root element text (`shadow-open`), and a nested open-root `title` attribute (`shadow-nested-title`). It then inserts exactly two targets into the active session: one in an open root attached before its host is connected, then one added to that connected root. The direct `ShadowRoot` child-text and closed-root text sentinels must remain unchanged and are not targets. Automatic DOM-mutation translation is enabled only for this fixture; lazy loading remains off.
+
+Timing uses one renderer-document `performance.now()` clock: initial acceptance is the latest accepted DOM write among the three initial IDs, measured from measurement start; each dynamic latency runs from that target's registered insertion to its accepted DOM write. Exact accounting checks each of the five IDs once at primitive admission, scheduler enqueue, selected batch, provider request, accepted DOM write, and scheduler settlement; batch and settlement ownership must match the run's translation session. The run then performs real Restore, verifies original target values/attributes and both sentinels, and checks that session work has settled and measurement observers disconnected.
+
+Long-task results are reported only after the fixture's pre-measurement calibration captures a task of at least 50 ms. For the measurement-to-terminal and each insertion-to-accepted-write interval, only calibrated task entries whose full start-to-end interval lies within the renderer-clock bounds are included. Unsupported, failed, or uncaptured calibration makes the interval's long-task result unavailable (`null` with a reason), never zero. Translation and startup voice-list Edge responses are local fixtures; no external Edge service response is used.
+
+`spa-navigation` uses the 12-target mixed text/title fixture and fully translates route A before navigation, then verifies production cursor progression, invalidation-gated source changes, automatic route-B session ownership, retained-node reuse, changed-target-only provider work, same-document `performance.now()` navigation latencies, and exact route-specific Restore of text and title attributes. It never holds provider responses or runs pending/stale-result probes. Run it with the static and dynamic regressions:
+
+```sh
+BENCH_MODES=legacy,sliced BENCH_SCENARIOS=small,dynamic-dom,spa-navigation BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+  BENCH_OUTPUT=/tmp/opencode/page-translation-spa-navigation-smoke.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+```sh
+BENCH_MODES=sliced BENCH_SCENARIOS=dynamic-dom BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
 
 ## Opt-in sliced-discovery cancellation probes
 

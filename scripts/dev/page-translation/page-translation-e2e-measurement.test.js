@@ -1,7 +1,83 @@
 import { describe, expect, it } from 'vitest';
-import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, drainAndDisconnectMeasurementObservers, groupMutationRecords, isDuplicateAcceptedMutation } from './e2e-benchmark/measurement-lifecycle.mjs';
+import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, drainAndDisconnectMeasurementObservers, findFinalTranslationTerminal, groupMutationRecords, isDuplicateAcceptedMutation, summarizeAcceptanceTimes, trackAcceptedTarget, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 
 describe('translation measurement lifecycle boundary', () => {
+  it('preserves static count-based completion without an explicit dynamic inventory', () => {
+    const acceptedIds = new Set();
+    const firstAcceptedAtById = {};
+    const completionTimes = { visible: null, all: null };
+    const record = (id, at) => trackAcceptedTarget({
+      id, at, acceptedIds, firstAcceptedAtById, visibleIds: [], targetCount: 2, completionTimes,
+    });
+    record('static-a', 10);
+    expect(completionTimes.all).toBeNull();
+    record('static-b', 20);
+    expect(completionTimes).toEqual({ visible: null, all: 20 });
+  });
+
+  it('keeps initial-set completion separate from known all-target completion', () => {
+    const initialTargetIds = Array.from({ length: 12 }, (_, index) => `target-${index}`);
+    const dynamicTargetIds = Array.from({ length: 6 }, (_, index) => `dynamic-${index}`);
+    const expectedTargetIds = [...initialTargetIds, ...dynamicTargetIds];
+    const completionTimes = { visible: null, initialAll: null, all: null, initialMaxAcceptedAt: null, allMaxAcceptedAt: null };
+    const acceptedIds = new Set();
+    const firstAcceptedAtById = {};
+    const nonIterableRemainingIds = ids => {
+      const remaining = new Set(ids);
+      return {
+        has: id => remaining.has(id),
+        delete: id => remaining.delete(id),
+        get size() { return remaining.size; },
+        [Symbol.iterator]() { throw new Error('Dynamic completion must not scan the inventory.'); },
+      };
+    };
+    const visibleRemainingIds = nonIterableRemainingIds(initialTargetIds);
+    const initialRemainingIds = nonIterableRemainingIds(initialTargetIds);
+    const expectedRemainingIds = nonIterableRemainingIds(expectedTargetIds);
+    const record = (id, at) => trackAcceptedTarget({
+      id, at, acceptedIds, firstAcceptedAtById, visibleIds: [], targetCount: initialTargetIds.length,
+      visibleRemainingIds, initialRemainingIds, expectedRemainingIds, completionTimes,
+    });
+    initialTargetIds.forEach((id, index) => record(id, index + 1));
+    expect(completionTimes.visible).toBe(12);
+    expect(completionTimes.initialAll).toBe(12);
+    expect(completionTimes.all).toBeNull();
+    dynamicTargetIds.forEach((id, index) => record(id, index + 13));
+    expect(completionTimes.initialAll).toBe(12);
+    expect(completionTimes.all).toBe(18);
+    const cohortIds = ['dynamic-0', 'dynamic-1'];
+    const cohort = {
+      targetIds: cohortIds,
+      remainingIds: nonIterableRemainingIds(cohortIds),
+      firstAcceptedAt: null,
+      completionAt: null,
+      acceptedAtById: {},
+    };
+    expect(trackCohortAcceptedTarget(cohort, cohortIds[0], 19)).toBe(true);
+    expect(trackCohortAcceptedTarget(cohort, cohortIds[0], 20)).toBe(false);
+    expect(trackCohortAcceptedTarget(cohort, cohortIds[1], 21)).toBe(true);
+    expect(cohort).toMatchObject({ firstAcceptedAt: 19, completionAt: 21 });
+    const summary = summarizeAcceptanceTimes(firstAcceptedAtById, [], expectedTargetIds);
+    expect(summary.allTargetsCompletionAt).toBe(18);
+    expect(summarizeAcceptanceTimes(firstAcceptedAtById, [], initialTargetIds).allTargetsCompletionAt).toBe(12);
+  });
+
+  it('selects only a same-session terminal with full expected completion evidence', () => {
+    const event = (action, translatedCount, totalCount, failedCount, owner = 'session-dynamic') => ({
+      message: {
+        action: 'page-translation-frame-lifecycle',
+        data: { action, data: { sessionId: owner, translatedCount, totalCount, failedCount } },
+      },
+    });
+    const early = event('page-translate-idle', 12, 12, 0);
+    const partial = event('page-translate-complete', 15, 18, 0);
+    const wrongOwner = event('page-translate-idle', 18, 18, 0, 'other-session');
+    const final = event('page-translate-idle', 18, 18, 0);
+    expect(findFinalTranslationTerminal([early, partial, wrongOwner, final], 'session-dynamic', 18)).toBe(final);
+    expect(findFinalTranslationTerminal([early, partial, wrongOwner], 'session-dynamic', 18)).toBeNull();
+    expect(findFinalTranslationTerminal([event('page-translate-complete', 18, 18, 1)], 'session-dynamic', 18)).toBeNull();
+  });
+
   it('stops translation observers after exact completion/DOM acceptance and before real Restore', async () => {
     const order = [];
     const state = { attempted: true, started: true, stopped: false, stopAttempts: 0 };

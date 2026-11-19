@@ -6,17 +6,42 @@ export const startupVoicesEndpoint = Object.freeze({ hostname: 'speech.platform.
 export const startupVoicesResponse = Object.freeze([]);
 
 const largeScenarios = new Set(['early-visible', 'in-window-visible', 'late-visible']);
+const scrollBandTops = [20, 1120, 2220];
 const largeTargetCount = 1000;
 const visibleTargetIndexes = [500, 501, 502, 503];
 
 export function createFixture(scenario = 'small') {
-  if (scenario !== 'small' && !largeScenarios.has(scenario)) throw new TypeError(`Unknown benchmark fixture scenario: ${scenario}`);
+  if (scenario === 'shadow-dom') {
+    const targets = [
+      { id: 'shadow-light', source: 'Shadow fixture light DOM source.', kind: 'text', visible: true },
+      { id: 'shadow-open', source: 'Shadow fixture open-root source.', kind: 'text', visible: true },
+      { id: 'shadow-nested-title', source: 'Shadow fixture nested title source.', kind: 'title', visible: true },
+      { id: 'shadow-dynamic-host', source: 'Shadow fixture inserted-host source.', kind: 'text', visible: true },
+      { id: 'shadow-dynamic-root', source: 'Shadow fixture later-root source.', kind: 'text', visible: true },
+    ];
+    const html = `<!doctype html><meta charset="utf-8"><title>Shadow DOM benchmark</title><main><p data-bench-id="shadow-light" data-bench-kind="text">${targets[0].source}</p><div id="shadow-initial-host"></div><div id="shadow-closed-host"></div></main><script>
+      const initialHost=document.getElementById('shadow-initial-host');
+      const initialRoot=initialHost.attachShadow({mode:'open'});
+      const openTarget=document.createElement('p');openTarget.dataset.benchId='shadow-open';openTarget.dataset.benchKind='text';openTarget.style.direction='rtl';openTarget.style.unicodeBidi='isolate';openTarget.textContent=${JSON.stringify(targets[1].source)};initialRoot.append(openTarget);
+      const nestedHost=document.createElement('div');nestedHost.id='shadow-nested-host';initialRoot.append(nestedHost);
+      const nestedRoot=nestedHost.attachShadow({mode:'open'});
+      const nestedTitle=document.createElement('p');nestedTitle.dataset.benchId='shadow-nested-title';nestedTitle.dataset.benchKind='title';nestedTitle.style.minHeight='1px';nestedTitle.setAttribute('title',${JSON.stringify(targets[2].source)});nestedRoot.append(nestedTitle);
+      initialRoot.append(document.createTextNode('SHADOW_DIRECT_TEXT_SENTINEL'));
+      const closedRoot=document.getElementById('shadow-closed-host').attachShadow({mode:'closed'});
+      const closedSentinel=document.createElement('p');closedSentinel.textContent='SHADOW_CLOSED_ROOT_SENTINEL';closedRoot.append(closedSentinel);
+      window.__shadowBenchmarkOracle={initialHost,initialRoot,openTarget,nestedHost,nestedRoot,nestedTitle,closedHost:document.getElementById('shadow-closed-host'),closedSentinel};
+    </script>`;
+    return { scenario, targetCount: 3, targetTexts: targets.slice(0, 3).map(target => target.source), targets: targets.slice(0, 3), shadowTargets: targets,
+      visibleIds: targets.slice(0, 3).map(target => target.id), html, viewport: { width: 1280, height: 900 }, scroll: { x: 0, y: 0 }, responseDelayMs: 50 };
+  }
+  if (scenario !== 'small' && scenario !== 'dynamic-dom' && scenario !== 'spa-navigation' && scenario !== 'scroll-through' && !largeScenarios.has(scenario)) throw new TypeError(`Unknown benchmark fixture scenario: ${scenario}`);
 
-  const texts = scenario === 'small'
+  const texts = scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' || scenario === 'scroll-through'
     ? targetTexts
     : Array.from({ length: largeTargetCount }, (_, index) => `Benchmark target ${String(index + 1).padStart(4, '0')} has stable fixture content.`);
   const count = texts.length;
-  const visibleIndexes = scenario === 'small' ? texts.map((_, index) => index) : visibleTargetIndexes;
+  const visibleIndexes = scenario === 'scroll-through' ? [0, 1, 2, 3]
+    : scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' ? texts.map((_, index) => index) : visibleTargetIndexes;
   let indexes = texts.map((_, index) => index);
   if (scenario === 'early-visible') indexes = [...visibleIndexes, ...indexes.filter(index => !visibleIndexes.includes(index))];
   if (scenario === 'in-window-visible') indexes = [0, 1, ...visibleIndexes, ...indexes.filter(index => index > 1 && !visibleIndexes.includes(index))];
@@ -25,17 +50,41 @@ export function createFixture(scenario = 'small') {
     id: `target-${index}`,
     source: texts[index],
     visible: visibleIndexes.includes(index),
+    ...(scenario === 'spa-navigation' ? { kind: index < 6 ? 'text' : 'title' } : {}),
   }));
   const htmlTargets = targets.map(target => {
     const targetIndex = Number(target.id.slice(7));
-    const position = scenario === 'small'
+    const position = scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation'
       ? ''
-      : `position:absolute;left:20px;top:${target.visible ? 20 + visibleIndexes.indexOf(targetIndex) * 30 : 2000 + targetIndex * 30}px;width:900px;height:24px;`;
-    return `<p data-bench-id="${target.id}"${position ? ` style="${position}"` : ''}>${target.source}</p>`;
+      : scenario === 'scroll-through'
+        ? `position:absolute;left:20px;top:${scrollBandTops[Math.floor(targetIndex / 4)] + (targetIndex % 4) * 30}px;width:900px;height:24px;`
+        : `position:absolute;left:20px;top:${target.visible ? 20 + visibleIndexes.indexOf(targetIndex) * 30 : 2000 + targetIndex * 30}px;width:900px;height:24px;`;
+    const style = [position, target.kind === 'title' ? 'min-height:1px;' : ''].filter(Boolean).join('');
+    return target.kind === 'title'
+      ? `<p data-bench-id="${target.id}" data-bench-kind="title"${style ? ` style="${style}"` : ''} title="${target.source}"></p>`
+      : `<p data-bench-id="${target.id}"${target.kind ? ' data-bench-kind="text"' : ''}${style ? ` style="${style}"` : ''}>${target.source}</p>`;
   }).join('');
-  const html = `<!doctype html><meta charset="utf-8"><title>Page translation benchmark</title><main${scenario === 'small' ? '' : ' style="position:relative;min-height:12000px"'}>${htmlTargets}</main>`;
+  const spaControl = scenario === 'spa-navigation' ? `<button id="spa-navigation-control" type="button" translate="no">Navigate</button><script>
+  const bSources = ${JSON.stringify(targetTexts.map((_, index) => `SPA route B sentence ${index + 1} has distinct stable content.`))};
+  let changed = false;
+  document.addEventListener('translate-it:benchmark-spa-invalidated', () => {
+    if (changed) return; changed = true;
+    for (const index of [1, 5, 9]) { const el = document.querySelector('[data-bench-id="target-' + index + '"]'); if (el.dataset.benchKind === 'title') el.setAttribute('title', bSources[index]); else el.firstChild.nodeValue = bSources[index]; el.dataset.benchRouteSource = bSources[index]; }
+    document.documentElement.dataset.spaSourcesChanged = 'true';
+  }, { once: true });
+  document.getElementById('spa-navigation-control').addEventListener('click', () => history.pushState({}, '', '/replacement'));
+  </script>` : '';
+  const html = `<!doctype html><meta charset="utf-8"><title>Page translation benchmark</title><main${scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' ? '' : ` style="position:relative;min-height:${scenario === 'scroll-through' ? 3200 : 12000}px"`}>${htmlTargets}${spaControl}</main>${scenario === 'spa-navigation' ? '<script>document.documentElement.dataset.benchSpaScenario="true"</script>' : ''}`;
   const orderedTexts = targets.map(target => target.source);
   const visibleIds = targets.filter(target => target.visible).map(target => target.id);
+  const dynamicCohorts = scenario === 'dynamic-dom' ? [0, 1].map(cohortIndex => ({
+    id: `cohort-${cohortIndex + 1}`,
+    targets: Array.from({ length: 3 }, (_, index) => ({
+      id: `dynamic-${cohortIndex + 1}-${index + 1}`,
+      source: `Dynamic cohort ${cohortIndex + 1} sentence ${index + 1} has unique stable fixture content.`,
+      visible: true,
+    })),
+  })) : undefined;
   return {
     scenario,
     targetCount: count,
@@ -46,6 +95,9 @@ export function createFixture(scenario = 'small') {
     viewport: { width: 1280, height: 900 },
     scroll: { x: 0, y: 0 },
     responseDelayMs: 50,
+    ...(dynamicCohorts ? { dynamicCohorts } : {}),
+    ...(scenario === 'spa-navigation' ? { spaChangedIds: ['target-1', 'target-5', 'target-9'], spaSources: targetTexts.map((_, index) => `SPA route B sentence ${index + 1} has distinct stable content.`) } : {}),
+    ...(scenario === 'scroll-through' ? { scrollBands: scrollBandTops.map((top, band) => ({ band, top, ids: targets.slice(band * 4, band * 4 + 4).map(target => target.id) })) } : {}),
   };
 }
 
@@ -142,7 +194,7 @@ export async function startFixture(fixture = createFixture(), { runtimeBridge, r
         ].filter(Boolean)) : new Set();
         if (replacementCollector && replacementPaths.has(url.pathname)
             && await replacementCollector.handle(request, response)) return;
-        const replacementFixture = fixture.scenario === 'page-translation-replacement';
+        const replacementFixture = fixture.scenario === 'page-translation-replacement' || fixture.scenario === 'spa-navigation';
         const isFixtureRoute = url.pathname === '/' || (replacementFixture && url.pathname === '/replacement');
         if (!isFixtureRoute || url.search) { response.writeHead(404).end(); return; }
         response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fixture.html);
@@ -153,7 +205,7 @@ export async function startFixture(fixture = createFixture(), { runtimeBridge, r
       });
       return;
     }
-    if (request.url !== '/' && !(fixture.scenario === 'page-translation-replacement' && request.url === '/replacement')) { response.writeHead(404).end(); return; }
+    if (request.url !== '/' && !(['page-translation-replacement', 'spa-navigation'].includes(fixture.scenario) && request.url === '/replacement')) { response.writeHead(404).end(); return; }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(fixture.html);
   });

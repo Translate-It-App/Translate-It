@@ -8,6 +8,7 @@ General technical documentation for the extension. Documents are grouped by stab
 - [**contracts/**](contracts/README.md) — behavioral invariants and runtime contracts.
 - [**providers/**](providers/README.md) — provider implementation and integration guides.
 - [**infrastructure/**](infrastructure/README.md) — shared runtime subsystems (stats, queues, lifecycle, messaging).
+- [**benchmarks/**](benchmarks/README.md) — recorded performance benchmark reports and artifacts.
 
 ## In this folder
 

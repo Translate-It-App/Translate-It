@@ -40,6 +40,12 @@ export function isDuplicateAcceptedMutation({ wasAlreadyAccepted, expectedText, 
   const nextValueByTarget = new Map();
   for (let index = records.length - 1; index >= 0; index--) {
     const record = records[index];
+    if (record.type === 'attributes' && record.attributeName === 'title') {
+      const resultingValue = nextValueByTarget.get(record.target) ?? record.target.getAttribute('title');
+      if (record.oldValue === expectedText && resultingValue === expectedText) return true;
+      nextValueByTarget.set(record.target, record.oldValue);
+      continue;
+    }
     if (record.type !== 'characterData') continue;
     const resultingValue = nextValueByTarget.get(record.target) ?? record.target.nodeValue;
     if (record.oldValue === expectedText && resultingValue === expectedText) return true;
@@ -66,18 +72,66 @@ export function summarizeAcceptanceTimes(firstAcceptedAtById, visibleIds, expect
   };
 }
 
-export function trackAcceptedTarget({ id, at, acceptedIds, firstAcceptedAtById, visibleIds, targetCount, completionTimes }) {
+export function trackAcceptedTarget({ id, at, acceptedIds, firstAcceptedAtById, visibleIds, targetCount, visibleRemainingIds, initialRemainingIds, expectedRemainingIds, completionTimes }) {
   const firstObservation = !Object.hasOwn(firstAcceptedAtById, id);
   if (firstObservation) firstAcceptedAtById[id] = at;
   acceptedIds.add(id);
   const firstTimes = ids => ids.map(targetId => firstAcceptedAtById[targetId]).filter(Number.isFinite);
-  if (completionTimes.visible === null && visibleIds.length && firstTimes(visibleIds).length === visibleIds.length) {
+  if (visibleRemainingIds) {
+    if (firstObservation && visibleRemainingIds.has(id)) {
+      visibleRemainingIds.delete(id);
+      completionTimes.visibleMaxAcceptedAt = Math.max(completionTimes.visibleMaxAcceptedAt ?? -Infinity, at);
+      if (completionTimes.visible === null && visibleRemainingIds.size === 0) completionTimes.visible = completionTimes.visibleMaxAcceptedAt;
+    }
+  } else if (completionTimes.visible === null && visibleIds.length && firstTimes(visibleIds).length === visibleIds.length) {
     completionTimes.visible = Math.max(...firstTimes(visibleIds));
   }
-  if (completionTimes.all === null && acceptedIds.size === targetCount) {
+  if (initialRemainingIds && expectedRemainingIds) {
+    if (firstObservation && initialRemainingIds.has(id)) {
+      initialRemainingIds.delete(id);
+      completionTimes.initialMaxAcceptedAt = Math.max(completionTimes.initialMaxAcceptedAt ?? -Infinity, at);
+      if (completionTimes.initialAll === null && initialRemainingIds.size === 0) completionTimes.initialAll = completionTimes.initialMaxAcceptedAt;
+    }
+    if (firstObservation && expectedRemainingIds.has(id)) {
+      expectedRemainingIds.delete(id);
+      completionTimes.allMaxAcceptedAt = Math.max(completionTimes.allMaxAcceptedAt ?? -Infinity, at);
+      if (completionTimes.all === null && expectedRemainingIds.size === 0) completionTimes.all = completionTimes.allMaxAcceptedAt;
+    }
+  } else if (completionTimes.all === null && acceptedIds.size === targetCount) {
     completionTimes.all = Math.max(...firstTimes([...acceptedIds]));
   }
   return firstObservation;
+}
+
+export function findFinalTranslationTerminal(events, sessionId, expectedCount) {
+  if (!Array.isArray(events) || typeof sessionId !== 'string' || !Number.isInteger(expectedCount) || expectedCount < 1) return null;
+  return events.find(event => {
+    const message = event?.message ?? event;
+    const payload = message?.data?.data ?? message?.data ?? {};
+    const eventSessionId = payload.sessionId ?? payload.messageId ?? message?.data?.sessionId ?? message?.sessionId;
+    return message?.action === 'page-translation-frame-lifecycle'
+      && ['page-translate-complete', 'page-translate-idle'].includes(message?.data?.action)
+      && eventSessionId === sessionId
+      && payload.translatedCount === expectedCount
+      && payload.totalCount === expectedCount
+      && payload.failedCount === 0;
+  }) ?? null;
+}
+
+export function registerThenInsertCohort({ register, insert, now = () => performance.now() }) {
+  if (typeof register !== 'function' || typeof insert !== 'function' || typeof now !== 'function') throw new TypeError('Dynamic cohort registration, insertion and clock callbacks are required.');
+  register();
+  const insertedAt = now();
+  return { insertedAt, result: insert() };
+}
+
+export function trackCohortAcceptedTarget(cohort, id, acceptedAt) {
+  if (!cohort?.remainingIds?.has(id) || !Number.isFinite(acceptedAt) || Object.hasOwn(cohort.acceptedAtById, id)) return false;
+  cohort.acceptedAtById[id] = acceptedAt;
+  cohort.remainingIds.delete(id);
+  if (cohort.firstAcceptedAt === null) cohort.firstAcceptedAt = acceptedAt;
+  if (cohort.completionAt === null && cohort.remainingIds.size === 0) cohort.completionAt = acceptedAt;
+  return true;
 }
 
 export async function completeTranslationMeasurement({ state, awaitAcceptedTranslation, stopMeasurement, sendRestore, awaitRestoredDOM, cleanupErrors }) {

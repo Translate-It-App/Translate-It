@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTransportRequest, mapEdgeResponse, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
+import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
+import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, parseScenarioSelection, settingsForScenario, shadowInitialTranslationReadiness, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './e2e-benchmark/scenario-plan.mjs';
+import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
+import { registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
+import { matchesAutoTranslateRule } from '../../../src/utils/ui/exclusion.js';
 
 describe('page translation benchmark measurements', () => {
   it('maps each actual Edge request source into the provider response shape', () => {
@@ -96,10 +100,258 @@ describe('page translation benchmark measurements', () => {
     expect(fixtures[0].targets.map(target => target.id)).not.toEqual(fixtures[1].targets.map(target => target.id));
   });
 
+  it('keeps dynamic DOM opt-in and leaves static fixture fields unchanged', () => {
+    expect(parseScenarioSelection('small,dynamic-dom')).toEqual(['small', 'dynamic-dom']);
+    const small = createFixture('small');
+    const dynamic = createFixture('dynamic-dom');
+    expect(small).not.toHaveProperty('dynamicCohorts');
+    expect(dynamic.targetCount).toBe(12);
+    expect(dynamic.targets).toEqual(small.targets);
+    expect(dynamic.html).toBe(small.html);
+    expect(dynamic.dynamicCohorts.map(cohort => cohort.targets)).toHaveLength(2);
+    const all = [...dynamic.targets, ...dynamic.dynamicCohorts.flatMap(cohort => cohort.targets)];
+    expect(new Set(all.map(target => target.id)).size).toBe(18);
+    expect(new Set(all.map(target => target.source)).size).toBe(18);
+    expect(dynamic.dynamicCohorts.flatMap(cohort => cohort.targets).every(target => !dynamic.html.includes(target.id))).toBe(true);
+  });
+
+  it('adds an opt-in native-history SPA fixture without changing the static fixtures', () => {
+    const small = createFixture('small');
+    const spa = createFixture('spa-navigation');
+    expect(parseScenarioSelection()).toEqual(['small']);
+    expect(parseScenarioSelection('small,dynamic-dom,spa-navigation')).toEqual(['small', 'dynamic-dom', 'spa-navigation']);
+    expect(spa.targets.map(({ id, source, visible }) => ({ id, source, visible }))).toEqual(small.targets);
+    expect(spa.targets.map(target => target.kind)).toEqual([...Array(6).fill('text'), ...Array(6).fill('title')]);
+    expect(spa.spaChangedIds).toEqual(['target-1', 'target-5', 'target-9']);
+    expect(spa.html).toContain("history.pushState({}, '', '/replacement')");
+    expect(spa.html).toContain('translate-it:benchmark-spa-invalidated');
+    expect(spa.html).toContain('data-bench-kind="title"');
+    expect(spa.html).toContain("el.setAttribute('title', bSources[index])");
+    expect(small.html).not.toContain('spa-navigation-control');
+    expect(settingsForScenario({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false }, 'small')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false });
+    expect(settingsForScenario({}, 'dynamic-dom')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: true });
+    expect(settingsForScenario({}, 'spa-navigation')).toMatchObject({
+      WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false,
+      WHOLE_PAGE_AUTO_TRANSLATE_RULES: ['127.0.0.1/replacement'],
+      TRANSLATION_API: 'edge', TARGET_LANGUAGE: 'fr',
+    });
+    const routeRule = settingsForScenario({}, 'spa-navigation').WHOLE_PAGE_AUTO_TRANSLATE_RULES[0];
+    expect(matchesAutoTranslateRule('http://127.0.0.1:43127/replacement', routeRule)).toBe(true);
+    expect(matchesAutoTranslateRule('http://127.0.0.1:43127/', routeRule)).toBe(false);
+  });
+
+  it('defines the five exact Shadow DOM targets and enables only DOM-change translation', () => {
+    const small = createFixture('small');
+    const shadow = createFixture('shadow-dom');
+    expect(parseScenarioSelection('shadow-dom')).toEqual(['shadow-dom']);
+    expect(shadow.targetCount).toBe(3);
+    expect(shadow.targets.map(({ id, source, kind }) => ({ id, source, kind }))).toEqual([
+      { id: 'shadow-light', source: 'Shadow fixture light DOM source.', kind: 'text' },
+      { id: 'shadow-open', source: 'Shadow fixture open-root source.', kind: 'text' },
+      { id: 'shadow-nested-title', source: 'Shadow fixture nested title source.', kind: 'title' },
+    ]);
+    expect(shadow.shadowTargets).toHaveLength(5);
+    expect(new Set(shadow.shadowTargets.map(target => target.id)).size).toBe(5);
+    expect(new Set(shadow.shadowTargets.map(target => target.source)).size).toBe(5);
+    expect(shadow.html).toContain('SHADOW_DIRECT_TEXT_SENTINEL');
+    expect(shadow.html).toContain('SHADOW_CLOSED_ROOT_SENTINEL');
+    expect(shadow.html).toContain("mode:'closed'");
+    expect(shadow.html).toContain("openTarget.style.direction='rtl';openTarget.style.unicodeBidi='isolate'");
+    expect(small.html).not.toContain('shadow-dom');
+    expect(settingsForScenario({}, 'shadow-dom')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: true });
+    expect(settingsForScenario({}, 'shadow-dom')).not.toHaveProperty('WHOLE_PAGE_LAZY_LOADING');
+    expect(settingsForScenario({}, 'small')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false });
+  });
+
+  it('requires exact drained initial-session accounting before Shadow DOM insertion', () => {
+    const expectedIds = ['a', 'b', 'c'];
+    const args = {
+      expectedIds, expectedSessionId: 'session-1', observedSessionId: 'session-1',
+      schedulerState: { discoveryPending: false, pendingSettlementCount: 0, queueIds: [], activeFlushes: 0 },
+      bridgeDiscoveryDrained: true, admissions: expectedIds, enqueues: expectedIds,
+      settlements: expectedIds.map(id => ({ id, sessionId: 'session-1' })), acceptedDomIds: expectedIds,
+    };
+    expect(shadowInitialTranslationReadiness(args).ready).toBe(true);
+    expect(shadowInitialTranslationReadiness({ ...args, acceptedDomIds: ['a', 'b'] }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, settlements: args.settlements.slice(0, 2) }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, schedulerState: { ...args.schedulerState, discoveryPending: true } }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, bridgeDiscoveryDrained: false }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, observedSessionId: 'session-2' }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, admissions: ['a', 'a', 'c'] }).ready).toBe(false);
+    expect(shadowInitialTranslationReadiness({ ...args, settlements: [...args.settlements, args.settlements[0]] }).ready).toBe(false);
+  });
+
+  it('validates observed Shadow DOM sources and measured initial geometry against fixture oracles', () => {
+    const fixture = createFixture('shadow-dom');
+    const observedTargets = fixture.targets.map(({ id, source }) => [id, source]);
+    const observedGeometry = { targetCount: fixture.targetCount, visibleIds: fixture.visibleIds,
+      viewport: fixture.viewport, scroll: fixture.scroll };
+    expect(validateShadowInitialObservations({ fixture, observedTargets, observedGeometry }).ok).toBe(true);
+    expect(validateShadowInitialObservations({ fixture, observedTargets: observedTargets.map(([id, source]) =>
+      [id, id === 'shadow-open' ? 'wrong source' : source]), observedGeometry }).issues).toContain('observed initial source mismatch: shadow-open');
+    expect(validateShadowInitialObservations({ fixture, observedTargets: observedTargets.slice(1), observedGeometry }).ok).toBe(false);
+    expect(validateShadowInitialObservations({ fixture, observedTargets,
+      observedGeometry: { ...observedGeometry, viewport: { width: 1024, height: 768 } } }).ok).toBe(false);
+  });
+
+  it('accepts only same-document advanced SPA cursors and consistent same-clock timings', () => {
+    const input = {
+      cursorA: { documentEpoch: 4, routeRevision: 2, url: 'http://127.0.0.1:1234/' },
+      cursorB: { documentEpoch: 4, routeRevision: 3, url: 'http://127.0.0.1:1234/replacement' },
+      navStartedAt: 100, stopAt: 105, invalidatedAt: 110, sourceUpdatedAt: 115,
+      firstAcceptedAtById: { 'target-1': 120, 'target-5': 125, 'target-9': 130 }, terminalAt: 160,
+      changedIds: ['target-1', 'target-5', 'target-9'], retainedIds: ['target-0'], requestedIds: ['target-1', 'target-5', 'target-9'],
+      acceptedIds: ['target-1', 'target-5', 'target-9'], duplicateIds: [], completionReady: true,
+    };
+    expect(validateSpaNavigation(input)).toMatchObject({ ok: true, navigationToFirstAcceptedMs: 20, navigationToCompletionMs: 60 });
+    expect(validateSpaNavigation({ ...input, cursorB: { ...input.cursorB, documentEpoch: 5 } }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, terminalAt: null }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, sourceUpdatedAt: 105 }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, requestedIds: [...input.requestedIds, 'target-0'], retainedIds: ['target-0'] }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, acceptedIds: [...input.acceptedIds, 'target-0'], retainedIds: ['target-0'] }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, completionReady: false }).ok).toBe(false);
+  });
+
+  it('requires identical A/B settings and a distinct automatic B owner', () => {
+    const settings = { provider: 'edge', targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: false };
+    expect(validateSpaSessions({ settingsA: settings, settingsB: { ...settings }, autoB: true, sessionA: 'A', sessionB: 'B' }).ok).toBe(true);
+    expect(validateSpaSessions({ settingsA: settings, settingsB: { ...settings, lazyLoading: true }, autoB: true, sessionA: 'A', sessionB: 'B' }).ok).toBe(false);
+    expect(validateSpaSessions({ settingsA: settings, settingsB: { ...settings, provider: 'google' }, autoB: true, sessionA: 'A', sessionB: 'B' }).ok).toBe(false);
+    expect(validateSpaSessions({ settingsA: settings, settingsB: settings, autoB: false, sessionA: 'A', sessionB: 'B' }).ok).toBe(false);
+    expect(validateSpaSessions({ settingsA: settings, settingsB: settings, autoB: true, sessionA: 'A', sessionB: 'A' }).ok).toBe(false);
+  });
+
+  it('requires SPA terminal counts, matching session, and timestamp after every B write', () => {
+    const event = { performanceAt: 150, message: { action: 'page-translation-frame-lifecycle', data: { action: 'page-translate-complete', data: {
+      sessionId: 'B', translatedCount: 12, totalCount: 12, failedCount: 0,
+    } } } };
+    const changedIds = ['target-1', 'target-5', 'target-9'];
+    const base = { event, sessionId: 'B', targetIds: Array.from({ length: 12 }, (_, i) => `target-${i}`),
+      acceptedAtById: { 'target-1': 120, 'target-5': 130, 'target-9': 149 },
+      acceptedIds: changedIds, expectedAcceptedIds: changedIds };
+    expect(validateSpaTerminal(base).ok).toBe(true);
+    expect(validateSpaTerminal({ ...base, acceptedIds: [...changedIds, 'target-0'] }).ok).toBe(false);
+    expect(validateSpaTerminal({ ...base, event: { ...event, message: { ...event.message, data: { ...event.message.data,
+      data: { ...event.message.data.data, translatedCount: 11 } } } } }).ok).toBe(false);
+    expect(validateSpaTerminal({ ...base, sessionId: 'A' }).ok).toBe(false);
+    expect(validateSpaTerminal({ ...base, acceptedAtById: { ...base.acceptedAtById, 'target-9': 151 } }).ok).toBe(false);
+    expect(validateSpaTerminal({ ...base, event: { ...event, message: { ...event.message, data: { ...event.message.data,
+      data: { ...event.message.data.data, failedCount: 1 } } } } }).ok).toBe(false);
+  });
+
+  it('validates viewport-entry/write clocks, distinct provider requests, final terminal, exact Restore, and cleanup', () => {
+    const ids = ['a', 'b'];
+    const pipelineStages = Object.fromEntries([
+      'bridgeDiscoveredAtById', 'intersectionSchedulerRegisteredAtById', 'intersectionCallbackAtById', 'schedulerAdmissionAtById', 'schedulerEnqueueAtById',
+    ].map((name, index) => [name, { a: index + 1, b: index + 1 }]));
+    const args = {
+      expectedIds: ids, viewportEntryAtById: { a: 10, b: 20 }, acceptedAtById: { a: 15, b: 25 },
+      pipelineStages,
+      checkpoints: [{ scheduler: { isScrolling: true } }],
+      selectionViewport: [{ at: 4, isScrolling: false, targetIds: ids, targets: ids.map(id => ({ id, classification: 'viewport' })) }],
+      terminalAt: 30, acceptedIds: ids, duplicateAcceptedIds: [],
+      providerRequests: [{ requestViewport: { at: 11, targets: [{ id: 'a', classification: 'permitted-50px-buffer' }, { id: 'b', classification: 'outside-buffer' }] } }],
+      schedulerState: { managerTranslating: false, activeFlushes: 0, queueIds: [], pendingSettlementCount: 0, discoveryPending: false },
+      restoreOriginals: [['a', 'one'], ['b', 'two']], expectedOriginals: [['a', 'one'], ['b', 'two']], cleanupErrors: [],
+    };
+    expect(validateScrollThroughEvidence(args).ok).toBe(true);
+    const prefetch = validateScrollThroughEvidence({ ...args, acceptedAtById: { ...args.acceptedAtById, b: 19 } });
+    expect(prefetch).toMatchObject({ ok: true, prefetchAcceptedIds: ['b'], viewportEntryToAcceptedWriteLatencyMsById: { a: 5, b: null } });
+    expect(validateScrollThroughEvidence({ ...args, providerRequests: [...args.providerRequests, args.providerRequests[0]] }).issues).toContain('duplicate physical provider request target ID: a');
+    expect(validateScrollThroughEvidence({ ...args, terminalAt: 24 }).issues).toContain('matching terminal is missing or precedes latest accepted write');
+    expect(validateScrollThroughEvidence({ ...args, schedulerState: { ...args.schedulerState, queueIds: ['pending'] } }).issues).toContain('scheduler/discovery work was not drained at the terminal');
+    expect(validateScrollThroughEvidence({ ...args, pipelineStages: { ...pipelineStages, intersectionCallbackAtById: { a: 2 } } }).issues).toContain('missing intersectionCallbackAtById stage: b');
+    expect(validateScrollThroughEvidence({ ...args, restoreOriginals: [['a', 'wrong'], ['b', 'two']] }).issues).toContain('Restore originals do not exactly match the fixture');
+    expect(validateScrollThroughEvidence({ ...args, cleanupErrors: ['observer failed'] }).ok).toBe(false);
+    expect(validateScrollThroughEvidence({ ...args, checkpoints: [{ scheduler: { isScrolling: null } }] }).issues).toContain('scroll checkpoint isScrolling state unavailable: 0');
+    expect(validateScrollThroughEvidence({ ...args, selectionViewport: [{ ...args.selectionViewport[0], targets: [{ id: 'a', classification: 'viewport' }] }] }).issues).toContain('scheduler selection geometry does not exactly match selected target IDs: 0');
+    expect(validateScrollThroughStages(ids, { ...pipelineStages, schedulerAdmissionAtById: { a: 2, b: 2 } }).issues).toContain('scroll pipeline stages are out of order: a');
+    expect(deriveScrollAcceptanceLatency(ids, { a: 10, b: 20 }, { a: 15, b: 25 })).toEqual({ latencyMsById: { a: 5, b: 5 }, prefetchAcceptedIds: [], issues: [] });
+    expect(deriveScrollAcceptanceLatency(ids, { a: 10 }, { a: 9, b: 25 })).toMatchObject({
+      latencyMsById: { a: null }, prefetchAcceptedIds: ['a'],
+      issues: expect.arrayContaining(['missing actual viewport entry timestamp: b']),
+    });
+    expect(deriveScrollAggregateMetrics([
+      { band: 1, ids: ['a', 'b'] }, { band: 2, ids: ['c', 'd'] },
+    ], { a: 10, b: 20, c: 30, d: 40 }, { a: 12, b: 19, c: 35, d: 50 })).toEqual({
+      latencyByViewportBand: [
+        { band: 1, targetCount: 2, measurableCount: 1, prefetchCount: 1, meanMs: 2, medianMs: 2, maxMs: 2 },
+        { band: 2, targetCount: 2, measurableCount: 2, prefetchCount: 0, meanMs: 7.5, medianMs: 7.5, maxMs: 10 },
+      ],
+      lastViewportEntryToFullAcceptance: {
+        lastViewportEntryAt: 40, fullAcceptanceAt: 50, latencyMs: 10, fullAcceptanceBeforeLastViewportEntry: false,
+      },
+    });
+    expect(deriveScrollAggregateMetrics([{ band: 1, ids: ['a', 'b'] }], { a: 10, b: 20 }, { a: 12, b: 19 })
+      .lastViewportEntryToFullAcceptance).toMatchObject({ latencyMs: -1, fullAcceptanceBeforeLastViewportEntry: true });
+    expect(validateScrollThroughObservations(ids, [{ scheduler: { isScrolling: false } }], args.selectionViewport).ok).toBe(true);
+  });
+
+  it('validates that route provider evidence is local Edge transport and observers stop before Restore', () => {
+    const requests = [{ category: 'provider-translation', method: 'POST', url: 'https://edge.microsoft.com/translate/translatetext', targetIds: ['target-1'] }];
+    expect(validateSpaProviderRoute({ provider: 'edge', requests, expectedIds: ['target-1'] }).ok).toBe(true);
+    expect(validateSpaProviderRoute({ provider: 'google', requests, expectedIds: ['target-1'] }).ok).toBe(false);
+    expect(validateSpaProviderRoute({ provider: 'edge', requests: [{ ...requests[0], url: 'https://example.com/translate' }], expectedIds: ['target-1'] }).ok).toBe(false);
+    expect(validateSpaObserverRestoreOrder({ spaObserverStoppedAt: 10, measurementObserverStoppedAt: 11, restoreStartedAt: 12 }).ok).toBe(true);
+    expect(validateSpaObserverRestoreOrder({ spaObserverStoppedAt: 13, measurementObserverStoppedAt: 11, restoreStartedAt: 12 }).ok).toBe(false);
+  });
+
+  it('registers the complete cohort before insertion and tracks first/all latency once', () => {
+    const order = [];
+    const mockObserver = { observe: root => order.push(`observe:${root}`) };
+    const inserted = registerThenInsertCohort({
+      register: () => { order.push('register'); mockObserver.observe('fixture-root'); },
+      now: () => { order.push('timestamp'); return 100; },
+      insert: () => { order.push('append-host'); return 'nodes'; },
+    });
+    expect(order).toEqual(['register', 'observe:fixture-root', 'timestamp', 'append-host']);
+    expect(inserted).toEqual({ insertedAt: 100, result: 'nodes' });
+    const cohort = { targetIds: ['a', 'b'], remainingIds: new Set(['a', 'b']), firstAcceptedAt: null, completionAt: null, acceptedAtById: {} };
+    expect(trackCohortAcceptedTarget(cohort, 'a', 110)).toBe(true);
+    expect(trackCohortAcceptedTarget(cohort, 'a', 115)).toBe(false);
+    expect(trackCohortAcceptedTarget(cohort, 'b', 140)).toBe(true);
+    expect(cohort).toMatchObject({ firstAcceptedAt: 110, completionAt: 140, acceptedAtById: { a: 110, b: 140 } });
+    expect(cohort.firstAcceptedAt - inserted.insertedAt).toBe(10);
+    expect(cohort.completionAt - inserted.insertedAt).toBe(40);
+  });
+
+  it('accounts dynamic provider targets exactly once and validates the persistent setting', () => {
+    const expectedIds = [...Array.from({ length: 12 }, (_, index) => `target-${index}`),
+      ...Array.from({ length: 6 }, (_, index) => `dynamic-${index < 3 ? 1 : 2}-${index % 3 + 1}`)];
+    const result = validateAcceptedMutationAccounting({
+      expectedIds, targetKinds: expectedIds.map(() => 'text'), acceptedIds: expectedIds,
+      mutationIds: expectedIds, duplicateAcceptances: 0, staleWrites: 0, unattributedWrites: 0,
+    });
+    expect(result.ok).toBe(true);
+    const base = { WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false, PROXY_ENABLED: false };
+    expect(settingsForScenario(base, 'small')).toEqual(base);
+    expect(settingsForScenario(base, 'dynamic-dom')).toEqual({ ...base, WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: true });
+    const expected = { targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: true };
+    expect(validateEffectiveSettings(expected, expected).ok).toBe(true);
+    expect(validateEffectiveSettings({ ...expected, autoTranslateOnDOMChanges: false }, expected).ok).toBe(false);
+    expect(validateEffectiveSettings({ ...expected, autoTranslateOnDOMChanges: false }, { ...expected, autoTranslateOnDOMChanges: false }).ok).toBe(true);
+  });
+
+  it('preserves the default Firefox provider probe target order', () => {
+    const expectedIds = Array.from({ length: 12 }, (_, index) => `target-${index}`);
+    expect(orderedAcceptedTargetIds(expectedIds, new Set([...expectedIds].reverse()))).toEqual(expectedIds);
+  });
+
   it('keeps insufficient percentiles unavailable instead of implying samples', () => {
     expect(summarize([])).toEqual({ n: 0, p50: null, p95: null });
     expect(summarize([9, 1, 5])).toEqual({ n: 3, p50: 5, p95: null });
     expect(summarize(Array.from({ length: 40 }, (_, i) => i + 1)).p95).toBe(38);
+  });
+
+  it('limits SPA long-task samples to calibrated tasks wholly inside navigation through B completion', () => {
+    const tasks = [
+      { startTime: 90, duration: 20 },
+      { startTime: 100, duration: 10 },
+      { startTime: 145, duration: 10 },
+      { startTime: 150, duration: 10 },
+    ];
+    expect(longTasksWithinInterval(tasks, 100, 155)).toEqual([tasks[1], tasks[2]]);
+    expect(longTasksWithinInterval(null, 100, 150)).toBeNull();
   });
 
   it('does not convert missing interval endpoints into finite zero or negative samples', () => {

@@ -35,6 +35,7 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
     isolatedProbes: [],
     modes: ['legacy', 'sliced', 'viewport'],
     scenarios: ['small'],
+    scrollSchedulingMode: null,
     samples: 4,
     warmups: 1,
     sourcePaths: [],
