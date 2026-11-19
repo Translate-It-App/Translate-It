@@ -63,6 +63,29 @@ done
 
 The expected Custom configuration is independently checked against observed runtime values: 5,000-character batching, provider concurrency 1/2/4, and Page chunk sizes 50/25/10 with parallel execution and worker/flush limits 1/2/4. Level 1 is expected to remain serial; levels 3 and 5 must exhibit overlapping logical and physical work. Three measured trials plus one discarded warmup are not enough to report p95. Browser scheduling, CDP interception, the fixed 50ms fixture response delay, 1,000-target fixture geometry, and instrumentation contribute overhead; these offline results do not characterize real provider latency, quality, service limits, or network behavior.
 
+### Gemini offline matrix
+
+The Gemini lane runs the production Gemini provider and parser against only the exact synthetic `https://benchmark-gemini.invalid/v1beta/models/benchmark-gemini-model:generateContent` POST. The harness configures that full endpoint, fixed model `benchmark-gemini-model`, and dummy query key `benchmark-dummy-key`; the strict decoder checks the endpoint, query key, request schema, generation config and fixture texts, and rejects Authorization headers. This endpoint is classified as a provider request only when `BENCH_PROVIDER=gemini`; discovery, Edge, Google V2 and Custom runs block it. No real key or live Gemini request is used. The browser URL retains the configured custom endpoint and production routing appends no official Google endpoint.
+
+Run the six level/scheduling combinations (3 measured samples plus one discarded warmup each: 24 trials total):
+
+```sh
+set -e
+for level in 1 3 5; do
+  for scheduling in fluid on-stop; do
+    BENCH_LANE=provider BENCH_PROVIDER=gemini BENCH_OPTIMIZATION_LEVEL="$level" \
+      BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING="$scheduling" \
+      BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+      BENCH_OUTPUT="/tmp/opencode/gemini-level-${level}-${scheduling}.json" \
+      pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+  done
+done
+```
+
+Expected runtime values are independently checked, not copied from the observed provider snapshot: level 1/3/5 expects provider batching optimal size 50/20/6, 5,000 character limit, and provider concurrency 1/3/6. Scheduler chunk size is 80/30/15, maxChars 15,000, parallel execution enabled, and its flush/worker cap is 1/3/6. The trial retains the existing AUTO source-language resolution; the fixture does not force or claim a particular source code. HTTP target `ids` are mapped from fixture texts and structured Gemini wire IDs are retained separately as `wireIds`.
+
+Logical scheduler batch count/sizes/peak and physical HTTP request count/peak are reported independently. AI retries or recovery can create additional physical requests, so there is deliberately no one-logical-batch/one-HTTP assertion; every physical attempt remains network-correlated, must settle successfully, and participates in exact target/source accounting. The deterministic valid response is reversed and retains request IDs, exercising the real parser's ID-to-input-order mapping. p95 remains unavailable for n=3 (the minimum remains 40). These offline measurements do not represent live Gemini latency, quality, model behavior, service limits or network behavior.
+
 ## Opt-in lazy scroll-through scheduling
 
 The separate `scroll-through` fixture contains 12 unique targets in three four-target vertical bands; only band one is initially visible. Discovery remains selected with `BENCH_MODES` (`legacy`, `sliced`, or `viewport`), independently of lazy scheduler selection. Select one scheduler mode per invocation with `BENCH_SCROLL_SCHEDULING=fluid` or `on-stop`; either setting enables production lazy loading, while `on-stop` additionally enables translate-after-scroll-stop. These flags are never enabled for other fixtures.

@@ -1,5 +1,6 @@
 import { GOOGLE_V2_ENDPOINT } from './google-v2-fixture.mjs';
 import { CUSTOM_FIXTURE_ENDPOINT } from './custom-fixture.mjs';
+import { GEMINI_FIXTURE_ENDPOINT, GEMINI_FIXTURE_KEY } from './gemini-fixture.mjs';
 
 export function measureScenarioRuns(results, scenario, mode, measureMode) {
   return measureMode(results.filter(run => run.scenario === scenario && run.mode === mode && run.phase === 'measured'));
@@ -155,6 +156,14 @@ export function classifyTransportRequest({ method, url }, { fixtureOrigin, exten
     return method === CUSTOM_FIXTURE_ENDPOINT.method ? { kind: 'provider-translation', provider: 'custom' }
       : { kind: 'blocked', reason: `unexpected Custom method: ${method}` };
   }
+  if (parsed.origin === GEMINI_FIXTURE_ENDPOINT.origin && parsed.pathname === GEMINI_FIXTURE_ENDPOINT.pathname) {
+    if (selectedProvider !== 'gemini') return { kind: 'blocked', reason: `unexpected Gemini endpoint for selected ${selectedProvider ?? 'unspecified'} provider` };
+    if (method !== GEMINI_FIXTURE_ENDPOINT.method || parsed.username || parsed.password || parsed.port || parsed.hash
+        || [...parsed.searchParams.keys()].length !== 1 || parsed.searchParams.get('key') !== GEMINI_FIXTURE_KEY) {
+      return { kind: 'blocked', reason: 'unexpected Gemini method or API key' };
+    }
+    return { kind: 'provider-translation', provider: 'gemini' };
+  }
   if (selectedProvider === 'googlev2' && parsed.origin === GOOGLE_V2_ENDPOINT.origin && parsed.pathname === GOOGLE_V2_ENDPOINT.pathname) {
     return method === GOOGLE_V2_ENDPOINT.method ? { kind: 'provider-translation', provider: 'googlev2' }
       : { kind: 'blocked', reason: `unexpected Google V2 method: ${method}` };
@@ -175,7 +184,7 @@ export function mapProviderHTTPRequestSequence(providerAttempts, sourceToId, pro
   return providerAttempts.map(request => ({
     at: request.startedAt,
     ids: (request.batchTexts ?? []).map(source => sourceToId.get(source) ?? null),
-    ...(provider === 'custom' && request.batchIds !== undefined ? { wireIds: request.batchIds } : {}),
+    ...(['custom', 'gemini'].includes(provider) && request.batchIds !== undefined ? { wireIds: request.batchIds } : {}),
     bodyBytes: request.bodyBytes,
   }));
 }

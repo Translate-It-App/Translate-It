@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, measureScenarioRuns, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
 import { decodeGoogleV2Request, GOOGLE_V2_DELIMITER, mapGoogleV2Response } from './e2e-benchmark/google-v2-fixture.mjs';
 import { CUSTOM_FIXTURE_ENDPOINT, CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL, decodeCustomRequest, mapCustomResponse } from './e2e-benchmark/custom-fixture.mjs';
+import { decodeGeminiRequest, GEMINI_FIXTURE_KEY, GEMINI_FIXTURE_MODEL, GEMINI_FIXTURE_URL, mapGeminiResponse } from './e2e-benchmark/gemini-fixture.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
 import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
@@ -19,7 +20,6 @@ describe('page translation benchmark measurements', () => {
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'nope', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('BENCH_PROVIDER');
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'google-v2', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('BENCH_PROVIDER');
     expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3' })).toMatchObject({ provider: 'googlev2', optimizationLevel: 3 });
-    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'gemini', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('not implemented');
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'edge', BENCH_OPTIMIZATION_LEVEL: '2' })).toThrow('BENCH_OPTIMIZATION_LEVEL');
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'edge', BENCH_OPTIMIZATION_LEVEL: '3', BENCH_MODES: 'legacy,sliced' })).toThrow('production-default sliced');
     for (const optimizationLevel of [1, 3, 5]) {
@@ -43,7 +43,50 @@ describe('page translation benchmark measurements', () => {
       CUSTOM_API_URL: CUSTOM_FIXTURE_URL, CUSTOM_API_KEY: '', CUSTOM_API_MODEL: CUSTOM_FIXTURE_MODEL,
       WHOLE_PAGE_TOKEN_WARNING_HIDDEN: true,
     });
-    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'gemini', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('not implemented');
+    const gemini = parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'gemini', BENCH_OPTIMIZATION_LEVEL: '3' });
+    expect(providerLaneSettings({}, gemini)).toMatchObject({
+      TRANSLATION_API: 'gemini', PROVIDER_OPTIMIZATION_LEVELS: { gemini: 3 },
+      GEMINI_API_URL: GEMINI_FIXTURE_URL, GEMINI_API_KEY: GEMINI_FIXTURE_KEY,
+      GEMINI_MODEL: GEMINI_FIXTURE_MODEL, GEMINI_MODEL_SOURCE: 'legacy', WHOLE_PAGE_TOKEN_WARNING_HIDDEN: true,
+    });
+  });
+
+  it('strictly decodes Gemini REST requests and returns reversed ID-preserving candidate text', () => {
+    const expectedTexts = ['Benchmark target 1 has stable fixture content.', 'Benchmark target 2 has stable fixture content.'];
+    const request = {
+      method: 'POST', url: `${GEMINI_FIXTURE_URL}?key=${GEMINI_FIXTURE_KEY}`,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: JSON.stringify({ translations: [
+          { id: '0', text: expectedTexts[0] }, { id: '1', text: expectedTexts[1] },
+        ] }) }] }],
+        systemInstruction: { parts: [{ text: 'Translate to French and return JSON.' }] },
+        generationConfig: { maxOutputTokens: 8192, responseMimeType: 'application/json', temperature: 0.1 },
+      }),
+    };
+    const decoded = decodeGeminiRequest({ ...request, expectedTexts });
+    expect(decoded).toEqual({ model: GEMINI_FIXTURE_MODEL, ids: ['0', '1'], texts: expectedTexts });
+    expect(decodeGeminiRequest({ ...request, headers: { 'content-type': 'application/json' }, expectedTexts })).toEqual(decoded);
+    expect(() => decodeGeminiRequest({ ...request, url: `${GEMINI_FIXTURE_URL}?key=wrong`, expectedTexts })).toThrow('key');
+    expect(() => decodeGeminiRequest({ ...request, url: `${GEMINI_FIXTURE_URL}?key=${GEMINI_FIXTURE_KEY}&extra=x`, expectedTexts })).toThrow('key');
+    expect(() => decodeGeminiRequest({ ...request, headers: { Authorization: 'Bearer secret' }, expectedTexts })).toThrow('Authorization');
+    expect(() => decodeGeminiRequest({ ...request, headers: {}, expectedTexts })).toThrow('application/json');
+    expect(() => decodeGeminiRequest({ ...request, method: 'GET', expectedTexts })).toThrow('endpoint');
+    const malformedGeneration = JSON.parse(request.body);
+    malformedGeneration.generationConfig.temperature = 0.2;
+    expect(() => decodeGeminiRequest({ ...request, body: JSON.stringify(malformedGeneration), expectedTexts })).toThrow('payload');
+    const malformedUserContent = JSON.parse(request.body);
+    malformedUserContent.contents[0].parts[0].text = JSON.stringify({ translations: [{ id: '0', text: 'not a fixture source' }] });
+    expect(() => decodeGeminiRequest({ ...request, body: JSON.stringify(malformedUserContent), expectedTexts })).toThrow('fixture text');
+    const response = mapGeminiResponse(decoded);
+    expect(response.candidates[0]).toMatchObject({ finishReason: 'STOP', content: { role: 'model' } });
+    const content = response.candidates[0].content.parts[0].text;
+    expect(JSON.parse(content)).toEqual([
+      { id: '1', text: `fixture translation: ${expectedTexts[1]}` },
+      { id: '0', text: `fixture translation: ${expectedTexts[0]}` },
+    ]);
+    expect(AIResponseParser.parseBatchResult(content, 2, expectedTexts, 'Gemini', ResponseFormat.JSON_ARRAY).results)
+      .toEqual(expectedTexts.map(text => `fixture translation: ${text}`));
   });
 
   it('strictly decodes and reverses synthetic Custom requests while preserving production wire IDs', () => {
@@ -165,6 +208,18 @@ describe('page translation benchmark measurements', () => {
       expect(validateProviderSchedulerRuntime({ provider: 'custom', optimizationLevel, providerRuntime: runtime, scheduler }).ok).toBe(true);
       expect(validateProviderSchedulerRuntime({ provider: 'custom', optimizationLevel, providerRuntime: runtime, scheduler: { ...scheduler, chunkSize: chunkSize + 1 } }).ok).toBe(false);
     }
+    for (const [optimizationLevel, optimalSize, maxConcurrent, chunkSize] of [[1, 50, 1, 80], [3, 20, 3, 30], [5, 6, 6, 15]]) {
+      const runtime = { provider: 'gemini', optimizationLevel, batching: { optimalSize, characterLimit: 5000 },
+        expectedBatching: { optimalSize, characterLimit: 5000 }, maxConcurrent, configuredMaxConcurrent: maxConcurrent };
+      expect(validateProviderRuntime({ requestedProvider: 'gemini', requestedOptimizationLevel: optimizationLevel, snapshot: runtime }).ok).toBe(true);
+      const scheduler = { providerRegistryId: 'gemini', chunkSize, maxChars: 15000, parallelExecution: true,
+        maxConcurrentFlushes: maxConcurrent, pageWorkerLimit: maxConcurrent };
+      expect(validateProviderSchedulerRuntime({ provider: 'gemini', optimizationLevel, providerRuntime: runtime, scheduler }).ok).toBe(true);
+      expect(validateProviderRuntime({ requestedProvider: 'gemini', requestedOptimizationLevel: optimizationLevel,
+        snapshot: { ...runtime, batching: { ...runtime.batching, optimalSize: optimalSize + 1 } } }).ok).toBe(false);
+      expect(validateProviderSchedulerRuntime({ provider: 'gemini', optimizationLevel, providerRuntime: runtime,
+        scheduler: { ...scheduler, maxChars: 5000 } }).ok).toBe(false);
+    }
   });
 
   it('correlates provider Fetch requests to Network records by event session and request ID', () => {
@@ -261,6 +316,7 @@ describe('page translation benchmark measurements', () => {
   it('retains legacy discovery/Edge scrolling and selects banded acceptance for 1000-target providers', () => {
     expect(usesBandedProviderScroll('googlev2')).toBe(true);
     expect(usesBandedProviderScroll('custom')).toBe(true);
+    expect(usesBandedProviderScroll('gemini')).toBe(true);
     expect(usesBandedProviderScroll('edge')).toBe(false);
     expect(usesBandedProviderScroll(undefined)).toBe(false);
     expect(scrollThroughPhases(false)).toEqual([
@@ -315,6 +371,18 @@ describe('page translation benchmark measurements', () => {
       logical: { peakLogicalBatchConcurrency: 1 }, physical: { peakPhysicalConcurrency: 1 },
       pageWorkerLimit: 2, providerLimiterCapacity: 2,
     }).ok).toBe(false);
+    for (const [optimizationLevel, peak, cap] of [[1, 1, 1], [3, 2, 3], [5, 3, 6]]) {
+      const physical = summarizePhysicalProviderAttempts(Array.from({ length: peak }, (_, index) => ({
+        attemptId: `gemini-${index}`, networkSessionId: 'gemini-session', networkId: `gemini-${index}`,
+        startedAt: index, settledAt: peak + index, status: 200, outcome: 'finished',
+      })));
+      expect(validateProviderConcurrencyObservations({
+        provider: 'gemini', optimizationLevel, targetCount: 1000,
+        logical: { logicalBatchCount: 40, logicalBatchSizes: Array(40).fill(25), peakLogicalBatchConcurrency: peak },
+        physical, pageWorkerLimit: cap, providerLimiterCapacity: cap,
+      }).ok).toBe(true);
+      expect(physical.physicalRequestCount).toBe(peak);
+    }
   });
 
   it('requires observed Edge concurrency evidence for SPA workload trials without exempting probes', () => {
@@ -744,6 +812,18 @@ describe('page translation benchmark measurements', () => {
     expect(classifyTransportRequest({ ...customRequest, url: `${CUSTOM_FIXTURE_URL}/extra` }, { selectedProvider: 'custom' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ ...customRequest, url: `${CUSTOM_FIXTURE_URL}?unexpected=1` }, { selectedProvider: 'custom' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ ...customRequest, method: 'GET' }, { selectedProvider: 'custom' }).kind).toBe('blocked');
+    const geminiRequest = { method: 'POST', url: `${GEMINI_FIXTURE_URL}?key=${GEMINI_FIXTURE_KEY}` };
+    expect(classifyTransportRequest(geminiRequest).kind).toBe('blocked');
+    for (const provider of ['edge', 'googlev2', 'custom']) {
+      expect(classifyTransportRequest(geminiRequest, { selectedProvider: provider }).kind).toBe('blocked');
+    }
+    expect(classifyTransportRequest(geminiRequest, { selectedProvider: 'gemini' }))
+      .toMatchObject({ kind: 'provider-translation', provider: 'gemini' });
+    expect(classifyTransportRequest({ ...geminiRequest, url: `${GEMINI_FIXTURE_URL}?key=wrong` },
+      { selectedProvider: 'gemini' }).kind).toBe('blocked');
+    expect(classifyTransportRequest({ ...geminiRequest, url: `${GEMINI_FIXTURE_URL}?key=${GEMINI_FIXTURE_KEY}&extra=x` },
+      { selectedProvider: 'gemini' }).kind).toBe('blocked');
+    expect(classifyTransportRequest({ ...geminiRequest, method: 'GET' }, { selectedProvider: 'gemini' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'GET', url: 'https://translate.google.com/translate_a/single' }, { selectedProvider: 'googlev2' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'POST', url: 'https://translate.google.com/translate_a/single/extra' }, { selectedProvider: 'googlev2' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'GET', url: 'http://127.0.0.1:1234/' }, { fixtureOrigin: 'http://127.0.0.1:1234' }).kind).toBe('local');
@@ -752,10 +832,13 @@ describe('page translation benchmark measurements', () => {
     expect(classifyTransportRequest({ method: 'GET', url: 'chrome-extension://invalid/' }, { extensionOrigin: 'chrome-extension://fixture-id' }).kind).toBe('invalid-extension-placeholder');
   });
 
-  it('records fixture target IDs separately from Custom parser wire IDs in HTTP sequence order', () => {
+  it('records fixture target IDs separately from structured parser wire IDs in HTTP sequence order', () => {
     const sourceToId = new Map([['text A', 'target-A'], ['text B', 'target-B']]);
     const attempts = [{ startedAt: 12, batchTexts: ['text B', 'text A'], batchIds: ['0', '1'], bodyBytes: 42 }];
     expect(mapProviderHTTPRequestSequence(attempts, sourceToId, 'custom')).toEqual([
+      { at: 12, ids: ['target-B', 'target-A'], wireIds: ['0', '1'], bodyBytes: 42 },
+    ]);
+    expect(mapProviderHTTPRequestSequence(attempts, sourceToId, 'gemini')).toEqual([
       { at: 12, ids: ['target-B', 'target-A'], wireIds: ['0', '1'], bodyBytes: 42 },
     ]);
     expect(mapProviderHTTPRequestSequence(attempts, sourceToId, 'edge')).toEqual([

@@ -8,7 +8,7 @@ import { serializeBenchmarkArtifact, writeBenchmarkArtifact } from './e2e-benchm
 import { validateBuildParity } from './e2e-benchmark/build-environment.mjs';
 import { createCancellationRequestLifecycle, promoteRequestDiagnostics } from './e2e-benchmark/cancellation-probes.mjs';
 import { measureScenarioRuns, summarize, validateRunGate } from './e2e-benchmark/metrics.mjs';
-import { providerLaneFinalization } from './e2e-benchmark/scenario-plan.mjs';
+import { providerLaneFinalization, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
 
 async function runActualFinalization({ failAt = null, cleanupFailure = false, measureFailureAfter = null, trialCleanupErrors = [], trialCleanupReport = null, trialDiagnostics = null, providerLane = null, providerSamples = 4 } = {}) {
   const runner = await readFile(new URL('./e2e-benchmark/run.mjs', import.meta.url), 'utf8');
@@ -50,6 +50,7 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
     validateRunGate,
     measureScenarioRuns,
     providerLaneFinalization,
+    usesBandedProviderScroll,
     validateBuildParity,
     validateHarnessBuildParity: () => {
       harness.buildParity = context.validateBuildParity(harness.builds, context.modes);

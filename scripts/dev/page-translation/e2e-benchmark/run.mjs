@@ -12,6 +12,7 @@ import { writeBenchmarkArtifact } from './artifact-writer.mjs';
 import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership, measureScenarioRuns } from './metrics.mjs';
 import { decodeGoogleV2Request, GOOGLE_V2_ENDPOINT, mapGoogleV2Response } from './google-v2-fixture.mjs';
 import { CUSTOM_FIXTURE_ENDPOINT, decodeCustomRequest, mapCustomResponse } from './custom-fixture.mjs';
+import { decodeGeminiRequest, mapGeminiResponse } from './gemini-fixture.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
 import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, modeOrder, mapProviderBatchIds, parseProviderLane, providerLaneSettings, providerLaneFinalization, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
@@ -33,10 +34,10 @@ if (isolatedProbes.length && process.env.BENCH_SCENARIOS && process.env.BENCH_SC
   throw new TypeError('Cancellation and stale-success probes require BENCH_SCENARIOS=early-visible.');
 }
 const modes = providerLane ? ['sliced'] : isolatedProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
-const scenarios = isolatedProbes.length ? ['early-visible'] : parseScenarioSelection(['googlev2', 'custom'].includes(providerLane?.provider) ? process.env.BENCH_SCENARIOS ?? 'scroll-through' : process.env.BENCH_SCENARIOS ?? 'small');
+const scenarios = isolatedProbes.length ? ['early-visible'] : parseScenarioSelection(usesBandedProviderScroll(providerLane?.provider) ? process.env.BENCH_SCENARIOS ?? 'scroll-through' : process.env.BENCH_SCENARIOS ?? 'small');
 const scrollSchedulingMode = parseScrollSchedulingMode(process.env.BENCH_SCROLL_SCHEDULING);
 if (scenarios.includes('scroll-through') !== (scrollSchedulingMode !== null)) throw new TypeError('BENCH_SCENARIOS=scroll-through requires BENCH_SCROLL_SCHEDULING=fluid or on-stop, and scheduling is only valid with scroll-through.');
-if (['googlev2', 'custom'].includes(providerLane?.provider) && (scenarios.length !== 1 || scenarios[0] !== 'scroll-through')) throw new TypeError(`${providerLane.provider} provider lane requires the scroll-through workload.`);
+if (usesBandedProviderScroll(providerLane?.provider) && (scenarios.length !== 1 || scenarios[0] !== 'scroll-through')) throw new TypeError(`${providerLane.provider} provider lane requires the scroll-through workload.`);
 const samples = Number(process.env.BENCH_SAMPLES ?? 5);
 const warmups = Number(process.env.BENCH_WARMUPS ?? 1);
 const defaultArtifact = `/tmp/opencode/page-translation-${providerLane ? 'provider-' : ''}e2e-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}.json`;
@@ -51,6 +52,7 @@ const sourcePaths = [
   'src/features/translation/providers/MicrosoftEdgeProvider.js',
   'src/features/translation/providers/GoogleTranslateV2Provider.js',
   'src/features/translation/providers/CustomProvider.js',
+  'src/features/translation/providers/GoogleGemini.js',
   'src/features/translation/providers/utils/AIResponseParser.js',
   'src/features/translation/providers/ProviderManifest.js',
   'src/features/translation/core/ProviderConfigurations.js',
@@ -60,6 +62,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/metrics.mjs',
   'scripts/dev/page-translation/e2e-benchmark/google-v2-fixture.mjs',
   'scripts/dev/page-translation/e2e-benchmark/custom-fixture.mjs',
+  'scripts/dev/page-translation/e2e-benchmark/gemini-fixture.mjs',
   'scripts/dev/page-translation/e2e-benchmark/build.mjs',
   'scripts/dev/page-translation/e2e-benchmark/build-environment.mjs',
   'scripts/dev/page-translation/e2e-benchmark/chrome.mjs',
@@ -294,7 +297,7 @@ const harness = {
   provenance: {},
   settings,
   scenarios: scenarios.map(scenario => {
-    const fixture = createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) });
+    const fixture = createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) });
     return { scenario, targetCount: fixture.targetCount, visibleIds: fixture.visibleIds, viewport: fixture.viewport, scroll: fixture.scroll, responseDelayMs: fixture.responseDelayMs };
   }),
   fixtureWarmupSemantics: 'Each trial starts a fresh Chrome process/profile; warmups are discarded cold-profile runs, not persistent-process/JIT warmups.',
@@ -364,7 +367,7 @@ function validateHarnessBuildParity() {
   return parity;
 }
 
-async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, schedulingMode = null }) {
+async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, schedulingMode = null }) {
   const scenarioSettings = settingsForScenario(settings, fixtureConfig.scenario, schedulingMode);
   const trialSettings = providerLane ? providerLaneSettings(scenarioSettings, providerLane) : scenarioSettings;
   const trial = {
@@ -416,7 +419,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       try { url = new URL(params.request?.url); } catch { return; }
        if (!((url.origin === 'https://edge.microsoft.com' && url.pathname === '/translate/translatetext')
             || (url.origin === GOOGLE_V2_ENDPOINT.origin && url.pathname === GOOGLE_V2_ENDPOINT.pathname)
-            || (url.origin === CUSTOM_FIXTURE_ENDPOINT.origin && url.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname))) return;
+            || (url.origin === CUSTOM_FIXTURE_ENDPOINT.origin && url.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname)
+            || (url.origin === 'https://benchmark-gemini.invalid' && url.pathname === '/v1beta/models/benchmark-gemini-model:generateContent'))) return;
       entry = { sessionId, networkId: id, startedAt: Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null };
       providerNetworkEvents.set(key, entry);
     } else if (entry && event.method === 'Network.responseReceived') {
@@ -508,6 +512,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           }
           if (providerLane?.provider === 'googlev2' && !classification.provider) throw new Error('Unexpected non-Google endpoint for selected Google V2 lane.');
           if (providerLane?.provider === 'custom' && classification.provider !== 'custom') throw new Error('Unexpected non-Custom endpoint for selected Custom lane.');
+          if (providerLane?.provider === 'gemini' && classification.provider !== 'gemini') throw new Error('Unexpected non-Gemini endpoint for selected Gemini lane.');
         if (providerLane) {
           const networkId = event.params.networkId;
           requestRecord.networkId = networkId ?? null;
@@ -540,6 +545,15 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           requestRecord.batchIds = decoded.ids;
           requestRecord.batchTexts = body;
           responseBody = mapCustomResponse(decoded);
+        } else if (providerLane?.provider === 'gemini') {
+          const decoded = decodeGeminiRequest({
+            method: request.method, url: request.url, body: request.postData ?? '',
+            headers: request.headers ?? {}, expectedTexts: fixtureConfig.targetTexts,
+          });
+          body = decoded.texts;
+          requestRecord.batchIds = decoded.ids;
+          requestRecord.batchTexts = body;
+          responseBody = mapGeminiResponse(decoded);
         } else {
           body = JSON.parse(request.postData ?? 'null');
           responseBody = mapEdgeResponse(body);
@@ -3228,14 +3242,14 @@ try {
     validateHarnessBuildParity();
     await runNetworkGuardNegativeProbe(slicedOutput, 'sliced');
     for (const scenario of scenarios) {
-      const fixture = createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) });
+      const fixture = createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) });
       for (let ordinal = 1; ordinal <= warmups; ordinal++) {
         await runRecordedTrial({ mode: 'sliced', scenario, ordinal, phase: 'warmup', extensionPath: slicedOutput, fixtureConfig: fixture, schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null });
       }
     }
     for (const scenario of scenarios) for (let ordinal = 1; ordinal <= samples; ordinal++) {
       harness.plannedMeasuredOrder.push({ scenario, ordinal, modes: ['sliced'] });
-      await runRecordedTrial({ mode: 'sliced', scenario, ordinal, phase: 'measured', extensionPath: slicedOutput, fixtureConfig: createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) }), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null });
+      await runRecordedTrial({ mode: 'sliced', scenario, ordinal, phase: 'measured', extensionPath: slicedOutput, fixtureConfig: createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) }), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null });
     }
     harness.scenarioSummaries = {};
     for (const scenario of scenarios) {
@@ -3317,7 +3331,7 @@ try {
     harness.status = harness.successfulStaleReplyGate.passed ? 'passed' : 'failed';
   } else {
     harness.comparisonOrdering = 'Legacy warmups qualify first. Every selected mode then receives complete discarded warmups before measured rounds; measured mode order is a deterministic cyclic rotation of all selected modes by scenario index plus zero-based measured ordinal.';
-    const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) }), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null }));
+    const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) }), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null }));
     harness.schedulingMode = scrollSchedulingMode;
     const legacyOutput = await compileMode('legacy');
     const legacyRuns = [];
