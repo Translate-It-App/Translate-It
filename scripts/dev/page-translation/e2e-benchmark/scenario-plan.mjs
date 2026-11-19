@@ -1,3 +1,5 @@
+import { CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL } from './custom-fixture.mjs';
+
 export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'dynamic-dom', 'shadow-dom', 'spa-navigation', 'early-visible', 'in-window-visible', 'late-visible', 'scroll-through']);
 export const SCROLL_SCHEDULING_MODES = Object.freeze(['fluid', 'on-stop']);
 export const COMPARISON_MODES = Object.freeze(['sliced', 'viewport']);
@@ -15,7 +17,7 @@ export function parseProviderLane(env = {}) {
   if ((env.BENCH_LANE ?? 'discovery') !== 'provider') return null;
   const provider = env.BENCH_PROVIDER;
   if (!provider || !BENCH_PROVIDERS.includes(provider)) throw new TypeError(`Provider lane requires BENCH_PROVIDER to be one of: ${BENCH_PROVIDERS.join(', ')}.`);
-  if (!['edge', 'googlev2'].includes(provider)) throw new TypeError(`Provider lane adapter "${provider}" is not implemented; only edge and googlev2 are currently supported.`);
+  if (!['edge', 'googlev2', 'custom'].includes(provider)) throw new TypeError(`Provider lane adapter "${provider}" is not implemented; only edge, googlev2, and custom are currently supported.`);
   if (!['1', '3', '5'].includes(env.BENCH_OPTIMIZATION_LEVEL)) throw new TypeError('Provider lane requires BENCH_OPTIMIZATION_LEVEL=1, 3, or 5.');
   if (env.BENCH_MODES !== undefined && env.BENCH_MODES !== '' && env.BENCH_MODES.split(',').map(value => value.trim()).some(mode => mode !== 'sliced')) {
     throw new TypeError('Provider lane requires production-default sliced discovery; use BENCH_MODES=sliced or omit BENCH_MODES.');
@@ -24,7 +26,9 @@ export function parseProviderLane(env = {}) {
 }
 
 export function providerLaneSettings(settings, { provider, optimizationLevel }) {
-  return Object.freeze({ ...settings, TRANSLATION_API: provider, PROVIDER_OPTIMIZATION_LEVELS: { [provider]: optimizationLevel } });
+  return Object.freeze({ ...settings, TRANSLATION_API: provider, PROVIDER_OPTIMIZATION_LEVELS: { [provider]: optimizationLevel },
+    ...(provider === 'custom' ? { CUSTOM_API_URL: CUSTOM_FIXTURE_URL, CUSTOM_API_KEY: '', CUSTOM_API_MODEL: CUSTOM_FIXTURE_MODEL,
+      WHOLE_PAGE_TOKEN_WARNING_HIDDEN: true } : {}) });
 }
 
 export function pageTranslationStartMessage(provider = 'edge') {
@@ -39,7 +43,11 @@ export function validateProviderRuntime({ requestedProvider, requestedOptimizati
   if (!snapshot?.batching || !batchingExpectation || JSON.stringify(snapshot.batching) !== JSON.stringify(batchingExpectation)) issues.push('effective provider batching configuration mismatch');
   if (!Number.isFinite(snapshot?.maxConcurrent) || snapshot.maxConcurrent < 1) issues.push('effective scheduler concurrency unavailable');
   else if (Number.isFinite(snapshot.configuredMaxConcurrent) && snapshot.maxConcurrent !== snapshot.configuredMaxConcurrent) issues.push('effective scheduler concurrency mismatch');
-  if (requestedProvider === 'googlev2') {
+  if (requestedProvider === 'custom') {
+    const expected = { 1: 1, 3: 2, 5: 4 }[requestedOptimizationLevel];
+    if (!expected || snapshot?.batching?.characterLimit !== 5000) issues.push(`Custom characterLimit mismatch: expected 5000, got ${snapshot?.batching?.characterLimit ?? 'unavailable'}`);
+    if (snapshot?.maxConcurrent !== expected) issues.push(`Custom provider limiter mismatch: expected ${expected ?? 'unsupported'}, got ${snapshot?.maxConcurrent ?? 'unavailable'}`);
+  } else if (requestedProvider === 'googlev2') {
     const expected = { 1: { characterLimit: 7500, maxConcurrent: 1 }, 3: { characterLimit: 5000, maxConcurrent: 4 }, 5: { characterLimit: 3000, maxConcurrent: 8 } }[requestedOptimizationLevel];
     if (!expected || snapshot?.batching?.characterLimit !== expected.characterLimit) issues.push(`Google V2 characterLimit mismatch: expected ${expected?.characterLimit ?? 'unsupported'}, got ${snapshot?.batching?.characterLimit ?? 'unavailable'}`);
     if (snapshot?.maxConcurrent !== expected?.maxConcurrent) issues.push(`Google V2 provider limiter mismatch: expected ${expected?.maxConcurrent ?? 'unsupported'}, got ${snapshot?.maxConcurrent ?? 'unavailable'}`);
@@ -50,8 +58,9 @@ export function validateProviderRuntime({ requestedProvider, requestedOptimizati
 export function validateProviderSchedulerRuntime({ provider, optimizationLevel, providerRuntime, scheduler }) {
   const issues = [];
   const multipliers = { 1: 2, 2: 1.5, 3: 1, 4: 0.7, 5: 0.4 };
-  const expectedChunkSize = Math.max(Math.floor(25 * (multipliers[optimizationLevel] ?? 1)), 5);
-  const expectedMaxChars = providerRuntime?.batching?.characterLimit;
+  const expectedChunkSize = provider === 'custom' ? ({ 1: 50, 3: 25, 5: 10 }[optimizationLevel] ?? null)
+    : Math.max(Math.floor(25 * (multipliers[optimizationLevel] ?? 1)), 5);
+  const expectedMaxChars = provider === 'custom' ? 5000 : providerRuntime?.batching?.characterLimit;
   const expectedMaxConcurrentFlushes = provider === 'googlev2'
     ? Math.max(1, Math.min(4, Math.floor((providerRuntime?.maxConcurrent ?? 0) / 2)))
     : providerRuntime?.maxConcurrent;
@@ -61,17 +70,17 @@ export function validateProviderSchedulerRuntime({ provider, optimizationLevel, 
     if (scheduler.providerRegistryId !== provider) issues.push(`scheduler provider mismatch: expected ${provider}, got ${scheduler.providerRegistryId ?? 'unavailable'}`);
     if (scheduler.chunkSize !== expectedChunkSize) issues.push(`scheduler chunkSize mismatch: expected ${expectedChunkSize}, got ${scheduler.chunkSize ?? 'unavailable'}`);
     if (!Number.isFinite(expectedMaxChars) || scheduler.maxChars !== expectedMaxChars) issues.push(`scheduler maxChars mismatch: expected ${expectedMaxChars ?? 'unavailable'}, got ${scheduler.maxChars ?? 'unavailable'}`);
-    const parallelExecution = provider === 'googlev2' && optimizationLevel > 1;
+    const parallelExecution = provider === 'custom' || (provider === 'googlev2' && optimizationLevel > 1);
     if (scheduler.parallelExecution !== parallelExecution) issues.push(`scheduler parallelExecution mismatch: expected ${parallelExecution} for ${provider}, got ${String(scheduler.parallelExecution)}`);
     if (!Number.isFinite(expectedMaxConcurrentFlushes) || scheduler.maxConcurrentFlushes !== expectedMaxConcurrentFlushes) {
       issues.push(`scheduler maxConcurrentFlushes mismatch: expected ${expectedMaxConcurrentFlushes ?? 'unavailable'}, got ${scheduler.maxConcurrentFlushes ?? 'unavailable'}`);
     }
-    if (provider === 'googlev2' && scheduler.pageWorkerLimit !== pageWorkerLimit) issues.push(`scheduler pageWorkerLimit mismatch: expected ${pageWorkerLimit}, got ${scheduler.pageWorkerLimit ?? 'unavailable'}`);
+    if (['googlev2', 'custom'].includes(provider) && scheduler.pageWorkerLimit !== pageWorkerLimit) issues.push(`scheduler pageWorkerLimit mismatch: expected ${pageWorkerLimit}, got ${scheduler.pageWorkerLimit ?? 'unavailable'}`);
   }
   return { ok: issues.length === 0, provider, optimizationLevel, expected: {
     providerRegistryId: provider, chunkSize: expectedChunkSize, maxChars: expectedMaxChars,
-    parallelExecution: provider === 'googlev2' && optimizationLevel > 1,
-    maxConcurrentFlushes: expectedMaxConcurrentFlushes, ...(provider === 'googlev2' ? { pageWorkerLimit } : {}),
+    parallelExecution: provider === 'custom' || (provider === 'googlev2' && optimizationLevel > 1),
+    maxConcurrentFlushes: expectedMaxConcurrentFlushes, ...(['googlev2', 'custom'].includes(provider) ? { pageWorkerLimit } : {}),
   }, observed: scheduler ?? null, issues };
 }
 
@@ -203,6 +212,10 @@ export function scrollThroughPhases(googleV2) {
       ['revisit-band-2', 900, 1, 0], ['revisit-initial', 0, null, 0]];
 }
 
+export function usesBandedProviderScroll(provider) {
+  return ['googlev2', 'custom'].includes(provider);
+}
+
 export function validateProviderConcurrencyObservations({ provider, optimizationLevel, targetCount, logical, physical,
   pageWorkerLimit, providerLimiterCapacity }) {
   const issues = [];
@@ -212,14 +225,14 @@ export function validateProviderConcurrencyObservations({ provider, optimization
   if (!Number.isFinite(providerLimiterCapacity) || providerLimiterCapacity < 1) issues.push('observed provider limiter capacity unavailable');
   if (!Number.isFinite(physical?.peakPhysicalConcurrency) || physical.peakPhysicalConcurrency < 1) issues.push('observed physical HTTP concurrency unavailable');
   else if (physical?.peakPhysicalConcurrency > providerLimiterCapacity) issues.push(`observed physical HTTP concurrency exceeds provider limiter capacity: ${physical.peakPhysicalConcurrency}/${providerLimiterCapacity}`);
-  if (provider === 'googlev2') {
-    if (targetCount !== 1000) issues.push(`Google V2 concurrency demonstration requires 1000 targets, got ${targetCount ?? 'unavailable'}`);
+  if (['googlev2', 'custom'].includes(provider)) {
+    if (targetCount !== 1000) issues.push(`${provider} concurrency demonstration requires 1000 targets, got ${targetCount ?? 'unavailable'}`);
     const validLevel = [1, 3, 5].includes(optimizationLevel);
     if (!validLevel) issues.push(`unsupported Google V2 optimization level: ${optimizationLevel}`);
     const observedPeaks = [logical?.peakLogicalBatchConcurrency, physical?.peakPhysicalConcurrency];
     const expected = optimizationLevel === 1 ? 1 : 2;
     if (validLevel && observedPeaks.some(peak => optimizationLevel === 1 ? peak !== expected : !Number.isFinite(peak) || peak <= 1)) {
-      issues.push(`Google V2 observed concurrency mismatch for level ${optimizationLevel}: expected ${optimizationLevel === 1 ? 'serial peak 1' : 'overlap >1'}, got logical=${observedPeaks[0] ?? 'unavailable'}, physical=${observedPeaks[1] ?? 'unavailable'}`);
+      issues.push(`${provider} observed concurrency mismatch for level ${optimizationLevel}: expected ${optimizationLevel === 1 ? 'serial peak 1' : 'overlap >1'}, got logical=${observedPeaks[0] ?? 'unavailable'}, physical=${observedPeaks[1] ?? 'unavailable'}`);
     }
   }
   return { ok: issues.length === 0, issues, observed: { targetCount, pageWorkerLimit, providerLimiterCapacity,

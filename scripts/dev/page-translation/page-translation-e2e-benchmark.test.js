@@ -1,13 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
-import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, measureScenarioRuns, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
+import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, measureScenarioRuns, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
 import { decodeGoogleV2Request, GOOGLE_V2_DELIMITER, mapGoogleV2Response } from './e2e-benchmark/google-v2-fixture.mjs';
+import { CUSTOM_FIXTURE_ENDPOINT, CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL, decodeCustomRequest, mapCustomResponse } from './e2e-benchmark/custom-fixture.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
-import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases } from './e2e-benchmark/scenario-plan.mjs';
+import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
 import { registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 import { matchesAutoTranslateRule } from '../../../src/utils/ui/exclusion.js';
 import { registryIdToName } from '../../../src/features/translation/providers/ProviderConstants.js';
 import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
+import { AIResponseParser } from '../../../src/features/translation/providers/utils/AIResponseParser.js';
+import { ResponseFormat } from '../../../src/features/translation/core/ProviderConfigurations.js';
 
 describe('page translation benchmark measurements', () => {
   it('validates Edge and Google V2 lanes without changing legacy selection', () => {
@@ -33,6 +36,51 @@ describe('page translation benchmark measurements', () => {
     expect(providerLaneSettings({ TARGET_LANGUAGE: 'fr' }, google)).toMatchObject({ TRANSLATION_API: 'googlev2', PROVIDER_OPTIMIZATION_LEVELS: { googlev2: 5 } });
     expect(pageTranslationStartMessage(google.provider).data.provider).toBe('googlev2');
     expect(pageTranslationStartMessage()).toEqual({ action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' } });
+    const custom = parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'custom', BENCH_OPTIMIZATION_LEVEL: '3' });
+    expect(custom).toMatchObject({ provider: 'custom', optimizationLevel: 3, mode: 'sliced' });
+    expect(providerLaneSettings({}, custom)).toMatchObject({
+      TRANSLATION_API: 'custom', PROVIDER_OPTIMIZATION_LEVELS: { custom: 3 },
+      CUSTOM_API_URL: CUSTOM_FIXTURE_URL, CUSTOM_API_KEY: '', CUSTOM_API_MODEL: CUSTOM_FIXTURE_MODEL,
+      WHOLE_PAGE_TOKEN_WARNING_HIDDEN: true,
+    });
+    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'gemini', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('not implemented');
+  });
+
+  it('strictly decodes and reverses synthetic Custom requests while preserving production wire IDs', () => {
+    const expectedTexts = ['Benchmark target 1 has stable fixture content.', 'Benchmark target 2 has stable fixture content.'];
+    const request = {
+      method: 'POST', url: CUSTOM_FIXTURE_URL,
+      body: JSON.stringify({ model: CUSTOM_FIXTURE_MODEL, max_tokens: 4096, messages: [
+        { role: 'system', content: 'Translate.' },
+        { role: 'user', content: JSON.stringify({ translations: [
+          { id: '0', text: expectedTexts[0] }, { id: '1', text: expectedTexts[1] },
+        ] }) },
+      ] }),
+    };
+    const decoded = decodeCustomRequest({ ...request, expectedTexts });
+    expect(decoded).toEqual({ model: CUSTOM_FIXTURE_MODEL, ids: ['0', '1'], texts: expectedTexts });
+    expect(decodeCustomRequest({ ...request, expectedTexts, headers: { 'content-type': 'application/json' } })).toEqual(decoded);
+    expect(() => decodeCustomRequest({ ...request, url: `${CUSTOM_FIXTURE_URL}/extra`, expectedTexts })).toThrow('endpoint');
+    expect(() => decodeCustomRequest({ ...request, method: 'GET', expectedTexts })).toThrow('endpoint');
+    expect(() => decodeCustomRequest({ ...request, headers: { Authorization: 'Bearer secret' }, expectedTexts })).toThrow('Authorization');
+    for (const body of ['{', JSON.stringify({ model: CUSTOM_FIXTURE_MODEL, messages: [], max_tokens: 4096 }),
+      JSON.stringify({ model: CUSTOM_FIXTURE_MODEL, messages: [{ role: 'user', content: '{"translations":[{"id":"x","text":"unknown"}]}' }], max_tokens: 4096 })]) {
+      expect(() => decodeCustomRequest({ ...request, body, expectedTexts })).toThrow();
+    }
+    const response = mapCustomResponse(decoded);
+    const content = response.choices[0].message.content;
+    expect(JSON.parse(content).translations).toEqual([
+      { id: '1', text: `fixture translation: ${expectedTexts[1]}` },
+      { id: '0', text: `fixture translation: ${expectedTexts[0]}` },
+    ]);
+    expect(AIResponseParser.cleanAIResponse(content, ResponseFormat.JSON_OBJECT)).toEqual({
+      translations: [
+        { id: '1', text: `fixture translation: ${expectedTexts[1]}` },
+        { id: '0', text: `fixture translation: ${expectedTexts[0]}` },
+      ],
+    });
+    expect(AIResponseParser.parseBatchResult(content, 2, expectedTexts, 'Custom', ResponseFormat.JSON_OBJECT).results)
+      .toEqual(expectedTexts.map(text => `fixture translation: ${text}`));
   });
 
   it('decodes strict Google V2 form requests and creates parser-compatible single/multi-segment legacy responses', async () => {
@@ -107,6 +155,15 @@ describe('page translation benchmark measurements', () => {
       expect(validateProviderSchedulerRuntime({ provider: 'googlev2', optimizationLevel, providerRuntime: runtime, scheduler: { ...scheduler, pageWorkerLimit: pageWorkers + 1 } }).ok).toBe(false);
       expect(validateProviderRuntime({ requestedProvider: 'googlev2', requestedOptimizationLevel: optimizationLevel,
         snapshot: { ...runtime, batching: { characterLimit: characterLimit - 1 } } }).ok).toBe(false);
+    }
+    for (const [optimizationLevel, maxConcurrent, chunkSize] of [[1, 1, 50], [3, 2, 25], [5, 4, 10]]) {
+      const runtime = { provider: 'custom', optimizationLevel, batching: { characterLimit: 5000 }, expectedBatching: { characterLimit: 5000 }, maxConcurrent, configuredMaxConcurrent: maxConcurrent };
+      expect(registryIdToName('custom')).toBe('Custom');
+      expect(validateProviderRuntime({ requestedProvider: 'custom', requestedOptimizationLevel: optimizationLevel, snapshot: runtime }).ok).toBe(true);
+      const scheduler = { providerRegistryId: 'custom', chunkSize, maxChars: 5000, parallelExecution: true,
+        maxConcurrentFlushes: maxConcurrent, pageWorkerLimit: maxConcurrent };
+      expect(validateProviderSchedulerRuntime({ provider: 'custom', optimizationLevel, providerRuntime: runtime, scheduler }).ok).toBe(true);
+      expect(validateProviderSchedulerRuntime({ provider: 'custom', optimizationLevel, providerRuntime: runtime, scheduler: { ...scheduler, chunkSize: chunkSize + 1 } }).ok).toBe(false);
     }
   });
 
@@ -201,7 +258,11 @@ describe('page translation benchmark measurements', () => {
       .issues).toContain('SPA logical batch count mismatch for B: expected 0, got 1');
   });
 
-  it('retains the legacy discovery/Edge scroll choreography while isolating Google V2 band acceptance', () => {
+  it('retains legacy discovery/Edge scrolling and selects banded acceptance for 1000-target providers', () => {
+    expect(usesBandedProviderScroll('googlev2')).toBe(true);
+    expect(usesBandedProviderScroll('custom')).toBe(true);
+    expect(usesBandedProviderScroll('edge')).toBe(false);
+    expect(usesBandedProviderScroll(undefined)).toBe(false);
     expect(scrollThroughPhases(false)).toEqual([
       ['burst-band-2', 900, null, 0], ['burst-band-3', 2000, null, 150],
       ['settled-band-3', 2000, null, 750], ['revisit-band-2', 900, 1, 0], ['revisit-initial', 0, null, 0],
@@ -237,6 +298,22 @@ describe('page translation benchmark measurements', () => {
       provider: 'googlev2', optimizationLevel: 5, targetCount: 999,
       logical: { peakLogicalBatchConcurrency: 2 }, physical: { peakPhysicalConcurrency: 2 },
       pageWorkerLimit: 4, providerLimiterCapacity: 8,
+    }).ok).toBe(false);
+    for (const [optimizationLevel, peak, cap] of [[1, 1, 1], [3, 2, 2], [5, 3, 4]]) {
+      const physical = summarizePhysicalProviderAttempts(Array.from({ length: peak }, (_, index) => ({
+        attemptId: `custom-${index}`, networkSessionId: 'custom-session', networkId: `custom-${index}`,
+        startedAt: index, settledAt: peak + index, status: 200, outcome: 'finished',
+      })));
+      expect(validateProviderConcurrencyObservations({
+        provider: 'custom', optimizationLevel, targetCount: 1000,
+        logical: { peakLogicalBatchConcurrency: peak }, physical,
+        pageWorkerLimit: cap, providerLimiterCapacity: cap,
+      }).ok).toBe(true);
+    }
+    expect(validateProviderConcurrencyObservations({
+      provider: 'custom', optimizationLevel: 3, targetCount: 1000,
+      logical: { peakLogicalBatchConcurrency: 1 }, physical: { peakPhysicalConcurrency: 1 },
+      pageWorkerLimit: 2, providerLimiterCapacity: 2,
     }).ok).toBe(false);
   });
 
@@ -659,12 +736,31 @@ describe('page translation benchmark measurements', () => {
     expect(classifyTransportRequest(edgeRequest).kind).toBe('provider-translation');
     expect(classifyTransportRequest(edgeRequest, { selectedProvider: 'edge' }).kind).toBe('provider-translation');
     expect(classifyTransportRequest(edgeRequest, { selectedProvider: 'googlev2' })).toMatchObject({ kind: 'blocked' });
+    const customRequest = { method: 'POST', url: CUSTOM_FIXTURE_URL };
+    expect(classifyTransportRequest(customRequest).kind).toBe('blocked');
+    expect(classifyTransportRequest(customRequest, {}).kind).toBe('blocked');
+    expect(classifyTransportRequest(customRequest, { selectedProvider: 'custom' })).toMatchObject({ kind: 'provider-translation', provider: 'custom' });
+    expect(classifyTransportRequest(customRequest, { selectedProvider: 'edge' }).kind).toBe('blocked');
+    expect(classifyTransportRequest({ ...customRequest, url: `${CUSTOM_FIXTURE_URL}/extra` }, { selectedProvider: 'custom' }).kind).toBe('blocked');
+    expect(classifyTransportRequest({ ...customRequest, url: `${CUSTOM_FIXTURE_URL}?unexpected=1` }, { selectedProvider: 'custom' }).kind).toBe('blocked');
+    expect(classifyTransportRequest({ ...customRequest, method: 'GET' }, { selectedProvider: 'custom' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'GET', url: 'https://translate.google.com/translate_a/single' }, { selectedProvider: 'googlev2' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'POST', url: 'https://translate.google.com/translate_a/single/extra' }, { selectedProvider: 'googlev2' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'GET', url: 'http://127.0.0.1:1234/' }, { fixtureOrigin: 'http://127.0.0.1:1234' }).kind).toBe('local');
     expect(classifyTransportRequest({ method: 'GET', url: 'http://127.0.0.1:1234/other' }, { fixtureOrigin: 'http://127.0.0.1:4321' }).kind).toBe('blocked');
     expect(classifyTransportRequest({ method: 'GET', url: 'chrome-extension://fixture-id/chunks/asset.js' }, { extensionOrigin: 'chrome-extension://fixture-id' }).kind).toBe('local');
     expect(classifyTransportRequest({ method: 'GET', url: 'chrome-extension://invalid/' }, { extensionOrigin: 'chrome-extension://fixture-id' }).kind).toBe('invalid-extension-placeholder');
+  });
+
+  it('records fixture target IDs separately from Custom parser wire IDs in HTTP sequence order', () => {
+    const sourceToId = new Map([['text A', 'target-A'], ['text B', 'target-B']]);
+    const attempts = [{ startedAt: 12, batchTexts: ['text B', 'text A'], batchIds: ['0', '1'], bodyBytes: 42 }];
+    expect(mapProviderHTTPRequestSequence(attempts, sourceToId, 'custom')).toEqual([
+      { at: 12, ids: ['target-B', 'target-A'], wireIds: ['0', '1'], bodyBytes: 42 },
+    ]);
+    expect(mapProviderHTTPRequestSequence(attempts, sourceToId, 'edge')).toEqual([
+      { at: 12, ids: ['target-B', 'target-A'], bodyBytes: 42 },
+    ]);
   });
 
   it('keeps default 12-target scroll fixture intact and enables a 1000-target provider variant in three scroll bands', () => {

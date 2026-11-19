@@ -9,11 +9,12 @@ import { buildBenchmarkExtension } from './build.mjs';
 import { validateBuildParity } from './build-environment.mjs';
 import { launchChrome } from './chrome.mjs';
 import { writeBenchmarkArtifact } from './artifact-writer.mjs';
-import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership, measureScenarioRuns } from './metrics.mjs';
+import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership, measureScenarioRuns } from './metrics.mjs';
 import { decodeGoogleV2Request, GOOGLE_V2_ENDPOINT, mapGoogleV2Response } from './google-v2-fixture.mjs';
+import { CUSTOM_FIXTURE_ENDPOINT, decodeCustomRequest, mapCustomResponse } from './custom-fixture.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
-import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, modeOrder, mapProviderBatchIds, parseProviderLane, providerLaneSettings, providerLaneFinalization, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases } from './scenario-plan.mjs';
+import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, modeOrder, mapProviderBatchIds, parseProviderLane, providerLaneSettings, providerLaneFinalization, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
 
@@ -32,10 +33,10 @@ if (isolatedProbes.length && process.env.BENCH_SCENARIOS && process.env.BENCH_SC
   throw new TypeError('Cancellation and stale-success probes require BENCH_SCENARIOS=early-visible.');
 }
 const modes = providerLane ? ['sliced'] : isolatedProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
-const scenarios = isolatedProbes.length ? ['early-visible'] : parseScenarioSelection(providerLane?.provider === 'googlev2' ? process.env.BENCH_SCENARIOS ?? 'scroll-through' : process.env.BENCH_SCENARIOS ?? 'small');
+const scenarios = isolatedProbes.length ? ['early-visible'] : parseScenarioSelection(['googlev2', 'custom'].includes(providerLane?.provider) ? process.env.BENCH_SCENARIOS ?? 'scroll-through' : process.env.BENCH_SCENARIOS ?? 'small');
 const scrollSchedulingMode = parseScrollSchedulingMode(process.env.BENCH_SCROLL_SCHEDULING);
 if (scenarios.includes('scroll-through') !== (scrollSchedulingMode !== null)) throw new TypeError('BENCH_SCENARIOS=scroll-through requires BENCH_SCROLL_SCHEDULING=fluid or on-stop, and scheduling is only valid with scroll-through.');
-if (providerLane?.provider === 'googlev2' && (scenarios.length !== 1 || scenarios[0] !== 'scroll-through')) throw new TypeError('Google V2 provider lane requires the scroll-through workload.');
+if (['googlev2', 'custom'].includes(providerLane?.provider) && (scenarios.length !== 1 || scenarios[0] !== 'scroll-through')) throw new TypeError(`${providerLane.provider} provider lane requires the scroll-through workload.`);
 const samples = Number(process.env.BENCH_SAMPLES ?? 5);
 const warmups = Number(process.env.BENCH_WARMUPS ?? 1);
 const defaultArtifact = `/tmp/opencode/page-translation-${providerLane ? 'provider-' : ''}e2e-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}.json`;
@@ -49,6 +50,8 @@ const sourcePaths = [
   'src/features/page-translation/PageTranslationConstants.js',
   'src/features/translation/providers/MicrosoftEdgeProvider.js',
   'src/features/translation/providers/GoogleTranslateV2Provider.js',
+  'src/features/translation/providers/CustomProvider.js',
+  'src/features/translation/providers/utils/AIResponseParser.js',
   'src/features/translation/providers/ProviderManifest.js',
   'src/features/translation/core/ProviderConfigurations.js',
   'src/core/services/translation/UnifiedTranslationService.js',
@@ -56,6 +59,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/fixture.mjs',
   'scripts/dev/page-translation/e2e-benchmark/metrics.mjs',
   'scripts/dev/page-translation/e2e-benchmark/google-v2-fixture.mjs',
+  'scripts/dev/page-translation/e2e-benchmark/custom-fixture.mjs',
   'scripts/dev/page-translation/e2e-benchmark/build.mjs',
   'scripts/dev/page-translation/e2e-benchmark/build-environment.mjs',
   'scripts/dev/page-translation/e2e-benchmark/chrome.mjs',
@@ -290,7 +294,7 @@ const harness = {
   provenance: {},
   settings,
   scenarios: scenarios.map(scenario => {
-    const fixture = createFixture(scenario, { providerLane: providerLane?.provider === 'googlev2' });
+    const fixture = createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) });
     return { scenario, targetCount: fixture.targetCount, visibleIds: fixture.visibleIds, viewport: fixture.viewport, scroll: fixture.scroll, responseDelayMs: fixture.responseDelayMs };
   }),
   fixtureWarmupSemantics: 'Each trial starts a fresh Chrome process/profile; warmups are discarded cold-profile runs, not persistent-process/JIT warmups.',
@@ -360,7 +364,7 @@ function validateHarnessBuildParity() {
   return parity;
 }
 
-async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario, { providerLane: providerLane?.provider === 'googlev2' }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, schedulingMode = null }) {
+async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, schedulingMode = null }) {
   const scenarioSettings = settingsForScenario(settings, fixtureConfig.scenario, schedulingMode);
   const trialSettings = providerLane ? providerLaneSettings(scenarioSettings, providerLane) : scenarioSettings;
   const trial = {
@@ -411,7 +415,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       let url;
       try { url = new URL(params.request?.url); } catch { return; }
        if (!((url.origin === 'https://edge.microsoft.com' && url.pathname === '/translate/translatetext')
-           || (url.origin === GOOGLE_V2_ENDPOINT.origin && url.pathname === GOOGLE_V2_ENDPOINT.pathname))) return;
+            || (url.origin === GOOGLE_V2_ENDPOINT.origin && url.pathname === GOOGLE_V2_ENDPOINT.pathname)
+            || (url.origin === CUSTOM_FIXTURE_ENDPOINT.origin && url.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname))) return;
       entry = { sessionId, networkId: id, startedAt: Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null };
       providerNetworkEvents.set(key, entry);
     } else if (entry && event.method === 'Network.responseReceived') {
@@ -502,6 +507,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
             throw new Error(`Unexpected provider endpoint for selected ${providerLane.provider} lane.`);
           }
           if (providerLane?.provider === 'googlev2' && !classification.provider) throw new Error('Unexpected non-Google endpoint for selected Google V2 lane.');
+          if (providerLane?.provider === 'custom' && classification.provider !== 'custom') throw new Error('Unexpected non-Custom endpoint for selected Custom lane.');
         if (providerLane) {
           const networkId = event.params.networkId;
           requestRecord.networkId = networkId ?? null;
@@ -525,6 +531,15 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           requestRecord.sourceLanguageQuery = decoded.sourceLanguage;
           requestRecord.batchTexts = body;
           responseBody = mapGoogleV2Response(body);
+        } else if (providerLane?.provider === 'custom') {
+          const decoded = decodeCustomRequest({
+            method: request.method, url: request.url, body: request.postData ?? '',
+            headers: request.headers ?? {}, expectedTexts: fixtureConfig.targetTexts,
+          });
+          body = decoded.texts;
+          requestRecord.batchIds = decoded.ids;
+          requestRecord.batchTexts = body;
+          responseBody = mapCustomResponse(decoded);
         } else {
           body = JSON.parse(request.postData ?? 'null');
           responseBody = mapEdgeResponse(body);
@@ -1051,13 +1066,13 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         return initialIds.every(id => state?.acceptedIds.includes(id)) ? state : null;
       }, 60_000), bandAcceptance: [] };
       const phases = [];
-      const googleV2 = providerLane?.provider === 'googlev2';
-      for (const [label, y, bandIndex, waitBeforeMs] of scrollThroughPhases(googleV2)) {
+      const bandedProviderLane = usesBandedProviderScroll(providerLane?.provider);
+      for (const [label, y, bandIndex, waitBeforeMs] of scrollThroughPhases(bandedProviderLane)) {
         if (waitBeforeMs) await new Promise(resolve => setTimeout(resolve, waitBeforeMs));
         const phase = await evaluate(chrome, pageSession,
           `(()=>new Promise(resolve=>{const done=()=>{requestAnimationFrame(()=>{requestAnimationFrame(()=>{const visible=[...document.querySelectorAll('[data-bench-id]')].filter(el=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth}).map(el=>el.dataset.benchId);resolve({x:scrollX,y:scrollY,visibleIds:visible,at:performance.now(),scheduler:window.__pageTranslationBenchmark.pageSessionSnapshot()})})})};addEventListener('scroll',done,{once:true});window.scrollTo(0,${y});if(scrollY===${y})done()}))()`, contentContext);
         if (phase.y !== y) throw new Error(`Native scroll did not reach requested ${label} offset: ${phase.y}/${y}`);
-        if (googleV2 && bandIndex !== null) {
+        if (bandedProviderLane && bandIndex !== null) {
           const band = fixtureConfig.scrollBands[bandIndex];
           const visibleValidation = validateExactTargetIds(`${label} visible target`, phase.visibleIds, band.ids);
           if (!visibleValidation.ok) throw new Error(`Native scroll did not expose the complete ${label}: ${visibleValidation.issues.join('; ')}`);
@@ -1068,7 +1083,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           trial.scrollThrough.bandAcceptance.push({ band: band.band, targetCount: band.ids.length, acceptedIds: band.ids,
             acceptedCount: accepted.acceptedIds.length, acceptedAtById: Object.fromEntries(band.ids.map(id => [id, accepted.acceptedPerformanceAtById?.[id] ?? null])) });
         }
-        if (!googleV2 && label === 'revisit-band-2') {
+        if (!bandedProviderLane && label === 'revisit-band-2') {
           await new Promise(resolve => setTimeout(resolve, 750));
           const band = fixtureConfig.scrollBands[1];
           const accepted = await until(async () => {
@@ -1080,8 +1095,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         }
         phases.push({ label, ...phase });
       }
-      trial.scrollThrough = { ...trial.scrollThrough, phases, method: googleV2
-        ? 'window.scrollTo with native scroll events and animation-frame settling; each visited band must be visible and exactly accepted before the next native scroll; no scheduler signals or synthetic events'
+      trial.scrollThrough = { ...trial.scrollThrough, phases, method: bandedProviderLane
+        ? 'window.scrollTo with native scroll events and animation-frame settling; each 1000-target provider-lane band must be visible and exactly accepted before the next native scroll; no scheduler signals or synthetic events'
         : 'window.scrollTo with native scroll events and animation-frame settling; discovery/Edge burst and settled checkpoints preserve the legacy sequence; no scheduler signals or synthetic events' };
     }
 
@@ -2817,10 +2832,13 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const providerOrderValidation = validateExactTargetIds('provider request source', providerRequestIds, expectedIds);
     if (!providerOrderValidation.ok) throw new Error(providerOrderValidation.issues.join('; '));
     trial.providerRequestOrderValidation = providerOrderValidation;
-    trial.providerHTTPRequestSequence = providerAttempts.map(request => ({ at: request.startedAt, ids: (request.batchTexts ?? []).map(source => sourceToId.get(source) ?? null), bodyBytes: request.bodyBytes }));
+    trial.providerHTTPRequestSequence = mapProviderHTTPRequestSequence(providerAttempts, sourceToId, providerLane?.provider);
     if (providerLane) {
       trial.providerLogicalBatches = summarizeLogicalProviderBatches(contentObservation.logicalBatchIntervals, trial.sessionId);
       if (!trial.providerLogicalBatches.ok) throw new Error(trial.providerLogicalBatches.issues.join('; '));
+      if (providerLane.provider === 'custom' && providerAttempts.length !== trial.providerLogicalBatches.logicalBatchCount) {
+        throw new Error(`Custom physical request count must equal logical batch count (no retries/recovery): ${providerAttempts.length}/${trial.providerLogicalBatches.logicalBatchCount}`);
+      }
       trial.providerHTTPAttempts = providerAttempts.map(request => ({
         attemptId: request.physicalAttemptId ?? null, targetSessionId: request.targetSessionId,
         networkId: request.networkId ?? null, startedAt: request.physicalAttempt?.startedAt ?? null,
@@ -3210,14 +3228,14 @@ try {
     validateHarnessBuildParity();
     await runNetworkGuardNegativeProbe(slicedOutput, 'sliced');
     for (const scenario of scenarios) {
-      const fixture = createFixture(scenario, { providerLane: providerLane?.provider === 'googlev2' });
+      const fixture = createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) });
       for (let ordinal = 1; ordinal <= warmups; ordinal++) {
         await runRecordedTrial({ mode: 'sliced', scenario, ordinal, phase: 'warmup', extensionPath: slicedOutput, fixtureConfig: fixture, schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null });
       }
     }
     for (const scenario of scenarios) for (let ordinal = 1; ordinal <= samples; ordinal++) {
       harness.plannedMeasuredOrder.push({ scenario, ordinal, modes: ['sliced'] });
-      await runRecordedTrial({ mode: 'sliced', scenario, ordinal, phase: 'measured', extensionPath: slicedOutput, fixtureConfig: createFixture(scenario, { providerLane: providerLane?.provider === 'googlev2' }), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null });
+      await runRecordedTrial({ mode: 'sliced', scenario, ordinal, phase: 'measured', extensionPath: slicedOutput, fixtureConfig: createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) }), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null });
     }
     harness.scenarioSummaries = {};
     for (const scenario of scenarios) {
@@ -3299,7 +3317,7 @@ try {
     harness.status = harness.successfulStaleReplyGate.passed ? 'passed' : 'failed';
   } else {
     harness.comparisonOrdering = 'Legacy warmups qualify first. Every selected mode then receives complete discarded warmups before measured rounds; measured mode order is a deterministic cyclic rotation of all selected modes by scenario index plus zero-based measured ordinal.';
-    const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario, { providerLane: providerLane?.provider === 'googlev2' }), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null }));
+    const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario, { providerLane: ['googlev2', 'custom'].includes(providerLane?.provider) }), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null }));
     harness.schedulingMode = scrollSchedulingMode;
     const legacyOutput = await compileMode('legacy');
     const legacyRuns = [];

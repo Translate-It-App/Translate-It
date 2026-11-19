@@ -1,4 +1,5 @@
 import { GOOGLE_V2_ENDPOINT } from './google-v2-fixture.mjs';
+import { CUSTOM_FIXTURE_ENDPOINT } from './custom-fixture.mjs';
 
 export function measureScenarioRuns(results, scenario, mode, measureMode) {
   return measureMode(results.filter(run => run.scenario === scenario && run.mode === mode && run.phase === 'measured'));
@@ -148,6 +149,12 @@ export function classifyTransportRequest({ method, url }, { fixtureOrigin, exten
     if (selectedProvider && selectedProvider !== 'edge') return { kind: 'blocked', reason: `unexpected Edge endpoint for selected ${selectedProvider} provider` };
     return method === 'POST' ? { kind: 'provider-translation' } : { kind: 'blocked', reason: `unexpected Edge method: ${method}` };
   }
+  if (parsed.origin === CUSTOM_FIXTURE_ENDPOINT.origin && parsed.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname
+      && !parsed.username && !parsed.password && !parsed.port && !parsed.search && !parsed.hash) {
+    if (selectedProvider !== 'custom') return { kind: 'blocked', reason: `unexpected Custom endpoint for selected ${selectedProvider ?? 'unspecified'} provider` };
+    return method === CUSTOM_FIXTURE_ENDPOINT.method ? { kind: 'provider-translation', provider: 'custom' }
+      : { kind: 'blocked', reason: `unexpected Custom method: ${method}` };
+  }
   if (selectedProvider === 'googlev2' && parsed.origin === GOOGLE_V2_ENDPOINT.origin && parsed.pathname === GOOGLE_V2_ENDPOINT.pathname) {
     return method === GOOGLE_V2_ENDPOINT.method ? { kind: 'provider-translation', provider: 'googlev2' }
       : { kind: 'blocked', reason: `unexpected Google V2 method: ${method}` };
@@ -162,6 +169,15 @@ export function classifyTransportRequest({ method, url }, { fixtureOrigin, exten
   const resourceOrigin = parsed.protocol === 'chrome-extension:' ? `chrome-extension://${parsed.host}` : parsed.origin;
   if (extensionOrigin && resourceOrigin === extensionOrigin && parsed.protocol === 'chrome-extension:' && method === 'GET') return { kind: 'local' };
   return { kind: 'blocked', reason: `unexpected external URL: ${url}` };
+}
+
+export function mapProviderHTTPRequestSequence(providerAttempts, sourceToId, provider) {
+  return providerAttempts.map(request => ({
+    at: request.startedAt,
+    ids: (request.batchTexts ?? []).map(source => sourceToId.get(source) ?? null),
+    ...(provider === 'custom' && request.batchIds !== undefined ? { wireIds: request.batchIds } : {}),
+    bodyBytes: request.bodyBytes,
+  }));
 }
 
 export function validateRunGate(options = {}) {

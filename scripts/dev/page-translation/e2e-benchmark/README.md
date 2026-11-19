@@ -15,7 +15,7 @@ BENCH_MODES=legacy,sliced,viewport BENCH_SCENARIOS=small,early-visible,in-window
 
 `BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `dynamic-dom`, `shadow-dom`, `spa-navigation`, `early-visible`, `in-window-visible`, `late-visible`, and `scroll-through`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
 
-## Opt-in Edge and Google V2 provider lanes (Issue #432)
+## Opt-in Edge, Google V2, and Custom provider lanes (Issue #432)
 
 ```sh
 BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 \
@@ -24,7 +24,7 @@ BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 \
   pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
 ```
 
-The lane supports only Edge and Google V2, requires an explicit optimization level (`1`, `3`, or `5`), and forces production-default Sliced discovery. Custom and Gemini remain rejected; if `BENCH_MODES` is set it must be `sliced`. Google V2 runs require the scroll-through fixture and one scheduling mode. The default/discovery and Edge scroll-through remain 12 targets and preserve the original burst/settled scroll sequence. Only Google V2 uses 1,000 unique targets in three bands (334/333/333), spaced 1px apart so each entire band is safely inside the viewport at the runner's existing native scroll offsets; it verifies exact visible membership and waits for each band's exact accepted-write set before scrolling onward.
+The lane requires an explicit optimization level (`1`, `3`, or `5`) and forces production-default Sliced discovery. If `BENCH_MODES` is set it must be `sliced`. Google V2 and Custom runs require the scroll-through fixture and one scheduling mode. The default/discovery and Edge scroll-through remain 12 targets and preserve the original burst/settled scroll sequence. Google V2 and Custom use 1,000 unique targets in three bands (334/333/333), spaced 1px apart so each entire band is safely inside the viewport at the runner's existing native scroll offsets; they verify exact visible membership and wait for each band's exact accepted-write set before scrolling onward.
 
 For the six-run Google V2 matrix (optimization levels 1/3/5 × `fluid`/`on-stop`), run once per row with 3 measured trials plus 1 discarded warmup:
 
@@ -41,6 +41,27 @@ done
 ```
 
 This is the minimal matrix spanning all requested optimizer levels and both scroll scheduling modes, with one representative 1,000-target scenario rather than multiplying fixture variants. Provider artifacts persist `scenarioSummaries[scenario].sliced`, aggregated from measured trials only; warmups are excluded. Synthetic Fetch interception returns deterministic parser-compatible legacy Google arrays; it does not contact Google or measure live provider latency/quality. Google V2's configured endpoint is exactly `https://translate.google.com/translate_a/single` POST. The actual `sl` query is recorded per request and is not overridden: the Page AUTO resolver may choose a source code such as `nl` even for this English-language fixture. The fixture's deterministic response metadata reports detected language `en`; this is synthetic parser metadata, separate from and not evidence of the request's `sl` value. Reports record observed provider optimizer/rate-limiter capacity, scheduler chunk/maxChars/parallel execution and Page worker limit, logical batch intervals/sizes/peak overlap, and separately correlated physical HTTP count/peak overlap, each request's latency and terminal settlement, first accepted translation, and total completion. Logical batches are not assumed to map 1:1 to HTTP requests, nor are configured limits presented as observed physical parallelism. With fewer than 40 valid samples, p95 remains unavailable.
+
+### Custom provider offline matrix
+
+This opt-in lane exercises the production `CustomProvider` and parser through the real scheduler and provider pipeline. The harness intercepts the exact synthetic `https://benchmark-custom.invalid/v1/chat/completions` POST only when `BENCH_PROVIDER=custom` selects this lane; requests to that endpoint are blocked in discovery runs and other provider lanes. The fixed model is `benchmark-custom-model`; the harness sets `CUSTOM_API_KEY` blank, rejects Authorization headers, validates the actual JSON request, and returns reversed structured translations with the exact wire IDs. No credentials or live provider traffic are used. HTTP sequence `ids` are fixture target IDs mapped from request texts; Custom parser wire IDs are recorded separately as `wireIds`. Each successful trial requires one HTTP request per observed logical batch, exact source and DOM accounting, and correlated terminal network outcomes; retries or structured-recovery requests fail the trial.
+
+Run each of the six level/scheduling combinations:
+
+```sh
+set -e
+for level in 1 3 5; do
+  for scheduling in fluid on-stop; do
+    BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL="$level" \
+      BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING="$scheduling" \
+      BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+      BENCH_OUTPUT="/tmp/opencode/custom-level-${level}-${scheduling}.json" \
+      pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+  done
+done
+```
+
+The expected Custom configuration is independently checked against observed runtime values: 5,000-character batching, provider concurrency 1/2/4, and Page chunk sizes 50/25/10 with parallel execution and worker/flush limits 1/2/4. Level 1 is expected to remain serial; levels 3 and 5 must exhibit overlapping logical and physical work. Three measured trials plus one discarded warmup are not enough to report p95. Browser scheduling, CDP interception, the fixed 50ms fixture response delay, 1,000-target fixture geometry, and instrumentation contribute overhead; these offline results do not characterize real provider latency, quality, service limits, or network behavior.
 
 ## Opt-in lazy scroll-through scheduling
 
