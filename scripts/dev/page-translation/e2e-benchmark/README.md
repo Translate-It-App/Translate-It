@@ -11,9 +11,17 @@ BENCH_MODES=legacy,sliced,viewport BENCH_SCENARIOS=small,early-visible,in-window
   pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
 ```
 
-`BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `dynamic-dom`, `early-visible`, `in-window-visible`, and `late-visible`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
+`BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `dynamic-dom`, `spa-navigation`, `early-visible`, `in-window-visible`, and `late-visible`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
 
-The opt-in `dynamic-dom` fixture keeps the same 12-target initial page, enables production `WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES` only for that scenario, and inserts two deterministic three-target cohorts into the active session. Cohort one is inserted while the initial session is translating; cohort two is registered and inserted only after all 12 initial targets have both accepted settlements and accepted DOM writes. The report retains each cohort's raw IDs/timestamps and insertion-to-first/all accepted-write intervals. Static scenarios retain the existing setting (`false`) and fixture.
+The opt-in `dynamic-dom` fixture keeps the same 12-target initial page, enables production `WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES` only for that scenario, and inserts two deterministic three-target cohorts into the active session. Cohort one is inserted while the initial session is translating; cohort two is registered and inserted only after all 12 initial targets have both accepted settlements and accepted DOM writes. The report retains each cohort's raw IDs/timestamps and insertion-to-first/all accepted-write intervals. Static scenarios retain the existing setting (`false`) and fixture. The opt-in `spa-navigation` selection exposes a native `history.pushState` control and an exact local `/replacement` auto-rule (route A is not auto-started); its B-source mutation is gated on the real production invalidation callback.
+
+`spa-navigation` uses the 12-target mixed text/title fixture and fully translates route A before navigation, then verifies production cursor progression, invalidation-gated source changes, automatic route-B session ownership, retained-node reuse, changed-target-only provider work, same-document `performance.now()` navigation latencies, and exact route-specific Restore of text and title attributes. It never holds provider responses or runs pending/stale-result probes. Run it with the static and dynamic regressions:
+
+```sh
+BENCH_MODES=legacy,sliced BENCH_SCENARIOS=small,dynamic-dom,spa-navigation BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+  BENCH_OUTPUT=/tmp/opencode/page-translation-spa-navigation-smoke.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
 
 ```sh
 BENCH_MODES=sliced BENCH_SCENARIOS=dynamic-dom BENCH_SAMPLES=3 BENCH_WARMUPS=1 \

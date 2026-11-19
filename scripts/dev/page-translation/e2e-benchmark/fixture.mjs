@@ -10,13 +10,13 @@ const largeTargetCount = 1000;
 const visibleTargetIndexes = [500, 501, 502, 503];
 
 export function createFixture(scenario = 'small') {
-  if (scenario !== 'small' && scenario !== 'dynamic-dom' && !largeScenarios.has(scenario)) throw new TypeError(`Unknown benchmark fixture scenario: ${scenario}`);
+  if (scenario !== 'small' && scenario !== 'dynamic-dom' && scenario !== 'spa-navigation' && !largeScenarios.has(scenario)) throw new TypeError(`Unknown benchmark fixture scenario: ${scenario}`);
 
-  const texts = scenario === 'small' || scenario === 'dynamic-dom'
+  const texts = scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation'
     ? targetTexts
     : Array.from({ length: largeTargetCount }, (_, index) => `Benchmark target ${String(index + 1).padStart(4, '0')} has stable fixture content.`);
   const count = texts.length;
-  const visibleIndexes = scenario === 'small' || scenario === 'dynamic-dom' ? texts.map((_, index) => index) : visibleTargetIndexes;
+  const visibleIndexes = scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' ? texts.map((_, index) => index) : visibleTargetIndexes;
   let indexes = texts.map((_, index) => index);
   if (scenario === 'early-visible') indexes = [...visibleIndexes, ...indexes.filter(index => !visibleIndexes.includes(index))];
   if (scenario === 'in-window-visible') indexes = [0, 1, ...visibleIndexes, ...indexes.filter(index => index > 1 && !visibleIndexes.includes(index))];
@@ -25,15 +25,29 @@ export function createFixture(scenario = 'small') {
     id: `target-${index}`,
     source: texts[index],
     visible: visibleIndexes.includes(index),
+    ...(scenario === 'spa-navigation' ? { kind: index < 6 ? 'text' : 'title' } : {}),
   }));
   const htmlTargets = targets.map(target => {
     const targetIndex = Number(target.id.slice(7));
-    const position = scenario === 'small' || scenario === 'dynamic-dom'
+    const position = scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation'
       ? ''
       : `position:absolute;left:20px;top:${target.visible ? 20 + visibleIndexes.indexOf(targetIndex) * 30 : 2000 + targetIndex * 30}px;width:900px;height:24px;`;
-    return `<p data-bench-id="${target.id}"${position ? ` style="${position}"` : ''}>${target.source}</p>`;
+    const style = [position, target.kind === 'title' ? 'min-height:1px;' : ''].filter(Boolean).join('');
+    return target.kind === 'title'
+      ? `<p data-bench-id="${target.id}" data-bench-kind="title"${style ? ` style="${style}"` : ''} title="${target.source}"></p>`
+      : `<p data-bench-id="${target.id}"${target.kind ? ' data-bench-kind="text"' : ''}${style ? ` style="${style}"` : ''}>${target.source}</p>`;
   }).join('');
-  const html = `<!doctype html><meta charset="utf-8"><title>Page translation benchmark</title><main${scenario === 'small' || scenario === 'dynamic-dom' ? '' : ' style="position:relative;min-height:12000px"'}>${htmlTargets}</main>`;
+  const spaControl = scenario === 'spa-navigation' ? `<button id="spa-navigation-control" type="button" translate="no">Navigate</button><script>
+  const bSources = ${JSON.stringify(targetTexts.map((_, index) => `SPA route B sentence ${index + 1} has distinct stable content.`))};
+  let changed = false;
+  document.addEventListener('translate-it:benchmark-spa-invalidated', () => {
+    if (changed) return; changed = true;
+    for (const index of [1, 5, 9]) { const el = document.querySelector('[data-bench-id="target-' + index + '"]'); if (el.dataset.benchKind === 'title') el.setAttribute('title', bSources[index]); else el.firstChild.nodeValue = bSources[index]; el.dataset.benchRouteSource = bSources[index]; }
+    document.documentElement.dataset.spaSourcesChanged = 'true';
+  }, { once: true });
+  document.getElementById('spa-navigation-control').addEventListener('click', () => history.pushState({}, '', '/replacement'));
+  </script>` : '';
+  const html = `<!doctype html><meta charset="utf-8"><title>Page translation benchmark</title><main${scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' ? '' : ' style="position:relative;min-height:12000px"'}>${htmlTargets}${spaControl}</main>${scenario === 'spa-navigation' ? '<script>document.documentElement.dataset.benchSpaScenario="true"</script>' : ''}`;
   const orderedTexts = targets.map(target => target.source);
   const visibleIds = targets.filter(target => target.visible).map(target => target.id);
   const dynamicCohorts = scenario === 'dynamic-dom' ? [0, 1].map(cohortIndex => ({
@@ -55,6 +69,7 @@ export function createFixture(scenario = 'small') {
     scroll: { x: 0, y: 0 },
     responseDelayMs: 50,
     ...(dynamicCohorts ? { dynamicCohorts } : {}),
+    ...(scenario === 'spa-navigation' ? { spaChangedIds: ['target-1', 'target-5', 'target-9'], spaSources: targetTexts.map((_, index) => `SPA route B sentence ${index + 1} has distinct stable content.`) } : {}),
   };
 }
 
@@ -151,7 +166,7 @@ export async function startFixture(fixture = createFixture(), { runtimeBridge, r
         ].filter(Boolean)) : new Set();
         if (replacementCollector && replacementPaths.has(url.pathname)
             && await replacementCollector.handle(request, response)) return;
-        const replacementFixture = fixture.scenario === 'page-translation-replacement';
+        const replacementFixture = fixture.scenario === 'page-translation-replacement' || fixture.scenario === 'spa-navigation';
         const isFixtureRoute = url.pathname === '/' || (replacementFixture && url.pathname === '/replacement');
         if (!isFixtureRoute || url.search) { response.writeHead(404).end(); return; }
         response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fixture.html);
@@ -162,7 +177,7 @@ export async function startFixture(fixture = createFixture(), { runtimeBridge, r
       });
       return;
     }
-    if (request.url !== '/' && !(fixture.scenario === 'page-translation-replacement' && request.url === '/replacement')) { response.writeHead(404).end(); return; }
+    if (request.url !== '/' && !(['page-translation-replacement', 'spa-navigation'].includes(fixture.scenario) && request.url === '/replacement')) { response.writeHead(404).end(); return; }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(fixture.html);
   });

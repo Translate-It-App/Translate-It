@@ -19,6 +19,7 @@ const trace = {
   restores: [],
   events: [],
   bridgeSession: null,
+  spaNavigation: null,
   discoveryAdmissionOrder: null,
   schedulerEnqueueOrder: [],
   selectedBatchMembers: [],
@@ -147,6 +148,98 @@ const trace = {
       bridgeDiscoveryCancelled: typeof discovery?.cancelled === 'boolean' ? discovery.cancelled : null,
       bridgeDiscoveryFailed: typeof discovery?.failed === 'boolean' ? discovery.failed : null,
     };
+  },
+  enableSpaNavigationTracking({ changedIds, sources }) {
+    if (this.spaNavigation) throw new Error('SPA navigation tracking may only be enabled once.');
+    const elements = new Map([...document.querySelectorAll('[data-bench-id]')].map(element => [element.dataset.benchId, element]));
+    if (!Array.isArray(changedIds) || changedIds.length !== 3 || changedIds.some(id => !elements.has(id))
+        || !Array.isArray(sources) || sources.length !== elements.size) throw new Error('Invalid SPA fixture target oracle.');
+    const targetSource = (id, element = elements.get(id)) => element?.dataset.benchKind === 'title' ? element.getAttribute('title') : element?.textContent;
+    const idsByElement = new Map([...elements].map(([id, element]) => [element, id]));
+    this.spaNavigation = {
+      elements, idsByElement, changedIds: [...changedIds], sources: [...sources], originalSources: new Map([...elements].map(([id, element]) => [id, targetSource(id, element)])),
+      identity: new Map(elements), navStartedAt: null, invalidatedAt: null, sourceMutationAt: null, stopAt: null,
+      admissions: [], enqueues: [], batches: [], acceptedAtById: {}, acceptedBySession: {}, duplicateAcceptedIds: [], terminalAt: null,
+    };
+    const observe = records => {
+      const state = this.spaNavigation;
+      for (const record of records) {
+        const target = record.target;
+        if (!target || ![Node.ELEMENT_NODE, Node.ATTRIBUTE_NODE, Node.TEXT_NODE].includes(target.nodeType)) continue;
+        const candidate = (target.nodeType === Node.ELEMENT_NODE ? target : target.nodeType === Node.ATTRIBUTE_NODE ? target.ownerElement : target.parentElement)?.closest('[data-bench-id]');
+        const id = state.idsByElement.get(candidate);
+        if (!id) continue;
+        const element = state.elements.get(id);
+        const owner = FeatureManager.getInstance().getFeatureHandler('pageTranslation')?.scheduler?.translationSessionId ?? null;
+        if (!state.sessionB && state.navStartedAt !== null && owner && owner !== state.sessionA) state.sessionB = owner;
+        const source = state.changedIds.includes(id) && owner === state.sessionB
+          ? state.sources[Number(id.slice(7))] : state.originalSources.get(id);
+        const translatedValue = `\u200e${this.translationPrefix} ${source}`;
+        const resultingValue = element?.dataset.benchKind === 'title' ? element.getAttribute('title') : element.textContent;
+        if (resultingValue !== translatedValue) continue;
+        if (!owner) continue;
+        const accepted = state.acceptedBySession[owner] ??= new Set();
+        accepted.add(id);
+        if (state.changedIds.includes(id) && owner !== state.sessionA) {
+          if (!state.sessionB && owner !== state.sessionA) state.sessionB = owner;
+          if (owner !== state.sessionB) continue;
+          if (Object.hasOwn(state.acceptedAtById, id)) state.duplicateAcceptedIds.push(id);
+          else state.acceptedAtById[id] = performance.now();
+        }
+      }
+    };
+    this.spaNavigation.observerCallback = observe;
+    this.spaNavigation.observer = new MutationObserver(observe);
+    this.spaNavigation.observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['title'] });
+    return { targetIds: [...elements.keys()], changedIds: [...changedIds], identityCount: elements.size };
+  },
+  beginSpaNavigation() {
+    if (!this.spaNavigation || this.spaNavigation.navStartedAt !== null) throw new Error('SPA navigation tracking is not ready.');
+    const state = this.spaNavigation;
+    state.navStartedAt = performance.now();
+    document.getElementById('spa-navigation-control')?.click();
+    return state.navStartedAt;
+  },
+  spaSnapshot() {
+    const state = this.spaNavigation;
+    if (!state) return null;
+    const manager = FeatureManager.getInstance().getFeatureHandler('pageTranslation');
+    const scheduler = manager?.scheduler;
+    const pendingMeasurementMutations = measurement?.observer?.takeRecords() ?? [];
+    if (pendingMeasurementMutations.length) measurement.processMutations(pendingMeasurementMutations);
+    const pendingMutations = state.observer.takeRecords();
+    if (pendingMutations.length) state.observerCallback(pendingMutations);
+    const currentId = scheduler?.translationSessionId ?? null;
+    const targetValue = element => element.dataset.benchKind === 'title' ? element.getAttribute('title') : element.textContent;
+    const featureManager = FeatureManager.getInstance();
+    return {
+      changedIds: state.changedIds, originalSources: [...state.originalSources], navStartedAt: state.navStartedAt,
+      invalidatedAt: state.invalidatedAt, sourceMutationAt: state.sourceMutationAt, stopAt: state.stopAt, cursorB: state.cursor,
+      cursorA: state.cursorA ?? null, sessionA: state.sessionA, sessionB: state.sessionB, admissions: state.admissions, enqueues: state.enqueues,
+      batches: state.batches,
+      acceptedAtById: state.acceptedAtById, duplicateAcceptedIds: state.duplicateAcceptedIds,
+      cursor: featureManager.navigationCursor ?? state.cursor ?? null,
+      managerCallEvents: this.events.filter(event => event.name === 'manager.translatePage.entry'),
+      managerCalls: this.calls,
+      schedulerRequests: this.schedulerRequests,
+      identityPreserved: [...state.elements].every(([id, element]) => document.querySelector(`[data-bench-id="${id}"]`) === element),
+      currentSessionId: currentId,
+      session: scheduler ? { managerTranslating: manager.isTranslating === true, activeFlushes: scheduler.activeFlushes ?? null,
+        queueIds: scheduler.queue?.map(item => item?.id ?? null) ?? null, discoveryPending: scheduler.discoveryPending ?? null } : null,
+      dom: [...state.elements].map(([id, element]) => [id, targetValue(element)]),
+      sourceValues: [...state.elements].map(([id, element]) => [id, element.dataset.benchRouteSource ?? targetValue(element)]),
+      acceptedIds: [...(state.acceptedBySession[state.sessionA] ?? [])],
+      acceptedBySession: Object.fromEntries(Object.entries(state.acceptedBySession).map(([owner, accepted]) => [owner, [...accepted]])),
+      events: this.events.filter(event => event.name.startsWith('spa.')),
+    };
+  },
+  finishSpaNavigationTracking() {
+    const state = this.spaNavigation;
+    if (!state?.observer) return { drained: false, reason: 'SPA observer unavailable' };
+    const records = state.observer.takeRecords();
+    if (records.length) state.observerCallback(records);
+    state.observer.disconnect();
+    return { drained: state.observer.takeRecords().length === 0, disconnected: true, finalAcceptedAtById: state.acceptedAtById };
   },
   enableCancellationProbe() {
     if (this.cancellationLedger) return { enabled: true, reused: true };
@@ -345,12 +438,14 @@ PageTranslationManager.prototype.translatePage = wrapPageTranslationStart(origin
     trace.record('manager.translatePage.entry', {
       at,
       isAuto: options.isAuto === true,
+      sessionId: _manager.scheduler?.translationSessionId ?? null,
       targetLanguage: options.targetLanguage ?? null,
     });
   },
   onSettled(manager, args, at, endedAt) {
     const options = args[0] ?? {};
-    trace.calls.push({ at, endedAt, settings: {
+    trace.calls.push({ at, endedAt, isAuto: options.isAuto === true, sessionId: manager.scheduler?.translationSessionId ?? null, settings: {
+      provider: manager.settings?.translationApi ?? null,
       targetLanguage: manager.settings?.targetLanguage ?? options.targetLanguage ?? null,
       lazyLoading: manager.settings?.lazyLoading ?? null,
       translateAfterScrollStop: manager.settings?.translateAfterScrollStop ?? null,
@@ -358,6 +453,25 @@ PageTranslationManager.prototype.translatePage = wrapPageTranslationStart(origin
     }, messageId: manager.translationMessageId, totalTasks: manager.scheduler?.totalTasks });
   },
 });
+
+const originalUrlCheck = FeatureManager.prototype.checkForUrlChange;
+if (typeof originalUrlCheck === 'function') {
+  FeatureManager.prototype.checkForUrlChange = function (...args) {
+    const result = originalUrlCheck.apply(this, args);
+    if (document.documentElement?.dataset?.benchSpaScenario === 'true' && location.pathname === '/replacement' && args[0]?.navigationCursor) {
+      const cursor = args[0]?.navigationCursor ?? null;
+      const state = trace.spaNavigation;
+      if (state && state.invalidatedAt === null) {
+        state.invalidatedAt = performance.now();
+        state.cursor = cursor;
+      }
+      trace.record('spa.navigation.invalidated', { cursor, performanceAt: state?.invalidatedAt ?? performance.now() });
+      document.dispatchEvent(new CustomEvent('translate-it:benchmark-spa-invalidated', { detail: { cursor } }));
+      if (state && state.sourceMutationAt === null) state.sourceMutationAt = performance.now();
+    }
+    return result;
+  };
+}
 
 const benchmarkTargetId = node => {
   const element = node?.nodeType === Node.ELEMENT_NODE
@@ -367,6 +481,17 @@ const benchmarkTargetId = node => {
 };
 
 const observedAdmissionNodes = new WeakSet();
+const originalStopAutoTranslation = PageTranslationManager.prototype.stopAutoTranslation;
+if (typeof originalStopAutoTranslation === 'function') {
+  PageTranslationManager.prototype.stopAutoTranslation = function (...args) {
+    const state = trace.spaNavigation;
+    if (state && state.navStartedAt !== null && state.stopAt === null) {
+      state.stopAt = performance.now();
+      trace.record('spa.navigation.stop', { performanceAt: state.stopAt, cancellationReason: args[0]?.cancellationReason ?? null });
+    }
+    return originalStopAutoTranslation.apply(this, args);
+  };
+}
 const originalRestore = PageTranslationManager.prototype.restorePage;
 PageTranslationManager.prototype.restorePage = function(...args) {
   const at = Date.now();
@@ -411,6 +536,7 @@ installCallThrough(PageTranslationScheduler.prototype, 'enqueue', function (args
   const [text, , score, node] = args;
   const id = benchmarkTargetId(node);
   trace.schedulerEnqueueOrder.push(id);
+  if (trace.spaNavigation && trace.spaNavigation.invalidatedAt !== null) trace.spaNavigation.enqueues.push({ id, at: performance.now(), sessionId: this.translationSessionId ?? null });
   trace.record('scheduler.enqueue', { id, score: Number(score) || 0, textLength: typeof text === 'string' ? text.length : null });
 });
 installCallThrough(PageTranslationScheduler.prototype, 'flush', function () {
@@ -419,10 +545,14 @@ installCallThrough(PageTranslationScheduler.prototype, 'flush', function () {
 installCallThrough(PageTranslationScheduler.prototype, '_executeBatchRequest', function ([batch]) {
   const targetIds = Array.isArray(batch) ? batch.map(item => benchmarkTargetId(item?.node)) : null;
   trace.selectedBatchMembers.push(targetIds);
+  if (trace.spaNavigation && trace.spaNavigation.invalidatedAt !== null) trace.spaNavigation.batches.push({ sessionId: this.translationSessionId ?? null, targetIds, at: performance.now() });
   trace.record('scheduler.executeBatchRequest.entry', { itemCount: Array.isArray(batch) ? batch.length : null, targetIds });
 });
 installCallThrough(PageTranslationBridge.prototype, 'translate', function () {
   trace.bridgeSession = this.session;
+  const spaManager = FeatureManager.getInstance().getFeatureHandler('pageTranslation');
+  const spaSessionId = spaManager?.scheduler?.translationSessionId ?? null;
+  if (trace.spaNavigation && trace.spaNavigation.navStartedAt !== null && spaSessionId && spaSessionId !== trace.spaNavigation.sessionA) trace.spaNavigation.sessionB = spaSessionId;
   if (trace.dynamicDOMEnabled !== true) trace.discoveryAdmissionOrder = [];
   trace.viewportWindowObservation = null;
   const session = this.session;
@@ -431,6 +561,7 @@ installCallThrough(PageTranslationBridge.prototype, 'translate', function () {
     const installed = installPrimitiveAdmissionObserver(session, function ([node]) {
       const id = benchmarkTargetId(node);
       trace.discoveryAdmissionOrder.push(id);
+      if (trace.spaNavigation && trace.spaNavigation.invalidatedAt !== null) trace.spaNavigation.admissions.push({ id, at: performance.now(), sessionId: FeatureManager.getInstance().getFeatureHandler('pageTranslation')?.scheduler?.translationSessionId ?? null });
       trace.record('primitive.admission', { id, stage: 'after-DOMTranslator-filter-before-PageTranslationScheduler-enqueue' });
       const activeSession = trace.bridgeSession;
       if (activeSession?.viewportFirstDiscoveryEnabled && !trace.viewportWindowObservation) {

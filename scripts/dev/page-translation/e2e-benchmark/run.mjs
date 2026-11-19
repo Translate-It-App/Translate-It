@@ -9,10 +9,10 @@ import { buildBenchmarkExtension } from './build.mjs';
 import { validateBuildParity } from './build-environment.mjs';
 import { launchChrome } from './chrome.mjs';
 import { writeBenchmarkArtifact } from './artifact-writer.mjs';
-import { classifyTransportRequest, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
+import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
-import { modeOrder, mapProviderBatchIds, parseScenarioSelection, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './scenario-plan.mjs';
+import { modeOrder, mapProviderBatchIds, parseScenarioSelection, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
 
@@ -60,6 +60,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-probes.mjs',
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-gate.mjs',
   'scripts/dev/page-translation/page-translation-e2e-runtime.test.js',
+  'scripts/dev/page-translation/page-translation-e2e-benchmark.test.js',
   'scripts/dev/page-translation/page-translation-e2e-measurement.test.js',
   'scripts/dev/page-translation/page-translation-e2e-large-page.test.js',
   'scripts/dev/page-translation/page-translation-e2e-artifact-writer.test.js',
@@ -206,7 +207,23 @@ function measureMode(runs) {
         run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.firstAcceptedAt),
       insertionToAllAccepted: intervals(run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.insertedAt,
         run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.completionAt),
-    }]))
+    }])),
+    ...(runs.every(run => run.scenario === 'spa-navigation') ? (() => {
+      const longTaskSamples = runs.map(run => longTasksWithinInterval(run.derivedTimings?.longTasks,
+        run.spaNavigationTiming?.navStartedAt, run.spaNavigationTiming?.terminalAt));
+      const longTaskSummary = longTaskSamples.some(entries => entries === null)
+        ? { ...summarizeLongTasks(null), unavailableReason: 'One or more SPA trials lacked calibrated long-task observations or navigation boundaries.' }
+        : { ...summarizeLongTasks(longTaskSamples.flat()), unavailableReason: null };
+      return { spaNavigation: {
+        navigationToFirstAcceptedWrite: summarizeIntervals(runs.map(run => run.spaNavigationTiming?.navStartedAt), runs.map(run => run.spaNavigationTiming?.firstAcceptedAt)),
+        navigationToBCompletion: summarizeIntervals(runs.map(run => run.spaNavigationTiming?.navStartedAt), runs.map(run => run.spaNavigationTiming?.terminalAt)),
+        longTaskMeasurementBoundary: 'Calibrated fixture-document PerformanceObserver tasks whose full intervals fall between native pushState click start (performance.now) and B-session terminal receipt; excludes route A and Restore.',
+        longTaskSamples,
+        longTaskSummary,
+        longTaskCalibration: runs.map(run => run.longTaskCalibration ?? { supported: false, reason: 'calibration was not run' }),
+        rawTrials: runs.map(run => run.spaNavigationTiming ?? null),
+      } };
+    })() : {}),
   };
 }
 function sessionIdFromStart(response) {
@@ -439,7 +456,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           if (staleSuccessProbe && !root) throw new Error(`Cannot map provider response to exactly one real Page root (matches=${roots.length}).`);
           const physicalCall = root && physical.find(operation => operation.messageId === root.messageId && operation.sessionId === root.sessionId);
           const controller = root && workerState.controllers?.find(candidate => candidate.messageId === root.messageId && candidate.sessionId === root.sessionId);
-          const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
+         const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id
+           ?? (fixtureConfig.spaSources?.includes(text) ? `target-${fixtureConfig.spaSources.indexOf(text)}` : null));
           if (staleSuccessProbe && (!physicalCall || !controller || targetIds.some(id => id === null))) {
             throw new Error('Cannot fulfill provider response without exact body/root/physical/controller fixture correlation.');
           }
@@ -824,7 +842,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const originals = fixtureConfig.targets.map(target => [target.id, target.source]);
     const originalById = new Map(originals);
     trial.rawDOM.original = await evaluate(chrome, pageSession,
-      `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext);
+      `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.dataset.benchKind==='title'?el.getAttribute('title'):el.textContent])`, contentContext);
     if (trial.rawDOM.original.length !== fixtureConfig.targetCount
         || JSON.stringify(trial.rawDOM.original) !== JSON.stringify(originals)) {
       throw new Error(`Pre-translation fixture DOM does not exactly match ${fixtureConfig.targetCount} source targets.`);
@@ -836,7 +854,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       `typeof window.__pageTranslationBenchmark?.startMeasurement==='function'&&typeof window.__pageTranslationBenchmark?.stopMeasurement==='function'`, contentContext);
     if (!trial.traceAvailable) throw new Error('Measurement trace writer API is not ready; refusing to claim measured trial.');
     await evaluate(chrome, pageSession,
-      'window.__benchEvents=[];window.addEventListener("__benchmark-runtime-event",e=>{const receivedAt=Date.now();window.__benchEvents.push({receivedAt,message:e.detail})});', contentContext);
+      'window.__benchEvents=[];window.addEventListener("__benchmark-runtime-event",e=>{const receivedAt=Date.now();const performanceAt=performance.now();window.__benchEvents.push({receivedAt,performanceAt,message:e.detail})});', contentContext);
     measurementState.attempted = true;
     if (fixtureConfig.scenario === 'dynamic-dom') {
       const expectedIds = [...fixtureConfig.targets, ...fixtureConfig.dynamicCohorts.flatMap(cohort => cohort.targets)].map(target => target.id);
@@ -849,6 +867,11 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     if (trial.measurementStart.targetCount !== fixtureConfig.targetCount
         || JSON.stringify(trial.measurementStart.visibleIds) !== JSON.stringify(actualGeometry.visibleIds)) {
       throw new Error('MutationObserver target/visible-ID snapshot does not match actual viewport geometry.');
+    }
+    if (fixtureConfig.scenario === 'spa-navigation') {
+      trial.spaTrackingStart = await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.enableSpaNavigationTracking(${JSON.stringify({ changedIds: fixtureConfig.spaChangedIds, sources: fixtureConfig.spaSources })})`, contentContext);
+      if (trial.spaTrackingStart?.identityCount !== fixtureConfig.targetCount) throw new Error('SPA target identity tracking failed to initialize.');
     }
     if (cancellationProbe) {
       trial.cancellation.initialDOMMetadata = await evaluate(chrome, pageSession,
@@ -871,6 +894,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const sessionId = sessionIdFromStart(started);
     if (!sessionId) throw new Error('Successful PAGE_TRANSLATE response omitted its session ID.');
     trial.sessionId = sessionId;
+    if (fixtureConfig.scenario === 'spa-navigation') {
+      await evaluate(chrome, pageSession,
+        `window.__pageTranslationBenchmark.spaNavigation.sessionA=${JSON.stringify(sessionId)};window.__pageTranslationBenchmark.spaNavigation.cursorA=window.__pageTranslationBenchmark.spaSnapshot().cursor`, contentContext);
+    }
     const managerCall = await until(async () => {
       const state = await evaluate(chrome, pageSession,
         'window.__pageTranslationBenchmark.calls.at(-1)??null', contentContext, false);
@@ -922,7 +949,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       };
       const snapshotDom = async label => {
         const dom = await evaluate(chrome, pageSession,
-          `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
+          `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.dataset.benchKind==='title'?el.getAttribute('title'):el.textContent])`, contentContext, false);
         const metadata = await evaluate(chrome, pageSession,
           `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`, contentContext, false);
         const value = { at: now(), dom, metadata };
@@ -2044,6 +2071,197 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       trial.cancellation.cleanup.pendingHeldFetches = cancellationControl.heldRequests.filter(item => !item.record.handlerSettled).length;
       if (trial.cancellation.cleanup.pendingHeldFetches) throw new Error('Cancellation probe ended with a held Fetch request unsettled.');
       if (trial.requests.some(request => request.category === 'blocked')) throw new Error('Unexpected external request blocked during cancellation probe.');
+      trial.status = 'passed';
+      return trial;
+    }
+
+    if (fixtureConfig.scenario === 'spa-navigation') {
+      const ids = fixtureConfig.targets.map(target => target.id);
+      const changedIds = fixtureConfig.spaChangedIds;
+      const retainedIds = ids.filter(id => !changedIds.includes(id));
+      const routeSource = id => changedIds.includes(id) ? fixtureConfig.spaSources[Number(id.slice(7))] : originalById.get(id);
+      const readSpa = () => evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.spaSnapshot()', contentContext, false);
+      const readEvents = () => evaluate(chrome, pageSession, 'window.__benchEvents??[]', contentContext, false);
+      const translationTerminal = (list, owner, targetIds, acceptedAtById, acceptedIds, expectedAcceptedIds = targetIds) => list.find(event =>
+        validateSpaTerminal({ event, sessionId: owner, targetIds, acceptedAtById, acceptedIds, expectedAcceptedIds }).ok);
+      const expectedTranslation = (_id, source) => `\u200efixture translation: ${source}`;
+      const completedA = await until(async () => {
+        const [list, state, pageState] = await Promise.all([readEvents(), readSpa(), evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false)]);
+        const terminal = translationTerminal(list, sessionId, ids, undefined, state.acceptedIds);
+        const domOkay = state.dom.length === ids.length && state.dom.every(([id, text]) => text === expectedTranslation(id, originalById.get(id)));
+        const acceptedOkay = ids.every(id => state.acceptedIds.includes(id));
+        const idle = pageState?.translationSessionId === sessionId && pageState.managerTranslating === false
+          && pageState.activeFlushes === 0 && pageState.queueIds?.length === 0 && pageState.pendingSettlementCount === 0
+          && pageState.discoveryPending === false;
+        trial.spaRouteAProgress = { terminalObserved: !!terminal, domOkay, acceptedOkay, idle,
+          acceptedIds: state.acceptedIds, dom: state.dom, pageState };
+        return terminal && domOkay && acceptedOkay && idle ? { terminal, state, pageState } : null;
+      }, 60_000);
+      if (completedA.state.sessionA !== sessionId || !completedA.state.cursorA) throw new Error('Route A did not expose its real production navigation cursor/session.');
+      const providerARequests = trial.requests.filter(request => request.category === 'provider-translation')
+        .filter(request => (request.batchTexts ?? []).every(source => fixtureConfig.targets.some(target => target.source === source)))
+        .map(request => ({ ...request, targetIds: request.batchTexts.map(source => fixtureConfig.targets.find(target => target.source === source)?.id ?? null) }));
+      const providerAIds = providerARequests
+        .flatMap(request => request.batchTexts ?? []).map(source => fixtureConfig.targets.find(target => target.source === source)?.id ?? null);
+      const providerASettings = completedA.state.managerCalls.find(call => call.isAuto === false)?.settings;
+      const providerAValidation = validateExactTargetIds('route A provider request', providerAIds, ids);
+      if (!providerAValidation.ok) throw new Error(providerAValidation.issues.join('; '));
+      const providerARoute = validateSpaProviderRoute({ provider: providerASettings?.provider, requests: providerARequests, expectedIds: ids });
+      if (!providerARoute.ok) throw new Error(providerARoute.issues.join('; '));
+      trial.spaNavigation = { sessionA: sessionId, changedIds, retainedIds, routeA: completedA, cursorA: completedA.state.cursorA,
+        acceptedAIds: completedA.state.acceptedIds, pendingA: completedA.pageState, providerAIds, providerAValidation, providerARoute };
+
+      trial.spaNavigation.navStartedAt = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.beginSpaNavigation()', contentContext);
+      trial.timestamps.spaNavigationStartedAt = trial.spaNavigation.navStartedAt;
+      const invalidation = await until(async () => {
+        const state = await readSpa();
+        const event = state.events.find(item => item.name === 'spa.navigation.invalidated');
+        const routeSourcesUpdated = changedIds.every(id => state.sourceValues.find(([targetId]) => targetId === id)?.[1] === fixtureConfig.spaSources[Number(id.slice(7))]);
+        return event && state.sourceMutationAt > state.invalidatedAt && routeSourcesUpdated ? { state, event } : null;
+      }, 20_000);
+      trial.spaNavigation.invalidation = invalidation.event;
+      trial.spaNavigation.sourceMutationAt = invalidation.state.sourceMutationAt;
+      trial.spaNavigation.cursorB = invalidation.event.cursor;
+      const bStarted = await until(async () => {
+        const state = await readSpa();
+        const autoEntry = state.managerCallEvents.find(event => event.isAuto === true);
+        const current = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+        return autoEntry && current?.translationSessionId && current.translationSessionId !== sessionId
+          ? { state, current, autoEntry, sessionB: current.translationSessionId } : null;
+      }, 30_000);
+      if (trial.commands.filter(command => command.action === 'page-translate').length !== 1) throw new Error('SPA route B must be started only by the production auto-rule path.');
+      trial.spaNavigation.sessionB = bStarted.sessionB;
+      const bAccepted = await until(async () => {
+        const [list, state, pageState] = await Promise.all([readEvents(), readSpa(), evaluate(chrome, pageSession,
+          'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false)]);
+        const terminal = translationTerminal(list, bStarted.sessionB, ids, state.acceptedAtById,
+          state.acceptedBySession[bStarted.sessionB] ?? [], changedIds);
+        const translatedDom = state.dom.length === ids.length && ids.every(id => state.dom.find(([targetId]) => targetId === id)?.[1] === expectedTranslation(id, changedIds.includes(id) ? fixtureConfig.spaSources[Number(id.slice(7))] : originalById.get(id)));
+        const acceptedChanged = changedIds.every(id => Number.isFinite(state.acceptedAtById[id]));
+        const idle = pageState?.translationSessionId === bStarted.sessionB && pageState.managerTranslating === false
+          && pageState.activeFlushes === 0 && pageState.queueIds?.length === 0 && pageState.pendingSettlementCount === 0
+          && pageState.discoveryPending === false;
+        return terminal && translatedDom && acceptedChanged && idle ? { terminal, state, pageState } : null;
+      }, 60_000);
+      const terminalAt = bAccepted.terminal.performanceAt;
+      const beforeRestore = bAccepted.state;
+      const requestedSources = trial.requests.filter(request => request.category === 'provider-translation')
+        .flatMap(request => request.batchTexts ?? []).filter(source => fixtureConfig.spaSources.includes(source));
+      const requestIds = requestedSources.map(source => `target-${fixtureConfig.spaSources.indexOf(source)}`);
+      const providerBRequests = trial.requests.filter(request => request.category === 'provider-translation')
+        .filter(request => (request.batchTexts ?? []).every(source => fixtureConfig.spaSources.includes(source)))
+        .map(request => ({ ...request, targetIds: request.batchTexts.map(source => `target-${fixtureConfig.spaSources.indexOf(source)}`) }));
+      const providerRequests = trial.requests.filter(request => request.category === 'provider-translation').map(request => ({
+        ...request,
+        targetIds: (request.batchTexts ?? []).map(source => fixtureConfig.targets.find(target => target.source === source)?.id
+          ?? (fixtureConfig.spaSources.includes(source) ? `target-${fixtureConfig.spaSources.indexOf(source)}` : null)),
+      }));
+      const settingsCalls = beforeRestore.managerCalls;
+      const settingsA = settingsCalls.find(call => call.isAuto === false)?.settings;
+      const settingsB = settingsCalls.find(call => call.isAuto === true)?.settings;
+      const providerRouteValidation = validateSpaProviderRoute({ provider: settingsA?.provider === 'edge' && settingsB?.provider === 'edge' ? 'edge' : null,
+        requests: providerRequests, expectedIds: [...ids, ...changedIds] });
+      const bEnqueues = beforeRestore.enqueues.filter(item => item.sessionId === bStarted.sessionB).map(item => item.id);
+      const bAdmissions = beforeRestore.admissions.filter(item => item.sessionId === bStarted.sessionB);
+      const discoveredIds = bAdmissions.map(item => item.id);
+      const bBatches = beforeRestore.batches.filter(batch => batch.sessionId === bStarted.sessionB);
+      const batchIds = bBatches.flatMap(batch => batch.targetIds ?? []);
+      const bEntries = beforeRestore.managerCallEvents.filter(event => event.isAuto === true);
+      const checkedProviderBRoute = validateSpaProviderRoute({ provider: settingsB?.provider, requests: providerBRequests, expectedIds: changedIds });
+      const exactChanged = validateExactTargetIds('B accepted write', Object.keys(beforeRestore.acceptedAtById), changedIds);
+      const exactBAccepted = validateExactTargetIds('B session acceptance ledger', beforeRestore.acceptedBySession[bStarted.sessionB] ?? [], changedIds);
+      const exactRequests = validateExactTargetIds('B provider request', requestIds, changedIds);
+      const exactBatches = validateExactTargetIds('B scheduler batch', batchIds, changedIds);
+      const exactAdmissions = validateExactTargetIds('B discovery scan', discoveredIds, ids);
+      const exactEnqueues = validateExactTargetIds('B scheduler enqueue', bEnqueues, changedIds);
+      const cursorValidation = validateSpaNavigation({ cursorA: trial.spaNavigation.cursorA, cursorB: trial.spaNavigation.cursorB,
+        navStartedAt: trial.spaNavigation.navStartedAt, stopAt: beforeRestore.stopAt, invalidatedAt: beforeRestore.invalidatedAt, sourceUpdatedAt: beforeRestore.sourceMutationAt,
+        firstAcceptedAtById: beforeRestore.acceptedAtById, terminalAt,
+        changedIds, retainedIds, requestedIds: requestIds, acceptedIds: beforeRestore.acceptedBySession[bStarted.sessionB] ?? [],
+        duplicateIds: beforeRestore.duplicateAcceptedIds, completionReady: validateSpaTerminal({ event: bAccepted.terminal,
+          sessionId: bStarted.sessionB, targetIds: ids, acceptedAtById: beforeRestore.acceptedAtById,
+          acceptedIds: beforeRestore.acceptedBySession[bStarted.sessionB] ?? [], expectedAcceptedIds: changedIds }).ok });
+      const sourceOrdered = beforeRestore.stopAt > trial.spaNavigation.navStartedAt
+        && beforeRestore.sourceMutationAt > beforeRestore.invalidatedAt
+        && bAdmissions.length > 0 && bAdmissions.every(item => item.at > beforeRestore.sourceMutationAt)
+        && retainedIds.every(id => !bEnqueues.includes(id) && !requestIds.includes(id))
+        && exactBAccepted.ok && retainedIds.every(id => !(beforeRestore.acceptedBySession[bStarted.sessionB] ?? []).includes(id));
+      const sessionValidation = validateSpaSessions({ settingsA, settingsB,
+        autoB: bEntries.length > 0 && bEntries.every(entry => entry.isAuto === true)
+          && settingsCalls.filter(call => call.isAuto === true).length >= 1,
+        sessionA: sessionId, sessionB: bStarted.sessionB });
+      const settingsSame = sessionValidation.ok;
+      const autoOnly = sessionValidation.ok;
+      const issues = [...exactChanged.issues, ...exactBAccepted.issues, ...exactRequests.issues, ...exactBatches.issues, ...exactAdmissions.issues, ...exactEnqueues.issues,
+        ...cursorValidation.issues, ...providerARoute.issues, ...checkedProviderBRoute.issues, ...providerRouteValidation.issues];
+      if (!sourceOrdered) issues.push('B sources/admissions violate invalidation-before-discovery ordering or retained-target invariants');
+      issues.push(...sessionValidation.issues);
+      if (!beforeRestore.identityPreserved) issues.push('Fixture target element identity changed across same-document navigation');
+      if (issues.length) throw new Error(issues.join('; '));
+
+      trial.spaNavigation = { ...trial.spaNavigation, sessionB: bStarted.sessionB, autoEntry: bStarted.autoEntry,
+        cursorB: trial.spaNavigation.cursorB, acceptedAtById: beforeRestore.acceptedAtById, BDiscoveryAdmissions: bAdmissions,
+        BEnqueues: beforeRestore.enqueues.filter(item => item.sessionId === bStarted.sessionB), BBatches: bBatches,
+        BProviderRequestIds: requestIds, duplicateAcceptedIds: beforeRestore.duplicateAcceptedIds,
+        providerBRoute: checkedProviderBRoute, providerRouteValidation,
+        completion: bAccepted.terminal, completionAt: terminalAt, finalDOM: beforeRestore.dom,
+        validation: { ok: true, issues: [], exactChanged, exactRequests, exactBatches, exactAdmissions, exactEnqueues, sourceOrdered, settingsSame, autoOnly, sessionValidation, cursorValidation } };
+      trial.spaNavigationTiming = { clock: 'performance.now() in the fixture document', navStartedAt: trial.spaNavigation.navStartedAt,
+        firstAcceptedAt: cursorValidation.firstAcceptedAt, terminalAt, navigationToFirstAcceptedMs: cursorValidation.navigationToFirstAcceptedMs,
+        navigationToCompletionMs: cursorValidation.navigationToCompletionMs, acceptedAtById: beforeRestore.acceptedAtById };
+      trial.derivedTimings = { ...(trial.derivedTimings ?? {}), spaNavigation: trial.spaNavigationTiming };
+      trial.rawDOM.translated = beforeRestore.dom;
+      trial.terminal = bAccepted.terminal;
+
+      trial.spaNavigation.spaObserverCleanup = await evaluate(chrome, pageSession,
+        'window.__pageTranslationBenchmark.finishSpaNavigationTracking()', contentContext);
+      if (!trial.spaNavigation.spaObserverCleanup?.drained || !trial.spaNavigation.spaObserverCleanup?.disconnected) {
+        throw new Error('SPA acceptance observer did not drain and disconnect before Restore.');
+      }
+      trial.spaNavigation.observersStoppedAt = now();
+      const contentTrace = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.stopMeasurement()', contentContext);
+      measurementState.stopped = contentTrace?.available === true;
+      measurementState.stopAttempts++;
+      trial.measurementStopAttempted = true;
+      trial.measurements = { content: contentTrace };
+      trial.spaNavigation.measurementObserverStoppedAt = now();
+      if (!contentTrace?.available) throw new Error(`SPA measurement stop failed before Restore: ${contentTrace?.reason ?? 'observer snapshot unavailable'}`);
+      const calibratedLongTasks = validatedLongTaskObservation(trial.longTaskCalibration, contentTrace.longTasks);
+      trial.derivedTimings.longTasks = calibratedLongTasks.entries;
+      trial.spaNavigation.longTaskUnavailableReason = calibratedLongTasks.unavailableReason;
+      trial.spaNavigation.observersStoppedBeforeRestore = true;
+
+      trial.timestamps.restoreStarted = now();
+      const observerRestoreOrder = validateSpaObserverRestoreOrder({ spaObserverStoppedAt: trial.spaNavigation.observersStoppedAt,
+        measurementObserverStoppedAt: trial.spaNavigation.measurementObserverStoppedAt, restoreStartedAt: trial.timestamps.restoreStarted });
+      if (!observerRestoreOrder.ok) throw new Error(observerRestoreOrder.issues.join('; '));
+      trial.spaNavigation.observerRestoreOrder = observerRestoreOrder;
+      const restoreResponse = await evaluate(chrome, pageSession,
+        `chrome.runtime.sendMessage(${JSON.stringify({ action: 'page-restore' })})`, contentContext);
+      trial.commands.push({ action: 'page-restore', sentAt: trial.timestamps.restoreStarted, respondedAt: now(), response: restoreResponse });
+      if (!restoreResponse?.success) throw new Error(formatCommandFailure('PAGE_RESTORE', restoreResponse));
+      const restored = await until(async () => {
+        const list = await readEvents();
+        const done = list.find(event => isSessionEvent(event, 'page-restore-complete', bStarted.sessionB));
+        if (!done) return null;
+        const dom = await evaluate(chrome, pageSession,
+          `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.dataset.benchKind==='title'?el.getAttribute('title'):el.textContent])`, contentContext, false);
+        const expected = ids.map(id => [id, routeSource(id)]);
+        return JSON.stringify(dom) === JSON.stringify(expected) ? { done, dom } : null;
+      }, 30_000);
+      trial.rawDOM.restored = restored.dom;
+      trial.restoreTerminal = restored.done;
+      trial.timestamps.restoreCompleted = now();
+      const sourceToId = new Map([...fixtureConfig.targets.map(target => [target.source, target.id]), ...fixtureConfig.spaSources.map((source, index) => [source, `target-${index}`])]);
+      const providerAttempts = trial.requests.filter(request => request.category === 'provider-translation');
+      trial.providerTranslationAttempts = providerAttempts.length;
+      trial.providerRequestOrder = mapProviderBatchIds(providerAttempts.map(request => request.batchTexts ?? []), sourceToId);
+      trial.providerBatchSizes = providerAttempts.map(request => request.batchSize);
+      trial.spaNavigation.restoreValidation = { ok: true, expected: ids.map(id => [id, routeSource(id)]), observed: restored.dom,
+        retainedSourceIds: retainedIds, changedSourceIds: changedIds };
+      trial.spaNavigationTiming.restoreCompletedAt = trial.timestamps.restoreCompleted;
+      if (trial.requests.some(request => request.category === 'blocked')) throw new Error('Unexpected external request blocked during SPA navigation trial.');
       trial.status = 'passed';
       return trial;
     }

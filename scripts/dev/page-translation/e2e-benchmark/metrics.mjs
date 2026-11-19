@@ -62,6 +62,13 @@ export function summarizeLongTasks(entries) {
   };
 }
 
+export function longTasksWithinInterval(entries, start, end) {
+  if (entries == null || !Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  if (!Array.isArray(entries)) throw new TypeError('Long-task entries must be an array or unavailable.');
+  return entries.filter(entry => Number.isFinite(entry?.startTime) && Number.isFinite(entry?.duration)
+    && entry.startTime >= start && entry.startTime + entry.duration <= end);
+}
+
 export function validateWindowMembership({ scenario, visibleIds, windowCandidateIds, enumerationSteps }) {
   const issues = [];
   if (!['early-visible', 'in-window-visible', 'late-visible'].includes(scenario)) issues.push('window scenario unavailable or invalid');

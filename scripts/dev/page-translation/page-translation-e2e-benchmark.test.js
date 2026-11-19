@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTransportRequest, mapEdgeResponse, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
+import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
-import { parseScenarioSelection, settingsForScenario } from './e2e-benchmark/scenario-plan.mjs';
+import { parseScenarioSelection, settingsForScenario, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
 import { registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
+import { matchesAutoTranslateRule } from '../../../src/utils/ui/exclusion.js';
 
 describe('page translation benchmark measurements', () => {
   it('maps each actual Edge request source into the provider response shape', () => {
@@ -114,6 +115,85 @@ describe('page translation benchmark measurements', () => {
     expect(dynamic.dynamicCohorts.flatMap(cohort => cohort.targets).every(target => !dynamic.html.includes(target.id))).toBe(true);
   });
 
+  it('adds an opt-in native-history SPA fixture without changing the static fixtures', () => {
+    const small = createFixture('small');
+    const spa = createFixture('spa-navigation');
+    expect(parseScenarioSelection()).toEqual(['small']);
+    expect(parseScenarioSelection('small,dynamic-dom,spa-navigation')).toEqual(['small', 'dynamic-dom', 'spa-navigation']);
+    expect(spa.targets.map(({ id, source, visible }) => ({ id, source, visible }))).toEqual(small.targets);
+    expect(spa.targets.map(target => target.kind)).toEqual([...Array(6).fill('text'), ...Array(6).fill('title')]);
+    expect(spa.spaChangedIds).toEqual(['target-1', 'target-5', 'target-9']);
+    expect(spa.html).toContain("history.pushState({}, '', '/replacement')");
+    expect(spa.html).toContain('translate-it:benchmark-spa-invalidated');
+    expect(spa.html).toContain('data-bench-kind="title"');
+    expect(spa.html).toContain("el.setAttribute('title', bSources[index])");
+    expect(small.html).not.toContain('spa-navigation-control');
+    expect(settingsForScenario({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false }, 'small')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false });
+    expect(settingsForScenario({}, 'dynamic-dom')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: true });
+    expect(settingsForScenario({}, 'spa-navigation')).toMatchObject({
+      WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false,
+      WHOLE_PAGE_AUTO_TRANSLATE_RULES: ['127.0.0.1/replacement'],
+      TRANSLATION_API: 'edge', TARGET_LANGUAGE: 'fr',
+    });
+    const routeRule = settingsForScenario({}, 'spa-navigation').WHOLE_PAGE_AUTO_TRANSLATE_RULES[0];
+    expect(matchesAutoTranslateRule('http://127.0.0.1:43127/replacement', routeRule)).toBe(true);
+    expect(matchesAutoTranslateRule('http://127.0.0.1:43127/', routeRule)).toBe(false);
+  });
+
+  it('accepts only same-document advanced SPA cursors and consistent same-clock timings', () => {
+    const input = {
+      cursorA: { documentEpoch: 4, routeRevision: 2, url: 'http://127.0.0.1:1234/' },
+      cursorB: { documentEpoch: 4, routeRevision: 3, url: 'http://127.0.0.1:1234/replacement' },
+      navStartedAt: 100, stopAt: 105, invalidatedAt: 110, sourceUpdatedAt: 115,
+      firstAcceptedAtById: { 'target-1': 120, 'target-5': 125, 'target-9': 130 }, terminalAt: 160,
+      changedIds: ['target-1', 'target-5', 'target-9'], retainedIds: ['target-0'], requestedIds: ['target-1', 'target-5', 'target-9'],
+      acceptedIds: ['target-1', 'target-5', 'target-9'], duplicateIds: [], completionReady: true,
+    };
+    expect(validateSpaNavigation(input)).toMatchObject({ ok: true, navigationToFirstAcceptedMs: 20, navigationToCompletionMs: 60 });
+    expect(validateSpaNavigation({ ...input, cursorB: { ...input.cursorB, documentEpoch: 5 } }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, terminalAt: null }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, sourceUpdatedAt: 105 }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, requestedIds: [...input.requestedIds, 'target-0'], retainedIds: ['target-0'] }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, acceptedIds: [...input.acceptedIds, 'target-0'], retainedIds: ['target-0'] }).ok).toBe(false);
+    expect(validateSpaNavigation({ ...input, completionReady: false }).ok).toBe(false);
+  });
+
+  it('requires identical A/B settings and a distinct automatic B owner', () => {
+    const settings = { provider: 'edge', targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: false };
+    expect(validateSpaSessions({ settingsA: settings, settingsB: { ...settings }, autoB: true, sessionA: 'A', sessionB: 'B' }).ok).toBe(true);
+    expect(validateSpaSessions({ settingsA: settings, settingsB: { ...settings, lazyLoading: true }, autoB: true, sessionA: 'A', sessionB: 'B' }).ok).toBe(false);
+    expect(validateSpaSessions({ settingsA: settings, settingsB: { ...settings, provider: 'google' }, autoB: true, sessionA: 'A', sessionB: 'B' }).ok).toBe(false);
+    expect(validateSpaSessions({ settingsA: settings, settingsB: settings, autoB: false, sessionA: 'A', sessionB: 'B' }).ok).toBe(false);
+    expect(validateSpaSessions({ settingsA: settings, settingsB: settings, autoB: true, sessionA: 'A', sessionB: 'A' }).ok).toBe(false);
+  });
+
+  it('requires SPA terminal counts, matching session, and timestamp after every B write', () => {
+    const event = { performanceAt: 150, message: { action: 'page-translation-frame-lifecycle', data: { action: 'page-translate-complete', data: {
+      sessionId: 'B', translatedCount: 12, totalCount: 12, failedCount: 0,
+    } } } };
+    const changedIds = ['target-1', 'target-5', 'target-9'];
+    const base = { event, sessionId: 'B', targetIds: Array.from({ length: 12 }, (_, i) => `target-${i}`),
+      acceptedAtById: { 'target-1': 120, 'target-5': 130, 'target-9': 149 },
+      acceptedIds: changedIds, expectedAcceptedIds: changedIds };
+    expect(validateSpaTerminal(base).ok).toBe(true);
+    expect(validateSpaTerminal({ ...base, acceptedIds: [...changedIds, 'target-0'] }).ok).toBe(false);
+    expect(validateSpaTerminal({ ...base, event: { ...event, message: { ...event.message, data: { ...event.message.data,
+      data: { ...event.message.data.data, translatedCount: 11 } } } } }).ok).toBe(false);
+    expect(validateSpaTerminal({ ...base, sessionId: 'A' }).ok).toBe(false);
+    expect(validateSpaTerminal({ ...base, acceptedAtById: { ...base.acceptedAtById, 'target-9': 151 } }).ok).toBe(false);
+    expect(validateSpaTerminal({ ...base, event: { ...event, message: { ...event.message, data: { ...event.message.data,
+      data: { ...event.message.data.data, failedCount: 1 } } } } }).ok).toBe(false);
+  });
+
+  it('validates that route provider evidence is local Edge transport and observers stop before Restore', () => {
+    const requests = [{ category: 'provider-translation', method: 'POST', url: 'https://edge.microsoft.com/translate/translatetext', targetIds: ['target-1'] }];
+    expect(validateSpaProviderRoute({ provider: 'edge', requests, expectedIds: ['target-1'] }).ok).toBe(true);
+    expect(validateSpaProviderRoute({ provider: 'google', requests, expectedIds: ['target-1'] }).ok).toBe(false);
+    expect(validateSpaProviderRoute({ provider: 'edge', requests: [{ ...requests[0], url: 'https://example.com/translate' }], expectedIds: ['target-1'] }).ok).toBe(false);
+    expect(validateSpaObserverRestoreOrder({ spaObserverStoppedAt: 10, measurementObserverStoppedAt: 11, restoreStartedAt: 12 }).ok).toBe(true);
+    expect(validateSpaObserverRestoreOrder({ spaObserverStoppedAt: 13, measurementObserverStoppedAt: 11, restoreStartedAt: 12 }).ok).toBe(false);
+  });
+
   it('registers the complete cohort before insertion and tracks first/all latency once', () => {
     const order = [];
     const inserted = registerThenInsertCohort({
@@ -158,6 +238,17 @@ describe('page translation benchmark measurements', () => {
     expect(summarize([])).toEqual({ n: 0, p50: null, p95: null });
     expect(summarize([9, 1, 5])).toEqual({ n: 3, p50: 5, p95: null });
     expect(summarize(Array.from({ length: 40 }, (_, i) => i + 1)).p95).toBe(38);
+  });
+
+  it('limits SPA long-task samples to calibrated tasks wholly inside navigation through B completion', () => {
+    const tasks = [
+      { startTime: 90, duration: 20 },
+      { startTime: 100, duration: 10 },
+      { startTime: 145, duration: 10 },
+      { startTime: 150, duration: 10 },
+    ];
+    expect(longTasksWithinInterval(tasks, 100, 155)).toEqual([tasks[1], tasks[2]]);
+    expect(longTasksWithinInterval(null, 100, 150)).toBeNull();
   });
 
   it('does not convert missing interval endpoints into finite zero or negative samples', () => {
