@@ -42,6 +42,20 @@ done
 
 This is the minimal matrix spanning all requested optimizer levels and both scroll scheduling modes, with one representative 1,000-target scenario rather than multiplying fixture variants. Provider artifacts persist `scenarioSummaries[scenario].sliced`, aggregated from measured trials only; warmups are excluded. Synthetic Fetch interception returns deterministic parser-compatible legacy Google arrays; it does not contact Google or measure live provider latency/quality. Google V2's configured endpoint is exactly `https://translate.google.com/translate_a/single` POST. The actual `sl` query is recorded per request and is not overridden: the Page AUTO resolver may choose a source code such as `nl` even for this English-language fixture. The fixture's deterministic response metadata reports detected language `en`; this is synthetic parser metadata, separate from and not evidence of the request's `sl` value. Reports record observed provider optimizer/rate-limiter capacity, scheduler chunk/maxChars/parallel execution and Page worker limit, logical batch intervals/sizes/peak overlap, and separately correlated physical HTTP count/peak overlap, each request's latency and terminal settlement, first accepted translation, and total completion. Logical batches are not assumed to map 1:1 to HTTP requests, nor are configured limits presented as observed physical parallelism. With fewer than 40 valid samples, p95 remains unavailable.
 
+### Isolated Google V2 transient 503 resilience probe (Phase 2.3.1)
+
+This opt-in correctness probe runs one fresh Sliced Chrome session at Google V2 Optimization Level 3 with Fluid scheduling. It leaves the normal network guard enabled, waits for an observed concrete Page AUTO source resolver state before selecting a physical Google V2 request, and fulfills exactly one selected request with HTTP 503. The production QueueManager, RateLimitManager, provider, and scheduler remain active; the subsequent request must be an actual 200 retry. It does not create performance samples or run alongside the provider matrix or other isolated probes.
+
+```sh
+BENCH_RESILIENCE_PROBES=googlev2-503 \
+  BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/googlev2-503-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The separate `*-resilience-googlev2-503.json` artifact preserves raw physical attempts, Page/root/QueueManager message and item IDs, resolver state, queue start/settlement status, retry error type/attempt limit/timer state, retry delay, resource cleanup, DOM and Restore evidence. The observed retry delay must be 950–2050ms, allowing 50ms timestamp tolerance around the production SERVER_ERROR 1–2s jitter window. The selector fails closed when the resolver is not concrete or the request cannot be tied to exactly one provider root and fixture target set. This is an offline deterministic harness response, not a live Google service/latency test.
+
 ### Custom provider offline matrix
 
 This opt-in lane exercises the production `CustomProvider` and parser through the real scheduler and provider pipeline. The harness intercepts the exact synthetic `https://benchmark-custom.invalid/v1/chat/completions` POST only when `BENCH_PROVIDER=custom` selects this lane; requests to that endpoint are blocked in discovery runs and other provider lanes. The fixed model is `benchmark-custom-model`; the harness sets `CUSTOM_API_KEY` blank, rejects Authorization headers, validates the actual JSON request, and returns reversed structured translations with the exact wire IDs. No credentials or live provider traffic are used. HTTP sequence `ids` are fixture target IDs mapped from request texts; Custom parser wire IDs are recorded separately as `wireIds`. Each successful trial requires one HTTP request per observed logical batch, exact source and DOM accounting, and correlated terminal network outcomes; retries or structured-recovery requests fail the trial.

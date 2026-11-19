@@ -18,23 +18,32 @@ import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, find
 import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, modeOrder, mapProviderBatchIds, parseProviderLane, providerLaneSettings, providerLaneFinalization, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
+import { parseResilienceProbeSelection, selectResolvedGoogleAttempt, shouldEnableResilienceQueueProbe, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './resilience-probes.mjs';
 
 const root = process.cwd();
 const providerLane = parseProviderLane(process.env);
 const cancellationProbes = parseCancellationProbeSelection(process.env.BENCH_CANCELLATION_PROBES);
 const staleSuccessProbes = parseSuccessfulReplyProbeSelection(process.env.BENCH_STALE_SUCCESS_PROBES);
+const resilienceProbes = parseResilienceProbeSelection(process.env.BENCH_RESILIENCE_PROBES);
 if (cancellationProbes.length && staleSuccessProbes.length) throw new TypeError('Cancellation and stale-success probes must run separately.');
-const isolatedProbes = cancellationProbes.length ? cancellationProbes : staleSuccessProbes;
-if (providerLane && isolatedProbes.length) throw new TypeError('Provider lane cannot be combined with cancellation or stale-success probes.');
+if ([cancellationProbes, staleSuccessProbes, resilienceProbes].filter(items => items.length).length > 1) throw new TypeError('Isolated correctness probes must run separately.');
+const isolatedProbes = cancellationProbes.length ? cancellationProbes : staleSuccessProbes.length ? staleSuccessProbes : resilienceProbes;
+validateResilienceProbeIsolation({
+  selected: resilienceProbes.length > 0, provider: providerLane?.provider,
+  optimizationLevel: providerLane?.optimizationLevel, modes: process.env.BENCH_MODES,
+  scenario: process.env.BENCH_SCENARIOS, schedulingMode: process.env.BENCH_SCROLL_SCHEDULING,
+  competingProbe: cancellationProbes.length > 0 || staleSuccessProbes.length > 0,
+});
+if (providerLane && (cancellationProbes.length || staleSuccessProbes.length)) throw new TypeError('Provider lane cannot be combined with cancellation or stale-success probes.');
 const requestedModes = [...new Set((providerLane ? 'sliced' : process.env.BENCH_MODES ?? (isolatedProbes.length ? 'sliced' : 'legacy,sliced,viewport')).split(',').map(value => value.trim()).filter(Boolean))];
 if (isolatedProbes.length && (requestedModes.length !== 1 || requestedModes[0] !== 'sliced')) {
   throw new TypeError('Cancellation and stale-success probes require BENCH_MODES=sliced only.');
 }
-if (isolatedProbes.length && process.env.BENCH_SCENARIOS && process.env.BENCH_SCENARIOS !== 'early-visible') {
+if (isolatedProbes.length && !resilienceProbes.length && process.env.BENCH_SCENARIOS && process.env.BENCH_SCENARIOS !== 'early-visible') {
   throw new TypeError('Cancellation and stale-success probes require BENCH_SCENARIOS=early-visible.');
 }
 const modes = providerLane ? ['sliced'] : isolatedProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
-const scenarios = isolatedProbes.length ? ['early-visible'] : parseScenarioSelection(usesBandedProviderScroll(providerLane?.provider) ? process.env.BENCH_SCENARIOS ?? 'scroll-through' : process.env.BENCH_SCENARIOS ?? 'small');
+const scenarios = isolatedProbes.length ? [resilienceProbes.length ? 'scroll-through' : 'early-visible'] : parseScenarioSelection(usesBandedProviderScroll(providerLane?.provider) ? process.env.BENCH_SCENARIOS ?? 'scroll-through' : process.env.BENCH_SCENARIOS ?? 'small');
 const scrollSchedulingMode = parseScrollSchedulingMode(process.env.BENCH_SCROLL_SCHEDULING);
 if (scenarios.includes('scroll-through') !== (scrollSchedulingMode !== null)) throw new TypeError('BENCH_SCENARIOS=scroll-through requires BENCH_SCROLL_SCHEDULING=fluid or on-stop, and scheduling is only valid with scroll-through.');
 if (usesBandedProviderScroll(providerLane?.provider) && (scenarios.length !== 1 || scenarios[0] !== 'scroll-through')) throw new TypeError(`${providerLane.provider} provider lane requires the scroll-through workload.`);
@@ -76,6 +85,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/cancellation-probes.mjs',
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-probes.mjs',
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-gate.mjs',
+  'scripts/dev/page-translation/e2e-benchmark/resilience-probes.mjs',
   'scripts/dev/page-translation/page-translation-e2e-runtime.test.js',
   'scripts/dev/page-translation/page-translation-e2e-benchmark.test.js',
   'scripts/dev/page-translation/page-translation-e2e-measurement.test.js',
@@ -367,7 +377,7 @@ function validateHarnessBuildParity() {
   return parity;
 }
 
-async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, schedulingMode = null }) {
+async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, resilienceProbe = null, schedulingMode = null }) {
   const scenarioSettings = settingsForScenario(settings, fixtureConfig.scenario, schedulingMode);
   const trialSettings = providerLane ? providerLaneSettings(scenarioSettings, providerLane) : scenarioSettings;
   const trial = {
@@ -405,6 +415,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
   const networkEventUnsubscribes = new Map();
   const providerNetworkEvents = new Map();
   const providerPhysicalAttempts = [];
+  const resilienceEvidence = resilienceProbe ? { injected503: [], attempts: [], unnecessaryRetransmits: [], siblingRequests: [] } : null;
   let providerAttemptSequence = 0;
   const providerNetworkObserver = event => {
     const params = event.params ?? {};
@@ -563,6 +574,43 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         requestRecord.batchSize = body.length;
         requestRecord.batchTexts ??= body;
         requestRecord.fixtureDelayMs = fixtureConfig.responseDelayMs;
+        if (resilienceProbe && classification.provider === 'googlev2') {
+          const networkId = event.params.networkId ?? null;
+          const resources = trial.sessionId ? await evaluate(chrome, workerSession,
+            `globalThis.__pageTranslationBenchmark.resourceSnapshot([],[${JSON.stringify(trial.sessionId)}])`, undefined, false) : null;
+          const resolver = resources?.sourceResolvers?.[trial.sessionId];
+          const roots = await evaluate(chrome, workerSession,
+            'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
+          const matchingRoots = (roots?.providerRoots ?? []).filter(root => root.sessionId === trial.sessionId
+            && sameProviderTexts(root.texts, body));
+          const logicalRoots = [...new Map(matchingRoots.map(root => [root.messageId, root])).values()];
+          const root = logicalRoots.length === 1 ? logicalRoots[0] : null;
+          const selection = selectResolvedGoogleAttempt({
+            request: { networkId, sourceLanguage: requestRecord.sourceLanguageQuery }, classification, resolver, failedCount: resilienceEvidence.injected503.length,
+          });
+          const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
+          const base = { attemptId: `resilience-${resilienceEvidence.attempts.length + 1}`, networkId,
+            pageSessionId: trial.sessionId, logicalMessageId: root?.messageId ?? null, texts: body, targetIds,
+            source: resolver?.effectiveSourceLanguage ?? null, sourceLanguageQuery: requestRecord.sourceLanguageQuery ?? null,
+            target: resolver?.effectiveTargetLanguage ?? null };
+          if (resilienceEvidence.injected503.length && sameProviderTexts(resilienceEvidence.injected503[0].texts, body)) {
+            base.retryOf = resilienceEvidence.injected503[0].attemptId;
+          }
+          resilienceEvidence.attempts.push(base);
+          requestRecord.resilienceCorrelation = { ...base, resolver, matchingRootCount: logicalRoots.length, selection };
+          if (selection.selected) {
+            if (!root || !targetIds.length || targetIds.some(id => id === null)) throw new Error('Resolved Google request lacks unique QueueManager/logical target correlation.');
+            const failure = { ...base, status: 503, selectedAt: now() };
+            resilienceEvidence.injected503.push(failure);
+            requestRecord.resilienceInjected503 = failure;
+            const send = sendBySession.get(event.sessionId);
+            await send('Fetch.fulfillRequest', { requestId, responseCode: 503,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify({ error: { code: 503, message: 'Benchmark injected transient failure' } })).toString('base64') }, event.sessionId);
+            requestRecord.response = { status: 503, endedAt: now() };
+            return;
+          }
+        }
         if (fixtureConfig.scenario === 'scroll-through' && pageSession && contentContext) {
           const requestViewport = await evaluate(chrome, pageSession,
             `(()=>{const sources=${JSON.stringify(body)};return {at:performance.now(),scrollY,targets:sources.map(source=>{const el=[...document.querySelectorAll('[data-bench-id]')].find(node=>node.textContent===source);if(!el)return {source,id:null,classification:'unmapped'};const r=el.getBoundingClientRect();const visible=r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth;const buffered=r.bottom>-50&&r.top<innerHeight+50&&r.right>-50&&r.left<innerWidth+50;return {source,id:el.dataset.benchId,classification:visible?'viewport':buffered?'permitted-50px-buffer':'outside-buffer'}})}})()`, contentContext, false);
@@ -786,6 +834,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         else await send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, event.sessionId).catch(() => {});
       }
     } finally {
+      if (resilienceProbe && requestRecord.resilienceCorrelation && requestRecord.response?.status === 200) {
+        const attempt = resilienceEvidence.attempts.find(item => item.attemptId === requestRecord.resilienceCorrelation.attemptId);
+        if (attempt) attempt.status = 200;
+      }
       requestRecord.endedAt = now();
       if (requestRecord.heldFetch) requestRecord.heldFetch.handlerSettled = true;
       if (reservation && !reservation.releaseRequested) {
@@ -879,12 +931,17 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       : `browser.storage.local.set(${JSON.stringify(trialSettings)})`;
     await evaluate(chrome, workerSession,
       `Promise.all([${settingWrite},browser.storage.sync.set(${JSON.stringify(trialSettings)}).catch(()=>{})])`);
-    if (cancellationProbe || staleSuccessProbe) {
+    if (cancellationProbe || staleSuccessProbe || resilienceProbe) {
       const workerInstrumentation = await evaluate(chrome, workerSession,
         'globalThis.__pageTranslationBenchmark.enableCancellationProbe()');
-      (trial.cancellation ?? trial.staleSuccess).workerInstrumentation = workerInstrumentation;
+      if (trial.cancellation || trial.staleSuccess) (trial.cancellation ?? trial.staleSuccess).workerInstrumentation = workerInstrumentation;
       if (!workerInstrumentation?.enabled || !workerInstrumentation?.lifecycleRegistryObserved
           || workerInstrumentation.instrumentationErrors?.length) throw new Error('Worker cancellation/provider/controller instrumentation was not fully installed.');
+    }
+    if (shouldEnableResilienceQueueProbe(resilienceProbe)) {
+      trial.resilienceQueueInstrumentation = await evaluate(chrome, workerSession,
+        'globalThis.__pageTranslationBenchmark.enableResilienceQueueProbe()');
+      if (!trial.resilienceQueueInstrumentation?.enabled) throw new Error('Resilience-only QueueManager attempt instrumentation was not installed.');
     }
 
     const { targetId } = await chrome.send('Target.createTarget', { url: 'about:blank' });
@@ -2789,7 +2846,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     trial.providerBatchSizes = providerAttempts.map(request => request.batchSize);
     const originalsFromDom = trial.rawDOM.original;
     const translatedFromDom = trial.rawDOM.translated;
-    const providerSources = providerAttempts.flatMap(request => request.batchTexts ?? []);
+    const providerSources = providerAttempts.filter(request => !request.resilienceInjected503)
+      .flatMap(request => request.batchTexts ?? []);
     const expectedIds = originalsFromDom.map(([id]) => id);
     const sourceToId = new Map(originals.map(([id, source]) => [source, id]));
     if (sourceToId.size !== originals.length) throw new Error('Fixture source texts are not unique; HTTP body-to-target order cannot be proven.');
@@ -2843,7 +2901,11 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
 
     trial.providerRequestOrder = mapProviderBatchIds(providerAttempts.map(request => request.batchTexts ?? []), sourceToId);
     const providerRequestIds = trial.providerRequestOrder.flat();
-    const providerOrderValidation = validateExactTargetIds('provider request source', providerRequestIds, expectedIds);
+    const successfulProviderRequestIds = resilienceProbe
+      ? mapProviderBatchIds(providerAttempts.filter(request => !request.resilienceInjected503)
+        .map(request => request.batchTexts ?? []), sourceToId).flat()
+      : providerRequestIds;
+    const providerOrderValidation = validateExactTargetIds('provider request source', successfulProviderRequestIds, expectedIds);
     if (!providerOrderValidation.ok) throw new Error(providerOrderValidation.issues.join('; '));
     trial.providerRequestOrderValidation = providerOrderValidation;
     trial.providerHTTPRequestSequence = mapProviderHTTPRequestSequence(providerAttempts, sourceToId, providerLane?.provider);
@@ -2897,6 +2959,55 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         scheduler: trial.providerSchedulerObserved,
       });
       if (!trial.providerSchedulerValidation.ok) throw new Error(trial.providerSchedulerValidation.issues.join('; '));
+    }
+    if (resilienceProbe) {
+      const [resources, pageScheduler] = await Promise.all([
+        evaluate(chrome, workerSession,
+          `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(sessionId)}])`, undefined, false),
+        evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+      ]);
+      const logicalByTexts = new Map();
+      for (const attempt of resilienceEvidence.attempts) {
+        const key = JSON.stringify(attempt.texts);
+        if (!logicalByTexts.has(key)) logicalByTexts.set(key, []);
+        logicalByTexts.get(key).push(attempt);
+      }
+      for (const attempts of logicalByTexts.values()) {
+        const failedAttemptId = resilienceEvidence.injected503[0]?.attemptId;
+        if (attempts.length > 1 && attempts.some(attempt => attempt.attemptId !== failedAttemptId
+            && attempt.retryOf !== failedAttemptId)) {
+          resilienceEvidence.unnecessaryRetransmits.push({ texts: attempts[0].texts, attempts });
+        }
+      }
+      const failedIds = new Set(resilienceEvidence.injected503[0]?.targetIds ?? []);
+      for (const attempt of resilienceEvidence.attempts) {
+        if (attempt.attemptId === resilienceEvidence.injected503[0]?.attemptId
+            || attempt.retryOf === resilienceEvidence.injected503[0]?.attemptId) continue;
+        const overlap = attempt.targetIds?.filter(id => failedIds.has(id)) ?? [];
+        if (overlap.length) resilienceEvidence.unnecessaryRetransmits.push({ texts: attempt.texts, targetIds: overlap, attemptId: attempt.attemptId });
+      }
+      const translated = trial.rawDOM.translated ?? [];
+      const expectedTranslated = fixtureConfig.targets.map(({ id, source }) => [id, `\u200efixture translation: ${source}`]);
+      const failedTargetIds = failedIds;
+      resilienceEvidence.siblingRequests = resilienceEvidence.attempts.filter(attempt => attempt.status === 200
+        && attempt.pageSessionId === resilienceEvidence.injected503[0]?.pageSessionId
+        && attempt.targetIds?.length && attempt.targetIds.every(id => !failedTargetIds.has(id)));
+      const resourceValidation = validateRuntimeResources(resources, { sessionIds: [sessionId], final: true });
+      const cleanupOk = resourceValidation.ok
+        && pageScheduler?.managerTranslating === false
+        && pageScheduler.activeFlushes === 0 && pageScheduler.queueIds?.length === 0
+        && pageScheduler.pendingSettlementCount === 0 && pageScheduler.batchTimerActive === false
+        && pageScheduler.completionTimerActive === false;
+      const queueRetryEvidence = validateQueueRetryEvidence(traceEvents(workerTrace), {
+        messageId: resilienceEvidence.injected503[0]?.logicalMessageId,
+      });
+      trial.resilience = { ...resilienceEvidence, resources, pageScheduler, queueRetryEvidence, translation: {
+        exact: JSON.stringify(translated) === JSON.stringify(expectedTranslated),
+        duplicates: translated.length - new Set(translated.map(([id]) => id)).size,
+        expectedTargetIds: expectedTranslated.map(([id]) => id), observed: translated,
+      }, cleanup: { ok: cleanupOk, runtimeResources: resourceValidation } };
+      trial.resilience.validation = validateResilienceAccounting(trial.resilience);
+      if (!trial.resilience.validation.ok) throw new Error(trial.resilience.validation.issues.join('; '));
     }
     trial.status = 'passed';
   } catch (error) {
@@ -3228,7 +3339,29 @@ try {
     browserVersion: null,
     fileSha256: Object.fromEntries(await Promise.all(sourcePaths.map(async path => [path, await hashFile(path)]))),
   };
-  if (providerLane) {
+  if (resilienceProbes.length) {
+    harness.command = 'BENCH_RESILIENCE_PROBES=googlev2-503 BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid node scripts/dev/page-translation/e2e-benchmark/run.mjs';
+    harness.warmups = 0;
+    harness.measuredSamples = 0;
+    harness.resilienceProbe = { requested: 'googlev2-503', scenario: 'scroll-through', schedulingMode: 'fluid', status: 'running' };
+    const extensionPath = await compileMode('sliced');
+    validateHarnessBuildParity();
+    await runNetworkGuardNegativeProbe(extensionPath, 'sliced');
+    const run = await runTrial({
+      mode: 'sliced', scenario: 'scroll-through', ordinal: 1, globalRunOrder: ++globalRunOrder,
+      phase: 'isolated-googlev2-503-resilience', extensionPath, resilienceProbe: 'googlev2-503',
+      fixtureConfig: createFixture('scroll-through', { providerLane: true }), schedulingMode: 'fluid',
+    });
+    harness.results.push(run);
+    const rawPath = `${artifactPath.replace(/\.json$/i, '')}-resilience-googlev2-503.json`;
+    await mkdir(dirname(rawPath), { recursive: true });
+    await writeFile(rawPath, JSON.stringify({ command: harness.command, status: run.status, run }, null, 2));
+    harness.resilienceProbe = { requested: 'googlev2-503', status: run.status, artifactPath: rawPath,
+      validation: run.resilience?.validation ?? null };
+    harness.comparisonGate = { comparisonsAllowed: false, reason: 'Isolated retry resilience probe; no performance aggregation.' };
+    if (run.status !== 'passed') throw new Error(run.error?.message ?? 'Google V2 resilience probe failed.');
+    harness.status = 'passed';
+  } else if (providerLane) {
     harness.command = `BENCH_LANE=provider BENCH_PROVIDER=${providerLane.provider} BENCH_OPTIMIZATION_LEVEL=${providerLane.optimizationLevel} BENCH_MODES=sliced node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
     harness.warmups = warmups;
     harness.measuredSamples = samples;

@@ -85,11 +85,52 @@ installTimedCallThrough(MicrosoftEdgeProvider.prototype, '_translateChunk', ([te
   trace.record('microsoftEdgeProvider.translateChunk.end', { startedAt: token?.startedAt ?? null, failed: !!error, errorName: error?.name ?? null });
 });
 
+let resilienceQueueInstrumentationInstalled = false;
+function installResilienceQueueInstrumentation() {
+  if (resilienceQueueInstrumentationInstalled) return { enabled: true, alreadyInstalled: true };
+  const retryScheduledAtById = new Map();
+  const installed = installTimedCallThrough(QueueManager.prototype, '_processItem', ([item]) => {
+    const retryScheduledAt = retryScheduledAtById.get(item?.id) ?? null;
+    const token = {
+      item, queueItemId: item?.id ?? null, messageId: item?.messageId ?? null,
+      providerName: item?.providerName ?? null, context: item?.context ?? null,
+      attemptNumber: Number.isInteger(item?.attempts) ? item.attempts + 1 : null,
+      previousErrorType: item?.lastError?.type ?? null,
+      attemptLimit: item?.getRetryStrategy?.().maxRetries ?? null, retryScheduledAt,
+    };
+    trace.record('queueManager.processItem.start', {
+      queueItemId: token.queueItemId, messageId: token.messageId, providerName: token.providerName,
+      context: token.context, attemptNumber: token.attemptNumber, previousErrorType: token.previousErrorType,
+      attemptLimit: token.attemptLimit, retryScheduledAt: token.retryScheduledAt,
+    });
+    return token;
+  }, token => {
+    const { item } = token ?? {};
+    const status = item?.status ?? null;
+    const retryTimerActive = item?.id ? queueManager.retryTimeouts.has(item.id) : false;
+    const settledAt = Date.now();
+    const retryScheduledAt = status === 'retrying' && retryTimerActive ? settledAt : null;
+    if (retryScheduledAt !== null) retryScheduledAtById.set(item.id, retryScheduledAt);
+    trace.record('queueManager.processItem.end', {
+      queueItemId: token?.queueItemId ?? null, messageId: token?.messageId ?? null,
+      providerName: token?.providerName ?? null, attemptNumber: token?.attemptNumber ?? null,
+      attempts: item?.attempts ?? null, attemptLimit: item?.getRetryStrategy?.().maxRetries ?? null,
+      status, lastErrorType: item?.lastError?.type ?? null, retryTimerActive, retryScheduledAt,
+    });
+    if (status === 'completed' || status === 'failed') retryScheduledAtById.delete(item?.id);
+  });
+  resilienceQueueInstrumentationInstalled = installed;
+  return { enabled: installed, alreadyInstalled: false };
+}
+
 const marker = {
   startedAt: Date.now(),
   entry: 'src/core/background/index.js',
   unifiedTranslationService,
   trace,
+  enableResilienceQueueProbe() {
+    return installResilienceQueueInstrumentation();
+  },
   enableCancellationProbe() {
     cancellationProbeEnabled = true;
     if (!cancellationInstrumentationReady) {
@@ -241,6 +282,7 @@ const marker = {
             effectiveSourceLanguage: state.effectiveSourceLanguage ?? null,
             effectiveTargetLanguage: state.effectiveTargetLanguage ?? null,
             status: state.status ?? null,
+            resolutionPending: typeof state._resolveSource === 'function',
           } : { present: false }];
         })) : null,
       queue: queueAvailable ? {

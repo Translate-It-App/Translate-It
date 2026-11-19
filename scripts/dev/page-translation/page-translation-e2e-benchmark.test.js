@@ -12,8 +12,54 @@ import { registryIdToName } from '../../../src/features/translation/providers/Pr
 import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
 import { AIResponseParser } from '../../../src/features/translation/providers/utils/AIResponseParser.js';
 import { ResponseFormat } from '../../../src/features/translation/core/ProviderConfigurations.js';
+import { parseResilienceProbeSelection, selectResolvedGoogleAttempt, shouldEnableResilienceQueueProbe, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
 
 describe('page translation benchmark measurements', () => {
+  it('selects only a first Google V2 attempt after concrete AUTO source resolution and validates retry accounting', () => {
+    expect(parseResilienceProbeSelection(undefined)).toEqual([]);
+    expect(parseResilienceProbeSelection('googlev2-503')).toEqual(['googlev2-503']);
+    expect(() => parseResilienceProbeSelection('googlev2-503,other')).toThrow();
+    expect(shouldEnableResilienceQueueProbe(null)).toBe(false);
+    expect(shouldEnableResilienceQueueProbe('googlev2-503')).toBe(true);
+    expect(validateResilienceProbeIsolation({ selected: true, provider: 'googlev2', optimizationLevel: 3, modes: 'sliced', scenario: 'scroll-through', schedulingMode: 'fluid' })).toBe(true);
+    expect(() => validateResilienceProbeIsolation({ selected: true, provider: 'googlev2', optimizationLevel: 3, modes: 'legacy', scenario: 'scroll-through', schedulingMode: 'fluid' })).toThrow();
+    expect(() => validateResilienceProbeIsolation({ selected: true, provider: 'googlev2', optimizationLevel: 3, competingProbe: true })).toThrow();
+    const request = { networkId: 'net-1', sourceLanguage: 'en' };
+    const classification = { kind: 'provider-translation', provider: 'googlev2' };
+    expect(selectResolvedGoogleAttempt({ request, classification, resolver: { present: true, resolutionPending: true, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' }, failedCount: 0 }).selected).toBe(false);
+    expect(selectResolvedGoogleAttempt({ request, classification, resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'auto', effectiveTargetLanguage: 'fr' }, failedCount: 0 }).selected).toBe(false);
+    expect(selectResolvedGoogleAttempt({ request, classification, resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' }, failedCount: 0 })).toMatchObject({ selected: true, source: 'en', target: 'fr' });
+    expect(selectResolvedGoogleAttempt({ request: { ...request, sourceLanguage: 'nl' }, classification, resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' }, failedCount: 0 }).selected).toBe(false);
+    expect(selectResolvedGoogleAttempt({ request, classification, resolver: { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' }, failedCount: 1 }).selected).toBe(false);
+    const failed = { attemptId: 'failed', networkId: 'network-1', logicalMessageId: 'message-1', pageSessionId: 'session-1', targetIds: ['a'], texts: ['one'], status: 503 };
+    const queueEvents = [
+      { name: 'queueManager.processItem.start', at: 1_000, queueItemId: 'queue-1', messageId: 'message-1', attemptNumber: 1, attemptLimit: 2, previousErrorType: null },
+      { name: 'queueManager.processItem.end', at: 1_010, queueItemId: 'queue-1', messageId: 'message-1', attempts: 1, attemptLimit: 3, status: 'retrying', lastErrorType: 'SERVER_ERROR', retryTimerActive: true, retryScheduledAt: 1_010 },
+      { name: 'queueManager.processItem.start', at: 2_510, queueItemId: 'queue-1', messageId: 'message-1', attemptNumber: 2, attemptLimit: 3, previousErrorType: 'SERVER_ERROR', retryScheduledAt: 1_010 },
+      { name: 'queueManager.processItem.end', at: 2_520, queueItemId: 'queue-1', messageId: 'message-1', attempts: 2, attemptLimit: 3, status: 'completed', lastErrorType: 'SERVER_ERROR', retryTimerActive: false, retryScheduledAt: null },
+    ];
+    const queueRetryEvidence = validateQueueRetryEvidence(queueEvents, { messageId: 'message-1' });
+    expect(queueRetryEvidence).toMatchObject({ ok: true, observed: { queueItemId: 'queue-1', attempts: [1, 2], attemptLimit: 3, errorType: 'SERVER_ERROR', backoffMs: 1500, finalStatus: 'completed', retryTimerActiveAtSchedule: true, retryTimerActiveAtEnd: false } });
+    expect(validateQueueRetryEvidence(queueEvents, { messageId: 'wrong-message' }).ok).toBe(false);
+    expect(validateQueueRetryEvidence(queueEvents.map(event => event.name.endsWith('.start') && event.at === 2_510 ? { ...event, at: 3_200 } : event), { messageId: 'message-1' }).ok).toBe(false);
+    expect(validateQueueRetryEvidence(queueEvents.map(event => event.name.endsWith('.end') && event.status === 'retrying' ? { ...event, retryTimerActive: false } : event), { messageId: 'message-1' }).ok).toBe(false);
+    expect(validateQueueRetryEvidence(queueEvents.map(event => event.name.endsWith('.end') && event.status === 'retrying' ? { ...event, lastErrorType: 'NETWORK_ERROR' } : event), { messageId: 'message-1' }).ok).toBe(false);
+    expect(validateQueueRetryEvidence(queueEvents.map(event => event.name.endsWith('.end') ? { ...event, attemptLimit: 2 } : event), { messageId: 'message-1' }).ok).toBe(false);
+    expect(validateQueueRetryEvidence(queueEvents.map(event => event.name.endsWith('.start') && event.at === 2_510 ? { ...event, queueItemId: 'other-queue-item' } : event), { messageId: 'message-1' }).ok).toBe(false);
+    const evidence = {
+      injected503: [failed],
+      attempts: [failed, { ...failed, attemptId: 'retry', networkId: 'network-2', retryOf: 'failed', status: 200 }],
+      unnecessaryRetransmits: [],
+      siblingRequests: [{ status: 200, pageSessionId: 'session-1', targetIds: ['b'] }],
+      translation: { exact: true, duplicates: 0 },
+      queueRetryEvidence,
+      cleanup: { ok: true },
+    };
+    expect(validateResilienceAccounting(evidence)).toEqual({ ok: true, issues: [] });
+    expect(validateResilienceAccounting({ ...evidence, injected503: [failed, failed] }).ok).toBe(false);
+    expect(validateResilienceAccounting({ ...evidence, injected503: [{ ...failed, status: 200 }] }).ok).toBe(false);
+    expect(validateResilienceAccounting({ ...evidence, attempts: [failed, { ...failed, networkId: 'network-2', retryOf: 'failed', status: 200, logicalMessageId: null }] }).ok).toBe(false);
+  });
   it('validates Edge and Google V2 lanes without changing legacy selection', () => {
     expect(parseProviderLane({})).toBeNull();
     expect(() => parseProviderLane({ BENCH_LANE: 'provider' })).toThrow('BENCH_PROVIDER');

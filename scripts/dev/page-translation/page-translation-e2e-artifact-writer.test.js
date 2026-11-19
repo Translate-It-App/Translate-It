@@ -10,7 +10,7 @@ import { createCancellationRequestLifecycle, promoteRequestDiagnostics } from '.
 import { measureScenarioRuns, summarize, validateRunGate } from './e2e-benchmark/metrics.mjs';
 import { providerLaneFinalization, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
 
-async function runActualFinalization({ failAt = null, cleanupFailure = false, measureFailureAfter = null, trialCleanupErrors = [], trialCleanupReport = null, trialDiagnostics = null, providerLane = null, providerSamples = 4 } = {}) {
+async function runActualFinalization({ failAt = null, cleanupFailure = false, measureFailureAfter = null, trialCleanupErrors = [], trialCleanupReport = null, trialDiagnostics = null, providerLane = null, providerSamples = 4, resilienceProbes = [], resilienceRun = null } = {}) {
   const runner = await readFile(new URL('./e2e-benchmark/run.mjs', import.meta.url), 'utf8');
   const start = runner.indexOf('let globalRunOrder = 0;');
   expect(start).toBeGreaterThanOrEqual(0);
@@ -31,12 +31,13 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
     harness,
     artifactPath: path,
     providerLane,
-    requestedModes: providerLane ? ['sliced'] : ['legacy', 'sliced', 'viewport'],
+    requestedModes: providerLane || resilienceProbes.length ? ['sliced'] : ['legacy', 'sliced', 'viewport'],
     cancellationProbes: [],
     staleSuccessProbes: [],
-    isolatedProbes: [],
-    modes: providerLane ? ['sliced'] : ['legacy', 'sliced', 'viewport'],
-    scenarios: ['small'],
+    resilienceProbes,
+    isolatedProbes: resilienceProbes,
+    modes: providerLane || resilienceProbes.length ? ['sliced'] : ['legacy', 'sliced', 'viewport'],
+    scenarios: resilienceProbes.length ? ['scroll-through'] : ['small'],
     scrollSchedulingMode: null,
     samples: providerLane ? providerSamples : 4,
     warmups: 1,
@@ -81,7 +82,11 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
       return `${mode}-bundle`;
     },
     runNetworkGuardNegativeProbe: async () => {},
+    mkdir: async () => {},
+    dirname: path => path.slice(0, path.lastIndexOf('/')),
+    writeFile: async () => {},
     runTrial: async options => {
+      if (resilienceProbes.length) return resilienceRun;
       const failed = failAt && options.mode === failAt.mode && options.phase === failAt.phase && options.ordinal === failAt.ordinal;
       const run = {
         ...options,
@@ -193,6 +198,48 @@ describe('streamed benchmark artifact serialization', () => {
     expect(artifact.results.filter(run => run.phase === 'measured').slice(0, 6).map(run => run.mode)).toEqual([
       'legacy', 'sliced', 'viewport', 'sliced', 'viewport', 'legacy',
     ]);
+  });
+
+  it('finalizes successful resilience probes without performance summaries or comparisons', async () => {
+    const resilienceRun = {
+      mode: 'sliced', scenario: 'scroll-through', phase: 'isolated-googlev2-503-resilience',
+      status: 'passed', cleanupErrors: [],
+      resilience: {
+        validation: { ok: true, issues: [] },
+        injected503: [{ attemptId: 'resilience-1', status: 503 }],
+        attempts: [
+          { attemptId: 'resilience-1', status: 503 },
+          { attemptId: 'resilience-2', status: 200, retryOf: 'resilience-1' },
+        ],
+      },
+    };
+    const { artifact, writes, compiles } = await runActualFinalization({
+      resilienceProbes: ['googlev2-503'], resilienceRun,
+    });
+    expect(artifact.status).toBe('passed');
+    expect(artifact.resilienceProbe).toMatchObject({ requested: 'googlev2-503', status: 'passed' });
+    expect(artifact.results[0].resilience.attempts[1]).toMatchObject({
+      attemptId: 'resilience-2', status: 200, retryOf: 'resilience-1',
+    });
+    expect(artifact.scenarioSummaries).toBeUndefined();
+    expect(artifact.comparisons).toBeUndefined();
+    expect(artifact.comparisonGate).toMatchObject({ comparisonsAllowed: false });
+    expect(writes).toEqual([{ count: 1, status: 'passed' }]);
+    expect(compiles).toEqual(['sliced']);
+  });
+
+  it('finalizes failed resilience probes as failed artifacts without performance aggregation', async () => {
+    const { artifact, writes } = await runActualFinalization({
+      resilienceProbes: ['googlev2-503'],
+      resilienceRun: { mode: 'sliced', scenario: 'scroll-through', status: 'failed', error: { message: 'retry failed' }, cleanupErrors: [] },
+    });
+    expect(artifact.status).toBe('failed');
+    expect(artifact.resilienceProbe).toMatchObject({ requested: 'googlev2-503', status: 'failed' });
+    expect(artifact.error.message).toBe('retry failed');
+    expect(artifact.scenarioSummaries).toBeUndefined();
+    expect(artifact.comparisons).toBeUndefined();
+    expect(artifact.comparisonGate).toMatchObject({ comparisonsAllowed: false });
+    expect(writes).toEqual([{ count: 1, status: 'failed' }]);
   });
 
   it('persists a measured-only provider-lane scenario summary through the artifact writer', async () => {
