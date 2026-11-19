@@ -236,4 +236,44 @@ describe('large-page benchmark plan and geometry checks', () => {
     expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: false, expectedText, resultingText: host.textContent, records: childListRecords })).toBe(false);
     host.remove();
   });
+
+  it('detects repeated accepted title writes from actual MutationObserver deliveries', async () => {
+    const target = document.createElement('div');
+    const expectedText = '\u200efixture translation: title';
+    target.title = 'source';
+    document.body.append(target);
+    const records = [];
+    const observer = new MutationObserver(delivered => records.push(...delivered));
+    observer.observe(target, { attributes: true, attributeOldValue: true });
+
+    target.title = expectedText;
+    target.title = expectedText;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const repeatedInDelivery = records.splice(0);
+    expect(repeatedInDelivery).toHaveLength(2);
+    expect(repeatedInDelivery.every(record => record.type === 'attributes' && record.attributeName === 'title')).toBe(true);
+    expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: false, expectedText, resultingText: target.title, records: repeatedInDelivery })).toBe(true);
+
+    target.title = 'source';
+    await new Promise(resolve => setTimeout(resolve, 0));
+    records.splice(0);
+    target.title = expectedText;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const firstAcceptance = records.splice(0);
+    expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: false, expectedText, resultingText: target.title, records: firstAcceptance })).toBe(false);
+
+    target.title = expectedText;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const laterRewrite = records.splice(0);
+    expect(laterRewrite).toHaveLength(1);
+    expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: true, expectedText, resultingText: target.title, records: laterRewrite })).toBe(true);
+
+    target.setAttribute('data-unrelated', 'changed');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const unrelatedAttribute = records.splice(0);
+    expect(unrelatedAttribute).toHaveLength(1);
+    expect(isDuplicateAcceptedMutation({ wasAlreadyAccepted: true, expectedText, resultingText: target.title, records: unrelatedAttribute })).toBe(false);
+    observer.disconnect();
+    target.remove();
+  });
 });

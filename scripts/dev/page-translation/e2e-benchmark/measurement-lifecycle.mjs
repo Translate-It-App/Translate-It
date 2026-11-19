@@ -40,6 +40,12 @@ export function isDuplicateAcceptedMutation({ wasAlreadyAccepted, expectedText, 
   const nextValueByTarget = new Map();
   for (let index = records.length - 1; index >= 0; index--) {
     const record = records[index];
+    if (record.type === 'attributes' && record.attributeName === 'title') {
+      const resultingValue = nextValueByTarget.get(record.target) ?? record.target.getAttribute('title');
+      if (record.oldValue === expectedText && resultingValue === expectedText) return true;
+      nextValueByTarget.set(record.target, record.oldValue);
+      continue;
+    }
     if (record.type !== 'characterData') continue;
     const resultingValue = nextValueByTarget.get(record.target) ?? record.target.nodeValue;
     if (record.oldValue === expectedText && resultingValue === expectedText) return true;
