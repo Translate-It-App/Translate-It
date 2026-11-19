@@ -15,6 +15,16 @@ BENCH_MODES=legacy,sliced,viewport BENCH_SCENARIOS=small,early-visible,in-window
 
 `BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `dynamic-dom`, `shadow-dom`, `spa-navigation`, `early-visible`, `in-window-visible`, `late-visible`, and `scroll-through`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
 
+## Opt-in provider lane (Issue #432 initial increment)
+
+```sh
+BENCH_LANE=provider BENCH_PROVIDER=edge BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The lane requires an explicit provider and optimization level (`1`, `3`, or `5`), and forces the production-default Sliced discovery build. If `BENCH_MODES` is set, it must be `sliced`; conflicting discovery modes are rejected. Edge is the only implemented provider adapter; Google V2, Custom, and Gemini are recognized IDs but fail clearly before build/Chrome launch. It uses the existing local Edge fixture response, so these are synthetic intercepted requests: no live provider, external provider traffic, provider latency, or translation-quality measurement is involved. Accounting follows CDP `Network.requestWillBeSent` through `loadingFinished`/`loadingFailed`; reported physical-request overlap is not scheduler logical-batch count or worker concurrency. The provider lane writes a separately named artifact and does not produce Legacy comparison artifacts.
+
 ## Opt-in lazy scroll-through scheduling
 
 The separate `scroll-through` fixture contains 12 unique targets in three four-target vertical bands; only band one is initially visible. Discovery remains selected with `BENCH_MODES` (`legacy`, `sliced`, or `viewport`), independently of lazy scheduler selection. Select one scheduler mode per invocation with `BENCH_SCROLL_SCHEDULING=fluid` or `on-stop`; either setting enables production lazy loading, while `on-stop` additionally enables translate-after-scroll-stop. These flags are never enabled for other fixtures.

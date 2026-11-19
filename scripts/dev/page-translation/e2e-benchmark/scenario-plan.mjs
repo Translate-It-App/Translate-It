@@ -6,6 +6,130 @@ export const MODE_DISCOVERY_FLAGS = Object.freeze({
   sliced: Object.freeze({ slicedDiscoveryEnabled: true, viewportFirstDiscoveryEnabled: false }),
   viewport: Object.freeze({ slicedDiscoveryEnabled: true, viewportFirstDiscoveryEnabled: true }),
 });
+export const BENCH_PROVIDERS = Object.freeze(['googlev2', 'custom', 'gemini', 'edge']);
+
+export function parseProviderLane(env = {}) {
+  if (env.BENCH_LANE !== undefined && !['discovery', 'provider'].includes(env.BENCH_LANE)) {
+    throw new TypeError(`Unsupported BENCH_LANE: ${env.BENCH_LANE}`);
+  }
+  if ((env.BENCH_LANE ?? 'discovery') !== 'provider') return null;
+  const provider = env.BENCH_PROVIDER;
+  if (!provider || !BENCH_PROVIDERS.includes(provider)) throw new TypeError(`Provider lane requires BENCH_PROVIDER to be one of: ${BENCH_PROVIDERS.join(', ')}.`);
+  if (provider !== 'edge') throw new TypeError(`Provider lane adapter "${provider}" is not implemented; only edge is currently supported.`);
+  if (!['1', '3', '5'].includes(env.BENCH_OPTIMIZATION_LEVEL)) throw new TypeError('Provider lane requires BENCH_OPTIMIZATION_LEVEL=1, 3, or 5.');
+  if (env.BENCH_MODES !== undefined && env.BENCH_MODES !== '' && env.BENCH_MODES.split(',').map(value => value.trim()).some(mode => mode !== 'sliced')) {
+    throw new TypeError('Provider lane requires production-default sliced discovery; use BENCH_MODES=sliced or omit BENCH_MODES.');
+  }
+  return Object.freeze({ lane: 'provider', provider, optimizationLevel: Number(env.BENCH_OPTIMIZATION_LEVEL), mode: 'sliced' });
+}
+
+export function providerLaneSettings(settings, { provider, optimizationLevel }) {
+  return Object.freeze({ ...settings, TRANSLATION_API: provider, PROVIDER_OPTIMIZATION_LEVELS: { [provider]: optimizationLevel } });
+}
+
+export function pageTranslationStartMessage(provider = 'edge') {
+  return { action: 'page-translate', data: { provider, targetLanguage: 'fr' } };
+}
+
+export function validateProviderRuntime({ requestedProvider, requestedOptimizationLevel, snapshot, expectedBatching }) {
+  const issues = [];
+  if (snapshot?.provider !== requestedProvider) issues.push(`effective provider mismatch: expected ${requestedProvider}, got ${snapshot?.provider ?? 'unavailable'}`);
+  if (snapshot?.optimizationLevel !== requestedOptimizationLevel) issues.push(`effective optimization level mismatch: expected ${requestedOptimizationLevel}, got ${snapshot?.optimizationLevel ?? 'unavailable'}`);
+  const batchingExpectation = expectedBatching ?? snapshot?.expectedBatching;
+  if (!snapshot?.batching || !batchingExpectation || JSON.stringify(snapshot.batching) !== JSON.stringify(batchingExpectation)) issues.push('effective provider batching configuration mismatch');
+  if (!Number.isFinite(snapshot?.maxConcurrent) || snapshot.maxConcurrent < 1) issues.push('effective scheduler concurrency unavailable');
+  else if (Number.isFinite(snapshot.configuredMaxConcurrent) && snapshot.maxConcurrent !== snapshot.configuredMaxConcurrent) issues.push('effective scheduler concurrency mismatch');
+  return { ok: issues.length === 0, issues, requestedProvider, requestedOptimizationLevel, observed: snapshot ?? null, expectedBatching };
+}
+
+export function validateProviderSchedulerRuntime({ provider, optimizationLevel, providerRuntime, scheduler }) {
+  const issues = [];
+  const multipliers = { 1: 2, 2: 1.5, 3: 1, 4: 0.7, 5: 0.4 };
+  const expectedChunkSize = Math.max(Math.floor(25 * (multipliers[optimizationLevel] ?? 1)), 5);
+  const expectedMaxChars = providerRuntime?.batching?.characterLimit;
+  const expectedMaxConcurrentFlushes = providerRuntime?.maxConcurrent;
+  if (!scheduler || typeof scheduler !== 'object') issues.push('effective PageTranslationScheduler batch configuration unavailable');
+  else {
+    if (scheduler.providerRegistryId !== provider) issues.push(`scheduler provider mismatch: expected ${provider}, got ${scheduler.providerRegistryId ?? 'unavailable'}`);
+    if (scheduler.chunkSize !== expectedChunkSize) issues.push(`scheduler chunkSize mismatch: expected ${expectedChunkSize}, got ${scheduler.chunkSize ?? 'unavailable'}`);
+    if (!Number.isFinite(expectedMaxChars) || scheduler.maxChars !== expectedMaxChars) issues.push(`scheduler maxChars mismatch: expected ${expectedMaxChars ?? 'unavailable'}, got ${scheduler.maxChars ?? 'unavailable'}`);
+    if (scheduler.parallelExecution !== false) issues.push(`scheduler parallelExecution mismatch: expected false for ${provider}, got ${String(scheduler.parallelExecution)}`);
+    if (!Number.isFinite(expectedMaxConcurrentFlushes) || scheduler.maxConcurrentFlushes !== expectedMaxConcurrentFlushes) {
+      issues.push(`scheduler maxConcurrentFlushes mismatch: expected ${expectedMaxConcurrentFlushes ?? 'unavailable'}, got ${scheduler.maxConcurrentFlushes ?? 'unavailable'}`);
+    }
+  }
+  return { ok: issues.length === 0, provider, optimizationLevel, expected: {
+    providerRegistryId: provider, chunkSize: expectedChunkSize, maxChars: expectedMaxChars,
+    parallelExecution: false, maxConcurrentFlushes: expectedMaxConcurrentFlushes,
+  }, observed: scheduler ?? null, issues };
+}
+
+export function validateProviderNetworkCorrelation(fetchRequests, networkEvents) {
+  const issues = [];
+  const key = (sessionId, networkId) => `${sessionId}:${networkId}`;
+  const eventsByKey = new Map();
+  for (const event of networkEvents ?? []) {
+    if (!event.sessionId || !event.networkId) {
+      issues.push('provider Network event lacks actual sessionId or network requestId');
+      continue;
+    }
+    const id = key(event.sessionId, event.networkId);
+    if (eventsByKey.has(id)) issues.push(`duplicate provider Network request ID: ${id}`);
+    else eventsByKey.set(id, event);
+  }
+  const seen = new Set();
+  for (const request of fetchRequests ?? []) {
+    const id = request.networkId && request.targetSessionId ? key(request.targetSessionId, request.networkId) : null;
+    if (!id) {
+      issues.push('provider Fetch request lacks correlated Network session/request ID');
+      continue;
+    }
+    if (seen.has(id)) issues.push(`duplicate provider Fetch correlation: ${id}`);
+    seen.add(id);
+    if (!eventsByKey.has(id)) issues.push(`provider Fetch request has no Network request: ${id}`);
+  }
+  for (const id of eventsByKey.keys()) if (!seen.has(id)) issues.push(`orphan provider Network request: ${id}`);
+  return { ok: issues.length === 0, issues };
+}
+
+export function providerLaneFinalization({ buildParity, cleanupErrors = [], primaryError = null }) {
+  return {
+    passed: buildParity?.ok === true && cleanupErrors.length === 0 && !primaryError,
+    comparisonsAllowed: false,
+    reason: 'Provider lane is finalized independently; Legacy qualification and comparison gates do not apply.',
+  };
+}
+
+export function summarizePhysicalProviderAttempts(attempts) {
+  const issues = [];
+  const intervals = [];
+  const seen = new Set();
+  for (const attempt of attempts ?? []) {
+    if (!attempt.attemptId || seen.has(attempt.attemptId)) issues.push('provider attempt IDs must be present and unique');
+    seen.add(attempt.attemptId);
+    if (!Number.isFinite(attempt.status)) issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks correlated response status`);
+    if (!['finished', 'failed'].includes(attempt.outcome)) issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks terminal outcome`);
+    if (!attempt.networkSessionId || !attempt.networkId) issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks Fetch/Network correlation`);
+    if (!Number.isFinite(attempt.startedAt) || !Number.isFinite(attempt.settledAt) || attempt.settledAt < attempt.startedAt) {
+      issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks valid terminal settlement`);
+      continue;
+    }
+    if (attempt.outcome === 'failed') issues.push(`provider attempt ${attempt.attemptId} failed: ${attempt.error ?? 'unknown network error'}`);
+    intervals.push({ at: attempt.startedAt, delta: 1 }, { at: attempt.settledAt, delta: -1 });
+  }
+  intervals.sort((a, b) => a.at - b.at || a.delta - b.delta);
+  let active = 0, peakConcurrency = 0;
+  for (const interval of intervals) { active += interval.delta; peakConcurrency = Math.max(peakConcurrency, active); }
+  return {
+    physicalRequestCount: attempts?.length ?? 0,
+    peakPhysicalConcurrency: peakConcurrency,
+    attempts: (attempts ?? []).map(attempt => ({ ...attempt,
+      latencyMs: Number.isFinite(attempt.startedAt) && Number.isFinite(attempt.settledAt) ? attempt.settledAt - attempt.startedAt : null })),
+    issues,
+    ok: issues.length === 0,
+    measurement: 'Physical HTTP request lifecycle from CDP Network requestWillBeSent through loadingFinished/loadingFailed; not scheduler batches or worker limits.',
+  };
+}
 
 export function validateSampleCount(value) {
   if (!Number.isInteger(value) || value < 3 || value > 40) throw new TypeError('BENCH_SAMPLES must be an integer between 3 and 40.');

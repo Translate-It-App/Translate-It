@@ -3,6 +3,9 @@ import { unifiedTranslationService } from '../../../../src/core/services/transla
 import { backgroundOperationLease } from '../../../../src/core/services/translation/BackgroundOperationLease.js';
 import { QueueManager, queueManager } from '../../../../src/features/translation/core/QueueManager.js';
 import { RateLimitManager, rateLimitManager } from '../../../../src/features/translation/core/RateLimitManager.js';
+import { getProviderConfiguration } from '../../../../src/features/translation/core/ProviderConfigurations.js';
+import { registryIdToName } from '../../../../src/features/translation/providers/ProviderConstants.js';
+import { storageManager } from '../../../../src/shared/storage/core/StorageCore.js';
 import { ProviderRequestEngine } from '../../../../src/features/translation/providers/utils/ProviderRequestEngine.js';
 import { BaseProvider } from '../../../../src/features/translation/providers/BaseProvider.js';
 import { MicrosoftEdgeProvider } from '../../../../src/features/translation/providers/MicrosoftEdgeProvider.js';
@@ -256,6 +259,25 @@ const marker = {
         : null,
       lease,
     };
+  },
+  providerRuntimeSnapshot(provider, expectedOptimizationLevel) {
+    const providerName = registryIdToName(provider);
+    const state = providerName ? rateLimitManager.providerStates.get(providerName) : null;
+    if (!state) return null;
+    const configuration = getProviderConfiguration(providerName, state.optimizationLevel);
+    const expectedConfiguration = getProviderConfiguration(providerName, expectedOptimizationLevel);
+    return {
+      provider,
+      providerName,
+      optimizationLevel: state.optimizationLevel,
+      maxConcurrent: state.config?.maxConcurrent ?? null,
+      configuredMaxConcurrent: configuration?.rateLimit?.maxConcurrent ?? null,
+      batching: configuration?.batching ?? null,
+      expectedBatching: expectedConfiguration?.batching ?? null,
+    };
+  },
+  applyBenchmarkSettings(settings) {
+    return storageManager.set(settings);
   },
   snapshot: () => trace.snapshot(),
 };

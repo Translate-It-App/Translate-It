@@ -1,12 +1,117 @@
 import { describe, expect, it } from 'vitest';
 import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
-import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, parseScenarioSelection, settingsForScenario, shadowInitialTranslationReadiness, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './e2e-benchmark/scenario-plan.mjs';
+import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizePhysicalProviderAttempts, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
 import { registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 import { matchesAutoTranslateRule } from '../../../src/utils/ui/exclusion.js';
+import { registryIdToName } from '../../../src/features/translation/providers/ProviderConstants.js';
 
 describe('page translation benchmark measurements', () => {
+  it('validates the explicit Edge provider lane without changing legacy selection', () => {
+    expect(parseProviderLane({})).toBeNull();
+    expect(() => parseProviderLane({ BENCH_LANE: 'provider' })).toThrow('BENCH_PROVIDER');
+    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'nope', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('BENCH_PROVIDER');
+    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'google-v2', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('BENCH_PROVIDER');
+    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('not implemented');
+    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'gemini', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('not implemented');
+    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'edge', BENCH_OPTIMIZATION_LEVEL: '2' })).toThrow('BENCH_OPTIMIZATION_LEVEL');
+    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'edge', BENCH_OPTIMIZATION_LEVEL: '3', BENCH_MODES: 'legacy,sliced' })).toThrow('production-default sliced');
+    for (const optimizationLevel of [1, 3, 5]) {
+      const lane = parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'edge', BENCH_OPTIMIZATION_LEVEL: String(optimizationLevel) });
+      expect(lane).toMatchObject({ lane: 'provider', provider: 'edge', optimizationLevel, mode: 'sliced' });
+      expect(providerLaneSettings({ TARGET_LANGUAGE: 'fr' }, lane)).toMatchObject({
+        TARGET_LANGUAGE: 'fr', TRANSLATION_API: 'edge', PROVIDER_OPTIMIZATION_LEVELS: { edge: optimizationLevel },
+      });
+      expect(pageTranslationStartMessage(lane.provider)).toEqual({
+        action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' },
+      });
+    }
+    expect(pageTranslationStartMessage()).toEqual({ action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' } });
+  });
+
+  it('validates observed provider runtime configuration rather than the requested settings echo', () => {
+    expect(registryIdToName('edge')).toBe('MicrosoftEdge');
+    const snapshot = { provider: 'edge', optimizationLevel: 3, batching: { maxBatchSize: 20 }, expectedBatching: { maxBatchSize: 20 }, maxConcurrent: 4, configuredMaxConcurrent: 4 };
+    expect(validateProviderRuntime({ requestedProvider: 'edge', requestedOptimizationLevel: 3, snapshot }).ok).toBe(true);
+    const mismatches = validateProviderRuntime({
+      requestedProvider: 'edge', requestedOptimizationLevel: 5,
+      snapshot: { ...snapshot, provider: 'googlev2', batching: { maxBatchSize: 10 }, maxConcurrent: null },
+      expectedBatching: { maxBatchSize: 20 },
+    });
+    expect(mismatches.ok).toBe(false);
+    expect(mismatches.issues).toEqual(expect.arrayContaining([
+      expect.stringContaining('provider mismatch'), expect.stringContaining('optimization level mismatch'),
+      expect.stringContaining('batching configuration mismatch'), expect.stringContaining('scheduler concurrency'),
+    ]));
+  });
+
+  it('validates effective PageTranslationScheduler batch limits against provider runtime configuration', () => {
+    const providerRuntime = { batching: { characterLimit: 5000 }, maxConcurrent: 5 };
+    for (const [optimizationLevel, chunkSize] of [[1, 50], [3, 25], [5, 10]]) {
+      const scheduler = {
+        providerRegistryId: 'edge', chunkSize, maxChars: 5000,
+        parallelExecution: false, maxConcurrentFlushes: 5,
+      };
+      expect(validateProviderSchedulerRuntime({ provider: 'edge', optimizationLevel, providerRuntime, scheduler }).ok).toBe(true);
+      expect(validateProviderSchedulerRuntime({
+        provider: 'edge', optimizationLevel, providerRuntime,
+        scheduler: { ...scheduler, chunkSize: chunkSize + 1, parallelExecution: true, maxConcurrentFlushes: 4 },
+      }).ok).toBe(false);
+    }
+    expect(validateProviderSchedulerRuntime({ provider: 'edge', optimizationLevel: 3, providerRuntime, scheduler: null }).ok).toBe(false);
+  });
+
+  it('correlates provider Fetch requests to Network records by event session and request ID', () => {
+    const fetch = [{ targetSessionId: 's1', networkId: 'n1' }];
+    const event = [{ sessionId: 's1', networkId: 'n1', startedAt: 1, status: 200, outcome: 'finished', settledAt: 2 }];
+    expect(validateProviderNetworkCorrelation(fetch, event).ok).toBe(true);
+    expect(validateProviderNetworkCorrelation(fetch, [{ ...event[0], sessionId: 's2' }]).issues).toContain('provider Fetch request has no Network request: s1:n1');
+    expect(validateProviderNetworkCorrelation([...fetch, ...fetch], event).issues).toContain('duplicate provider Fetch correlation: s1:n1');
+    expect(validateProviderNetworkCorrelation(fetch, [...event, ...event]).issues).toContain('duplicate provider Network request ID: s1:n1');
+    expect(validateProviderNetworkCorrelation(fetch, [...event, { sessionId: 's1', networkId: 'orphan' }]).issues).toContain('orphan provider Network request: s1:orphan');
+    expect(summarizePhysicalProviderAttempts([{
+      attemptId: 'unsettled', networkSessionId: 's1', networkId: 'n1', startedAt: 1, settledAt: null, status: null, outcome: null,
+    }]).ok).toBe(false);
+  });
+
+  it('finalizes provider results without consulting Legacy comparison qualification', () => {
+    expect(providerLaneFinalization({ buildParity: { ok: true } })).toMatchObject({
+      passed: true, comparisonsAllowed: false,
+    });
+    expect(providerLaneFinalization({ buildParity: { ok: true }, primaryError: new Error('Legacy gate failed') }).passed).toBe(false);
+    expect(providerLaneFinalization({ buildParity: { ok: true }, cleanupErrors: ['cleanup'] }).passed).toBe(false);
+  });
+
+  it('passes scroll scheduling through to provider trial settings', () => {
+    expect(settingsForScenario({}, 'scroll-through', 'on-stop')).toMatchObject({
+      WHOLE_PAGE_LAZY_LOADING: true, WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: true,
+    });
+    expect(settingsForScenario({}, 'scroll-through', 'fluid')).toMatchObject({
+      WHOLE_PAGE_LAZY_LOADING: true, WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: false,
+    });
+  });
+
+  it('accounts for physical provider request overlap and lifecycle outcomes', () => {
+    const result = summarizePhysicalProviderAttempts([
+      { attemptId: 'a', networkSessionId: 's1', networkId: 'n1', startedAt: 0, settledAt: 10, status: 200, outcome: 'finished' },
+      { attemptId: 'b', networkSessionId: 's1', networkId: 'n2', startedAt: 5, settledAt: 15, status: 200, outcome: 'finished' },
+    ]);
+    expect(result.ok).toBe(true);
+    expect(result.physicalRequestCount).toBe(2);
+    expect(result.peakPhysicalConcurrency).toBe(2);
+    expect(result.attempts.map(attempt => attempt.latencyMs)).toEqual([10, 10]);
+    const failure = summarizePhysicalProviderAttempts([
+      { attemptId: 'failed', networkSessionId: 's1', networkId: 'n3', startedAt: 1, settledAt: 8, status: 503, outcome: 'failed', error: 'net::ERR_FAILED' },
+      { attemptId: 'unsettled', networkSessionId: 's1', networkId: 'n4', startedAt: 2, settledAt: null, status: null, outcome: null },
+    ]);
+    expect(failure.ok).toBe(false);
+    expect(failure.issues).toEqual(expect.arrayContaining([
+      expect.stringContaining('failed'), expect.stringContaining('lacks valid terminal settlement'),
+      expect.stringContaining('lacks correlated response status'),
+    ]));
+  });
+
   it('maps each actual Edge request source into the provider response shape', () => {
     expect(mapEdgeResponse(['one', 'two'])).toEqual([
       { translations: [{ text: 'fixture translation: one' }] },

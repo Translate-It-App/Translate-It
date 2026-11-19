@@ -25,6 +25,8 @@ const trace = {
   selectedBatchMembers: [],
   schedulerBatchSessions: [],
   schedulerRequests: [],
+  schedulerBatchConfig: null,
+  providerRuntimeProbeEnabled: false,
   pageTranslationE2E: false,
   pageTranslationStartReporter: null,
   viewportWindowObservation: null,
@@ -125,6 +127,7 @@ const trace = {
     const discovery = bridgeSession?.discovery ?? null;
     return {
       translationSessionId: scheduler.translationSessionId ?? null,
+      schedulerBatchConfig: trace.schedulerBatchConfig ? { ...trace.schedulerBatchConfig } : null,
       managerTranslating: manager.isTranslating === true,
       isTranslated: scheduler.isTranslated === true,
       translatedCount: scheduler.translatedCount ?? null,
@@ -151,6 +154,7 @@ const trace = {
       bridgeDiscoveryFailed: typeof discovery?.failed === 'boolean' ? discovery.failed : null,
     };
   },
+  enableProviderRuntimeProbe() { trace.providerRuntimeProbeEnabled = true; return true; },
   viewportEntrySnapshot() { return measurement ? { ...measurement.viewportEntryAtById } : null; },
   schedulerSelectionSnapshot() { return trace.scrollThroughStages ? structuredClone(trace.scrollThroughStages.selectionViewport) : null; },
   measurementSnapshot() { return measurement ? { acceptedIds: [...measurement.acceptedIds], acceptedPerformanceAtById: { ...measurement.acceptedPerformanceAtById }, viewportEntryAtById: { ...measurement.viewportEntryAtById } } : null; },
@@ -581,6 +585,20 @@ installCallThrough(PageTranslationScheduler.prototype, 'enqueue', function (args
   if (trace.spaNavigation && trace.spaNavigation.invalidatedAt !== null) trace.spaNavigation.enqueues.push({ id, at: performance.now(), sessionId: this.translationSessionId ?? null });
   trace.record('scheduler.enqueue', { id, score: Number(score) || 0, textLength: typeof text === 'string' ? text.length : null });
 });
+const originalGetBatchConfig = PageTranslationScheduler.prototype._getBatchConfig;
+if (typeof originalGetBatchConfig === 'function') {
+  PageTranslationScheduler.prototype._getBatchConfig = function (...args) {
+    const result = originalGetBatchConfig.apply(this, args);
+    if (!trace.providerRuntimeProbeEnabled) return result;
+    return result.then(config => {
+      trace.schedulerBatchConfig = {
+        ...config,
+        maxConcurrentFlushes: this.settings?.maxConcurrentFlushes ?? null,
+      };
+      return config;
+    });
+  };
+}
 installCallThrough(PageTranslationScheduler.prototype, 'flush', function () {
   trace.record('scheduler.flush.entry', { queueLength: this.queue?.length ?? null, activeFlushes: this.activeFlushes ?? null, batchTimerPending: this.batchTimer != null });
 });

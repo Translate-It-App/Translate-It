@@ -29,6 +29,7 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
   const context = {
     harness,
     artifactPath: path,
+    providerLane: null,
     requestedModes: ['legacy', 'sliced', 'viewport'],
     cancellationProbes: [],
     staleSuccessProbes: [],

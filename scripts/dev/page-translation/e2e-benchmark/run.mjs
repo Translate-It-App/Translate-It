@@ -12,29 +12,31 @@ import { writeBenchmarkArtifact } from './artifact-writer.mjs';
 import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
-import { deriveScrollAggregateMetrics, modeOrder, mapProviderBatchIds, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './scenario-plan.mjs';
+import { deriveScrollAggregateMetrics, modeOrder, mapProviderBatchIds, parseProviderLane, providerLaneSettings, providerLaneFinalization, pageTranslationStartMessage, summarizePhysicalProviderAttempts, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
 
 const root = process.cwd();
+const providerLane = parseProviderLane(process.env);
 const cancellationProbes = parseCancellationProbeSelection(process.env.BENCH_CANCELLATION_PROBES);
 const staleSuccessProbes = parseSuccessfulReplyProbeSelection(process.env.BENCH_STALE_SUCCESS_PROBES);
 if (cancellationProbes.length && staleSuccessProbes.length) throw new TypeError('Cancellation and stale-success probes must run separately.');
 const isolatedProbes = cancellationProbes.length ? cancellationProbes : staleSuccessProbes;
-const requestedModes = [...new Set((process.env.BENCH_MODES ?? (isolatedProbes.length ? 'sliced' : 'legacy,sliced,viewport')).split(',').map(value => value.trim()).filter(Boolean))];
+if (providerLane && isolatedProbes.length) throw new TypeError('Provider lane cannot be combined with cancellation or stale-success probes.');
+const requestedModes = [...new Set((providerLane ? 'sliced' : process.env.BENCH_MODES ?? (isolatedProbes.length ? 'sliced' : 'legacy,sliced,viewport')).split(',').map(value => value.trim()).filter(Boolean))];
 if (isolatedProbes.length && (requestedModes.length !== 1 || requestedModes[0] !== 'sliced')) {
   throw new TypeError('Cancellation and stale-success probes require BENCH_MODES=sliced only.');
 }
 if (isolatedProbes.length && process.env.BENCH_SCENARIOS && process.env.BENCH_SCENARIOS !== 'early-visible') {
   throw new TypeError('Cancellation and stale-success probes require BENCH_SCENARIOS=early-visible.');
 }
-const modes = isolatedProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
+const modes = providerLane ? ['sliced'] : isolatedProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
 const scenarios = isolatedProbes.length ? ['early-visible'] : parseScenarioSelection(process.env.BENCH_SCENARIOS ?? 'small');
 const scrollSchedulingMode = parseScrollSchedulingMode(process.env.BENCH_SCROLL_SCHEDULING);
 if (scenarios.includes('scroll-through') !== (scrollSchedulingMode !== null)) throw new TypeError('BENCH_SCENARIOS=scroll-through requires BENCH_SCROLL_SCHEDULING=fluid or on-stop, and scheduling is only valid with scroll-through.');
 const samples = Number(process.env.BENCH_SAMPLES ?? 5);
 const warmups = Number(process.env.BENCH_WARMUPS ?? 1);
-const defaultArtifact = `/tmp/opencode/page-translation-e2e-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}.json`;
+const defaultArtifact = `/tmp/opencode/page-translation-${providerLane ? 'provider-' : ''}e2e-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}.json`;
 const artifactPath = resolve(process.env.BENCH_OUTPUT ?? defaultArtifact);
 const sourcePaths = [
   'src/core/background/index.js',
@@ -270,6 +272,7 @@ const harness = {
   }),
   fixtureWarmupSemantics: 'Each trial starts a fresh Chrome process/profile; warmups are discarded cold-profile runs, not persistent-process/JIT warmups.',
   requestedModes: modes,
+  ...(providerLane ? { lane: providerLane.lane, provider: providerLane.provider, optimizationLevel: providerLane.optimizationLevel } : {}),
   warmups,
   measuredSamples: samples,
   startedAt: now(),
@@ -335,9 +338,10 @@ function validateHarnessBuildParity() {
 }
 
 async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, schedulingMode = null }) {
-  const trialSettings = settingsForScenario(settings, fixtureConfig.scenario, schedulingMode);
+  const scenarioSettings = settingsForScenario(settings, fixtureConfig.scenario, schedulingMode);
+  const trialSettings = providerLane ? providerLaneSettings(scenarioSettings, providerLane) : scenarioSettings;
   const trial = {
-    mode, scenario: fixtureConfig.scenario, ...(schedulingMode ? { schedulingMode } : {}), ordinal, globalRunOrder, phase, status: 'running',
+    mode, scenario: fixtureConfig.scenario, ...(providerLane ? { lane: providerLane.lane, provider: providerLane.provider, optimizationLevel: providerLane.optimizationLevel } : {}), ...(schedulingMode ? { schedulingMode } : {}), ordinal, globalRunOrder, phase, status: 'running',
     timestamps: { trialStart: now() },
     contexts: [], workerReadiness: [], contentReadiness: [], commands: [], lifecycle: [],
     console: [], exceptions: [], requests: [], rawDOM: {}, cleanupErrors: [],
@@ -369,6 +373,34 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
   let eventUnsubscribe;
   let pageEventUnsubscribe;
   const networkEventUnsubscribes = new Map();
+  const providerNetworkEvents = new Map();
+  const providerPhysicalAttempts = [];
+  let providerAttemptSequence = 0;
+  const providerNetworkObserver = event => {
+    const params = event.params ?? {};
+    const id = params.requestId;
+    if (!id) return;
+    const sessionId = event.sessionId;
+    if (!sessionId) return;
+    const key = `${sessionId}:${id}`;
+    let entry = providerNetworkEvents.get(key);
+    if (event.method === 'Network.requestWillBeSent') {
+      let url;
+      try { url = new URL(params.request?.url); } catch { return; }
+      if (url.origin !== 'https://edge.microsoft.com' || url.pathname !== '/translate/translatetext') return;
+      entry = { sessionId, networkId: id, startedAt: Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null };
+      providerNetworkEvents.set(key, entry);
+    } else if (entry && event.method === 'Network.responseReceived') {
+      entry.status = params.response?.status ?? null;
+    } else if (entry && event.method === 'Network.loadingFinished') {
+      entry.settledAt = Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null;
+      entry.outcome = 'finished';
+    } else if (entry && event.method === 'Network.loadingFailed') {
+      entry.settledAt = Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null;
+      entry.outcome = 'failed';
+      entry.error = params.errorText ?? 'Network loading failed';
+    }
+  };
   const requestHandlerJobs = new Set();
   let staleContextDisposed = false;
   const cancellationControl = cancellationProbe || staleSuccessProbe ? {
@@ -441,6 +473,21 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     requestRecord.category = classification.kind;
     try {
       if (classification.kind === 'provider-translation') {
+        if (providerLane) {
+          const networkId = event.params.networkId;
+          requestRecord.networkId = networkId ?? null;
+          const network = networkId ? providerNetworkEvents.get(`${event.sessionId}:${networkId}`) : null;
+          const attempt = {
+            attemptId: `provider-http-${++providerAttemptSequence}`,
+            networkId: networkId ?? null,
+            networkSessionId: event.sessionId,
+            startedAt: network?.startedAt ?? null,
+            settledAt: null, outcome: null, status: null,
+          };
+          requestRecord.physicalAttemptId = attempt.attemptId;
+          providerPhysicalAttempts.push(attempt);
+          requestRecord.physicalAttempt = attempt;
+        }
         const body = JSON.parse(request.postData ?? 'null');
         let responseBody = mapEdgeResponse(body);
         requestRecord.bodyLength = request.postData?.length ?? 0;
@@ -726,6 +773,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         extensionOriginBySession.set(sessionId, extensionOrigin);
         if (!eventUnsubscribe) eventUnsubscribe = onEvent(event => recordEvent(event, trial));
         if (!requestUnsubscribe) requestUnsubscribe = onEvent(requestListener);
+        if (providerLane && !networkEventUnsubscribes.has(sessionId)) {
+          networkEventUnsubscribes.set(sessionId, onEvent(providerNetworkObserver));
+          await send('Network.enable', {}, sessionId);
+        }
         if (cancellationProbe || staleSuccessProbe) {
           if (!networkEventRouter?.register(sessionId, targetInfo)) throw new Error(`Could not register Network observer target for CDP session ${sessionId}.`);
           trial.networkObserverTargets ??= {};
@@ -755,8 +806,11 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       if (JSON.stringify(previous) !== JSON.stringify(state)) trial.workerReadiness.push({ at: now(), state });
       return state.initialized && state.listener && state.engine && state.unified && state.traceReady;
     });
+    const settingWrite = providerLane
+      ? `globalThis.__pageTranslationBenchmark.applyBenchmarkSettings(${JSON.stringify(trialSettings)})`
+      : `browser.storage.local.set(${JSON.stringify(trialSettings)})`;
     await evaluate(chrome, workerSession,
-      `Promise.all([browser.storage.local.set(${JSON.stringify(trialSettings)}),browser.storage.sync.set(${JSON.stringify(trialSettings)}).catch(()=>{})])`);
+      `Promise.all([${settingWrite},browser.storage.sync.set(${JSON.stringify(trialSettings)}).catch(()=>{})])`);
     if (cancellationProbe || staleSuccessProbe) {
       const workerInstrumentation = await evaluate(chrome, workerSession,
         'globalThis.__pageTranslationBenchmark.enableCancellationProbe()');
@@ -768,6 +822,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const { targetId } = await chrome.send('Target.createTarget', { url: 'about:blank' });
     ({ sessionId: pageSession } = await chrome.send('Target.attachToTarget', { targetId, flatten: true }));
     pageEventUnsubscribe = chrome.onEvent(event => recordEvent(event, trial));
+    if (providerLane) {
+      networkEventUnsubscribes.set(pageSession, chrome.onEvent(providerNetworkObserver));
+      await chrome.send('Network.enable', {}, pageSession);
+    }
     guardSessions.add(pageSession);
     sendBySession.set(pageSession, chrome.send);
     extensionOriginBySession.set(pageSession, testExtensionOrigin);
@@ -922,8 +980,12 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       const enabled = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.enableDynamicDOMTracking()', contentContext);
       if (enabled !== true) throw new Error('Dynamic DOM settlement instrumentation could not be installed.');
     }
+    if (providerLane) {
+      const enabled = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.enableProviderRuntimeProbe()', contentContext);
+      if (enabled !== true) throw new Error('Provider runtime instrumentation could not be installed.');
+    }
     const started = await evaluate(chrome, pageSession,
-      `chrome.runtime.sendMessage(${JSON.stringify({ action: 'page-translate', data: { provider: 'edge', targetLanguage: 'fr' } })})`, contentContext);
+      `chrome.runtime.sendMessage(${JSON.stringify(pageTranslationStartMessage(providerLane?.provider ?? 'edge'))})`, contentContext);
     trial.commands.push({ action: 'page-translate', sentAt: trial.timestamps.translationCommand, respondedAt: now(), response: started });
     if (!started?.success) throw new Error(formatCommandFailure('PAGE_TRANSLATE', started));
     const sessionId = sessionIdFromStart(started);
@@ -943,7 +1005,6 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       targetLanguage: 'fr', lazyLoading: trialSettings.WHOLE_PAGE_LAZY_LOADING, translateAfterScrollStop: trialSettings.WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP, autoTranslateOnDOMChanges: trialSettings.WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES,
     });
     if (!trial.effectiveSettingsValidation.ok) throw new Error(trial.effectiveSettingsValidation.issues.join('; '));
-
     if (fixtureConfig.scenario === 'scroll-through') {
       const initialIds = fixtureConfig.scrollBands[0].ids;
       trial.scrollThrough = { initialVisibleAcceptance: await until(async () => {
@@ -2690,12 +2751,63 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     const unexpectedExternal = trial.requests.find(request => request.category === 'blocked');
     if (unexpectedExternal) throw new Error(`Unexpected external request blocked: ${unexpectedExternal.url}`);
     if (!providerAttempts.length) throw new Error('No actual provider translation transport attempts were observed.');
+    if (providerLane) {
+      trial.providerRuntimeObserved = await evaluate(chrome, workerSession,
+        `globalThis.__pageTranslationBenchmark.providerRuntimeSnapshot(${JSON.stringify(providerLane.provider)},${providerLane.optimizationLevel})`, undefined, false);
+      trial.providerRuntimeValidation = validateProviderRuntime({
+        requestedProvider: providerLane.provider,
+        requestedOptimizationLevel: providerLane.optimizationLevel,
+        snapshot: trial.providerRuntimeObserved,
+      });
+      if (!trial.providerRuntimeValidation.ok) throw new Error(trial.providerRuntimeValidation.issues.join('; '));
+      trial.providerSchedulerObserved = await until(() => evaluate(chrome, pageSession,
+        'window.__pageTranslationBenchmark.pageSessionSnapshot()?.schedulerBatchConfig??null', contentContext, false));
+      trial.providerSchedulerValidation = validateProviderSchedulerRuntime({
+        provider: providerLane.provider,
+        optimizationLevel: providerLane.optimizationLevel,
+        providerRuntime: trial.providerRuntimeObserved,
+        scheduler: trial.providerSchedulerObserved,
+      });
+      if (!trial.providerSchedulerValidation.ok) throw new Error(trial.providerSchedulerValidation.issues.join('; '));
+    }
     trial.status = 'passed';
   } catch (error) {
     trial.status = 'failed';
     trial.error = { name: error.name, message: error.message, stack: error.stack };
   } finally {
     trial.stage ??= 'cleanup';
+    if (providerLane && chrome) {
+      try {
+        await until(() => providerPhysicalAttempts.every(attempt => {
+          const network = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
+          return network?.outcome === 'finished' || network?.outcome === 'failed';
+        }) ? true : null, 5_000);
+      } catch (error) {
+        trial.cleanupErrors.push(`Provider Network observers did not drain: ${error.message}`);
+      }
+      const providerNetworkRecords = [...providerNetworkEvents.values()];
+      trial.providerNetworkCorrelation = validateProviderNetworkCorrelation(
+        trial.requests.filter(request => request.category === 'provider-translation'),
+        providerNetworkRecords,
+      );
+      if (!trial.providerNetworkCorrelation.ok) {
+        trial.cleanupErrors.push(...trial.providerNetworkCorrelation.issues);
+        trial.status = 'failed';
+      }
+      for (const attempt of providerPhysicalAttempts) {
+        const network = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
+        if (network) Object.assign(attempt, {
+          startedAt: network.startedAt, settledAt: network.settledAt ?? null,
+          outcome: network.outcome ?? null, status: network.status ?? null, error: network.error ?? null,
+        });
+      }
+      trial.physicalProviderAccounting = summarizePhysicalProviderAttempts(providerPhysicalAttempts);
+      trial.physicalProviderAccounting.logicalBatchNote = 'Physical HTTP requests are distinct from scheduler logical batches and worker concurrency limits.';
+      if (!trial.physicalProviderAccounting.ok) {
+        trial.cleanupErrors.push(...trial.physicalProviderAccounting.issues);
+        trial.status = 'failed';
+      }
+    }
     if (staleSuccessProbe && chrome && pageSession && contentContext) {
       const sendCleanupCommand = async (action, reason) => {
         const sentAt = now();
@@ -2966,7 +3078,32 @@ try {
     browserVersion: null,
     fileSha256: Object.fromEntries(await Promise.all(sourcePaths.map(async path => [path, await hashFile(path)]))),
   };
-  if (cancellationProbes.length) {
+  if (providerLane) {
+    harness.command = `BENCH_LANE=provider BENCH_PROVIDER=${providerLane.provider} BENCH_OPTIMIZATION_LEVEL=${providerLane.optimizationLevel} BENCH_MODES=sliced node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
+    harness.warmups = warmups;
+    harness.measuredSamples = samples;
+    harness.executionPlan = {
+      lane: 'provider', provider: providerLane.provider, optimizationLevel: providerLane.optimizationLevel,
+      discoveryMode: 'sliced', scenarios, warmups, measuredSamples: samples,
+      transport: 'Synthetic locally fulfilled Edge fixture; no live provider requests.',
+      aggregation: 'Provider attempts are per physical intercepted HTTP request; no discovery comparison artifacts.',
+    };
+    const slicedOutput = await compileMode('sliced');
+    validateHarnessBuildParity();
+    await runNetworkGuardNegativeProbe(slicedOutput, 'sliced');
+    for (const scenario of scenarios) {
+      const fixture = createFixture(scenario);
+      for (let ordinal = 1; ordinal <= warmups; ordinal++) {
+        await runRecordedTrial({ mode: 'sliced', scenario, ordinal, phase: 'warmup', extensionPath: slicedOutput, fixtureConfig: fixture, schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null });
+      }
+    }
+    for (const scenario of scenarios) for (let ordinal = 1; ordinal <= samples; ordinal++) {
+      harness.plannedMeasuredOrder.push({ scenario, ordinal, modes: ['sliced'] });
+      await runRecordedTrial({ mode: 'sliced', scenario, ordinal, phase: 'measured', extensionPath: slicedOutput, fixtureConfig: createFixture(scenario), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null });
+    }
+    harness.comparisonGate = { comparisonsAllowed: false, reason: 'Provider lane is separate from discovery/comparison artifacts.' };
+    harness.status = harness.results.every(run => run.status === 'passed') ? 'passed' : 'failed';
+  } else if (cancellationProbes.length) {
     harness.command = `BENCH_CANCELLATION_PROBES=${cancellationProbes.join(',')} BENCH_MODES=sliced node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
     harness.warmups = 0;
     harness.measuredSamples = 0;
@@ -3124,7 +3261,14 @@ try {
   }));
   if (harness.cleanupErrors.length) harness.status = 'failed';
   harness.primaryError = primaryError?.message ?? null;
-  if (!isolatedProbes.length) {
+  if (providerLane) {
+    try { harness.buildParity = validateBuildParity(harness.builds, modes); }
+    catch (error) { harness.buildParity = { ok: false, issues: [error.message] }; }
+    harness.providerLaneFinalization = providerLaneFinalization({
+      buildParity: harness.buildParity, cleanupErrors: harness.cleanupErrors, primaryError,
+    });
+    if (!harness.providerLaneFinalization.passed) harness.status = 'failed';
+  } else if (!isolatedProbes.length) {
     let finalBuildParity = harness.buildParity;
     try { finalBuildParity = validateBuildParity(harness.builds, modes); }
     catch (error) { finalBuildParity = { ok: false, issues: [error.message] }; }
