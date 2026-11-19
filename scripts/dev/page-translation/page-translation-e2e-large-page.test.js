@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { modeOrder, mapProviderBatchIds, parseScenarioSelection, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './e2e-benchmark/scenario-plan.mjs';
+import { modeOrder, mapProviderBatchIds, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './e2e-benchmark/scenario-plan.mjs';
 import { createFixture } from './e2e-benchmark/fixture.mjs';
 import { summarizeAcceptanceTimes, isDuplicateAcceptedMutation, trackAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 import { captureViewportWindow, installPrimitiveAdmissionObserver } from './e2e-benchmark/trace.mjs';
@@ -90,6 +90,35 @@ describe('large-page benchmark plan and geometry checks', () => {
     expect(scenarios[1].targets.slice(2, 6).map(target => target.id)).toEqual(expectedVisible);
     expect(scenarios[2].targets.slice(0, 100).some(target => target.visible)).toBe(false);
     expect(validateExactTargetIds('admission', ['target-500', 'target-500'], ['target-500']).issues).toContain('duplicate admission target ID: target-500');
+  });
+
+  it('defines exactly 12 unique scroll-through targets in three separated four-target bands', () => {
+    const fixture = createFixture('scroll-through');
+    expect(fixture.targetCount).toBe(12);
+    expect(new Set(fixture.targets.map(target => target.id)).size).toBe(12);
+    expect(new Set(fixture.targetTexts).size).toBe(12);
+    expect(fixture.visibleIds).toEqual(['target-0', 'target-1', 'target-2', 'target-3']);
+    expect(fixture.scrollBands.map(band => band.ids)).toEqual([
+      ['target-0', 'target-1', 'target-2', 'target-3'],
+      ['target-4', 'target-5', 'target-6', 'target-7'],
+      ['target-8', 'target-9', 'target-10', 'target-11'],
+    ]);
+    expect(fixture.scrollBands.map(({ top }) => top)).toEqual([20, 1120, 2220]);
+    expect(fixture.html).toContain('top:20px');
+    expect(fixture.html).toContain('top:1120px');
+    expect(fixture.html).toContain('top:2220px');
+    expect(validateFixtureGeometry(fixture, { targetCount: 12, visibleIds: fixture.visibleIds, viewport: fixture.viewport, scroll: fixture.scroll }).ok).toBe(true);
+  });
+
+  it('keeps opt-in lazy scheduling independent from discovery flags and defaults', () => {
+    expect(parseScenarioSelection('scroll-through')).toEqual(['scroll-through']);
+    expect(parseScrollSchedulingMode('fluid')).toBe('fluid');
+    expect(parseScrollSchedulingMode('on-stop')).toBe('on-stop');
+    expect(() => parseScrollSchedulingMode('other')).toThrow('Unsupported');
+    expect(settingsForScenario({}, 'scroll-through', 'fluid')).toMatchObject({ WHOLE_PAGE_LAZY_LOADING: true, WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: false });
+    expect(settingsForScenario({}, 'scroll-through', 'on-stop')).toMatchObject({ WHOLE_PAGE_LAZY_LOADING: true, WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: true });
+    expect(settingsForScenario({}, 'small')).toEqual({ WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false });
+    expect(() => settingsForScenario({}, 'small', 'fluid')).toThrow('only supported');
   });
 
   it('records first acceptance and complete visible/all sets, leaving incomplete timing unavailable', () => {

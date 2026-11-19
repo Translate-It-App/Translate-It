@@ -1,4 +1,5 @@
-export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'dynamic-dom', 'spa-navigation', 'early-visible', 'in-window-visible', 'late-visible']);
+export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'dynamic-dom', 'spa-navigation', 'early-visible', 'in-window-visible', 'late-visible', 'scroll-through']);
+export const SCROLL_SCHEDULING_MODES = Object.freeze(['fluid', 'on-stop']);
 export const COMPARISON_MODES = Object.freeze(['sliced', 'viewport']);
 export const MODE_DISCOVERY_FLAGS = Object.freeze({
   legacy: Object.freeze({ slicedDiscoveryEnabled: false, viewportFirstDiscoveryEnabled: false }),
@@ -29,9 +30,142 @@ export function parseScenarioSelection(value = 'small') {
   return scenarios;
 }
 
-export function settingsForScenario(settings, scenario) {
+export function parseScrollSchedulingMode(value) {
+  if (value === undefined || value === '') return null;
+  if (!SCROLL_SCHEDULING_MODES.includes(value)) throw new TypeError(`Unsupported BENCH_SCROLL_SCHEDULING: ${value}`);
+  return value;
+}
+
+export function settingsForScenario(settings, scenario, schedulingMode = null) {
+  if (scenario !== 'scroll-through' && schedulingMode !== null) throw new TypeError('Scroll scheduling is only supported by the scroll-through scenario.');
+  if (scenario === 'scroll-through' && !SCROLL_SCHEDULING_MODES.includes(schedulingMode)) throw new TypeError('scroll-through requires BENCH_SCROLL_SCHEDULING=fluid or on-stop.');
   return Object.freeze({ ...settings, WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: scenario === 'dynamic-dom',
+    ...(scenario === 'scroll-through' ? {
+      WHOLE_PAGE_LAZY_LOADING: true,
+      WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: schedulingMode === 'on-stop',
+    } : {}),
     ...(scenario === 'spa-navigation' ? { WHOLE_PAGE_AUTO_TRANSLATE_RULES: ['127.0.0.1/replacement'], TRANSLATION_API: 'edge', TARGET_LANGUAGE: 'fr' } : {}) });
+}
+
+export function deriveScrollAcceptanceLatency(expectedIds, viewportEntryAtById, acceptedAtById) {
+  const latencyMsById = {};
+  const prefetchAcceptedIds = [];
+  const issues = [];
+  for (const id of expectedIds ?? []) {
+    const enteredAt = viewportEntryAtById?.[id];
+    const acceptedAt = acceptedAtById?.[id];
+    if (!Number.isFinite(enteredAt)) issues.push(`missing actual viewport entry timestamp: ${id}`);
+    if (!Number.isFinite(acceptedAt)) issues.push(`missing accepted DOM-write timestamp: ${id}`);
+    if (!Number.isFinite(enteredAt) || !Number.isFinite(acceptedAt)) continue;
+    const latency = acceptedAt - enteredAt;
+    if (latency < 0) {
+      latencyMsById[id] = null;
+      prefetchAcceptedIds.push(id);
+    } else latencyMsById[id] = latency;
+  }
+  return { latencyMsById, prefetchAcceptedIds, issues };
+}
+
+export function deriveScrollAggregateMetrics(scrollBands, viewportEntryAtById, acceptedAtById) {
+  const latency = deriveScrollAcceptanceLatency((scrollBands ?? []).flatMap(band => band.ids), viewportEntryAtById, acceptedAtById);
+  const byBand = (scrollBands ?? []).map(({ band, ids }) => {
+    const values = ids.map(id => latency.latencyMsById[id]).filter(Number.isFinite).sort((a, b) => a - b);
+    const middle = Math.floor(values.length / 2);
+    return {
+      band, targetCount: ids.length, measurableCount: values.length, prefetchCount: ids.filter(id => latency.prefetchAcceptedIds.includes(id)).length,
+      meanMs: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null,
+      medianMs: values.length ? (values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2) : null,
+      maxMs: values.length ? values.at(-1) : null,
+    };
+  });
+  const entries = Object.values(viewportEntryAtById ?? {});
+  const accepted = Object.values(acceptedAtById ?? {});
+  const lastViewportEntryAt = entries.length ? Math.max(...entries) : null;
+  const fullAcceptanceAt = accepted.length ? Math.max(...accepted) : null;
+  const completionLatencyMs = Number.isFinite(lastViewportEntryAt) && Number.isFinite(fullAcceptanceAt)
+    ? fullAcceptanceAt - lastViewportEntryAt : null;
+  return {
+    latencyByViewportBand: byBand,
+    lastViewportEntryToFullAcceptance: {
+      lastViewportEntryAt, fullAcceptanceAt, latencyMs: completionLatencyMs,
+      fullAcceptanceBeforeLastViewportEntry: Number.isFinite(completionLatencyMs) && completionLatencyMs < 0,
+    },
+  };
+}
+
+export function validateScrollThroughStages(expectedIds, stages = {}) {
+  const stageNames = ['bridgeDiscoveredAtById', 'intersectionSchedulerRegisteredAtById', 'intersectionCallbackAtById', 'schedulerAdmissionAtById', 'schedulerEnqueueAtById'];
+  const issues = [];
+  for (const id of expectedIds ?? []) {
+    const times = stageNames.map(name => stages?.[name]?.[id]);
+    for (const [index, name] of stageNames.entries()) {
+      if (!Number.isFinite(times[index])) issues.push(`missing ${name} stage: ${id}`);
+    }
+    if (times.every(Number.isFinite) && times.some((at, index) => index > 0 && at < times[index - 1])) {
+      issues.push(`scroll pipeline stages are out of order: ${id}`);
+    }
+  }
+  for (const name of stageNames) {
+    issues.push(...validateExactTargetIds(name, Object.keys(stages?.[name] ?? {}), expectedIds ?? []).issues);
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+export function validateScrollThroughObservations(expectedIds, phases, selections) {
+  const issues = [];
+  if (!Array.isArray(phases) || phases.length === 0) issues.push('scroll checkpoint observations unavailable');
+  else phases.forEach((phase, index) => {
+    if (typeof phase?.scheduler?.isScrolling !== 'boolean') issues.push(`scroll checkpoint isScrolling state unavailable: ${index}`);
+  });
+  if (!Array.isArray(selections) || selections.length === 0) issues.push('scheduler selection observations unavailable');
+  const selectedIds = [];
+  for (const [index, selection] of (selections ?? []).entries()) {
+    if (!Number.isFinite(selection?.at)) issues.push(`scheduler selection timestamp unavailable: ${index}`);
+    if (typeof selection?.isScrolling !== 'boolean') issues.push(`scheduler selection isScrolling state unavailable: ${index}`);
+    if (!Array.isArray(selection?.targetIds) || !Array.isArray(selection?.targets)
+        || JSON.stringify(selection.targetIds) !== JSON.stringify(selection.targets.map(target => target?.id))) {
+      issues.push(`scheduler selection geometry does not exactly match selected target IDs: ${index}`);
+      continue;
+    }
+    for (const target of selection.targets) {
+      if (!['viewport', 'permitted-50px-buffer', 'outside-buffer'].includes(target.classification)) {
+        issues.push(`missing scheduler selection-time geometry classification: ${target.id ?? 'unknown'}`);
+      }
+    }
+    selectedIds.push(...selection.targetIds);
+  }
+  const observedIds = [...new Set(selectedIds)];
+  issues.push(...validateExactTargetIds('scheduler selection', observedIds, expectedIds ?? []).issues);
+  return { ok: issues.length === 0, issues };
+}
+
+export function validateScrollThroughEvidence({ expectedIds, viewportEntryAtById, acceptedAtById, pipelineStages, checkpoints, selectionViewport, terminalAt, acceptedIds, duplicateAcceptedIds = [], providerRequests = [], schedulerState, restoreOriginals, expectedOriginals, cleanupErrors = [] }) {
+  const issues = [];
+  const stageValidation = validateScrollThroughStages(expectedIds, pipelineStages);
+  issues.push(...stageValidation.issues);
+  const observationValidation = validateScrollThroughObservations(expectedIds, checkpoints, selectionViewport);
+  issues.push(...observationValidation.issues);
+  const latency = deriveScrollAcceptanceLatency(expectedIds, viewportEntryAtById, acceptedAtById);
+  issues.push(...latency.issues);
+  issues.push(...validateExactTargetIds('scroll acceptance', acceptedIds, expectedIds ?? []).issues);
+  if (duplicateAcceptedIds.length) issues.push(`redundant accepted writes: ${duplicateAcceptedIds.join(',')}`);
+  const requestIds = (providerRequests ?? []).flatMap(request => request.requestViewport?.targets?.map(target => target.id).filter(Boolean) ?? []);
+  issues.push(...validateExactTargetIds('physical provider request', requestIds, expectedIds ?? []).issues);
+  for (const request of providerRequests ?? []) {
+    for (const target of request.requestViewport?.targets ?? []) {
+      if (Number.isFinite(acceptedAtById?.[target.id]) && acceptedAtById[target.id] <= request.requestViewport.at) issues.push(`target was physically re-requested after acceptance: ${target.id}`);
+      if (!['viewport', 'permitted-50px-buffer', 'outside-buffer'].includes(target.classification)) issues.push(`missing physical request viewport classification: ${target.id}`);
+    }
+  }
+  if (!Number.isFinite(terminalAt) || Object.values(acceptedAtById ?? {}).some(at => !Number.isFinite(at) || terminalAt < at)) issues.push('matching terminal is missing or precedes latest accepted write');
+  if (schedulerState?.managerTranslating !== false || schedulerState?.activeFlushes !== 0
+      || schedulerState?.queueIds?.length !== 0 || schedulerState?.pendingSettlementCount !== 0
+      || schedulerState?.discoveryPending !== false) issues.push('scheduler/discovery work was not drained at the terminal');
+  if (!Array.isArray(restoreOriginals) || JSON.stringify(restoreOriginals) !== JSON.stringify(expectedOriginals)) issues.push('Restore originals do not exactly match the fixture');
+  if (cleanupErrors.length) issues.push('measurement cleanup reported errors');
+  return { ok: issues.length === 0, issues, viewportEntryToAcceptedWriteLatencyMsById: latency.latencyMsById,
+    prefetchAcceptedIds: latency.prefetchAcceptedIds, pipelineStageValidation: stageValidation,
+    schedulerObservationValidation: observationValidation };
 }
 
 export function modeOrder(selectedModes, scenarioIndex, measuredOrdinalIndex) {

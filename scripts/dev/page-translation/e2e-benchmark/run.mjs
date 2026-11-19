@@ -12,7 +12,7 @@ import { writeBenchmarkArtifact } from './artifact-writer.mjs';
 import { classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
-import { modeOrder, mapProviderBatchIds, parseScenarioSelection, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './scenario-plan.mjs';
+import { deriveScrollAggregateMetrics, modeOrder, mapProviderBatchIds, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
 
@@ -30,6 +30,8 @@ if (isolatedProbes.length && process.env.BENCH_SCENARIOS && process.env.BENCH_SC
 }
 const modes = isolatedProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
 const scenarios = isolatedProbes.length ? ['early-visible'] : parseScenarioSelection(process.env.BENCH_SCENARIOS ?? 'small');
+const scrollSchedulingMode = parseScrollSchedulingMode(process.env.BENCH_SCROLL_SCHEDULING);
+if (scenarios.includes('scroll-through') !== (scrollSchedulingMode !== null)) throw new TypeError('BENCH_SCENARIOS=scroll-through requires BENCH_SCROLL_SCHEDULING=fluid or on-stop, and scheduling is only valid with scroll-through.');
 const samples = Number(process.env.BENCH_SAMPLES ?? 5);
 const warmups = Number(process.env.BENCH_WARMUPS ?? 1);
 const defaultArtifact = `/tmp/opencode/page-translation-e2e-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}.json`;
@@ -332,10 +334,10 @@ function validateHarnessBuildParity() {
   return parity;
 }
 
-async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null }) {
-  const trialSettings = settingsForScenario(settings, fixtureConfig.scenario);
+async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, fixtureConfig = createFixture(scenario), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, schedulingMode = null }) {
+  const trialSettings = settingsForScenario(settings, fixtureConfig.scenario, schedulingMode);
   const trial = {
-    mode, scenario: fixtureConfig.scenario, ordinal, globalRunOrder, phase, status: 'running',
+    mode, scenario: fixtureConfig.scenario, ...(schedulingMode ? { schedulingMode } : {}), ordinal, globalRunOrder, phase, status: 'running',
     timestamps: { trialStart: now() },
     contexts: [], workerReadiness: [], contentReadiness: [], commands: [], lifecycle: [],
     console: [], exceptions: [], requests: [], rawDOM: {}, cleanupErrors: [],
@@ -349,6 +351,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       viewport: fixtureConfig.viewport,
       scroll: fixtureConfig.scroll,
       responseDelayMs: fixtureConfig.responseDelayMs,
+      scrollBands: fixtureConfig.scrollBands ?? [],
     },
     settings: trialSettings,
   };
@@ -444,6 +447,11 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         requestRecord.batchSize = body.length;
         requestRecord.batchTexts = body;
         requestRecord.fixtureDelayMs = fixtureConfig.responseDelayMs;
+        if (fixtureConfig.scenario === 'scroll-through' && pageSession && contentContext) {
+          const requestViewport = await evaluate(chrome, pageSession,
+            `(()=>{const sources=${JSON.stringify(body)};return {at:performance.now(),scrollY,targets:sources.map(source=>{const el=[...document.querySelectorAll('[data-bench-id]')].find(node=>node.textContent===source);if(!el)return {source,id:null,classification:'unmapped'};const r=el.getBoundingClientRect();const visible=r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth;const buffered=r.bottom>-50&&r.top<innerHeight+50&&r.right>-50&&r.left<innerWidth+50;return {source,id:el.dataset.benchId,classification:visible?'viewport':buffered?'permitted-50px-buffer':'outside-buffer'}})}})()`, contentContext, false);
+          requestRecord.requestViewport = requestViewport;
+        }
         if (cancellationProbe || staleSuccessProbe) {
           const workerState = await evaluate(chrome, event.sessionId,
             'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
@@ -862,7 +870,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         `window.__pageTranslationBenchmark.setExpectedTargetIds(${JSON.stringify(expectedIds)})`, contentContext);
       if (configured !== true) throw new Error('Dynamic expected target inventory could not be configured before measurement.');
     }
-    trial.measurementStart = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.startMeasurement()', contentContext);
+    trial.measurementStart = await evaluate(chrome, pageSession,
+      `window.__pageTranslationBenchmark.startMeasurement(${JSON.stringify({ scrollThrough: fixtureConfig.scenario === 'scroll-through' })})`, contentContext);
     measurementState.started = true;
     if (trial.measurementStart.targetCount !== fixtureConfig.targetCount
         || JSON.stringify(trial.measurementStart.visibleIds) !== JSON.stringify(actualGeometry.visibleIds)) {
@@ -905,9 +914,34 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     });
     trial.effectiveSettingsObserved = managerCall.settings;
     trial.effectiveSettingsValidation = validateEffectiveSettings(managerCall.settings, {
-      targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: trialSettings.WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES,
+      targetLanguage: 'fr', lazyLoading: trialSettings.WHOLE_PAGE_LAZY_LOADING, translateAfterScrollStop: trialSettings.WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP, autoTranslateOnDOMChanges: trialSettings.WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES,
     });
     if (!trial.effectiveSettingsValidation.ok) throw new Error(trial.effectiveSettingsValidation.issues.join('; '));
+
+    if (fixtureConfig.scenario === 'scroll-through') {
+      const initialIds = fixtureConfig.scrollBands[0].ids;
+      trial.scrollThrough = { initialVisibleAcceptance: await until(async () => {
+        const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
+        return initialIds.every(id => state?.acceptedIds.includes(id)) ? state : null;
+      }, 60_000) };
+      const phases = [];
+      for (const [label, y] of [['burst-band-2', 900], ['burst-band-3', 2000], ['settled-band-3', 2000], ['revisit-band-2', 900], ['revisit-initial', 0]]) {
+        if (label === 'burst-band-3') await wait(150);
+        if (label === 'settled-band-3') await wait(750);
+        const phase = await evaluate(chrome, pageSession,
+          `(()=>new Promise(resolve=>{const done=()=>{requestAnimationFrame(()=>{requestAnimationFrame(()=>{const visible=[...document.querySelectorAll('[data-bench-id]')].filter(el=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth}).map(el=>el.dataset.benchId);resolve({x:scrollX,y:scrollY,visibleIds:visible,at:performance.now(),scheduler:window.__pageTranslationBenchmark.pageSessionSnapshot()})})})};addEventListener('scroll',done,{once:true});window.scrollTo(0,${y});if(scrollY===${y})done()}))()`, contentContext);
+        if (phase.y !== y) throw new Error(`Native scroll did not reach requested ${label} offset: ${phase.y}/${y}`);
+        phases.push({ label, ...phase });
+        if (label === 'revisit-band-2') {
+          await wait(750);
+          await until(async () => {
+            const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
+            return fixtureConfig.scrollBands[1].ids.every(id => state?.acceptedIds.includes(id)) ? true : null;
+          }, 30_000);
+        }
+      }
+      trial.scrollThrough = { ...trial.scrollThrough, phases, method: 'window.scrollTo with native scroll events and animation-frame settling; no scheduler signals or synthetic events' };
+    }
 
     let dynamicCohortsInserted = 0;
     const insertDynamicCohort = async index => {
@@ -2275,7 +2309,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           trial.lifecycle = events;
           const expectedCount = fixtureConfig.targets.length
             + (fixtureConfig.dynamicCohorts?.reduce((total, cohort) => total + cohort.targets.length, 0) ?? 0);
-          const terminal = fixtureConfig.scenario === 'dynamic-dom'
+          const terminal = fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'scroll-through'
             ? findFinalTranslationTerminal(events, sessionId, expectedCount)
             : events.find(event => ['page-translate-complete', 'page-translate-idle'].some(action => isSessionEvent(event, action, sessionId)));
           if (terminal) trial.terminal = terminal;
@@ -2288,6 +2322,15 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           }
           if (fixtureConfig.scenario === 'dynamic-dom' && dynamicCohortsInserted !== fixtureConfig.dynamicCohorts.length) return null;
           if (!terminal) return null;
+          if (fixtureConfig.scenario === 'scroll-through') {
+            const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+            const measurementEvidence = await evaluate(chrome, pageSession,
+              'window.__pageTranslationBenchmark.viewportEntrySnapshot()', contentContext, false);
+            if (state.translationSessionId !== sessionId || state.managerTranslating !== false || state.activeFlushes !== 0
+                || state.queueIds?.length !== 0 || state.pendingSettlementCount !== 0 || state.discoveryPending !== false
+                || Object.keys(measurementEvidence ?? {}).length !== expectedCount) return null;
+            trial.scrollThrough.finalSchedulerState = state;
+          }
           if (fixtureConfig.scenario === 'dynamic-dom') {
             const acceptedSnapshot = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.dynamicSnapshot()', contentContext, false);
             const expectedIds = [...fixtureConfig.targets, ...fixtureConfig.dynamicCohorts.flatMap(cohort => cohort.targets)].map(target => target.id);
@@ -2343,6 +2386,30 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     });
     const contentTrace = lifecycle.measurement;
     trial.measurements.content = contentTrace;
+    if (fixtureConfig.scenario === 'scroll-through') {
+      const scrollValidation = validateScrollThroughEvidence({
+        expectedIds: fixtureConfig.targets.map(target => target.id),
+        viewportEntryAtById: contentTrace.viewportEntryAtById,
+        acceptedAtById: contentTrace.acceptedPerformanceAtById,
+        pipelineStages: contentTrace.scrollThroughStages,
+        checkpoints: trial.scrollThrough.phases,
+        selectionViewport: contentTrace.scrollThroughStages?.selectionViewport,
+        terminalAt: trial.terminal?.performanceAt,
+        acceptedIds: contentTrace.acceptedIds,
+        duplicateAcceptedIds: contentTrace.duplicateAcceptedIds,
+        providerRequests: trial.requests.filter(request => request.category === 'provider-translation'),
+        schedulerState: trial.scrollThrough.finalSchedulerState,
+        restoreOriginals: lifecycle.restored?.dom,
+        expectedOriginals: originals,
+        cleanupErrors: trial.cleanupErrors,
+      });
+      trial.scrollThrough.validation = scrollValidation;
+      trial.scrollThrough.viewportEntryToAcceptedWriteLatencyMsById = scrollValidation.viewportEntryToAcceptedWriteLatencyMsById;
+      trial.scrollThrough.productionStages = contentTrace.scrollThroughStages;
+      trial.scrollThrough.aggregateLatency = deriveScrollAggregateMetrics(
+        fixtureConfig.scrollBands, contentTrace.viewportEntryAtById, contentTrace.acceptedPerformanceAtById);
+      if (!scrollValidation.ok) throw new Error(scrollValidation.issues.join('; '));
+    }
     if (fixtureConfig.scenario === 'dynamic-dom') {
       const cohortMeasurements = contentTrace.dynamicCohorts ?? [];
       const expectedCohorts = fixtureConfig.dynamicCohorts;
@@ -2813,13 +2880,14 @@ try {
     harness.status = harness.successfulStaleReplyGate.passed ? 'passed' : 'failed';
   } else {
     harness.comparisonOrdering = 'Legacy warmups qualify first. Every selected mode then receives complete discarded warmups before measured rounds; measured mode order is a deterministic cyclic rotation of all selected modes by scenario index plus zero-based measured ordinal.';
-    const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario) }));
+    const scenarioPlans = scenarios.map((scenario, index) => ({ scenario, index, fixture: createFixture(scenario), schedulingMode: scenario === 'scroll-through' ? scrollSchedulingMode : null }));
+    harness.schedulingMode = scrollSchedulingMode;
     const legacyOutput = await compileMode('legacy');
     const legacyRuns = [];
     harness.scenarioSummaries = {};
     for (const plan of scenarioPlans) {
       for (let ordinal = 1; ordinal <= warmups; ordinal++) {
-        const run = await runRecordedTrial({ mode: 'legacy', scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: legacyOutput, fixtureConfig: plan.fixture });
+        const run = await runRecordedTrial({ mode: 'legacy', scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: legacyOutput, fixtureConfig: plan.fixture, schedulingMode: plan.schedulingMode });
         legacyRuns.push(run);
       }
     }
@@ -2843,7 +2911,7 @@ try {
       for (const mode of modes) {
         if (mode === 'legacy') continue;
         for (let ordinal = 1; ordinal <= warmups; ordinal++) {
-          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture });
+          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'warmup', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture, schedulingMode: plan.schedulingMode });
         }
       }
     }
@@ -2852,7 +2920,7 @@ try {
         const order = modeOrder(modes, plan.index, ordinal - 1);
         harness.plannedMeasuredOrder.push({ scenario: plan.scenario, ordinal, modes: order });
         for (const mode of order) {
-          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'measured', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture });
+          await runRecordedTrial({ mode, scenario: plan.scenario, ordinal, phase: 'measured', extensionPath: modeOutputs.get(mode), fixtureConfig: plan.fixture, schedulingMode: plan.schedulingMode });
         }
       }
     }

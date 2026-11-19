@@ -130,6 +130,7 @@ const trace = {
       failedCount: scheduler.failedCount ?? null,
       totalTasks: scheduler.totalTasks ?? null,
       activeFlushes: scheduler.activeFlushes ?? null,
+      ...(trace.scrollThroughStages ? { isScrolling: scheduler.isScrolling } : {}),
       discoveryPending: typeof scheduler.discoveryPending === 'boolean' ? scheduler.discoveryPending : null,
       queueIds: Array.isArray(scheduler.queue) ? scheduler.queue.map(item => item?.id ?? null) : null,
       activeBatchIds: scheduler.activeBatches instanceof Set
@@ -149,6 +150,9 @@ const trace = {
       bridgeDiscoveryFailed: typeof discovery?.failed === 'boolean' ? discovery.failed : null,
     };
   },
+  viewportEntrySnapshot() { return measurement ? { ...measurement.viewportEntryAtById } : null; },
+  schedulerSelectionSnapshot() { return trace.scrollThroughStages ? structuredClone(trace.scrollThroughStages.selectionViewport) : null; },
+  measurementSnapshot() { return measurement ? { acceptedIds: [...measurement.acceptedIds], acceptedPerformanceAtById: { ...measurement.acceptedPerformanceAtById }, viewportEntryAtById: { ...measurement.viewportEntryAtById } } : null; },
   enableSpaNavigationTracking({ changedIds, sources }) {
     if (this.spaNavigation) throw new Error('SPA navigation tracking may only be enabled once.');
     const elements = new Map([...document.querySelectorAll('[data-bench-id]')].map(element => [element.dataset.benchId, element]));
@@ -480,6 +484,42 @@ const benchmarkTargetId = node => {
   return element?.closest?.('[data-bench-id]')?.dataset?.benchId ?? null;
 };
 
+const recordScrollStage = (name, id) => {
+  const stages = trace.scrollThroughStages;
+  if (!stages || !stages.expectedIds.includes(id)) return;
+  stages[name][id] ??= performance.now();
+};
+
+const scrollSelectionTarget = node => {
+  const id = benchmarkTargetId(node);
+  const element = node?.nodeType === Node.ELEMENT_NODE ? node
+    : node?.nodeType === Node.ATTRIBUTE_NODE ? node.ownerElement : node?.parentElement;
+  const rect = element?.getBoundingClientRect?.();
+  if (!id || !rect) return { id, classification: 'unavailable' };
+  const visible = rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+  const buffered = rect.bottom > -50 && rect.top < innerHeight + 50 && rect.right > -50 && rect.left < innerWidth + 50;
+  return { id, classification: visible ? 'viewport' : buffered ? 'permitted-50px-buffer' : 'outside-buffer' };
+};
+
+const installScrollThroughIntersectionObserver = session => {
+  const scheduler = session?.intersectionScheduler;
+  const originalAdd = scheduler?.add;
+  if (!scheduler || typeof originalAdd !== 'function' || originalAdd.__scrollThroughObserved) return false;
+  const observedAdd = function (node, callback) {
+    const id = benchmarkTargetId(node);
+    recordScrollStage('bridgeDiscoveredAtById', id);
+    recordScrollStage('intersectionSchedulerRegisteredAtById', id);
+    const observedCallback = function (...args) {
+      recordScrollStage('intersectionCallbackAtById', id);
+      return callback.apply(this, args);
+    };
+    return originalAdd.call(this, node, observedCallback);
+  };
+  observedAdd.__scrollThroughObserved = true;
+  scheduler.add = observedAdd;
+  return true;
+};
+
 const observedAdmissionNodes = new WeakSet();
 const originalStopAutoTranslation = PageTranslationManager.prototype.stopAutoTranslation;
 if (typeof originalStopAutoTranslation === 'function') {
@@ -535,6 +575,7 @@ trace.enableDynamicDOMTracking = () => {
 installCallThrough(PageTranslationScheduler.prototype, 'enqueue', function (args) {
   const [text, , score, node] = args;
   const id = benchmarkTargetId(node);
+  recordScrollStage('schedulerEnqueueAtById', id);
   trace.schedulerEnqueueOrder.push(id);
   if (trace.spaNavigation && trace.spaNavigation.invalidatedAt !== null) trace.spaNavigation.enqueues.push({ id, at: performance.now(), sessionId: this.translationSessionId ?? null });
   trace.record('scheduler.enqueue', { id, score: Number(score) || 0, textLength: typeof text === 'string' ? text.length : null });
@@ -545,6 +586,10 @@ installCallThrough(PageTranslationScheduler.prototype, 'flush', function () {
 installCallThrough(PageTranslationScheduler.prototype, '_executeBatchRequest', function ([batch]) {
   const targetIds = Array.isArray(batch) ? batch.map(item => benchmarkTargetId(item?.node)) : null;
   trace.selectedBatchMembers.push(targetIds);
+  if (trace.scrollThroughStages) trace.scrollThroughStages.selectionViewport.push({
+    at: performance.now(), isScrolling: this.isScrolling,
+    targetIds, targets: Array.isArray(batch) ? batch.map(item => scrollSelectionTarget(item?.node)) : null,
+  });
   if (trace.spaNavigation && trace.spaNavigation.invalidatedAt !== null) trace.spaNavigation.batches.push({ sessionId: this.translationSessionId ?? null, targetIds, at: performance.now() });
   trace.record('scheduler.executeBatchRequest.entry', { itemCount: Array.isArray(batch) ? batch.length : null, targetIds });
 });
@@ -556,10 +601,12 @@ installCallThrough(PageTranslationBridge.prototype, 'translate', function () {
   if (trace.dynamicDOMEnabled !== true) trace.discoveryAdmissionOrder = [];
   trace.viewportWindowObservation = null;
   const session = this.session;
+  if (trace.scrollThroughStages) installScrollThroughIntersectionObserver(session);
   const nodesTranslator = session?.domTranslator?.nodesTranslator;
   if (nodesTranslator && !observedAdmissionNodes.has(nodesTranslator)) {
     const installed = installPrimitiveAdmissionObserver(session, function ([node]) {
       const id = benchmarkTargetId(node);
+      recordScrollStage('schedulerAdmissionAtById', id);
       trace.discoveryAdmissionOrder.push(id);
       if (trace.spaNavigation && trace.spaNavigation.invalidatedAt !== null) trace.spaNavigation.admissions.push({ id, at: performance.now(), sessionId: FeatureManager.getInstance().getFeatureHandler('pageTranslation')?.scheduler?.translationSessionId ?? null });
       trace.record('primitive.admission', { id, stage: 'after-DOMTranslator-filter-before-PageTranslationScheduler-enqueue' });
@@ -599,11 +646,20 @@ const visible = element => {
   return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
     && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
 };
-trace.startMeasurement = () => {
+trace.startMeasurement = ({ scrollThrough = false } = {}) => {
   const targets = [...document.querySelectorAll('[data-bench-id]')].map(element => ({
     id: element.dataset.benchId, source: element.textContent, visibleAtStart: visible(element), element,
   }));
   const initialTargetIds = targets.map(target => target.id);
+  trace.scrollThroughStages = scrollThrough ? {
+    expectedIds: [...initialTargetIds],
+    bridgeDiscoveredAtById: {},
+    intersectionSchedulerRegisteredAtById: {},
+    intersectionCallbackAtById: {},
+    schedulerAdmissionAtById: {},
+    schedulerEnqueueAtById: {},
+    selectionViewport: [],
+  } : null;
   const expectedTargetIds = configuredExpectedTargetIds ?? initialTargetIds;
   const dynamicTargetTracking = configuredExpectedTargetIds !== null;
   if (initialTargetIds.some(id => !expectedTargetIds.includes(id))) throw new Error('Expected target inventory does not include every initial fixture target.');
@@ -616,6 +672,9 @@ trace.startMeasurement = () => {
   const mutations = [];
   const observerState = { recordCount: 0 };
   const firstAcceptedAtById = {};
+  const acceptedPerformanceAtById = {};
+  const viewportEntryAtById = {};
+  let viewportObserver = null;
   const visibleIds = new Set(targets.filter(target => target.visibleAtStart).map(target => target.id));
   const visibleRemainingIds = dynamicTargetTracking ? new Set(visibleIds) : null;
   let firstVisibleAcceptedWriteAt = null;
@@ -666,6 +725,7 @@ trace.startMeasurement = () => {
         ...(dynamicTargetTracking ? { visibleRemainingIds, initialRemainingIds, expectedRemainingIds } : {}), completionTimes,
       });
       const acceptedPerformanceAt = performance.now();
+      if (scrollThrough) acceptedPerformanceAtById[target.id] ??= acceptedPerformanceAt;
       const cohort = dynamicCohortByTargetId.get(target.id);
       if (cohort) trackCohortAcceptedTarget(cohort, target.id, acceptedPerformanceAt);
       if (firstObservation) trace.record('dom.acceptedWrite', { id: target.id, at: acceptedAt, visibleAtStart: target.visibleAtStart });
@@ -678,6 +738,16 @@ trace.startMeasurement = () => {
   const longTasks = [];
   const observer = new MutationObserver(processMutations);
   observer.observe(document.body, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
+  if (scrollThrough) {
+    viewportObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting || !measurement?.targetByElement.has(entry.target)) continue;
+        const id = measurement.targetByElement.get(entry.target).id;
+        viewportEntryAtById[id] ??= entry.time;
+      }
+    }, { root: null, rootMargin: '0px' });
+    for (const target of targets) viewportObserver.observe(target.element);
+  }
   let longTaskObserver = null;
   let longTasksUnavailableReason = null;
   if (!globalThis.PerformanceObserver || !PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
@@ -688,7 +758,7 @@ trace.startMeasurement = () => {
       longTaskObserver.observe({ type: 'longtask', buffered: false });
     } catch (error) { longTasksUnavailableReason = error.message; longTaskObserver = null; }
   }
-  measurement = { startedAt: Date.now(), targets, initialTargetIds, expectedTargetIds, targetByElement, targetById, acceptedIds, duplicateAcceptedIds, mutations, observerState, firstAcceptedAtById, visibleIds, completionTimes, dynamicCohorts, dynamicCohortByTargetId, observer, processMutations, longTaskObserver, longTasks, longTasksUnavailableReason, firstVisible: () => firstVisibleAcceptedWriteAt };
+  measurement = { startedAt: Date.now(), scrollThrough, targets, initialTargetIds, expectedTargetIds, targetByElement, targetById, acceptedIds, duplicateAcceptedIds, mutations, observerState, firstAcceptedAtById, acceptedPerformanceAtById, viewportEntryAtById, viewportObserver, visibleIds, completionTimes, dynamicCohorts, dynamicCohortByTargetId, observer, processMutations, longTaskObserver, longTasks, longTasksUnavailableReason, firstVisible: () => firstVisibleAcceptedWriteAt };
   trace.record('measurement.start', { targetCount: targets.length });
   return {
     startedAt: measurement.startedAt,
@@ -696,6 +766,7 @@ trace.startMeasurement = () => {
     visibleIds: targets.filter(target => target.visibleAtStart).map(target => target.id),
     longTasksSupported: !!longTaskObserver,
     longTasksUnavailableReason,
+    ...(scrollThrough ? { viewportEntryAtById: { ...viewportEntryAtById } } : {}),
   };
 };
 trace.setExpectedTargetIds = ids => {
@@ -754,6 +825,7 @@ trace.stopMeasurement = () => {
   if (!measurement) return { available: false, reason: 'measurement not started' };
   const current = measurement;
   try {
+    current.viewportObserver?.disconnect();
     drainAndDisconnectMeasurementObservers({
       mutationObserver: current.observer,
       processMutations: current.processMutations,
@@ -768,6 +840,11 @@ trace.stopMeasurement = () => {
     available: true, startedAt: current.startedAt, stoppedAt: Date.now(), targetCount: current.targets.length,
     acceptedUniqueCount: current.acceptedIds.size, acceptedIds: [...current.acceptedIds], duplicateAcceptedIds: [...current.duplicateAcceptedIds],
     firstAcceptedAtById: current.firstAcceptedAtById,
+    ...(current.scrollThrough ? {
+      acceptedPerformanceAtById: current.acceptedPerformanceAtById,
+      viewportEntryAtById: current.viewportEntryAtById,
+    } : {}),
+    scrollThroughStages: trace.scrollThroughStages ? structuredClone(trace.scrollThroughStages) : null,
     expectedTargetIds: [...current.expectedTargetIds],
     initialTargetIds: [...current.initialTargetIds],
     visibleIds: [...current.visibleIds], visibleSetCompletionAt: current.completionTimes.visible,
