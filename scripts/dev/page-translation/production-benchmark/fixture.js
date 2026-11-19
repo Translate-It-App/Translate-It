@@ -18,6 +18,45 @@ const paragraph = (id, text, expected) => {
   return node;
 };
 
+const attributeTarget = (element, id, name, value) => {
+  element.setAttribute(name, value);
+  element.dataset[`benchId${name.replaceAll(/(^|-)(.)/g, (_, _dash, char) => char.toUpperCase())}`] = id;
+  return { id, element, kind: 'attribute', name, original: value, expected: `${LRM}T:${value}` };
+};
+
+export const createAttributeHeavyFixture = () => {
+  const fragment = document.createDocumentFragment();
+  const targets = [];
+  for (let i = 0; i < 48; i++) {
+    const group = document.createElement('section');
+    group.dataset.benchTarget = '';
+    group.dataset.benchExcluded = `excluded-${i}`;
+    const text = `Attribute fixture text ${i}`;
+    const textParagraph = paragraph(`attribute-${i}-text`, text, `T:${text}`);
+    targets.push({ id: textParagraph.dataset.benchId, element: textParagraph, kind: 'text', original: textParagraph.textContent, expected: expected(textParagraph) });
+    const titleParagraph = document.createElement('p');
+    targets.push(attributeTarget(titleParagraph, `attribute-${i}-title`, 'title', `Title ${i}`));
+
+    const image = document.createElement('img');
+    image.dataset.benchTarget = '';
+    targets.push(attributeTarget(image, `attribute-${i}-alt`, 'alt', `Image description ${i}`));
+    image.setAttribute('data-bench-excluded', `excluded-image-${i}`);
+    // A missing placeholder is intentionally not an eligible translation target.
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.readOnly = true;
+    input.dataset.benchTarget = '';
+    targets.push(attributeTarget(input, `attribute-${i}-placeholder`, 'placeholder', `Action hint ${i}`));
+    const button = document.createElement('button');
+    button.dataset.benchTarget = '';
+    targets.push(attributeTarget(button, `attribute-${i}-aria-label`, 'aria-label', `Accessible action ${i}`));
+    button.setAttribute('data-bench-excluded', `excluded-button-${i}`);
+    group.append(textParagraph, titleParagraph, image, input, button);
+    fragment.append(group);
+  }
+  return { fragment, targets };
+};
+
 const makeViewportPanel = () => {
   const panel = document.createElement('section');
   panel.className = 'viewport-panel';
@@ -72,25 +111,45 @@ export const calibrateLongTaskObserver = async () => {
 
 export const runProductionFixture = async ({ Bridge, mode, fixture, latency, prefixCount, longTaskCaptureValid }) => {
   document.body.replaceChildren();
-  const panel = makeViewportPanel();
-  const offscreen = makePrefixAndTail(prefixCount);
-  const targets = [...offscreen.targets, ...panel.targets];
-  const originalContents = new Map(targets.map(node => [node, node.textContent]));
-
-  if (fixture === 'late-dom') {
-    document.body.append(offscreen.fragment, panel.panel);
+  const attributeHeavy = fixture === 'attribute-heavy';
+  const panel = attributeHeavy ? null : makeViewportPanel();
+  const offscreen = attributeHeavy ? null : makePrefixAndTail(prefixCount);
+  let targets;
+  if (attributeHeavy) {
+    const heavy = createAttributeHeavyFixture();
+    targets = heavy.targets;
+    document.body.append(heavy.fragment);
   } else {
-    document.body.append(panel.panel, offscreen.fragment);
+    targets = [...offscreen.targets, ...panel.targets].map(element => ({
+      id: element.dataset.benchId, element, kind: 'text', original: element.textContent, expected: expected(element),
+    }));
+    if (fixture === 'late-dom') document.body.append(offscreen.fragment, panel.panel);
+    else document.body.append(panel.panel, offscreen.fragment);
   }
-
-  const expectedIds = new Set(targets.map(node => node.dataset.benchId));
-  const visibleIds = new Set(panel.targets.map(node => node.dataset.benchId));
+  const expectedIds = new Set(targets.map(target => target.id));
+  const visibleIds = new Set(attributeHeavy
+    ? targets.filter(target => {
+      const { top, left, right, bottom, width, height } = target.element.getBoundingClientRect();
+      return width > 0 && height > 0 && bottom > 0 && right > 0 && top < innerHeight && left < innerWidth;
+    }).map(target => target.id)
+    : panel.targets.map(node => node.dataset.benchId));
+  const originalValue = target => target.kind === 'text' ? target.element.textContent : target.element.getAttribute(target.name);
+  const writeTarget = target => target.kind === 'text' ? target.element.textContent : target.element.getAttribute(target.name);
+  const attributeTargets = new Map();
+  for (const target of targets.filter(item => item.kind === 'attribute')) {
+    const list = attributeTargets.get(target.element) ?? new Map();
+    list.set(target.name, target);
+    attributeTargets.set(target.element, list);
+  }
+  const textTargetByElement = new Map(targets.filter(target => target.kind === 'text').map(target => [target.element, target]));
+  const textTargetByText = new WeakMap(targets.filter(target => target.kind === 'text').map(target => [target.element.firstChild, target]));
   const requests = new Map();
   let providerCallbackCalls = 0;
   let untrackedProviderCallbackCalls = 0;
   let settlementCalls = 0;
   const settlementStates = new Set();
-  const writes = new Set();
+  const observedWriteIds = new Set();
+  const settlements = new Map();
   let start = 0;
   let firstVisibleAcceptedWriteMs = null;
   let visibleCompletionMs = null;
@@ -99,18 +158,22 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
 
   const observer = new MutationObserver(records => {
     for (const record of records) {
-      const target = record.target.closest?.('[data-bench-id]') ?? record.target.parentElement?.closest('[data-bench-id]');
-      if (!target || target.textContent !== expected(target)) continue;
-      writes.add(target.dataset.benchId);
+      const target = record.type === 'attributes'
+        ? attributeTargets.get(record.target)?.get(record.attributeName)
+        : textTargetByText.get(record.target) ?? textTargetByElement.get(record.target);
+      if (!target || observedWriteIds.has(target.id) || writeTarget(target) !== target.expected) continue;
+      observedWriteIds.add(target.id);
       const now = performance.now() - start;
-      if (visibleIds.has(target.dataset.benchId) && firstVisibleAcceptedWriteMs === null) {
+      if (visibleIds.has(target.id) && firstVisibleAcceptedWriteMs === null) {
         firstVisibleAcceptedWriteMs = now;
       }
-      if (visibleCompletionMs === null && [...visibleIds].every(id => writes.has(id))) visibleCompletionMs = now;
-      if (allCompletionMs === null && writes.size === expectedIds.size) allCompletionMs = now;
+      if (visibleCompletionMs === null && [...visibleIds].every(id => observedWriteIds.has(id))) visibleCompletionMs = now;
+      if (allCompletionMs === null && observedWriteIds.size === expectedIds.size) allCompletionMs = now;
     }
   });
-  observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+  const observerOptions = { subtree: true, childList: true, characterData: true };
+  if (attributeHeavy) observerOptions.attributes = true;
+  observer.observe(document.body, observerOptions);
 
   const longTaskEntries = [];
   const longTasks = PerformanceObserver.supportedEntryTypes?.includes('longtask')
@@ -120,15 +183,22 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
 
   const provider = (text, _context, _key, node) => {
     providerCallbackCalls++;
-    const target = node?.nodeType === 1 ? node : node?.parentElement?.closest('[data-bench-id]');
-    const id = target?.dataset?.benchId;
+    const target = node?.nodeType === 2
+      ? attributeTargets.get(node.ownerElement)?.get(node.name)
+      : textTargetByText.get(node) ?? textTargetByElement.get(node?.nodeType === 1 ? node : node?.parentElement);
+    const id = target?.id;
     if (id && expectedIds.has(id)) requests.set(id, (requests.get(id) ?? 0) + 1);
     else untrackedProviderCallbackCalls++;
     return pause(latency).then(() => ({
       __pageTranslationSettlement: true,
       text: `T:${text}`,
       state: 'pending',
-      settle(outcome) { settlementCalls++; this.state = outcome; settlementStates.add(outcome); },
+      settle(outcome) {
+        settlementCalls++;
+        this.state = outcome;
+        settlementStates.add(outcome);
+        if (id) settlements.set(id, (settlements.get(id) ?? 0) + (outcome === 'accepted' ? 1 : 0));
+      },
     }));
   };
   const bridge = new Bridge();
@@ -144,7 +214,7 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
     lazyLoading: false,
     showOriginalOnHover: false,
     autoTranslateOnDOMChanges: false,
-    attributesToTranslate: [],
+    attributesToTranslate: attributeHeavy ? ['title', 'alt', 'placeholder', 'value', 'aria-label'] : [],
   }, provider, null, {
     onDiscoveryStateChange: state => {
       if (state === false && discoveryDrainElapsedMs === null) discoveryDrainElapsedMs = performance.now() - start;
@@ -162,18 +232,7 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
   try {
     await until(() => allCompletionMs !== null);
   } catch (error) {
-    const unmarkedExpected = node => node[EXPECTED];
-    const translatedWithoutLRM = targets.filter(node => node.textContent === unmarkedExpected(node)).length;
-    const translatedAfterRemovingLRM = targets.filter(node => node.textContent.replaceAll(LRM, '') === unmarkedExpected(node)).length;
-    const markerShapes = {
-      prefix: targets.filter(node => node.textContent === `${LRM}${unmarkedExpected(node)}`).length,
-      suffix: targets.filter(node => node.textContent === `${unmarkedExpected(node)}${LRM}`).length,
-      surrounding: targets.filter(node => node.textContent === `${LRM}${unmarkedExpected(node)}${LRM}`).length,
-      afterTranslationPrefix: targets.filter(node => node.textContent === unmarkedExpected(node).replace('T:', `T:${LRM}`)).length,
-      beforeTranslationPrefix: targets.filter(node => node.textContent === unmarkedExpected(node).replace('T:', `${LRM}T:`)).length,
-    };
-    const hasLRM = targets.filter(node => node.textContent.includes(LRM)).length;
-    throw new Error(`${mode}/${fixture}: ${error.message} Eligible=${expectedIds.size}, providerCallbacks=${providerCallbackCalls}, trackedAdmissions=${requests.size}, untrackedCallbacks=${untrackedProviderCallbackCalls}, settlements=${settlementCalls}, writes=${writes.size}, exactUnmarked=${translatedWithoutLRM}, afterRemovingLRM=${translatedAfterRemovingLRM}, targetsWithLRM=${hasLRM}, markerShapes=${JSON.stringify(markerShapes)}`);
+    throw new Error(`${mode}/${fixture}: ${error.message} Eligible=${expectedIds.size}, providerCallbacks=${providerCallbackCalls}, trackedAdmissions=${requests.size}, untrackedCallbacks=${untrackedProviderCallbackCalls}, settlements=${settlementCalls}, writes=${observedWriteIds.size}`);
   }
   await pause(20);
   longTaskEntries.push(...(longTasks?.takeRecords() ?? []));
@@ -189,7 +248,7 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
 
   const duplicateAdmissionIds = [...requests].filter(([, count]) => count !== 1).map(([id]) => id);
   const missingAdmissionIds = [...expectedIds].filter(id => !requests.has(id));
-  const translatedIds = new Set(targets.filter(node => node.textContent === expected(node)).map(node => node.dataset.benchId));
+  const translatedIds = new Set(targets.filter(target => writeTarget(target) === target.expected).map(target => target.id));
   const missingTranslationIds = [...expectedIds].filter(id => !translatedIds.has(id));
   const extraTranslationIds = [...translatedIds].filter(id => !expectedIds.has(id));
 
@@ -197,7 +256,9 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
     fixture,
     latencyMs: latency,
     expectedEligibleTargets: expectedIds.size,
+    visibleTargets: visibleIds.size,
     translatedTargets: translatedIds.size,
+    observedTargetWrites: observedWriteIds.size,
     firstVisibleAcceptedWriteMs,
     visibleCompletionMs,
     allWriteCompletionMs: allCompletionMs,
@@ -218,10 +279,13 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
     extraTranslationIds,
   };
 
+  const missingWrites = [...expectedIds].filter(id => !observedWriteIds.has(id));
+  const badSettlementIds = [...expectedIds].filter(id => settlements.get(id) !== 1);
   if (translatedIds.size !== expectedIds.size || missingTranslationIds.length || extraTranslationIds.length
     || requests.size !== expectedIds.size || missingAdmissionIds.length || duplicateAdmissionIds.length
     || providerCallbackCalls !== expectedIds.size || untrackedProviderCallbackCalls
-    || settlementCalls !== expectedIds.size
+    || settlementCalls !== expectedIds.size || [...settlementStates].length !== 1 || !settlementStates.has('accepted')
+    || badSettlementIds.length || missingWrites.length
     || firstVisibleAcceptedWriteMs === null || visibleCompletionMs === null || !Number.isFinite(discoveryDrainElapsedMs)) {
     throw new Error(`Fixture invariant failed: ${JSON.stringify(result)}`);
   }
@@ -237,11 +301,11 @@ export const runProductionFixture = async ({ Bridge, mode, fixture, latency, pre
       } catch (error) {
         restoreError = error;
       }
-      const mismatchedTargets = targets.filter(node => node.textContent !== originalContents.get(node));
+      const mismatchedTargets = targets.filter(target => originalValue(target) !== target.original);
       restoredTargets = targets.length - mismatchedTargets.length;
       if (mismatchedTargets.length) {
         const invariantError = new Error(
-          `Restore invariant failed: restored=${restoredTargets} expected=${targets.length}; mismatched IDs=${mismatchedTargets.map(node => node.dataset.benchId).join(',')}`,
+          `Restore invariant failed: restored=${restoredTargets} expected=${targets.length}; mismatched IDs=${mismatchedTargets.map(target => target.id).join(',')}`,
         );
         restoreError = restoreError
           ? new AggregateError([restoreError, invariantError], 'Production fixture restore failed.')
