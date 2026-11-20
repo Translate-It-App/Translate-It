@@ -17,6 +17,7 @@ import { createGoogleV2_503Evidence, executeGoogleV2_503, finalizeGoogleV2_503Ev
 import { createGoogleV2TimeoutProtocol, armGoogleV2Timeout, executeGoogleV2Timeout, collectGoogleV2TimeoutEvidence, recordGoogleTimeoutFailedTargetDOM, validateGoogleV2TimeoutEvidence } from './resilience/googlev2-timeout.mjs';
 import { createCustom429Protocol, armCustom429, claimCustom429Request, executeCustom429Request, collectCustom429Evidence, validateCustom429ProbeEvidence } from './resilience/custom-429.mjs';
 import { createCustom400Protocol, armCustom400, executeCustom400, collectCustom400Evidence, recordCustom400PreRestorePreArmDrain, recordCustom400FailedTargetDOM, validateCustom400ProbeEvidence } from './resilience/custom-400.mjs';
+import { createCustomCancellationProtocol, armCustomCancellation, admitCustomCancellationRequest, executeCustomCancellation, captureCustomCancellationPreRestore, collectCustomCancellationEvidence, validateCustomCancellationProbeEvidence } from './resilience/custom-cancellation.mjs';
 import { createGeminiStructuredRecoveryEvidence, executeGeminiStructuredRecovery, collectGeminiStructuredRecoveryEvidence, validateGeminiStructuredRecoveryEvidence } from './resilience/gemini-structured-recovery.mjs';
 import { runCancellationProbe } from './cancellation-runner.mjs';
 import { cleanupStaleSuccessProbe, runStaleSuccessProbe } from './stale-success-runner.mjs';
@@ -198,6 +199,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
   const googleTimeoutProtocol = resilienceProbe === 'googlev2-timeout' ? createGoogleV2TimeoutProtocol() : null;
   const custom429Protocol = resilienceProbe === 'custom-429' ? createCustom429Protocol() : null;
   const custom400Protocol = resilienceProbe === 'custom-400' ? createCustom400Protocol() : null;
+  const customCancellationProtocol = resilienceProbe === 'custom-cancellation' ? createCustomCancellationProtocol() : null;
   const { release: releaseCustomPaused, failHeld: failCustomHeldFetches } = createCustomFetchSettlement({
     protocol: custom429Protocol, sendBySession, now,
   });
@@ -252,7 +254,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       evidence.networkEvents.push({ sequence: evidence.networkEvents.length + 1, ...event });
     }) : null;
 
-  const processRequestPaused = async (event, requestRecord, reservation) => {
+  const processRequestPaused = async (event, requestRecord, reservation, admissionError) => {
     const { request, requestId } = event.params;
     const networkTarget = networkEventRouter?.targetForSession(event.sessionId) ?? null;
     requestRecord.targetSessionId = event.sessionId;
@@ -268,9 +270,10 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       if (requestRecord.requestViewport) return;
       requestRecord.requestViewport = await evaluate(chrome, pageSession,
         `(()=>{const sources=${JSON.stringify(sources)};return {at:performance.now(),scrollY,targets:sources.map(source=>{const el=[...document.querySelectorAll('[data-bench-id]')].find(node=>node.textContent===source);if(!el)return {source,id:null,classification:'unmapped'};const r=el.getBoundingClientRect();const visible=r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth;const buffered=r.bottom>-50&&r.top<innerHeight+50&&r.right>-50&&r.left<innerWidth+50;return {source,id:el.dataset.benchId,classification:visible?'viewport':buffered?'permitted-50px-buffer':'outside-buffer'}})}})()`, contentContext, false);
-    };
+      };
       requestRecord.category = classification.kind;
       try {
+        if (admissionError !== undefined) throw admissionError;
         if (classification.kind === 'provider-translation') {
           if (providerLane && classification.provider && classification.provider !== providerLane.provider) {
             throw new Error(`Unexpected provider endpoint for selected ${providerLane.provider} lane.`);
@@ -302,13 +305,18 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
           } else if (classification.provider === 'custom') {
             requestRecord.batchIds = decodedProvider.ids;
             requestRecord.batchTexts = body;
-            if (custom400Protocol?.armed) {
+          if (custom400Protocol?.armed) {
             if (await executeCustom400({
               protocol: custom400Protocol, event, requestId, requestRecord, classification, texts: decodedProvider.texts,
               fixtureConfig, sessionId: trial.sessionId, sendBySession, providerNetworkEvents, chrome, workerSession, pageSession, contentContext,
               evaluate, now, sameProviderTexts,
             })) return;
           }
+          if (customCancellationProtocol && await executeCustomCancellation({
+            protocol: customCancellationProtocol, event, requestId, requestRecord, body, fixtureConfig,
+            sessionId: trial.sessionId, providerNetworkEvents, chrome, workerSession, pageSession, contentContext,
+            evaluate, until, now, reservation, sameProviderTexts,
+          })) return;
           } else if (classification.provider === 'gemini') {
             requestRecord.batchIds = decodedProvider.ids;
             requestRecord.batchTexts = body;
@@ -499,7 +507,11 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
           }
         } else {
           await wait(fixtureConfig.responseDelayMs);
-        await fulfillPausedFetch({ send, sessionId: event.sessionId, requestId, status: 200, body: responseBody, requestRecord, now });
+        if (reservation) await reservation.release('fulfill', {
+          body: responseBody, responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+        });
+        else await fulfillPausedFetch({ send, sessionId: event.sessionId, requestId, status: 200, body: responseBody, requestRecord, now });
         }
       } else if (classification.kind === 'startup-metadata-fixture') {
         if (reservation) await reservation.release('fulfill', { body: startupVoicesResponse, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }] });
@@ -532,6 +544,10 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         if (custom429Protocol.releaseStates.has(requestRecord.custom429Role)) {
           requestRecord.response ??= { failed: true, reason: 'custom-429-protocol-error', endedAt: now() };
         }
+      }
+      if (customCancellationProtocol && requestRecord.customCancellationHeld) {
+        customCancellationProtocol.error = error;
+        customCancellationProtocol.evidence.handlerError = { name: error?.name ?? 'Error', message: error?.message ?? String(error) };
       }
       requestRecord.blocked = true;
       requestRecord.error ??= error.message;
@@ -568,14 +584,31 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     },
     reserveRequest: (event, requestRecord, requestId) => {
       const handlerLifecycle = cancellationControl?.requestLifecycle
+        ?? (customCancellationProtocol ? requestLifecycle : null)
         ?? (googleTimeoutProtocol ? requestLifecycle : null);
       return handlerLifecycle?.reserve({
         requestId, sessionId: event.sessionId, networkId: event.params.networkId ?? null, requestRecord,
       }) ?? null;
     },
+    onAdmission: (event, request, requestRecord, reservation, requestId) => {
+      if (!customCancellationProtocol?.armed || !reservation) return;
+      const classification = classifyPausedRequest(request, {
+        fixtureOrigin: new URL(trial.fixture.url).origin,
+        extensionOrigin: extensionOriginBySession.get(event.sessionId), selectedProvider: 'custom',
+      });
+      if (classification.kind !== 'provider-translation' || classification.provider !== 'custom') return;
+      const decoded = decodeProviderRequest('custom', request, fixtureConfig.targetTexts);
+      requestRecord.batchTexts = decoded.texts;
+      requestRecord.batchIds = decoded.ids;
+      admitCustomCancellationRequest({
+        protocol: customCancellationProtocol, event, requestRecord, requestId, reservation,
+        body: decoded.texts, now,
+      });
+    },
     handlePaused: processRequestPaused,
     trackHandler: (reservation, job) => {
       const lifecycle = cancellationControl?.requestLifecycle
+        ?? (customCancellationProtocol ? requestLifecycle : null)
         ?? (googleTimeoutProtocol ? requestLifecycle : null) ?? requestLifecycle;
       return handlerJobTracker.track(lifecycle, reservation, job, error => {
         trial.transportErrors ??= [];
@@ -639,7 +672,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       const workerInstrumentation = await evaluate(chrome, workerSession,
         'globalThis.__pageTranslationBenchmark.enableCancellationProbe()');
       if (trial.cancellation || trial.staleSuccess) (trial.cancellation ?? trial.staleSuccess).workerInstrumentation = workerInstrumentation;
-      else if (googleTimeoutProtocol) trial.resilience.workerInstrumentation = workerInstrumentation;
+       else if (googleTimeoutProtocol || customCancellationProtocol) trial.resilience.workerInstrumentation = workerInstrumentation;
       if (!workerInstrumentation?.enabled || !workerInstrumentation?.lifecycleRegistryObserved
           || workerInstrumentation.instrumentationErrors?.length) throw new Error('Worker cancellation/provider/controller instrumentation was not fully installed.');
     }
@@ -704,7 +737,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       return state.marker && state.initialized && state.baseInitialized && state.listener
         && state.features?.active && state.features?.handlerActive;
     });
-    if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol) {
+    if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol || customCancellationProtocol) {
       const contentInstrumentation = await evaluate(chrome, pageSession,
         'window.__pageTranslationBenchmark.enableCancellationProbe()', contentContext);
       const instrumentationOwner = trial.cancellation ?? trial.staleSuccess ?? trial.resilience;
@@ -796,6 +829,11 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       trial.cancellation.initialDOMMetadata = await evaluate(chrome, pageSession,
         `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,tagName:el.tagName,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`, contentContext, false);
     }
+    if (customCancellationProtocol) {
+      customCancellationProtocol.initialDOMMetadata = await evaluate(chrome, pageSession,
+        `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,tagName:el.tagName,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`, contentContext, false);
+      customCancellationProtocol.initialIds = [...fixtureConfig.scrollBands[0].ids];
+    }
     if (staleSuccessProbe) {
       trial.staleSuccess.initialDOMMetadata = await evaluate(chrome, pageSession,
         `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,tagName:el.tagName,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`, contentContext, false);
@@ -844,6 +882,14 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
           chrome, workerSession, pageSession, contentContext, evaluate, until, now,
         });
       }
+      if (customCancellationProtocol) {
+        const resources = await evaluate(chrome, workerSession,
+          `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(sessionId)}])`, undefined, false);
+        armCustomCancellation({
+          protocol: customCancellationProtocol, sessionId, resolver: resources?.sourceResolvers?.[sessionId],
+          initialIds, fixtureConfig, now,
+        });
+      }
       if (custom400Protocol) {
         await armCustom400({
           protocol: custom400Protocol, resilienceEvidence, initialIds, sessionId,
@@ -861,14 +907,34 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
           const band = fixtureConfig.scrollBands[bandIndex];
           const visibleValidation = validateExactTargetIds(`${label} visible target`, phase.visibleIds, band.ids);
           if (!visibleValidation.ok) throw new Error(`Native scroll did not expose the complete ${label}: ${visibleValidation.issues.join('; ')}`);
+          if (customCancellationProtocol?.held) {
+            const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
+            trial.scrollThrough.bandAcceptance.push({ band: band.band, targetCount: band.ids.length,
+              acceptedIds: state.acceptedIds.filter(id => band.ids.includes(id)), acceptedCount: state.acceptedIds.filter(id => band.ids.includes(id)).length,
+              cancelledTargetIds: customCancellationProtocol.held.targetIds });
+            phases.push({ label, ...phase });
+            break;
+          }
           const accepted = await until(async () => {
+            if (customCancellationProtocol?.held) return { cancellationHeld: true, acceptedIds: [] };
             const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
             const timeoutIds = googleTimeoutProtocol?.held?.cancellation ? new Set(googleTimeoutProtocol.held.targetIds) : new Set();
-            const failedIds = new Set([...(custom400Protocol?.evidence.injected400?.[0]?.targetIds ?? []), ...timeoutIds]);
+            const failedIds = new Set([...(custom400Protocol?.evidence.injected400?.[0]?.targetIds ?? []),
+              ...(customCancellationProtocol?.held?.targetIds ?? []), ...timeoutIds]);
             return band.ids.every(id => failedIds.has(id) || state?.acceptedIds.includes(id)) ? state : null;
           }, googleTimeoutProtocol ? 75_000 : 30_000);
+          if (accepted.cancellationHeld) {
+            const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
+            trial.scrollThrough.bandAcceptance.push({ band: band.band, targetCount: band.ids.length,
+              acceptedIds: state.acceptedIds.filter(id => band.ids.includes(id)),
+              acceptedCount: state.acceptedIds.filter(id => band.ids.includes(id)).length,
+              cancelledTargetIds: customCancellationProtocol.held.targetIds });
+            phases.push({ label, ...phase });
+            break;
+          }
           const failedIds = [
             ...(custom400Protocol?.evidence.injected400[0]?.targetIds ?? []),
+            ...(customCancellationProtocol?.held?.targetIds ?? []),
             ...(googleTimeoutProtocol?.held?.cancellation ? googleTimeoutProtocol.held.targetIds : []),
           ];
           const { acceptedIds, failedTargetIds } = partitionBandAcceptance(band.ids, accepted.acceptedIds, failedIds);
@@ -1213,6 +1279,32 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       state: measurementState,
       cleanupErrors: trial.cleanupErrors,
       awaitAcceptedTranslation: async () => {
+        if (customCancellationProtocol?.held) {
+          await customCancellationProtocol.claimCompletion;
+          if (customCancellationProtocol.error) {
+            throw new Error(customCancellationProtocol.error.message ?? String(customCancellationProtocol.error));
+          }
+          const stopped = await until(async () => {
+            const state = await evaluate(chrome, pageSession,
+              'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
+            const measurement = await evaluate(chrome, pageSession,
+              'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
+            return Array.isArray(measurement?.acceptedIds)
+              && state?.translationSessionId === sessionId && state.managerTranslating === false
+              && state.activeFlushes === 0 && state.queueIds?.length === 0 && state.pendingSettlementCount === 0
+              && state.discoveryPending === false
+              && JSON.stringify(measurement?.acceptedIds) === JSON.stringify(customCancellationProtocol.evidence.retainedAcceptedIds)
+              ? { state, measurement } : null;
+          }, 15_000);
+          trial.scrollThrough.finalSchedulerState = stopped.state;
+          trial.terminal = { cancellationStopAcknowledged: true, sessionId };
+          trial.rawDOM.translated = await evaluate(chrome, pageSession,
+            `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
+          await captureCustomCancellationPreRestore({
+            protocol: customCancellationProtocol, fixtureConfig, chrome, pageSession, contentContext, evaluate,
+          });
+          return { cancellation: true, acceptedIds: stopped.measurement.acceptedIds };
+        }
         const accepted = await until(async () => {
           const events = await evaluate(chrome, pageSession, 'window.__benchEvents??[]', contentContext, false);
           trial.lifecycle = events;
@@ -1369,7 +1461,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     const successfulProviderAttempts = canonicalProviderSourceAttempts(
       trial.requests.filter(request => request.category === 'provider-translation' && !request.canonicalSourceExcluded));
     trial.measurements.content = contentTrace;
-    if (fixtureConfig.scenario === 'scroll-through') {
+    if (fixtureConfig.scenario === 'scroll-through' && !customCancellationProtocol) {
       const partialFailedIds = custom400Protocol?.evidence.injected400[0]?.targetIds
         ?? googleTimeoutProtocol?.held?.targetIds ?? [];
       const expectedAcceptedIds = partialFailedIds.length
@@ -1507,16 +1599,33 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     trial.duplicateAcceptedWriteIds = contentTrace.duplicateAcceptedIds ?? [];
     const partialFailedIds = [
       ...(custom400Protocol?.evidence.injected400[0]?.targetIds ?? []),
+      ...(customCancellationProtocol?.held?.targetIds ?? []),
       ...(googleTimeoutProtocol?.held?.cancellation ? googleTimeoutProtocol.held.targetIds : []),
     ];
-    const expectedAcceptedIds = partialFailedIds.length
+    const expectedAcceptedIds = customCancellationProtocol
+      ? customCancellationProtocol.evidence.retainedAcceptedIds ?? customCancellationProtocol.initialIds
+      : partialFailedIds.length
       ? expectedIds.filter(id => !partialFailedIds.includes(id)) : expectedIds;
-    const orderValidation = [
-      validateExactTargetIds('Scheduler enqueue', enqueuedIds, expectedIds),
-      validateExactTargetIds('filtered primitive admission', admissionIds, expectedIds),
-      validateExactTargetIds('accepted DOM write', acceptedIds, expectedAcceptedIds),
-      validateExactTargetIds('selected scheduler batch', selectedBatchIds, expectedIds),
-    ];
+    const orderValidation = customCancellationProtocol
+      ? [enqueuedIds, admissionIds, selectedBatchIds].map((observed, index) => {
+        const label = ['Scheduler enqueue', 'filtered primitive admission', 'selected scheduler batch'][index];
+        const required = [...customCancellationProtocol.initialIds, ...(customCancellationProtocol.held?.targetIds ?? [])];
+        const unknown = (observed ?? []).filter(id => !expectedIds.includes(id));
+        const duplicates = (observed ?? []).filter((id, index, ids) => ids.indexOf(id) !== index);
+        const missingRequired = required.filter(id => !(observed ?? []).includes(id));
+        const issues = [];
+        if (!Array.isArray(observed)) issues.push(`${label} evidence is unavailable`);
+        if (unknown.length) issues.push(`${label} contains unknown target IDs: ${unknown.join(',')}`);
+        if (duplicates.length) issues.push(`${label} contains duplicate target IDs: ${[...new Set(duplicates)].join(',')}`);
+        if (missingRequired.length) issues.push(`${label} omitted initial/held target IDs: ${missingRequired.join(',')}`);
+        return { ok: issues.length === 0, issues };
+      }).concat(validateExactTargetIds('accepted DOM write', acceptedIds, expectedAcceptedIds))
+      : [
+        validateExactTargetIds('Scheduler enqueue', enqueuedIds, expectedIds),
+        validateExactTargetIds('filtered primitive admission', admissionIds, expectedIds),
+        validateExactTargetIds('accepted DOM write', acceptedIds, expectedAcceptedIds),
+        validateExactTargetIds('selected scheduler batch', selectedBatchIds, expectedIds),
+      ];
     const orderIssues = orderValidation.flatMap(validation => validation.issues);
     if (trial.duplicateAcceptedWriteIds.length) orderIssues.push(`duplicate accepted DOM writes: ${trial.duplicateAcceptedWriteIds.join(',')}`);
     if (orderIssues.length) throw new Error(orderIssues.join('; '));
@@ -1551,7 +1660,9 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     const canonicalSourceIds = mapProviderBatchIds(canonicalProviderSourceAttempts(providerAttempts
       .filter(request => !request.canonicalSourceExcluded))
       .map(request => request.batchTexts ?? []), sourceToId).flat();
-    const providerOrderValidation = validateExactTargetIds('provider request source', canonicalSourceIds, expectedIds);
+    const providerOrderValidation = customCancellationProtocol
+      ? { ok: true, issues: [], reason: 'Cancellation probe intentionally stops after its held post-initial band.' }
+      : validateExactTargetIds('provider request source', canonicalSourceIds, expectedIds);
     if (!providerOrderValidation.ok) throw new Error(providerOrderValidation.issues.join('; '));
     trial.providerRequestOrderValidation = providerOrderValidation;
     trial.providerHTTPRequestSequence = mapProviderHTTPRequestSequence(providerAttempts, sourceToId, providerLane?.provider);
@@ -1583,6 +1694,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     const failedTargetIdsForTrial = new Set(partialFailedIds);
     const failedTextsForTrial = new Set([
       ...(custom400Protocol?.evidence.injected400[0]?.texts ?? []),
+      ...(customCancellationProtocol?.held?.texts ?? []),
       ...(googleTimeoutProtocol?.held?.texts ?? []),
     ]);
     const validationOriginals = failedTargetIdsForTrial.size
@@ -1592,7 +1704,12 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     const validationRestored = failedTargetIdsForTrial.size
       ? new Map([...new Map(restoredLifecycle.dom)].filter(([id]) => !failedTargetIdsForTrial.has(id)))
       : new Map(restoredLifecycle.dom);
-    trial.validation = validateTrialTranslation({
+    trial.validation = customCancellationProtocol ? {
+      ok: JSON.stringify(restoredLifecycle.dom) === JSON.stringify(originals)
+        && JSON.stringify(acceptedIds) === JSON.stringify(customCancellationProtocol.evidence.retainedAcceptedIds)
+        && customCancellationProtocol.initialIds.every(id => acceptedIds.includes(id)),
+      issues: [],
+    } : validateTrialTranslation({
       originals: validationOriginals,
       translated: validationTranslated,
       requests: failedTargetIdsForTrial.size ? providerSources.filter(text => !failedTextsForTrial.has(text)) : providerSources,
@@ -1607,7 +1724,8 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       || failedTargetIdsForTrial.size !== 25
       || originalsFromDom.filter(([id]) => failedTargetIdsForTrial.has(id)).length !== 25
     )) throw new Error('Resilience failed targets were not preserved/restored exactly.');
-    if (!trial.validation.ok) throw new Error(trial.validation.issues.join('; '));
+    if (!trial.validation.ok) throw new Error(trial.validation.issues.length
+      ? trial.validation.issues.join('; ') : 'Custom cancellation retained-write or complete Restore check failed.');
     const unexpectedExternal = trial.requests.find(request => request.category === 'blocked');
     if (unexpectedExternal) throw new Error(`Unexpected external request blocked: ${unexpectedExternal.url}`);
     if (!providerAttempts.length) throw new Error('No actual provider translation transport attempts were observed.');
@@ -1629,7 +1747,31 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       });
       trial.resilience = { ...resilienceEvidence, ...timeoutEvidence };
     }
-if (resilienceProbe && !googleTimeoutProtocol) {
+    if (customCancellationProtocol) {
+      const [pageScheduler, contentDrain, workerDrain, metadata] = await Promise.all([
+        evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+        evaluate(chrome, pageSession,
+          `window.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(sessionId)})`, contentContext, false),
+        evaluate(chrome, workerSession,
+          `globalThis.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(sessionId)})`, undefined, false),
+        evaluate(chrome, pageSession,
+          `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,tagName:el.tagName,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`, contentContext, false),
+      ]);
+      const terminalMessageIds = (workerDrain?.providerRoots ?? [])
+        .filter(root => root.sessionId === sessionId).map(root => root.messageId);
+      const resources = await evaluate(chrome, workerSession,
+        `globalThis.__pageTranslationBenchmark.resourceSnapshot(${JSON.stringify(terminalMessageIds)}, [${JSON.stringify(sessionId)}])`, undefined, false);
+      trial.resilience = collectCustomCancellationEvidence({
+        protocol: customCancellationProtocol, evidence: resilienceEvidence, resources, pageScheduler, contentDrain, workerDrain, metadata,
+        originals, restoredDOM: restoredLifecycle.dom, acceptedIds, acceptedDomOrder: trial.acceptedDomOrder,
+        translated: trial.rawDOM.translated, duplicateAcceptedWriteIds: trial.duplicateAcceptedWriteIds,
+        workerTrace, traceEvents, providerAttempts, providerNetworkEvents,
+        providerPhysicalAccounting: trial.physicalProviderAccounting,
+        providerLogicalBatches: trial.providerLogicalBatches, providerRuntimeObserved: trial.providerRuntimeObserved,
+        pageWorkerLimit: trial.pageWorkerLimit, validateRuntimeResources,
+      });
+    }
+    if (resilienceProbe && !googleTimeoutProtocol && !customCancellationProtocol) {
       const terminalMessageIds = resilienceProbe === 'custom-400'
         ? [custom400Protocol.evidence.injected400[0]?.logicalMessageId].filter(id => typeof id === 'string')
         : resilienceProbe === 'custom-429'
@@ -1772,8 +1914,9 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
           fetchReleaseClassification: googleTimeoutProtocol.held.fetchReleaseClassification ?? null,
         } : null,
       } } : {}),
-      ...(custom429Protocol ? { protocol: custom429Protocol.evidence } : {}),
-      failureStage: trial.stage ?? null };
+       ...(custom429Protocol ? { protocol: custom429Protocol.evidence } : {}),
+       ...(customCancellationProtocol ? { customCancellation: customCancellationProtocol.evidence } : {}),
+       failureStage: trial.stage ?? null };
     trial.error = { name: error.name, message: error.message, stack: error.stack };
   } finally {
     if (custom429Protocol) {
@@ -1809,9 +1952,22 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
         });
       }
       if (resilienceProbe === 'googlev2-503') finalizeGoogleV2_503Evidence(trial.resilience ?? resilienceEvidence);
-      trial.physicalProviderAccounting = summarizePhysicalProviderAttempts(providerPhysicalAttempts, {
-        expectedTimeoutAbortAttemptId: googleTimeoutProtocol?.held?.attemptId ?? null,
-      });
+       trial.physicalProviderAccounting = summarizePhysicalProviderAttempts(providerPhysicalAttempts, {
+         expectedTimeoutAbortAttemptId: googleTimeoutProtocol?.held?.attemptId
+           ?? customCancellationProtocol?.held?.requestRecord?.physicalAttempt?.attemptId ?? null,
+       });
+       if (customCancellationProtocol) {
+         const cancelledAttemptIds = new Set((trial.resilience?.attempts ?? [])
+           .filter(attempt => attempt.correlation?.physicalStatus === 'rejected'
+             && attempt.correlation?.providerRootErrorType === 'USER_CANCELLED'
+             && attempt.correlation?.controllerAborted === true)
+           .map(attempt => attempt.attemptId));
+         trial.physicalProviderAccounting.expectedCancellationAttemptIds = [...cancelledAttemptIds];
+         trial.physicalProviderAccounting.issues = trial.physicalProviderAccounting.issues.filter(issue =>
+           ![...cancelledAttemptIds].some(attemptId => issue.startsWith(`provider attempt ${attemptId} lacks correlated response status`)
+             || issue.startsWith(`provider attempt ${attemptId} failed:`)));
+         trial.physicalProviderAccounting.ok = trial.physicalProviderAccounting.issues.length === 0;
+       }
       trial.physicalProviderAccounting.logicalBatchNote = 'Physical HTTP requests are distinct from scheduler logical batches and worker concurrency limits.';
       if (providerLane && isProviderWorkloadTrial({ networkGuardProbe, cancellationProbe, staleSuccessProbe, phase })) {
         trial.providerConcurrencyValidation = validateProviderConcurrencyObservations({
@@ -1848,7 +2004,7 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
         cleanup: { staleContextDisposed },
       });
     }
-    if ((custom429Protocol || googleTimeoutProtocol) && !cancellationControl) {
+    if ((custom429Protocol || googleTimeoutProtocol || customCancellationProtocol) && !cancellationControl) {
       try {
         const requestCleanup = await closeNetworkRequestLifecycle({
           lifecycle: requestLifecycle, guardedSessions: guardSessions, chrome,
@@ -1877,7 +2033,33 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
             trial.error ??= { name: 'GoogleTimeoutProbeValidationError', message: trial.resilience.validation.issues.join('; ') };
           }
         }
-        trial.cleanupErrors.push(...requestCleanup.errors.map(error => `${googleTimeoutProtocol ? 'Google timeout' : 'Custom 429'} request cleanup: ${error}`));
+        if (customCancellationProtocol && trial.resilience) {
+          trial.resilience.concurrency = {
+            peakPhysical: trial.physicalProviderAccounting?.peakPhysicalConcurrency ?? null,
+            peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
+            providerLimiterCapacity: trial.providerRuntimeObserved?.limiterCapacity ?? null,
+            pageWorkerLimit: trial.pageWorkerLimit ?? null,
+          };
+          const heldReservation = requestCleanup.reservations.find(item => item.requestId === customCancellationProtocol.held?.requestId);
+          const handlersDrained = requestCleanup.ok && requestHandlerJobs.size === 0
+            && requestCleanup.handlerCount === 0 && heldReservation?.handlerSettled === true;
+          trial.resilience.cleanup = {
+            ...trial.resilience.cleanup, ok: handlersDrained && trial.resilience.cleanup?.resourceValidation?.ok === true
+              && trial.resilience.cleanup?.contentDrain?.pendingOperations === 0
+              && trial.resilience.cleanup?.workerDrain?.ledger?.pending === 0
+              && !trial.resilience.cleanup?.workerDrain?.providerRoots?.some(root => root.status === 'pending'),
+             handlersDrained, handlerCount: requestCleanup.handlerCount,
+             finalDrainAt: requestCleanup.drainInterval?.completedAt ?? null,
+            requestLifecycle: requestCleanup, heldFetch: heldReservation ?? null,
+          };
+          trial.resilience.validation = validateCustomCancellationProbeEvidence(trial.resilience);
+          if (!trial.resilience.validation.ok) {
+            trial.status = 'failed';
+            trial.error ??= { name: 'CustomCancellationProbeValidationError', message: trial.resilience.validation.issues.join('; ') };
+          }
+        }
+        trial.cleanupErrors.push(...requestCleanup.errors.map(error =>
+          `${googleTimeoutProtocol ? 'Google timeout' : customCancellationProtocol ? 'Custom cancellation' : 'Custom 429'} request cleanup: ${error}`));
       } catch (error) {
         if (custom429Protocol) custom429Protocol.evidence.cleanup = { requestLifecycle: { ok: false, errors: [error?.message ?? String(error)] } };
         if (googleTimeoutProtocol && trial.resilience) {
@@ -1885,7 +2067,14 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
             requestLifecycle: { ok: false, errors: [error?.message ?? String(error)] } };
           trial.resilience.validation = validateGoogleV2TimeoutEvidence(trial.resilience);
         }
-        trial.cleanupErrors.push(`${googleTimeoutProtocol ? 'Google timeout' : 'Custom 429'} request cleanup failed: ${error?.message ?? String(error)}`);
+        if (customCancellationProtocol && trial.resilience) {
+          trial.resilience.cleanup = { ...trial.resilience.cleanup, ok: false,
+            requestLifecycle: { ok: false, errors: [error?.message ?? String(error)] } };
+          trial.resilience.validation = validateCustomCancellationProbeEvidence(trial.resilience);
+          trial.status = 'failed';
+          trial.error ??= { name: 'CustomCancellationProbeValidationError', message: trial.resilience.validation.issues.join('; ') };
+        }
+        trial.cleanupErrors.push(`${googleTimeoutProtocol ? 'Google timeout' : customCancellationProtocol ? 'Custom cancellation' : 'Custom 429'} request cleanup failed: ${error?.message ?? String(error)}`);
       }
     }
     if (cancellationControl) {

@@ -391,12 +391,15 @@ const trace = {
       const wrapped = function (...args) {
         const session = this.session;
         const owner = session ? trace.cancellationSessionOwners.get(session) ?? null : null;
+        const invalidationCallStartedAt = Date.now();
         const result = original.apply(this, args);
+        const invalidationCallCompletedAt = Date.now();
         if (session && owner === null) trace.cancellationInstrumentationErrors.push(`No captured origin session for Bridge.${method}`);
         else if (session) ledger.record('session.invalidation', owner, {
           method, capturedSessionActive: session.active,
           discoveryCancelled: session.discovery?.cancelled ?? null,
           bridgeStillOwnsCapturedSession: this.session === session,
+          invalidationCallStartedAt, invalidationCallCompletedAt,
         });
         return result;
       };

@@ -166,6 +166,8 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
   const handlerJobs = new Map();
   let nextId = 0;
   let closing = false;
+  let drainStartedAt = null;
+  let drainCompletedAt = null;
 
   const needsTeardownRelease = record => !record.releaseRequested && !record.requestRecord?.response;
 
@@ -231,6 +233,7 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
   }
 
   async function closeAndDrain({ disableFetch, timeoutMs = 5_000 } = {}) {
+    drainStartedAt = Date.now();
     closing = true;
     const errors = [];
     let timedOut = false;
@@ -278,10 +281,12 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
       if (!record.handlerSettled) errors.push(`Fetch ${record.requestId} handler did not settle`);
       if (record.handlerError) errors.push(`Fetch ${record.requestId} handler failed: ${record.handlerError.message}`);
     }
+    drainCompletedAt = Date.now();
     clearTimeout(deadlineTimer);
     return {
       ok: errors.length === 0,
       closing,
+      drainInterval: { startedAt: drainStartedAt, completedAt: drainCompletedAt },
       handlerCount: handlerJobs.size,
       reservationCount: reservations.size,
       reservations: [...reservations.values()].map(record => ({

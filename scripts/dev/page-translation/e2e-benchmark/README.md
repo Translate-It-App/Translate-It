@@ -114,6 +114,24 @@ BENCH_RESILIENCE_PROBES=googlev2-timeout \
 
 The probe holds one actual 25-target Google V2 Fetch request after concrete Page AUTO source resolution. It does not synthesize a response or timeout: production's 60-second batch deadline and cancellation execute normally, while sibling requests receive ordinary deterministic Google responses. Only the held-request observation is extended (to allow the actual 60-second deadline); other harness deadlines remain unchanged. The `*-resilience-googlev2-timeout.json` artifact separates the content `OPERATION_TIMEOUT` from the internal provider abort and retains exact request/message/session/controller/root/physical/QueueManager evidence. Passing requires one QueueManager attempt with no retry or failover, successful unrelated requests, logical and physical concurrency no greater than two, exactly 975 accepted writes and 25 unchanged/unmarked/unaccepted targets, exact Restore, strict runtime-resource validation, and settled held Fetch plus drained request handlers before Chrome teardown. Cleanup releases the held request on every path and fails closed if its release or handler drain is unproven. This is a correctness probe, not a performance sample or live Google test.
 
+### Isolated Custom cancellation resilience probe (Phase 2.3.6)
+
+```sh
+GIT_OPTIONAL_LOCKS=0 BENCH_RESILIENCE_PROBES=custom-cancellation \
+  BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/custom-cancellation-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+This isolated correctness probe uses the blank-key strict Custom fixture, 1,000 targets, and synthetic responses only. It completes the initial visible band and observes concrete AUTO source/target resolution before scrolling to the second band and holding one real Custom Fetch request. Deterministic pending-request and ownership barriers precede the real production Stop command; the held request must correlate to its actual Page session, logical batch, physical operation, controller, and unique fixture target IDs.
+
+Passing requires positive session invalidation, cancellation acknowledgement, matched controller abort and request settlement, with cancellation distinguished from timeout or generic provider failure. Previously accepted translations must remain exact, later targets must stay unaccepted, and no duplicate acceptance, stale write, retry, API-key failover, structured recovery, or new physical request from the cancelled session is allowed after cancellation. Real Restore must return all 1,000 targets and their original DOM metadata exactly. QueueManager, RateLimitManager, source resolver, lifecycle registry, scheduler, and Fetch handlers must drain; unexpected or unclassified Fetch release errors fail closed. Logical and physical concurrency remain subject to the existing Custom level-3 limits.
+
+An already-concurrent second-band sibling may have started before Stop. It is accounted for separately from the single selected held request and must also settle through production cancellation, without accepting its targets. Both cancelled physical operations require positive abort-cause evidence; a cancelled logical root alone cannot excuse a generic transport failure.
+
+The separate `*-resilience-custom-cancellation.json` artifact retains raw commands, correlation, cancellation and DOM evidence, physical request accounting, concurrency, resource cleanup, and source/build provenance. It contributes no performance samples or comparisons. Successful stale-reply injection is not part of this probe (Phase 2.3.7); this does not measure live Custom latency or quality.
+
 ### Custom provider offline matrix
 
 This opt-in lane exercises the production `CustomProvider` and parser through the real scheduler and provider pipeline. The harness intercepts the exact synthetic `https://benchmark-custom.invalid/v1/chat/completions` POST only when `BENCH_PROVIDER=custom` selects this lane; requests to that endpoint are blocked in discovery runs and other provider lanes. The fixed model is `benchmark-custom-model`; the harness sets `CUSTOM_API_KEY` blank, rejects Authorization headers, validates the actual JSON request, and returns reversed structured translations with the exact wire IDs. No credentials or live provider traffic are used. HTTP sequence `ids` are fixture target IDs mapped from request texts; Custom parser wire IDs are recorded separately as `wireIds`. Each successful trial requires one HTTP request per observed logical batch, exact source and DOM accounting, and correlated terminal network outcomes; retries or structured-recovery requests fail the trial.

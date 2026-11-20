@@ -10,7 +10,7 @@ import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProvider
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
 import { classifyHeldFetchRelease, createCancellationLedger, createCancellationRequestLifecycle, ensureCancellationAbortObserver, installCancellationRuntimeMessageObserver } from './e2e-benchmark/cancellation-probes.mjs';
 import { cleanupMeasurementBeforeResources, registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
-import { createNetworkCleanupSteps, createNetworkRequestLifecycle, failPausedFetch, fulfillPausedFetch, runNetworkGuardNegativeProbe } from './e2e-benchmark/network-interception.mjs';
+import { createFetchRequestListener, createHandlerJobTracker, createNetworkCleanupSteps, createNetworkRequestLifecycle, decodeProviderRequest, failPausedFetch, fulfillPausedFetch, runNetworkGuardNegativeProbe } from './e2e-benchmark/network-interception.mjs';
 import { matchesAutoTranslateRule } from '../../../src/utils/ui/exclusion.js';
 import { registryIdToName } from '../../../src/features/translation/providers/ProviderConstants.js';
 import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
@@ -299,16 +299,16 @@ describe('page translation benchmark measurements', () => {
     expect(timeoutSource).toContain('controllerAbortSequence: settled.controllerAbort.sequence');
     expect(runSource).toContain('if (googleTimeoutProtocol) armGoogleV2Timeout(googleTimeoutProtocol);');
     expect(timeoutSource).toContain('if (googleTimeoutProtocol.armed && resolver?.resolutionPending === false');
-    expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol)');
+    expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol || customCancellationProtocol)');
     expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || resilienceProbe)');
-    expect(runSource).toContain('else if (googleTimeoutProtocol) trial.resilience.workerInstrumentation = workerInstrumentation;');
+    expect(runSource).toContain('else if (googleTimeoutProtocol || customCancellationProtocol) trial.resilience.workerInstrumentation = workerInstrumentation;');
     expect(runSource).toContain('const instrumentationOwner = trial.cancellation ?? trial.staleSuccess ?? trial.resilience;');
     expect(timeoutSource).toContain('findGoogleTimeoutBatchError(contentOperations, sessionId, targetIds)');
     expect(timeoutSource).toContain('findGoogleTimeoutCancelMessage(contentOperations, root.messageId, sessionId)');
     expect(runSource).toContain('window.__pageTranslationBenchmark.cancellationSnapshot()');
     expect(timeoutSource).toContain('await captureRequestViewport(body)');
     expect(timeoutSource).toContain('requireGoogleTimeoutReservation(reservation).hold()');
-    expect(runSource).toMatch(/const handlerLifecycle = cancellationControl\?\.requestLifecycle\s*\?\?\s*\(googleTimeoutProtocol \? requestLifecycle : null\);/);
+    expect(runSource).toMatch(/const handlerLifecycle = cancellationControl\?\.requestLifecycle[\s\S]*?\?\? \(googleTimeoutProtocol \? requestLifecycle : null\);/);
     expect(runSource).toContain('return handlerLifecycle?.reserve({');
     expect(runSource).toContain('handlerJobTracker.track(lifecycle, reservation, job');
     expect(networkSource).toContain('lifecycle.trackHandler(reservation, job)');
@@ -379,6 +379,57 @@ describe('page translation benchmark measurements', () => {
       }],
     });
     expect(handlerSettled).toBe(true);
+  });
+  it('tracks malformed Custom admission failures and settles their reserved Fetch', async () => {
+    const order = [];
+    const releases = [];
+    const lifecycle = createNetworkRequestLifecycle({
+      now: () => 1,
+      sendBySession: new Map([['worker-session', async (_method, params) => {
+        releases.push(params);
+      }]]),
+    });
+    const tracker = createHandlerJobTracker();
+    const listener = createFetchRequestListener({
+      guardSessions: new Set(['worker-session']), now: () => 1, requests: [],
+      reserveRequest: (event, requestRecord, requestId) => {
+        order.push('reserve');
+        return lifecycle.reserve({ requestId, sessionId: event.sessionId, requestRecord });
+      },
+      onAdmission: (_event, request) => {
+        order.push('admission');
+        decodeProviderRequest('custom', request, ['expected source']);
+      },
+      handlePaused: async (_event, _record, reservation, admissionError) => {
+        order.push('handler');
+        try {
+          if (admissionError) throw admissionError;
+        } catch {
+          await reservation.release('fail', { errorReason: 'BlockedByClient', reason: 'request-handler-error' });
+        }
+      },
+      trackHandler: (reservation, job) => {
+        order.push('track');
+        return tracker.track(lifecycle, reservation, job, () => {});
+      },
+    });
+    const trackedJob = listener({
+      method: 'Fetch.requestPaused', sessionId: 'worker-session',
+      params: { requestId: 'malformed-custom', request: {
+        url: 'https://benchmark-custom.invalid/v1/chat/completions', method: 'POST', postData: '{',
+      } },
+    });
+    expect(order).toEqual(['reserve', 'admission', 'handler', 'track']);
+    expect(lifecycle.handlerCount).toBe(1);
+    await trackedJob;
+    const cleanup = await lifecycle.closeAndDrain({ disableFetch: async () => {}, timeoutMs: 1_000 });
+    expect(releases).toEqual([{ requestId: 'malformed-custom', errorReason: 'BlockedByClient' }]);
+    expect(cleanup).toMatchObject({
+      ok: true, handlerCount: 0, reservations: [{
+        requestId: 'malformed-custom', releaseAction: 'fail', handlerSettled: true,
+      }],
+    });
+    expect(tracker.jobs.size).toBe(0);
   });
   it('does not fail completed or non-held Fetch reservations during teardown', async () => {
     const dispatchRelease = vi.fn(async (reservation, action) => ({

@@ -1,19 +1,19 @@
 export function parseResilienceProbeSelection(value) {
   if (!value) return [];
   const selections = value.split(',').map(item => item.trim()).filter(Boolean);
-  if (selections.length !== 1 || !['googlev2-503', 'googlev2-timeout', 'custom-429', 'custom-400', 'gemini-structured-recovery'].includes(selections[0])) {
-    throw new TypeError('BENCH_RESILIENCE_PROBES supports only googlev2-503, googlev2-timeout, custom-429, custom-400, or gemini-structured-recovery.');
+  if (selections.length !== 1 || !['googlev2-503', 'googlev2-timeout', 'custom-429', 'custom-400', 'custom-cancellation', 'gemini-structured-recovery'].includes(selections[0])) {
+    throw new TypeError('BENCH_RESILIENCE_PROBES supports only googlev2-503, googlev2-timeout, custom-429, custom-400, custom-cancellation, or gemini-structured-recovery.');
   }
   return selections;
 }
 
 export function shouldEnableResilienceQueueProbe(probe) {
-  return probe === 'googlev2-503' || probe === 'googlev2-timeout' || probe === 'custom-429' || probe === 'custom-400' || probe === 'gemini-structured-recovery';
+  return probe === 'googlev2-503' || probe === 'googlev2-timeout' || probe === 'custom-429' || probe === 'custom-400' || probe === 'custom-cancellation' || probe === 'gemini-structured-recovery';
 }
 
 export function validateResilienceProbeIsolation({ selected, probe, provider, optimizationLevel, modes, scenario, schedulingMode, competingProbe }) {
   if (!selected) return true;
-  const custom = probe === 'custom-429' || probe === 'custom-400';
+  const custom = probe === 'custom-429' || probe === 'custom-400' || probe === 'custom-cancellation';
   const gemini = probe === 'gemini-structured-recovery';
   const selectedProvider = gemini ? 'gemini' : custom ? 'custom' : 'googlev2';
   if (competingProbe || provider !== selectedProvider || optimizationLevel !== 3
@@ -170,6 +170,29 @@ export function selectResolvedCustom400Batch({ request, classification, resolver
     sessionId: matching[0].sessionId, targetIds: [...targetIds], texts: [...request.texts] };
 }
 
+export function selectResolvedCustomCancellationBatch({ request, classification, resolver, roots = [],
+  expectedTargetIds = [], initialTargetIds = [], armedWallMs }) {
+  if (classification?.kind !== 'provider-translation' || classification.provider !== 'custom'
+      || !request?.networkId) return { selected: false, reason: 'not-custom-physical-request' };
+  if (!resolver?.present || resolver.resolutionPending !== false
+      || !resolver.effectiveSourceLanguage || resolver.effectiveSourceLanguage === 'auto'
+      || !resolver.effectiveTargetLanguage) return { selected: false, reason: 'source-not-concretely-resolved' };
+  if (!Number.isFinite(request.physicalStartedWallMs) || !Number.isFinite(armedWallMs)
+      || request.physicalStartedWallMs < armedWallMs) return { selected: false, reason: 'request-did-not-start-after-arm' };
+  const matching = roots.filter(root => root.sessionId === request.sessionId
+    && JSON.stringify(root.texts) === JSON.stringify(request.texts));
+  const targetIds = request.targetIds;
+  if (request.texts?.length !== 25 || matching.length !== 1 || !matching[0]?.messageId
+      || matching[0].sessionId !== request.sessionId
+      || !Array.isArray(targetIds) || targetIds.length !== 25
+      || targetIds.some(id => typeof id !== 'string' || !expectedTargetIds.includes(id))
+      || new Set(targetIds).size !== 25 || targetIds.some(id => initialTargetIds.includes(id))) {
+    return { selected: false, reason: 'batch-owner-or-target-correlation-invalid' };
+  }
+  return { selected: true, messageId: matching[0].messageId, sessionId: matching[0].sessionId,
+    targetIds: [...targetIds], texts: [...request.texts] };
+}
+
 export function isCustom400ProbeWindowRequest(request, armedWallMs) {
   return Number.isFinite(request?.startedAt) && Number.isFinite(armedWallMs) && request.startedAt >= armedWallMs;
 }
@@ -301,6 +324,360 @@ export function validateCustom400Evidence(evidence) {
 export function findSessionOwnedPendingRequest(queueItems, sessionId, excludedMessageIds = []) {
   return (queueItems ?? []).find(item => item.messageId && item.sessionId === sessionId
     && !excludedMessageIds.includes(item.messageId)) ?? null;
+}
+
+export function validateCustomCancellationEvidence(input) {
+  const issues = [];
+  try {
+  const evidence = input ?? {};
+  const held = evidence.heldRequest ?? {};
+  const cancellation = evidence.cancellation ?? {};
+  const providerRoot = cancellation.providerRoot ?? {};
+  const physical = cancellation.physical ?? {};
+  const translation = evidence.translation ?? {};
+  const expected = new Set(translation.expectedTargetIds ?? []);
+  const targetMapping = new Map((evidence.targetMapping ?? []).map(item => [item.source, item.id]));
+  const stopAt = cancellation.stop?.sentAt;
+  const arraysPresent = ['retries', 'failovers', 'recovery', 'duplicateAcceptedWriteIds',
+    'unexpectedPhysicalAttempts', 'unnecessaryRetransmits']
+    .every(key => Array.isArray(evidence[key]));
+  if (!arraysPresent) issues.push('retry, failover, recovery, and duplicate-write accounting evidence is incomplete');
+  if (!Array.isArray(evidence.targetMapping) || targetMapping.size !== evidence.targetMapping.length
+      || new Set(evidence.targetMapping.map(item => item.id)).size !== evidence.targetMapping.length
+      || [...expected].some(id => !evidence.targetMapping.some(item => item.id === id))) {
+    issues.push('fixture target/source mapping is incomplete or non-unique');
+  }
+  if (!Number.isFinite(stopAt) || stopAt <= 0
+      || !Number.isFinite(cancellation.stop?.respondedAt) || cancellation.stop.respondedAt < stopAt) {
+    issues.push('production Stop lacks a valid timestamp and ordered acknowledgement');
+  }
+  const physicalAbortMatched = value => value?.abortReasonMatched === true
+    && ((value.errorType == null && value.error == null && value.errorName == null)
+      || (value.errorType === 'USER_CANCELLED' && (value.error == null || /abort|cancel/i.test(value.error))));
+  const statusNullAbortMatched = attempt => attempt?.status === null
+    && attempt.outcome === 'failed' && /abort|cancel/i.test(attempt.networkError ?? '')
+    && attempt.correlation?.physicalStatus === 'rejected'
+    && attempt.correlation?.providerRootErrorType === 'USER_CANCELLED'
+    && attempt.correlation?.controllerAborted === true
+    && attempt.correlation?.physicalControllerAbortedAtEnd === true
+    && physicalAbortMatched({ errorType: attempt.correlation?.physicalErrorType,
+      error: attempt.correlation?.physicalError, errorName: attempt.correlation?.physicalErrorName,
+      abortReasonMatched: attempt.correlation?.physicalAbortReasonMatched });
+  const cancellationTerminalMatched = attempt => statusNullAbortMatched(attempt)
+    && attempt.correlation?.providerRootStatus === 'rejected';
+  const successfulTerminalMatched = attempt => attempt?.outcome === 'finished'
+    && attempt.status === 200 && attempt.networkError == null
+    && attempt.correlation?.providerRootStatus === 'fulfilled'
+    && attempt.correlation?.providerRootErrorType == null
+    && attempt.correlation?.physicalStatus === 'fulfilled'
+    && attempt.correlation?.physicalControllerAbortedAtEnd === false
+    && attempt.correlation?.controllerAborted === false
+    && attempt.correlation?.physicalErrorType == null
+    && attempt.correlation?.physicalError == null
+    && attempt.correlation?.physicalErrorName == null;
+  const terminalStateMatched = attempt => successfulTerminalMatched(attempt)
+    || cancellationTerminalMatched(attempt);
+  const invalidAttempt = attempt => !attempt.attemptId || !attempt.networkId || !attempt.networkSessionId
+    || !attempt.pageSessionId || attempt.pageSessionId !== held.pageSessionId || !attempt.logicalMessageId
+    || !Array.isArray(attempt.targetIds) || !attempt.targetIds.length
+    || attempt.targetIds.length !== attempt.texts?.length || !Array.isArray(attempt.texts)
+    || attempt.targetIds.some(id => typeof id !== 'string' || !expected.has(id))
+    || attempt.texts.some((text, index) => targetMapping.get(text) !== attempt.targetIds[index])
+    || new Set(attempt.targetIds).size !== attempt.targetIds.length
+    || attempt.correlation?.rootMatchCount !== 1 || attempt.correlation?.physicalMatchCount !== 1
+    || attempt.correlation?.controllerMatchCount !== 1 || !attempt.startedWallMs || !attempt.outcome
+    || attempt.startedWallMs <= 0 || Number.isFinite(stopAt) && attempt.startedWallMs > stopAt
+    || (attempt.selected || ['rejected', null].includes(attempt.correlation?.physicalStatus))
+      && (attempt.correlation?.providerRootErrorType !== 'USER_CANCELLED'
+        || attempt.correlation?.controllerAborted !== true
+        || attempt.correlation?.physicalControllerAbortedAtEnd !== true
+        || !physicalAbortMatched({ errorType: attempt.correlation?.physicalErrorType,
+          error: attempt.correlation?.physicalError, errorName: attempt.correlation?.physicalErrorName,
+          abortReasonMatched: attempt.correlation?.physicalAbortReasonMatched })
+        || attempt.outcome !== 'failed' || !/abort|cancel/i.test(attempt.networkError ?? ''))
+    || (attempt.selected && !['rejected', null].includes(attempt.correlation?.physicalStatus))
+    || (!attempt.selected && !['fulfilled', 'rejected', null].includes(attempt.correlation?.physicalStatus))
+    || (attempt.status === null && !statusNullAbortMatched(attempt));
+  if (evidence.arm?.sessionId !== held?.pageSessionId || !Number.isFinite(evidence.arm?.armedWallMs)
+      || evidence.arm?.resolver?.resolutionPending !== false
+      || !evidence.arm?.resolver?.effectiveSourceLanguage || evidence.arm.resolver.effectiveSourceLanguage === 'auto'
+      || !evidence.arm?.resolver?.effectiveTargetLanguage) issues.push('initial band and concrete AUTO resolution were not proven before arming');
+  if (!held?.requestId || !held.networkId || !held.networkSessionId || !held.attemptId || !held.messageId
+      || held.pageSessionId !== evidence.arm?.sessionId || held.method !== 'POST'
+      || held.targetIds?.length !== 25 || new Set(held.targetIds).size !== 25
+      || held.targetIds.some(id => !expected.has(id))) issues.push('held Custom Fetch lacks exact session, physical, logical, and unique fixture-target correlation');
+  if (evidence.pendingCheckpoint?.positive !== true
+      || evidence.pendingCheckpoint?.requestId !== held?.requestId
+      || evidence.pendingCheckpoint?.controllerAborted !== false
+      || evidence.pendingCheckpoint?.providerRootStatus !== 'pending') issues.push('pending checkpoint did not observe the held request with a live controller and pending root');
+  if (cancellation.stop?.action !== 'page-translate-stop-auto' || cancellation.stop.status !== 'fulfilled'
+      || cancellation.stop.response?.success !== true
+      || cancellation?.invalidation?.sessionId !== held?.pageSessionId
+      || cancellation?.invalidation?.capturedSessionActive !== false
+      || cancellation?.invalidation?.discoveryCancelled !== true) issues.push('real stop-auto command did not acknowledge and invalidate the held Page session');
+  if (cancellation.cancelMessage?.kind !== 'runtime.cancel.send'
+      || cancellation.cancelMessage.action !== 'CANCEL_TRANSLATION'
+      || ![null, held.messageId].includes(cancellation.cancelMessage.messageId)
+      || cancellation.cancelMessage.sessionId !== held.pageSessionId
+      || cancellation.cancelMessage.targetSessionId !== held.pageSessionId
+      || cancellation.cancelMessage.status !== 'fulfilled'
+      || cancellation.cancelMessage.response?.success !== true) {
+    issues.push('content runtime cancellation acknowledgement did not target the held batch and Page session');
+  }
+  if (cancellation.serviceCall?.status !== 'fulfilled' || cancellation.serviceCall.messageId !== held?.messageId
+      || cancellation.serviceCall.sessionId !== held?.pageSessionId
+      || cancellation.serviceCall.response?.handled !== true || cancellation.serviceCall.response?.success !== true
+      || cancellation.serviceCall.controllerMatched !== true
+      || cancellation.serviceCall.controllerAbortedBefore !== false
+      || cancellation.serviceCall.controllerAbortedAfter !== true
+      || cancellation.abortEvent?.messageId !== held?.messageId
+      || cancellation.abortEvent.sessionId !== held?.pageSessionId
+       || cancellation.abortEvent.sequence <= cancellation.serviceCall.sequence) issues.push('production cancellation did not abort the exact live provider controller');
+  if (cancellation.controller?.messageId !== held?.messageId
+      || cancellation.controller?.sessionId !== held?.pageSessionId
+      || cancellation.controller?.aborted !== true) {
+    issues.push('cancelled provider controller evidence does not match the held Page session and logical root');
+  }
+  if (providerRoot.messageId !== held.messageId || providerRoot.sessionId !== held.pageSessionId
+      || providerRoot.status !== 'rejected'
+      || physical.messageId !== held.messageId || physical.status !== 'rejected'
+      || physical.sessionId !== held.pageSessionId
+      || cancellation.physicalMatchCount !== 1 || cancellation.physical.controllerAbortedAtEnd !== true
+      || physical.url !== held.url || physical.method !== held.method
+      || physical.requestBody !== held.requestBody
+      || providerRoot.settledSequence <= cancellation.abortEvent?.sequence
+      || physical.settledSequence <= cancellation.abortEvent?.sequence
+      || providerRoot.errorType !== 'USER_CANCELLED'
+      || !physicalAbortMatched(physical)
+      || cancellation.network?.sessionId !== held.networkSessionId
+      || cancellation.network?.networkId !== held.networkId
+      || cancellation.network?.outcome !== 'failed'
+      || !/abort|cancel/i.test(cancellation.network?.error ?? '')) {
+    issues.push('provider root and exactly one physical Custom request did not settle as USER_CANCELLED after a matched network abort');
+  }
+  if (evidence.attempts?.filter(item => item.selected).length !== 1
+      || evidence.unexpectedPhysicalAttempts.length || evidence.unnecessaryRetransmits.length
+      || evidence.retries?.length || evidence.failovers?.length || evidence.recovery?.length) {
+    issues.push('unexpected selected requests, cancelled-session activity, retries, recovery, or failovers were observed');
+  }
+  const selectedAttempt = evidence.attempts?.find(item => item.selected);
+  if (selectedAttempt?.attemptId !== held?.attemptId || selectedAttempt?.networkId !== held?.networkId
+      || selectedAttempt?.networkSessionId !== held?.networkSessionId
+      || selectedAttempt?.pageSessionId !== held?.pageSessionId
+      || selectedAttempt?.logicalMessageId !== held?.messageId
+      || JSON.stringify(selectedAttempt?.targetIds) !== JSON.stringify(held?.targetIds)
+      || (cancellation.network?.status ?? null) !== selectedAttempt?.status
+      || cancellation.network?.outcome !== selectedAttempt?.outcome
+      || cancellation.network?.error !== selectedAttempt?.networkError) {
+    issues.push('selected physical attempt does not match held Fetch, Page session, logical root, and target identity');
+  }
+  const attempts = evidence.attempts ?? [];
+  const attemptIds = new Set();
+  const physicalIds = new Set();
+  const rootIds = new Set();
+  if (!Array.isArray(evidence.attempts) || attempts.some(invalidAttempt)) {
+    issues.push('one or more Custom physical requests lack unique actual session/root/physical/controller correlation');
+  }
+  for (const attempt of attempts) {
+    const physicalId = `${attempt.networkSessionId}:${attempt.networkId}`;
+    if (attemptIds.has(attempt.attemptId) || physicalIds.has(physicalId) || rootIds.has(attempt.logicalMessageId)) {
+      issues.push('provider attempt, physical request, or logical root identity is duplicated');
+      break;
+    }
+    attemptIds.add(attempt.attemptId);
+    physicalIds.add(physicalId);
+    rootIds.add(attempt.logicalMessageId);
+  }
+  if (attempts.some(attempt => !terminalStateMatched(attempt))) {
+    issues.push('raw Network status/outcome does not match the cancelled provider root and physical terminal state');
+  }
+  if (!Array.isArray(evidence.allSessionRoots) || !evidence.allSessionRoots.length
+      || evidence.allSessionRoots.some(root => root.sessionId !== held?.pageSessionId || root.status === 'pending')
+      || new Set(evidence.allSessionRoots.map(root => root.messageId)).size !== evidence.allSessionRoots.length
+      || evidence.allSessionRoots.length !== attempts.length
+       || evidence.allSessionRoots.some(root => !rootIds.has(root.messageId)
+         || root.status !== attempts.find(attempt => attempt.logicalMessageId === root.messageId)?.correlation?.providerRootStatus)
+      || !Array.isArray(evidence.allSessionPhysicalAttempts)
+      || evidence.allSessionPhysicalAttempts.length !== attempts.length
+      || new Set(evidence.allSessionPhysicalAttempts.map(item => `${item.networkSessionId}:${item.networkId}`)).size
+        !== evidence.allSessionPhysicalAttempts.length
+       || evidence.allSessionPhysicalAttempts.some(item => item.pageSessionId !== held?.pageSessionId
+         || !physicalIds.has(`${item.networkSessionId}:${item.networkId}`)
+         || (() => {
+           const attempt = attempts.find(candidate => candidate.networkSessionId === item.networkSessionId
+             && candidate.networkId === item.networkId);
+           return attempt?.attemptId !== item.attemptId || item.outcome !== attempt?.outcome
+              || item.status !== attempt?.status || !terminalStateMatched(attempt);
+         })())) {
+    issues.push('not all cancelled-session logical roots and physical requests have final settlement evidence');
+  }
+  if (!Array.isArray(evidence.allSessionControllers)
+      || evidence.allSessionControllers.length !== attempts.length
+       || new Set(evidence.allSessionControllers.map(item => item.messageId)).size !== attempts.length
+       || evidence.allSessionControllers.some(item => item.sessionId !== held?.pageSessionId
+         || !rootIds.has(item.messageId)
+          || attempts.find(attempt => attempt.logicalMessageId === item.messageId)?.correlation?.controllerAborted !== item.aborted)) {
+    issues.push('not all cancelled-session provider controllers have unique final accounting');
+  }
+   if (evidence.postInvalidation?.ok !== true || evidence.postInvalidation.lateAcceptedSettlements?.length
+       || evidence.postInvalidation.invalidMutations?.length || evidence.postInvalidation.lateOwnedMutations?.length
+      || evidence.duplicateAcceptedWriteIds?.length || translation.duplicates !== 0) issues.push('post-invalidation accepted writes or duplicate writes were observed');
+  const initialIds = evidence.arm?.initialTargetIds ?? [];
+  const retainedIds = evidence.retainedAcceptedIds ?? [];
+  if (new Set(retainedIds).size !== retainedIds.length
+      || retainedIds.some(id => !expected.has(id))
+      || translation.exact !== true || translation.targetCount !== 1000
+      || translation.acceptedTargetCount !== retainedIds.length
+      || translation.acceptedTargetIds?.length !== retainedIds.length
+      || JSON.stringify(translation.acceptedTargetIds) !== JSON.stringify(retainedIds)
+      || initialIds.some(id => !retainedIds.includes(id))
+      || JSON.stringify(cancellation.acceptedIdsAfterStop) !== JSON.stringify(retainedIds)
+      || translation.restoreExact !== true || translation.metadataExact !== true
+      || translation.acceptedSessionActivity !== 0 || translation.acceptedWriteCount !== retainedIds.length) {
+    issues.push('retained translations changed or final translation/Restore metadata was not exact');
+  }
+  if (evidence.queueAttemptEvidence?.ok !== true || evidence.cleanup?.ok !== true
+      || evidence.cleanup?.handlersDrained !== true || evidence.cleanup?.handlerCount !== 0
+      || evidence.cleanup?.requestLifecycle?.ok !== true
+      || evidence.cleanup?.resourceValidation?.ok !== true
+      || evidence.cleanup?.pageScheduler?.managerTranslating !== false
+      || evidence.cleanup?.pageScheduler?.activeFlushes !== 0
+      || evidence.cleanup?.pageScheduler?.queueIds?.length !== 0
+      || evidence.cleanup?.pageScheduler?.pendingSettlementCount !== 0
+      || evidence.cleanup?.pageScheduler?.batchTimerActive !== false
+      || evidence.cleanup?.pageScheduler?.completionTimerActive !== false
+      || evidence.resources?.sourceResolvers?.[held?.pageSessionId]?.present !== false
+      || evidence.cleanup?.contentDrain?.pendingOperations !== 0
+      || evidence.cleanup?.workerDrain?.ledger?.pending !== 0
+      || !Array.isArray(evidence.cleanup?.workerDrain?.providerRoots)
+      || !Array.isArray(evidence.cleanup?.workerDrain?.controllers)
+      || evidence.cleanup?.workerDrain?.providerRoots?.some(root => root.status === 'pending')
+      || evidence.cleanup?.workerDrain?.controllers?.some(controller => controller.sessionId === held?.pageSessionId
+        && controller.messageId === held.messageId && controller.aborted !== true)) {
+    issues.push('queue, runtime resources, promise roots, or Fetch handlers did not drain');
+  }
+  if (evidence.queueAttemptEvidence?.queueStartCount !== 1
+      || evidence.queueAttemptEvidence?.queueEndCount !== 1) {
+    issues.push('held logical root lacks exactly one observed QueueManager start and end event');
+  }
+  const reservations = evidence.cleanup?.requestLifecycle?.reservations;
+  const cancellationReleaseClassifications = new Set([
+    'network-loadingFailed-canceled-with-provider-settlement',
+    'invalid-fetch-id-after-matched-abort-and-provider-root-plus-physical-rejection',
+    'network-cancellation-after-production-stop',
+  ]);
+  if (!Array.isArray(reservations) || attempts.some(attempt => {
+    const matches = reservations.filter(item => item.sessionId === attempt.networkSessionId
+      && item.networkId === attempt.networkId);
+    return matches.length !== 1 || matches[0].handlerSettled !== true
+      || !(matches[0].releaseOutcome?.ok === true
+        || matches[0].releaseOutcome?.error === 'Invalid InterceptionId.'
+          && cancellationReleaseClassifications.has(matches[0].releaseClassification));
+  })) {
+    issues.push('provider attempts do not map one-to-one to settled, classified Fetch reservations');
+  }
+  const lifecycle = evidence.cleanup?.requestLifecycle;
+  const drain = lifecycle?.drainInterval;
+  const admissions = evidence.admissions ?? [];
+  const invalidation = cancellation.invalidation ?? {};
+  const classifyBoundary = timestamp => !Number.isFinite(timestamp)
+    ? null : timestamp < invalidation.invalidationCallStartedAt ? 'before'
+      : timestamp > invalidation.invalidationCallCompletedAt ? 'after' : 'indeterminate';
+  const reservationForAdmission = admission => reservations?.filter(item => item.requestId === admission.requestId) ?? [];
+  if (!Array.isArray(evidence.admissions) || !Array.isArray(reservations)
+      || new Set(admissions.map(item => item.requestId)).size !== admissions.length
+      || admissions.some(item => {
+        const matched = reservationForAdmission(item);
+        return !item.requestId || !Number.isInteger(item.order) || !item.decision || item.decision === 'pending'
+          || matched.length !== 1 || item.networkId !== matched[0]?.networkId
+          || item.networkSessionId !== matched[0]?.sessionId
+          || matched[0]?.handlerSettled !== true || matched[0]?.handlerError != null
+          || !(matched[0]?.releaseOutcome?.ok === true
+            || matched[0]?.releaseOutcome?.error === 'Invalid InterceptionId.'
+              && cancellationReleaseClassifications.has(matched[0]?.releaseClassification))
+          || !['before', 'after', 'indeterminate'].includes(item.relativeToInvalidation)
+          || item.relativeToInvalidation !== classifyBoundary(item.admittedAt)
+          || item.networkRelativeToInvalidation !== classifyBoundary(item.startedWallMs);
+      })
+      || attempts.some(attempt => {
+        if (attempt.startedWallMs < evidence.arm?.armedWallMs) return false;
+        const matchingReservation = reservations.filter(item => item.sessionId === attempt.networkSessionId
+          && item.networkId === attempt.networkId);
+        return matchingReservation.length !== 1
+          || admissions.filter(item => item.requestId === matchingReservation[0]?.requestId).length !== 1;
+      })) {
+    issues.push('Custom Fetch admission decisions do not map one-to-one to settled, classified lifecycle reservations with valid invalidation timing');
+  }
+  if (!Number.isFinite(invalidation.invalidationCallStartedAt)
+      || !Number.isFinite(invalidation.invalidationCallCompletedAt)
+      || invalidation.invalidationCallCompletedAt < invalidation.invalidationCallStartedAt) {
+    issues.push('session invalidation lacks a valid benchmark call timing envelope');
+  }
+  if (!evidence.cleanup?.handlersDrained || evidence.cleanup?.handlerCount !== 0
+      || lifecycle?.closing !== true || lifecycle?.ok !== true
+      || lifecycle?.reservationCount !== reservations?.length
+      || !Number.isFinite(drain?.startedAt) || !Number.isFinite(drain?.completedAt)
+      || drain.startedAt < stopAt || drain.completedAt < drain.startedAt
+      || !Number.isFinite(evidence.cleanup?.finalDrainAt) || evidence.cleanup.finalDrainAt < drain.completedAt
+      || !Array.isArray(reservations) || new Set(reservations.map(item => item.requestId)).size !== reservations.length
+      || reservations.some(item => item.releaseRequested !== true || item.handlerSettled !== true
+        || item.handlerError != null
+        || !(item.releaseOutcome?.ok === true
+          || item.releaseOutcome?.error === 'Invalid InterceptionId.'
+            && cancellationReleaseClassifications.has(item.releaseClassification)))) {
+    issues.push('post-Stop request accounting is not complete through final Fetch handler drainage');
+  }
+   if (['beforeStop', 'afterStop', 'preRestore', 'restored'].some(key =>
+     evidence.snapshots?.[key]?.dom?.length !== translation.targetCount
+       || evidence.snapshots[key].metadata?.length !== translation.targetCount)) {
+    issues.push('raw before-Stop, after-Stop, pre-Restore, and restored DOM/metadata snapshots are incomplete');
+   }
+   const validDOM = (snapshot, translatedIds) => Array.isArray(snapshot?.dom)
+     && JSON.stringify(snapshot.dom) === JSON.stringify((evidence.targetMapping ?? []).map(({ id, source }) =>
+       [id, translatedIds.has(id) ? `\u200efixture translation: ${source}` : source]));
+   const retained = new Set(evidence.retainedAcceptedIds ?? []);
+  const baselineMetadata = evidence.metadataBaseline;
+   if (!validDOM(evidence.snapshots?.beforeStop, retained)
+       || !validDOM(evidence.snapshots?.afterStop, retained)
+       || !validDOM(evidence.snapshots?.preRestore, retained)
+       || !validDOM(evidence.snapshots?.restored, new Set())
+       || !Array.isArray(baselineMetadata)
+        || JSON.stringify(evidence.snapshots?.restored?.metadata) !== JSON.stringify(baselineMetadata)
+        || ['beforeStop', 'afterStop', 'preRestore'].some(key => {
+          const metadata = evidence.snapshots?.[key]?.metadata;
+          const byId = new Map((metadata ?? []).map(item => [item.id, item]));
+          return byId.size !== translation.targetCount
+            || (baselineMetadata ?? []).some(base => !retained.has(base.id)
+              && JSON.stringify(byId.get(base.id)) !== JSON.stringify(base));
+        })) {
+     issues.push('raw DOM or metadata snapshots do not match fixture and source baselines');
+   }
+   const rawRoots = evidence.cleanup?.workerDrain?.providerRoots;
+   const rawControllers = evidence.cleanup?.workerDrain?.controllers;
+    if (Array.isArray(rawRoots) && (rawRoots.length !== attempts.length
+        || new Set(rawRoots.map(root => root.messageId)).size !== rawRoots.length
+        || rawRoots.some(root => {
+          const attempt = attempts.find(candidate => candidate.logicalMessageId === root.messageId);
+          return root.sessionId !== held?.pageSessionId || !attempt
+            || root.status !== attempt.correlation?.providerRootStatus;
+        })))
+      issues.push('worker-drain provider roots do not match the cancelled-session attempt ledger');
+    if (Array.isArray(rawControllers) && (rawControllers.length !== attempts.length
+        || new Set(rawControllers.map(controller => controller.messageId)).size !== rawControllers.length
+        || rawControllers.some(controller => controller.sessionId !== held?.pageSessionId
+          || !attempts.some(attempt => attempt.logicalMessageId === controller.messageId
+            && attempt.correlation?.controllerAborted === controller.aborted))))
+     issues.push('worker-drain controllers do not match the cancelled-session attempt ledger');
+  if (!Number.isFinite(evidence.concurrency?.peakPhysical) || evidence.concurrency.peakPhysical > 2
+      || !Number.isFinite(evidence.concurrency?.peakLogical) || evidence.concurrency.peakLogical > 2
+      || evidence.concurrency?.providerLimiterCapacity !== 2
+      || evidence.concurrency?.pageWorkerLimit !== 2) issues.push('Custom Level 3 physical/logical concurrency exceeded or lacked the existing limit of two');
+  if (evidence.releaseClassification?.ok !== true) issues.push('held Fetch release failure was not positively classified after matching cancellation');
+  if (evidence.handlerError) issues.push(`held Fetch handler failed: ${evidence.handlerError.message}`);
+  return { ok: issues.length === 0, issues };
+  } catch (error) {
+    return { ok: false, issues: [...issues, `invalid or incomplete cancellation evidence: ${error?.message ?? String(error)}`] };
+  }
 }
 
 export function validateCustom429Evidence(evidence) {

@@ -76,6 +76,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/resilience/googlev2-timeout.mjs',
   'scripts/dev/page-translation/e2e-benchmark/resilience/custom-429.mjs',
   'scripts/dev/page-translation/e2e-benchmark/resilience/custom-400.mjs',
+  'scripts/dev/page-translation/e2e-benchmark/resilience/custom-cancellation.mjs',
   'scripts/dev/page-translation/e2e-benchmark/resilience/gemini-structured-recovery.mjs',
   'scripts/dev/page-translation/e2e-benchmark/build.mjs',
   'scripts/dev/page-translation/e2e-benchmark/build-environment.mjs',
@@ -101,6 +102,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/page-translation-e2e-large-page.test.js',
   'scripts/dev/page-translation/page-translation-e2e-artifact-writer.test.js',
   'scripts/dev/page-translation/page-translation-e2e-cancellation.test.js',
+  'scripts/dev/page-translation/page-translation-e2e-custom-cancellation.test.js',
   'scripts/dev/page-translation/page-translation-e2e-stale-success.test.js',
   'scripts/dev/page-translation/page-translation-e2e-scheduler-stale-success.test.js',
   'scripts/dev/page-translation/page-translation-e2e-successful-reply-gate.test.js',
@@ -302,7 +304,7 @@ try {
   };
   if (resilienceProbes.length) {
     const probe = resilienceProbes[0];
-    const custom429 = probe === 'custom-429';
+    const custom429 = probe === 'custom-429' || probe === 'custom-cancellation';
     const provider = probe === 'gemini-structured-recovery' ? 'gemini' : custom429 ? 'custom' : 'googlev2';
     harness.command = `BENCH_RESILIENCE_PROBES=${probe} BENCH_LANE=provider BENCH_PROVIDER=${provider} BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
     harness.warmups = 0;
@@ -317,12 +319,17 @@ try {
       fixtureConfig: createFixture('scroll-through', { providerLane: true }), schedulingMode: 'fluid',
     });
     harness.results.push(run);
+    harness.provenance.browserVersion = run.browser?.browserVersion ?? null;
     const rawPath = `${artifactPath.replace(/\.json$/i, '')}-resilience-${probe}.json`;
     await mkdir(dirname(rawPath), { recursive: true });
-    await writeFile(rawPath, JSON.stringify({ command: harness.command, status: run.status, run }, null, 2));
+    await writeFile(rawPath, JSON.stringify({
+      command: harness.command, status: run.status, provenance: harness.provenance,
+      builds: harness.builds, buildParity: harness.buildParity,
+      probe: { requested: probe, scenario: 'scroll-through', schedulingMode: 'fluid' }, run,
+    }, null, 2));
     harness.resilienceProbe = { requested: probe, status: run.status, artifactPath: rawPath,
       validation: run.resilience?.validation ?? null };
-    harness.comparisonGate = { comparisonsAllowed: false, reason: 'Isolated retry resilience probe; no performance aggregation.' };
+    harness.comparisonGate = { comparisonsAllowed: false, reason: 'Isolated resilience correctness probe; no performance aggregation.' };
     if (run.status !== 'passed') throw new Error(run.error?.message ?? `${probe} resilience probe failed.`);
     harness.status = 'passed';
   } else if (providerLane) {

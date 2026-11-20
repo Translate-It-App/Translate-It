@@ -105,7 +105,7 @@ export function decodeProviderRequest(provider, request, expectedTexts) {
   return { texts, responseBody: mapEdgeResponse(texts) };
 }
 
-export function createFetchRequestListener({ guardSessions, now, requests, onRequest, reserveRequest, handlePaused, trackHandler }) {
+export function createFetchRequestListener({ guardSessions, now, requests, onRequest, reserveRequest, onAdmission, handlePaused, trackHandler }) {
   return event => {
     if (event.method !== 'Fetch.requestPaused' || !guardSessions.has(event.sessionId)) return;
     const { request, requestId } = event.params;
@@ -116,7 +116,18 @@ export function createFetchRequestListener({ guardSessions, now, requests, onReq
     requests.push(requestRecord);
     onRequest?.(event, request, requestRecord);
     const reservation = reserveRequest(event, requestRecord, requestId);
-    const job = handlePaused(event, requestRecord, reservation);
+    let admissionError;
+    try {
+      onAdmission?.(event, request, requestRecord, reservation, requestId);
+    } catch (error) {
+      admissionError = error;
+    }
+    let job;
+    try {
+      job = handlePaused(event, requestRecord, reservation, admissionError);
+    } catch (error) {
+      job = Promise.reject(error);
+    }
     return trackHandler(reservation, job);
   };
 }
