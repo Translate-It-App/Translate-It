@@ -1,3 +1,5 @@
+import { observeControllerAbort } from '../e2e-firefox/controller-abort-observer.mjs';
+
 export const cancellationProbeNames = Object.freeze(['stop', 'restore', 'replacement']);
 
 export function matchProviderPhysicalRoot({ url, body, sessionId, roots }) {
@@ -66,6 +68,21 @@ export function createCancellationLedger() {
   };
 }
 
+export function ensureCancellationAbortObserver({ messageId, sessionId, controller, observers, ledger, context, sequence }) {
+  if (typeof messageId !== 'string' || !messageId || typeof sessionId !== 'string' || !sessionId
+      || !controller || !observers || !ledger) return null;
+  const owner = { messageId, sessionId, context: context ?? null, cancelRequestSequence: sequence };
+  let observer = observers.get(messageId);
+  if (!observer) {
+    observer = observeControllerAbort(controller, owner, evidence => {
+      ledger.record('controller.abort', evidence.sessionId, evidence);
+    });
+    if (observer) observers.set(messageId, observer);
+  }
+  observer?.setOwner(owner);
+  return observer ?? null;
+}
+
 export function installTrustedLifecycleObserver(target, method, observe) {
   const original = target?.[method];
   if (typeof original !== 'function') return false;
@@ -122,12 +139,13 @@ export function installCancellationRuntimeMessageObserver(runtime, ledger, onUns
     const data = message?.data?.data ?? message?.data ?? {};
     const lifecycleAction = action === 'page-translation-frame-lifecycle' ? message?.data?.action ?? null : null;
     const sessionId = data?.sessionId ?? data?.messageId ?? null;
+    const messageId = data?.messageId ?? null;
     const isLifecycle = action === 'page-translation-frame-lifecycle';
     const isCancellation = action === 'CANCEL_TRANSLATION' || action === 'CANCEL_SESSION';
     if (!isLifecycle && !isCancellation) return original.call(this, message, ...args);
     const kind = isLifecycle ? 'runtime.lifecycle.send'
       : action === 'CANCEL_TRANSLATION' ? 'runtime.cancel.send' : 'runtime.cancelSession.send';
-    const detail = { action: lifecycleAction ?? action };
+    const detail = { action: lifecycleAction ?? action, messageId, targetSessionId: data?.sessionId ?? null };
     const operation = ledger.begin(kind, sessionId, detail);
     let result;
     try { result = original.call(this, message, ...args); }
@@ -148,6 +166,8 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
   const handlerJobs = new Map();
   let nextId = 0;
   let closing = false;
+
+  const needsTeardownRelease = record => !record.releaseRequested && !record.requestRecord?.response;
 
   function reserve({ requestId, sessionId, networkId = null, requestRecord = null }) {
     const id = ++nextId;
@@ -188,7 +208,7 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
       },
     };
     reservations.set(id, record);
-    if (closing) void record.release('fail', { reason: 'admitted-during-cleanup' });
+    if (closing && needsTeardownRelease(record)) record.release('fail', { reason: 'teardown' });
     return record;
   }
 
@@ -224,9 +244,10 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
       deadline,
     ]);
 
-    // Close admission before settling the known requests. Later admissions observe `closing`
-    // and self-release; Fetch.disable's acknowledgement is the event-stream barrier.
-    const initialReleases = [...reservations.values()].map(record => record.release('fail', { reason: 'teardown' }));
+    // Close admission before settling held requests; Fetch.disable's acknowledgement is the event-stream barrier.
+    const initialReleases = [...reservations.values()]
+      .filter(needsTeardownRelease)
+      .map(record => record.release('fail', { reason: 'teardown' }));
     if (disableFetch) {
       const disabled = await withinDeadline(Promise.resolve().then(disableFetch));
       if (disabled?.timedOut) errors.push(`Fetch.disable timed out after ${timeoutMs}ms.`);
@@ -244,14 +265,16 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
       errors.push(`Request handlers did not drain before deadline: ${[...handlerJobs.values()].map(entry => entry.requestId ?? entry.jobId).join(',')}`);
     }
 
-    const allReleases = [...reservations.values()].map(record => record.releasePromise ?? record.release('fail', { reason: 'teardown-after-admission' }));
+    const allReleases = [...reservations.values()]
+      .filter(record => record.releaseRequested)
+      .map(record => record.releasePromise);
     const releaseResult = await withinDeadline(Promise.all([...initialReleases, ...allReleases]));
     if (releaseResult?.timedOut) errors.push(`Fetch release commands did not settle before deadline: ${[...reservations.values()].filter(record => record.releaseOutcome === null).map(record => record.requestId).join(',')}`);
     else if (releaseResult?.error) errors.push(`Fetch release tracking failed: ${releaseResult.error.message}`);
 
     for (const record of reservations.values()) {
-      if (!record.releaseOutcome) errors.push(`Fetch ${record.requestId} release outcome unavailable`);
-      else if (record.releaseOutcome.ok !== true && !record.releaseClassification) errors.push(`Fetch ${record.requestId} teardown release failed: ${record.releaseOutcome.error ?? record.releaseOutcome.action}`);
+      if (record.releaseRequested && !record.releaseOutcome) errors.push(`Fetch ${record.requestId} release outcome unavailable`);
+      else if (record.releaseRequested && record.releaseOutcome?.ok !== true && !record.releaseClassification) errors.push(`Fetch ${record.requestId} teardown release failed: ${record.releaseOutcome?.error ?? record.releaseOutcome?.action}`);
       if (!record.handlerSettled) errors.push(`Fetch ${record.requestId} handler did not settle`);
       if (record.handlerError) errors.push(`Fetch ${record.requestId} handler failed: ${record.handlerError.message}`);
     }
@@ -263,7 +286,8 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
       reservationCount: reservations.size,
       reservations: [...reservations.values()].map(record => ({
         requestId: record.requestId, sessionId: record.sessionId, networkId: record.networkId,
-        held: record.held, releaseAction: record.releaseAction, releaseOutcome: record.releaseOutcome,
+        held: record.held, releaseRequested: record.releaseRequested,
+        releaseAction: record.releaseAction, releaseOutcome: record.releaseOutcome,
         releaseClassification: record.releaseClassification,
         handlerSettled: record.handlerSettled, handlerError: record.handlerError,
       })),

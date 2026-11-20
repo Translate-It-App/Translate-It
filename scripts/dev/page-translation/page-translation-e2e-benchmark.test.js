@@ -8,22 +8,333 @@ import { decodeGeminiRequest, GEMINI_FIXTURE_KEY, GEMINI_FIXTURE_MODEL, GEMINI_F
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
 import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
+import { classifyHeldFetchRelease, createCancellationLedger, createCancellationRequestLifecycle, ensureCancellationAbortObserver, installCancellationRuntimeMessageObserver } from './e2e-benchmark/cancellation-probes.mjs';
 import { registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 import { matchesAutoTranslateRule } from '../../../src/utils/ui/exclusion.js';
 import { registryIdToName } from '../../../src/features/translation/providers/ProviderConstants.js';
 import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
 import { AIResponseParser } from '../../../src/features/translation/providers/utils/AIResponseParser.js';
 import { ResponseFormat } from '../../../src/features/translation/core/ProviderConfigurations.js';
-import { findSessionOwnedPendingRequest, isCustom400ProbeWindowRequest, parseResilienceProbeSelection, partitionBandAcceptance, selectResolvedCustom400Batch, selectResolvedGoogleAttempt, selectResolvedGeminiAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom400Evidence, validateCustom400QueueEvidence, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
+import { claimGoogleTimeoutRequest, commitGoogleTimeoutRequest, findGoogleTimeoutBatchError, findGoogleTimeoutCancelMessage, findSessionOwnedPendingRequest, isCustom400ProbeWindowRequest, parseResilienceProbeSelection, partitionBandAcceptance, requireGoogleTimeoutReservation, selectResolvedCustom400Batch, selectResolvedGoogleAttempt, selectResolvedGoogleTimeoutBatch, selectResolvedGeminiAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom400Evidence, validateCustom400QueueEvidence, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateGoogleTimeoutEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
 
 describe('page translation benchmark measurements', () => {
+  it('selects and validates one production Google timeout without retry or sibling loss', () => {
+    expect(parseResilienceProbeSelection('googlev2-timeout')).toEqual(['googlev2-timeout']);
+    expect(shouldEnableResilienceQueueProbe('googlev2-timeout')).toBe(true);
+    expect(validateResilienceProbeIsolation({
+      selected: true, probe: 'googlev2-timeout', provider: 'googlev2', optimizationLevel: 3,
+      modes: 'sliced', scenario: 'scroll-through', schedulingMode: 'fluid',
+    })).toBe(true);
+    const texts = Array.from({ length: 25 }, (_, i) => `source-${i}`);
+    const targetIds = Array.from({ length: 25 }, (_, i) => `target-${i}`);
+    const expectedTargetIds = Array.from({ length: 1000 }, (_, i) => `target-${i}`);
+    const siblingTargets = expectedTargetIds.filter(id => !targetIds.includes(id));
+    const siblingTargetGroups = Array.from({ length: 38 }, (_, i) => siblingTargets.slice(i * 25, (i + 1) * 25));
+    siblingTargetGroups.push(siblingTargets.slice(950, 959), siblingTargets.slice(959, 967), siblingTargets.slice(967));
+    const attempts = [
+      { selected: true, networkSessionId: 'worker-a', networkId: 'net-a', logicalMessageId: 'message-a',
+        targetIds, status: null, outcome: 'failed' },
+      ...siblingTargetGroups.map((ids, i) => ({
+        selected: false, networkSessionId: 'worker-a', networkId: `net-${i + 1}`,
+        logicalMessageId: `message-${i + 1}`, targetIds: ids, status: 200, outcome: 'finished',
+      })),
+    ];
+    const acceptedWriteIds = expectedTargetIds.filter(id => !targetIds.includes(id));
+    const classification = { kind: 'provider-translation', provider: 'googlev2' };
+    const resolver = { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' };
+    const root = { messageId: 'message-a', sessionId: 'session-a', texts };
+    const request = { networkId: 'net-a', sessionId: 'session-a', sourceLanguage: 'en', texts, targetIds };
+    expect(selectResolvedGoogleTimeoutBatch({ request, classification, resolver, roots: [root], failedCount: 0 }))
+      .toMatchObject({ selected: false, reason: 'initial-band-not-yet-accepted' });
+    expect(selectResolvedGoogleTimeoutBatch({ request, classification, resolver, roots: [root], failedCount: 0, armed: true }))
+      .toMatchObject({ selected: true, messageId: root.messageId, targetIds });
+    expect(selectResolvedGoogleTimeoutBatch({ request, classification, resolver, roots: [root], failedCount: 1, armed: true }).selected).toBe(false);
+    expect(selectResolvedGoogleTimeoutBatch({ request, classification, resolver, roots: [root, root], failedCount: 0, armed: true }).selected).toBe(false);
+    expect(selectResolvedGoogleTimeoutBatch({ request: { ...request, texts: texts.slice(0, 24) }, classification, resolver, roots: [root], failedCount: 0, armed: true }).selected).toBe(false);
+    const queueEvents = [
+      { name: 'queueManager.processItem.start', queueItemId: 'queue-a', messageId: 'message-a', attemptNumber: 1 },
+      { name: 'queueManager.processItem.end', queueItemId: 'queue-a', messageId: 'message-a', attemptNumber: 1, attempts: 1, status: 'failed', retryTimerActive: false },
+    ];
+    const timeoutTargets = [
+      { kind: 'scheduler.batch', sessionId: 'session-a', targetIds, status: 'fulfilled', startedAt: 1_000, settledAt: 60_500 },
+      { kind: 'scheduler.batch.error', sessionId: 'session-a', targetIds, errorName: 'Error',
+        errorType: 'OPERATION_TIMEOUT', error: 'Operation timed out', wallTime: 60_500 },
+    ];
+    const timeout = findGoogleTimeoutBatchError(timeoutTargets, 'session-a', targetIds);
+    expect(timeout).toMatchObject({ errorType: 'OPERATION_TIMEOUT', schedulerBatchStatus: 'fulfilled',
+      startedAt: 1_000, settledAt: 60_500, targetIds, sessionId: 'session-a' });
+    expect(findGoogleTimeoutBatchError(timeoutTargets, 'other-session', targetIds)).toBeNull();
+    expect(findGoogleTimeoutBatchError([{ ...timeoutTargets[0], status: 'pending' }, timeoutTargets[1]], 'session-a', targetIds)).toBeNull();
+    expect(findGoogleTimeoutBatchError([{ ...timeoutTargets[0], targetIds: targetIds.slice(1) }, timeoutTargets[1]], 'session-a', targetIds)).toBeNull();
+    expect(findGoogleTimeoutBatchError([timeoutTargets[0], { ...timeoutTargets[1], errorType: 'NETWORK_ERROR' }], 'session-a', targetIds)).toBeNull();
+    const evidence = {
+      sessionId: 'session-a',
+      heldRequest: { messageId: 'message-a', requestId: 'fetch-a', networkSessionId: 'worker-a',
+        networkId: 'net-a', sessionId: 'session-a', targetIds, startedAt: 1_000,
+        url: 'https://translate.google.com/translate_a/t', method: 'POST', requestBody: '{"q":"held"}' },
+      timeout,
+      cancel: { action: 'CANCEL_TRANSLATION', messageId: 'message-a', targetSessionId: 'session-a',
+        status: 'fulfilled', response: { success: true } },
+      serviceTimeout: { messageId: 'message-a', sessionId: 'session-a', sequence: 3, status: 'fulfilled',
+        controllerMatched: true, controllerAbortedBefore: false, controllerAbortedAfter: true,
+        response: { handled: true, success: true } },
+      controller: { messageId: 'message-a', sessionId: 'session-a', sequence: 4, aborted: true },
+      providerRoot: { messageId: 'message-a', status: 'rejected', operationAborted: true, settledSequence: 5 },
+      physicalMatchCount: 1,
+      physical: { messageId: 'message-a', sessionId: 'session-a', status: 'rejected',
+        url: 'https://translate.google.com/translate_a/t', method: 'POST', requestBody: '{"q":"held"}',
+        errorName: null, errorType: null, operationAborted: false, abortReasonMatched: true, abortReasonType: 'string',
+        controllerAbortedAtEnd: true, settledSequence: 6 },
+      classification: { userFacingType: 'OPERATION_TIMEOUT', userFacingName: 'Error',
+        userFacingErrorType: 'OPERATION_TIMEOUT', internalAbortType: 'OPERATION_ABORTED', internalAbortName: null },
+      queueAttemptEvidence: validateGoogleTimeoutQueueEvidence(queueEvents, { messageId: 'message-a' }),
+      retries: [], failovers: [], siblingRequests: Array.from({ length: 39 }, () => ({ status: 200, outcome: 'finished' })),
+      attempts,
+      siblingRequests: attempts.filter(item => !item.selected),
+      concurrency: { peakPhysical: 2, peakLogical: 2 },
+      failedTargetDOM: {
+        ok: true,
+        expected: targetIds.map(id => [id, id.replace('target-', 'source-'), { pageTranslated: false, hasOriginal: false }]),
+        observed: targetIds.map(id => [id, id.replace('target-', 'source-'), { pageTranslated: false, hasOriginal: false }]),
+      },
+      cleanup: { ok: true, heldFetchSettled: true, handlersDrained: true, handlerCount: 0,
+        heldFetch: { requestId: 'fetch-a', handlerSettled: true, releaseOutcome: { ok: true }, releaseClassification: 'fetch-release-command-acknowledged' },
+        requestLifecycle: { ok: true }, resourceValidation: { ok: true },
+        contentDrain: { pendingOperations: 0 }, workerDrain: { ledger: { pending: 0 }, providerRoots: [] } },
+      translation: { targetCount: 1000, acceptedTargetCount: 975, failedTargetCount: 25,
+        acceptedWriteCount: 975, acceptedUniqueCount: 975, acceptedWriteIds, expectedTargetIds,
+        exact: true, restoreExact: true, failedSourcePreserved: true, failedTargetsUnmarked: true,
+        terminal: true, sessionOwner: 'session-a', duplicateAcceptedIds: [] },
+    };
+    expect(validateGoogleTimeoutEvidence(evidence)).toEqual({ ok: true, issues: [] });
+    expect(attempts).toHaveLength(42);
+    expect(siblingTargetGroups.slice(-3).map(group => group.length)).toEqual([9, 8, 8]);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, timeout: { errorName: 'Error', errorType: 'NETWORK_ERROR', startedAt: 500, settledAt: 60_500 } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, timeout: { ...timeout, sessionId: 'other-session' } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, timeout: { ...timeout, targetIds: targetIds.slice(1) } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, timeout: { ...timeout, errorType: 'NETWORK_ERROR' } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, serviceTimeout: undefined, serviceCancel: {
+      messageId: 'message-a', status: 'fulfilled', controllerMatched: true, controllerAbortedAfter: true,
+    } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, retries: [{ messageId: 'message-a' }] }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, attempts: [
+      ...attempts.slice(0, 2), { ...attempts[2], targetIds: [...attempts[2].targetIds, attempts[1].targetIds[0]] },
+      ...attempts.slice(3),
+    ] }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, attempts: attempts.slice(1) }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, attempts: attempts.map((item, index) =>
+      index === 1 ? { ...item, status: 503, outcome: 'failed' } : item) }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, selectionFailures: [{ reason: 'logical-batch-correlation-not-unique' }] }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, cancel: { ...evidence.cancel, messageId: 'sibling' } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, physical: { ...evidence.physical, errorName: 'OPERATION_TIMEOUT' } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, physical: { ...evidence.physical, operationAborted: false,
+      abortReasonMatched: false } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, physical: { ...evidence.physical, abortReasonMatched: false } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, providerRoot: { ...evidence.providerRoot, operationAborted: false } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, physical: { ...evidence.physical, requestBody: '{"q":"other"}' } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, physicalMatchCount: 2 }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, cleanup: { ...evidence.cleanup,
+      heldFetch: { ...evidence.cleanup.heldFetch, requestId: 'different-fetch' },
+    } }).ok).toBe(false);
+    expect(validateGoogleTimeoutEvidence({ ...evidence, translation: {
+      ...evidence.translation, acceptedWriteIds: [...evidence.translation.acceptedWriteIds.slice(1), 'target-0'],
+    } }).ok).toBe(false);
+    expect(validateGoogleTimeoutQueueEvidence([...queueEvents, { ...queueEvents[0], attemptNumber: 2 }], { messageId: 'message-a' }).ok).toBe(false);
+  });
+  it('keeps timeout execution separate from status injection and drains its held Fetch lifecycle', () => {
+    const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
+    const contentSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/content-entry.mjs', 'utf8');
+    expect(runSource).toContain("if (googleTimeoutProtocol && classification.provider === 'googlev2')");
+    expect(runSource).toContain('? { armed: false, claimed: false, held: null, selectionFailures: [], releaseRequested: false } : null');
+    expect(runSource).toContain('failedCount: googleTimeoutProtocol.held || googleTimeoutProtocol.claimed ? 1 : 0, armed: googleTimeoutProtocol.armed');
+    expect(runSource).toContain('if (!claimGoogleTimeoutRequest(googleTimeoutProtocol))');
+    expect(runSource).toContain('commitGoogleTimeoutRequest(googleTimeoutProtocol, timeoutHold)');
+    expect(runSource).toContain('controllerAborted: settled.controllerAbort.sequence > settled.serviceTimeout.sequence');
+    expect(runSource).toContain('controllerAbortSequence: settled.controllerAbort.sequence');
+    expect(runSource).toContain('if (googleTimeoutProtocol) googleTimeoutProtocol.armed = true;');
+    expect(runSource).toContain('if (googleTimeoutProtocol.armed && resolver?.resolutionPending === false');
+    expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol)');
+    expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || resilienceProbe)');
+    expect(runSource).toContain('else if (googleTimeoutProtocol) trial.resilience.workerInstrumentation = workerInstrumentation;');
+    expect(runSource).toContain('const instrumentationOwner = trial.cancellation ?? trial.staleSuccess ?? trial.resilience;');
+    expect(runSource).toContain('findGoogleTimeoutBatchError(contentOperations, trial.sessionId, targetIds)');
+    expect(runSource).toContain('findGoogleTimeoutCancelMessage(contentOperations, root.messageId, trial.sessionId)');
+    expect(runSource).toContain('window.__pageTranslationBenchmark.cancellationSnapshot()');
+    expect(runSource).toContain('await captureRequestViewport(body)');
+    expect(runSource).toContain('requireGoogleTimeoutReservation(reservation).hold()');
+    expect(runSource).toMatch(/const handlerLifecycle = cancellationControl\?\.requestLifecycle\s*\?\?\s*\(googleTimeoutProtocol \? requestLifecycle : null\);/);
+    expect(runSource).toContain('const reservation = handlerLifecycle?.reserve({');
+    expect(runSource).toContain('(handlerLifecycle ?? requestLifecycle).trackHandler(reservation, job)');
+    expect(runSource).toContain('item.kind === \'service.handleTimeout\'');
+    expect(runSource).toContain('cancellationDiagnostics.workerSnapshot = snapshot ?? null');
+    expect(runSource).toContain('cancellationDiagnostics.contentSnapshot = content ?? null');
+    expect(runSource).toContain('cancellationDiagnostics.error = { name: error?.name ?? \'Error\'');
+    expect(runSource).toContain('cancellationDiagnostics: googleTimeoutProtocol.held.cancellationDiagnostics ?? null');
+    expect(runSource).toContain('await reservation.release(\'fail\', { errorReason: \'Aborted\', reason: \'production-timeout-cancel\' })');
+    expect(runSource).toContain('requestLifecycle.closeAndDrain({');
+    expect(runSource).toContain('heldReservation?.handlerSettled === true');
+    expect(runSource).toContain('validateGoogleTimeoutEvidence(trial.resilience)');
+    expect(runSource).not.toContain("if (resilienceProbe && classification.provider === 'googlev2')");
+    expect(contentSource).toContain('errorType: error?.type ?? null');
+    expect(contentSource).toContain("ledger.record('scheduler.batch.error', sessionId");
+    expect(contentSource).toContain('errorType: error?.type ?? null');
+    expect(contentSource).toContain("scheduler._handleBatchError = wrapped");
+    const workerSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/worker-entry.mjs', 'utf8');
+    expect(workerSource).toContain("cancellationLedger.begin('service.handleTimeout'");
+    expect(workerSource).toContain('ensureCancellationAbortObserver({');
+    expect(workerSource).toContain('sequence: operation.sequence');
+    expect(workerSource).toContain('?? root?.controller ?? this.translationEngine?.getAbortController?.(messageId)');
+    expect(workerSource).toContain('controllerAbortedAfter: controller?.signal?.aborted ?? null');
+    expect(workerSource).toContain("cancellationLedger.begin('service.cancelRequest'");
+    const cancelHandler = readFileSync('src/features/translation/handlers/handleCancelTranslation.js', 'utf8');
+    expect(cancelHandler).toMatch(/if \(timeout\) \{[\s\S]*?unifiedTranslationService\.handleTimeout\(/);
+    const unifiedMessaging = readFileSync('src/shared/messaging/core/UnifiedMessaging.js', 'utf8');
+    expect(unifiedMessaging).toContain("'page-translate-batch': 60000");
+    expect(unifiedMessaging).toMatch(/action: 'CANCEL_TRANSLATION',\s*data: \{ messageId: message\.messageId, reason: 'Translation timed out', timeout: true \}/);
+  });
+  it('records the CANCEL_TRANSLATION message ID independently from its Page session', async () => {
+    const ledger = createCancellationLedger();
+    const runtime = { sendMessage: vi.fn(async () => ({ success: true })) };
+    expect(installCancellationRuntimeMessageObserver(runtime, ledger).installed).toBe(true);
+    await runtime.sendMessage({
+      action: 'CANCEL_TRANSLATION',
+      data: { messageId: 'batch-a', sessionId: 'page-a' },
+    });
+    expect(ledger.snapshot().operations).toMatchObject([{
+      kind: 'runtime.cancel.send', sessionId: 'page-a', messageId: 'batch-a',
+      targetSessionId: 'page-a', action: 'CANCEL_TRANSLATION', status: 'fulfilled',
+    }]);
+    await runtime.sendMessage({ action: 'CANCEL_TRANSLATION', data: { messageId: 'batch-only' } });
+    const operations = ledger.snapshot().operations;
+    expect(findGoogleTimeoutCancelMessage(operations, 'batch-only', 'page-a')).toMatchObject({
+      messageId: 'batch-only', sessionId: 'batch-only', targetSessionId: null,
+    });
+    expect(findGoogleTimeoutCancelMessage(operations, 'different-batch', 'page-a')).toBeNull();
+    expect(findGoogleTimeoutCancelMessage([
+      { ...operations.at(-1), messageId: 'batch-only', targetSessionId: 'other-page' },
+    ], 'batch-only', 'page-a')).toBeNull();
+  });
+  it('releases a held Fetch and drains its registered request handler during teardown', async () => {
+    const lifecycle = createCancellationRequestLifecycle(async (reservation, action) => ({
+      ok: true, action, requestId: reservation.requestId,
+    }));
+    const reservation = lifecycle.reserve({ requestId: 'fetch-timeout', sessionId: 'worker-session' });
+    expect(requireGoogleTimeoutReservation(reservation)).toBe(reservation);
+    expect(() => requireGoogleTimeoutReservation(null)).toThrow('requires a request-lifecycle Fetch reservation');
+    expect(reservation.hold()).toBe(true);
+    let handlerSettled = false;
+    lifecycle.trackHandler(reservation, reservation.waitForRelease().then(() => { handlerSettled = true; }));
+    const cleanup = await lifecycle.closeAndDrain({ disableFetch: async () => {}, timeoutMs: 1_000 });
+    expect(cleanup).toMatchObject({
+      ok: true, handlerCount: 0, reservations: [{
+        requestId: 'fetch-timeout', held: true, releaseAction: 'fail',
+        releaseOutcome: { ok: true }, handlerSettled: true,
+      }],
+    });
+    expect(handlerSettled).toBe(true);
+  });
+  it('does not fail completed or non-held Fetch reservations during teardown', async () => {
+    const dispatchRelease = vi.fn(async (reservation, action) => ({
+      ok: true, action, requestId: reservation.requestId,
+    }));
+    const lifecycle = createCancellationRequestLifecycle(dispatchRelease);
+    const completed = lifecycle.reserve({ requestId: 'fetch-completed', sessionId: 'worker-session' });
+    const held = lifecycle.reserve({ requestId: 'fetch-held', sessionId: 'worker-session' });
+    expect(held.hold()).toBe(true);
+    await completed.release('fulfill');
+    lifecycle.trackHandler(completed, Promise.resolve());
+    lifecycle.trackHandler(held, held.waitForRelease());
+    let admittedDuringClose;
+    const cleanup = await lifecycle.closeAndDrain({
+      disableFetch: async () => {
+        admittedDuringClose = lifecycle.reserve({ requestId: 'fetch-late', sessionId: 'worker-session' });
+        expect(admittedDuringClose.hold()).toBe(false);
+        lifecycle.trackHandler(admittedDuringClose, Promise.resolve());
+      },
+      timeoutMs: 1_000,
+    });
+    expect(dispatchRelease).toHaveBeenCalledTimes(3);
+    expect(dispatchRelease).toHaveBeenCalledWith(held, 'fail', { reason: 'teardown' });
+    expect(dispatchRelease).toHaveBeenCalledWith(completed, 'fulfill', {});
+    expect(dispatchRelease).toHaveBeenCalledWith(admittedDuringClose, 'fail', { reason: 'teardown' });
+    expect(cleanup).toMatchObject({
+      ok: true, reservations: [
+        { requestId: 'fetch-completed', held: false, releaseRequested: true, releaseAction: 'fulfill', releaseOutcome: { ok: true }, handlerSettled: true },
+        { requestId: 'fetch-held', held: true, releaseRequested: true, releaseAction: 'fail', releaseOutcome: { ok: true }, handlerSettled: true },
+        { requestId: 'fetch-late', held: false, releaseRequested: true, releaseAction: 'fail', releaseOutcome: { ok: true }, handlerSettled: true },
+      ],
+    });
+  });
+  it('does not fail Fetch reservations with a terminal response, including late admissions', async () => {
+    const dispatchRelease = vi.fn(async (reservation, action) => ({ ok: true, action, requestId: reservation.requestId }));
+    const lifecycle = createCancellationRequestLifecycle(dispatchRelease);
+    const completed = lifecycle.reserve({
+      requestId: 'fetch-direct-completion', sessionId: 'worker-session',
+      requestRecord: { response: { status: 200 } },
+    });
+    const pending = lifecycle.reserve({ requestId: 'fetch-pending-record', sessionId: 'worker-session', requestRecord: {} });
+    lifecycle.trackHandler(completed, Promise.resolve());
+    lifecycle.trackHandler(pending, pending.waitForRelease());
+    let lateCompleted;
+    let latePending;
+    const cleanup = await lifecycle.closeAndDrain({
+      disableFetch: async () => {
+        lateCompleted = lifecycle.reserve({
+          requestId: 'fetch-late-completed', sessionId: 'worker-session',
+          requestRecord: { response: { status: 200 } },
+        });
+        latePending = lifecycle.reserve({ requestId: 'fetch-late-pending', sessionId: 'worker-session', requestRecord: {} });
+        lifecycle.trackHandler(lateCompleted, Promise.resolve());
+        lifecycle.trackHandler(latePending, latePending.waitForRelease());
+      },
+      timeoutMs: 1_000,
+    });
+    expect(dispatchRelease).toHaveBeenCalledTimes(2);
+    expect(dispatchRelease).toHaveBeenCalledWith(pending, 'fail', { reason: 'teardown' });
+    expect(dispatchRelease).toHaveBeenCalledWith(latePending, 'fail', { reason: 'teardown' });
+    expect(dispatchRelease).not.toHaveBeenCalledWith(completed, 'fail', expect.anything());
+    expect(dispatchRelease).not.toHaveBeenCalledWith(lateCompleted, 'fail', expect.anything());
+    expect(cleanup.ok).toBe(true);
+  });
+  it('allows only one concurrent eligible Google timeout request to claim the hold', () => {
+    const protocol = { claimed: false, held: null };
+    expect(claimGoogleTimeoutRequest(protocol)).toBe(true);
+    expect(claimGoogleTimeoutRequest(protocol)).toBe(false);
+    expect(commitGoogleTimeoutRequest(protocol, { requestId: 'held-fetch' })).toBe(true);
+    expect(protocol).toMatchObject({ claimed: false, held: { requestId: 'held-fetch' } });
+    expect(claimGoogleTimeoutRequest(protocol)).toBe(false);
+    expect(commitGoogleTimeoutRequest(protocol, { requestId: 'second-fetch' })).toBe(false);
+  });
+  it('classifies an acknowledged held Fetch release without cancellation diagnostics', () => {
+    expect(classifyHeldFetchRelease({
+      heldRequestId: 'held-fetch', matchedRequestId: 'held-fetch',
+      releaseOutcome: { ok: true, action: 'fail' },
+    })).toEqual({ ok: true, classification: 'fetch-release-command-acknowledged', issues: [] });
+  });
+  it('updates the exact timeout controller abort observer with the Page session before handleTimeout aborts', () => {
+    const ledger = createCancellationLedger();
+    const observers = new Map();
+    const controller = new AbortController();
+    const timeout = ledger.begin('service.handleTimeout', 'page-session', { messageId: 'batch-timeout' });
+    const observer = ensureCancellationAbortObserver({
+      messageId: 'batch-timeout', sessionId: 'page-session', controller, observers, ledger,
+      context: 'page-translation-batch', sequence: timeout.sequence,
+    });
+    expect(observer).toBeTruthy();
+    controller.abort();
+    expect(ledger.snapshot().operations.at(-1)).toMatchObject({
+      kind: 'controller.abort', messageId: 'batch-timeout', sessionId: 'page-session',
+      context: 'page-translation-batch', cancelRequestSequence: timeout.sequence,
+      abortedBefore: false, abortedAfter: true,
+    });
+  });
   it('includes the queue projector in provenance and keeps Google resilience injection Google-only 503', () => {
     const source = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
     expect(source).toContain("'scripts/dev/page-translation/e2e-benchmark/rate-limit-queue.mjs'");
-    expect(source).toContain('const handlerLifecycle = cancellationControl?.requestLifecycle ?? requestLifecycle;');
-    expect(source).toContain('handlerLifecycle.trackHandler(reservation, job)');
+    expect(source).toContain('const handlerLifecycle = cancellationControl?.requestLifecycle');
+    expect(source).toContain('(handlerLifecycle ?? requestLifecycle).trackHandler(reservation, job)');
     expect(source).toContain('? resilienceEvidence.queueRetryEvidence ?? null');
-    const googleBranch = source.split("if (resilienceProbe && classification.provider === 'googlev2')")[1]?.split("if (custom429Protocol && classification.provider === 'custom')")[0];
+    const googleBranch = source.split("if (resilienceProbe === 'googlev2-503' && classification.provider === 'googlev2')")[1]?.split("if (googleTimeoutProtocol && classification.provider === 'googlev2')")[0];
     expect(googleBranch).toContain('responseCode: 503');
     expect(googleBranch).not.toMatch(/custom-429|Retry-After|retryAfterSeconds|status: 429/);
   });
@@ -642,6 +953,30 @@ describe('page translation benchmark measurements', () => {
     ]));
   });
 
+  it('allows only the explicitly selected failed timeout attempt without a response status', () => {
+    const timeoutAttempt = {
+      attemptId: 'timeout', networkSessionId: 'worker', networkId: 'timeout-network',
+      startedAt: 1, settledAt: 8, status: null, outcome: 'failed', error: 'net::ERR_ABORTED',
+    };
+    expect(summarizePhysicalProviderAttempts([timeoutAttempt], {
+      expectedTimeoutAbortAttemptId: 'timeout',
+    }).ok).toBe(true);
+    expect(summarizePhysicalProviderAttempts([timeoutAttempt]).issues).toEqual(expect.arrayContaining([
+      expect.stringContaining('lacks correlated response status'),
+      expect.stringContaining('failed'),
+    ]));
+    const otherFailures = summarizePhysicalProviderAttempts([
+      timeoutAttempt,
+      { ...timeoutAttempt, attemptId: 'other-failed', networkId: 'other-network', status: 503 },
+      { ...timeoutAttempt, attemptId: 'other-missing-status', networkId: 'missing-network', outcome: 'finished' },
+    ], { expectedTimeoutAbortAttemptId: 'timeout' });
+    expect(otherFailures.ok).toBe(false);
+    expect(otherFailures.issues).toEqual(expect.arrayContaining([
+      expect.stringContaining('other-failed failed'),
+      expect.stringContaining('other-missing-status lacks correlated response status'),
+    ]));
+  });
+
   it('measures logical batch intervals separately from physical request accounting', () => {
     const batches = [
       { sessionId: 'page-1', at: 0, settledAt: 10, outcome: 'fulfilled', targetIds: ['a', 'b'] },
@@ -1050,6 +1385,8 @@ describe('page translation benchmark measurements', () => {
       restoreOriginals: [['a', 'one'], ['b', 'two']], expectedOriginals: [['a', 'one'], ['b', 'two']], cleanupErrors: [],
     };
     expect(validateScrollThroughEvidence(args).ok).toBe(true);
+    expect(validateScrollThroughEvidence({ ...args, expectedAcceptedIds: ['a'], acceptedIds: ['a'],
+      acceptedAtById: { a: 15 }, terminalAt: 20 }).ok).toBe(true);
     const prefetch = validateScrollThroughEvidence({ ...args, acceptedAtById: { ...args.acceptedAtById, b: 19 } });
     expect(prefetch).toMatchObject({ ok: true, prefetchAcceptedIds: ['b'], viewportEntryToAcceptedWriteLatencyMsById: { a: 5, b: null } });
     expect(validateScrollThroughEvidence({ ...args, providerRequests: [...args.providerRequests, args.providerRequests[0]] }).issues).toContain('duplicate physical provider request target ID: a');
@@ -1079,6 +1416,10 @@ describe('page translation benchmark measurements', () => {
     });
     expect(deriveScrollAggregateMetrics([{ band: 1, ids: ['a', 'b'] }], { a: 10, b: 20 }, { a: 12, b: 19 })
       .lastViewportEntryToFullAcceptance).toMatchObject({ latencyMs: -1, fullAcceptanceBeforeLastViewportEntry: true });
+    expect(deriveScrollAggregateMetrics([{ band: 1, ids: ['a', 'b'] }], { a: 10, b: 20 }, { a: 12 },
+      ['a']).latencyByViewportBand).toEqual([
+      { band: 1, targetCount: 1, measurableCount: 1, prefetchCount: 0, meanMs: 2, medianMs: 2, maxMs: 2 },
+    ]);
     expect(validateScrollThroughObservations(ids, [{ scheduler: { isScrolling: false } }], args.selectionViewport).ok).toBe(true);
   });
 

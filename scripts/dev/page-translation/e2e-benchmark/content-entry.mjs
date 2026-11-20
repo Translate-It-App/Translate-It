@@ -281,10 +281,13 @@ const trace = {
         if (expectPromise) this.cancellationInstrumentationErrors.push(`${kind} returned a non-Promise result.`);
         return result;
       }
-      const operation = ledger.begin(kind, sessionId, detail);
+      const operation = ledger.begin(kind, sessionId, { ...detail, startedAt: Date.now() });
       result.then(
-        value => ledger.settle(operation, 'fulfilled', { response: value, ...detailOnSettlement(value) }),
-        error => ledger.settle(operation, 'rejected', { errorName: error?.name ?? 'Error', error: error?.message ?? String(error) }),
+        value => ledger.settle(operation, 'fulfilled', { settledAt: Date.now(), response: value, ...detailOnSettlement(value) }),
+        error => ledger.settle(operation, 'rejected', {
+          settledAt: Date.now(), errorName: error?.name ?? 'Error', errorType: error?.type ?? null,
+          error: error?.message ?? String(error),
+        }),
       );
       return result;
     };
@@ -307,6 +310,21 @@ const trace = {
       };
       wrapped.__cancellationObserved = true;
       scheduler._executeBatchRequest = wrapped;
+    }
+    if (typeof scheduler._handleBatchError === 'function' && !scheduler._handleBatchError.__cancellationObserved) {
+      const original = scheduler._handleBatchError;
+      const wrapped = function (error, batch, pageErrorType, sessionId = this.translationSessionId, ...rest) {
+        ledger.record('scheduler.batch.error', sessionId, {
+          targetIds: Array.isArray(batch) ? batch.map(item => benchmarkTargetId(item?.node)) : [],
+          errorName: error?.name ?? 'Error',
+          errorType: error?.type ?? null,
+          error: error?.message ?? String(error),
+          wallTime: Date.now(),
+        });
+        return original.call(this, error, batch, pageErrorType, sessionId, ...rest);
+      };
+      wrapped.__cancellationObserved = true;
+      scheduler._handleBatchError = wrapped;
     }
     if (typeof scheduler._createSettlement === 'function' && !scheduler._createSettlement.__cancellationObserved) {
       const original = scheduler._createSettlement;

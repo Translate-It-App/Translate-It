@@ -11,7 +11,7 @@ import { ProviderRequestEngine } from '../../../../src/features/translation/prov
 import { BaseProvider } from '../../../../src/features/translation/providers/BaseProvider.js';
 import { MicrosoftEdgeProvider } from '../../../../src/features/translation/providers/MicrosoftEdgeProvider.js';
 import { makeTrace, installCallThrough, installTimedCallThrough } from './trace.mjs';
-import { createCancellationLedger, matchProviderPhysicalRoot } from './cancellation-probes.mjs';
+import { createCancellationLedger, ensureCancellationAbortObserver, matchProviderPhysicalRoot } from './cancellation-probes.mjs';
 import { projectRateLimitQueueItems } from './rate-limit-queue.mjs';
 import { observeControllerAbort } from '../e2e-firefox/controller-abort-observer.mjs';
 
@@ -114,10 +114,19 @@ installTimedCallThrough(ProviderRequestEngine, 'executeApiCall', ([provider, opt
     : null;
   return { startedAt, operation, abortController: options?.abortController ?? null };
 }, (token, error) => {
-  trace.record('providerRequestEngine.executeApiCall.end', { startedAt: token?.startedAt ?? null, failed: !!error, errorName: error?.name ?? null });
+  trace.record('providerRequestEngine.executeApiCall.end', {
+    startedAt: token?.startedAt ?? null, failed: !!error,
+    errorName: error?.name ?? null, errorType: error?.type ?? null,
+  });
   if (token?.operation) cancellationLedger.settle(token.operation, error ? 'rejected' : 'fulfilled', {
     errorName: error?.name ?? null,
+    errorType: error?.type ?? null,
     error: error?.message ?? null,
+    abortReasonMatched: token.abortController?.signal?.aborted === true
+      && Object.is(error, token.abortController.signal.reason),
+    abortReasonType: token.abortController?.signal?.aborted === true
+      ? typeof token.abortController.signal.reason : null,
+    // ProviderRequestEngine normalizes AbortError into Error; retain its explicit abort marker.
     operationAborted: error?.operationAborted === true,
     controllerAbortedAtEnd: token.abortController?.signal?.aborted ?? null,
   });
@@ -199,7 +208,10 @@ const marker = {
         let result;
         try { result = originalTranslate.call(this, text, sourceLanguage, targetLanguage, options); }
         catch (error) {
-          cancellationLedger.settle(operation, 'rejected', { errorName: error?.name ?? 'Error', error: error?.message ?? String(error) });
+          cancellationLedger.settle(operation, 'rejected', {
+            errorName: error?.name ?? 'Error', errorType: error?.type ?? null,
+            error: error?.message ?? String(error),
+          });
           throw error;
         }
         if (!result || typeof result.then !== 'function') {
@@ -211,7 +223,11 @@ const marker = {
         }
         result.then(
           value => cancellationLedger.settle(operation, 'fulfilled', { resultSuccess: value?.success !== false, controllerAbortedAtEnd: options?.abortController?.signal?.aborted ?? null }),
-          error => cancellationLedger.settle(operation, 'rejected', { errorName: error?.name ?? null, error: error?.message ?? null, operationAborted: error?.operationAborted === true, controllerAbortedAtEnd: options?.abortController?.signal?.aborted ?? null }),
+          error => cancellationLedger.settle(operation, 'rejected', {
+            errorName: error?.name ?? null, errorType: error?.type ?? null,
+            error: error?.message ?? null, operationAborted: error?.operationAborted === true,
+            controllerAbortedAtEnd: options?.abortController?.signal?.aborted ?? null,
+          }),
         );
         return result;
       };
@@ -239,6 +255,54 @@ const marker = {
       }
 
       const service = unifiedTranslationService;
+      const originalHandleTimeout = service.handleTimeout;
+      if (typeof originalHandleTimeout === 'function') {
+        service.handleTimeout = function (messageId, ...args) {
+          const root = [...providerRoots].reverse().find(candidate => candidate.messageId === messageId);
+          const controller = lifecycleControllers.get(messageId)?.controller
+            ?? root?.controller ?? this.translationEngine?.getAbortController?.(messageId) ?? null;
+          const operation = cancellationLedger.begin('service.handleTimeout', root?.sessionId ?? null, {
+            messageId, reason: args[0] ?? null, timeoutType: args[1] ?? null,
+            controllerMatched: !!controller, controllerAbortedBefore: controller?.signal?.aborted ?? null,
+          });
+          const abortObserver = ensureCancellationAbortObserver({
+            messageId, sessionId: root?.sessionId ?? lifecycleControllers.get(messageId)?.context?.sessionId ?? null,
+            controller, observers: controllerAbortObservers, ledger: cancellationLedger,
+            context: globalThis.__firefoxPageTranslationStopMode === true ? 'page-translation-batch' : null,
+            sequence: operation.sequence,
+          });
+          operation.abortObserverAvailable = !!abortObserver;
+          let result;
+          try { result = originalHandleTimeout.call(this, messageId, ...args); }
+          catch (error) {
+            cancellationLedger.settle(operation, 'rejected', {
+              errorName: error?.name ?? 'Error', errorType: error?.type ?? null,
+              error: error?.message ?? String(error), controllerAbortedAfter: controller?.signal?.aborted ?? null,
+            });
+            throw error;
+          }
+          if (!result || typeof result.then !== 'function') {
+            cancellationLedger.settle(operation, 'unsupported-non-promise', {
+              returnedType: result === null ? 'null' : typeof result,
+              controllerAbortedAfter: controller?.signal?.aborted ?? null,
+            });
+            cancellationInstrumentationErrors.push(`UnifiedTranslationService.handleTimeout for ${messageId} returned a non-Promise.`);
+            return result;
+          }
+          result.then(
+            value => cancellationLedger.settle(operation, 'fulfilled', {
+              response: value, controllerAbortedAfter: controller?.signal?.aborted ?? null,
+            }),
+            error => cancellationLedger.settle(operation, 'rejected', {
+              errorName: error?.name ?? 'Error', errorType: error?.type ?? null,
+              error: error?.message ?? String(error), controllerAbortedAfter: controller?.signal?.aborted ?? null,
+            }),
+          );
+          return result;
+        };
+      } else {
+        cancellationInstrumentationErrors.push('UnifiedTranslationService.handleTimeout is unavailable.');
+      }
       const originalCancelRequest = service.cancelRequest;
       if (typeof originalCancelRequest === 'function') {
         service.cancelRequest = function (messageId, ...args) {

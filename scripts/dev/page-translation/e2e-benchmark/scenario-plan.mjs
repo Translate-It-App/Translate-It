@@ -133,21 +133,28 @@ export function providerLaneFinalization({ buildParity, cleanupErrors = [], prim
   };
 }
 
-export function summarizePhysicalProviderAttempts(attempts) {
+export function summarizePhysicalProviderAttempts(attempts, { expectedTimeoutAbortAttemptId = null } = {}) {
   const issues = [];
   const intervals = [];
   const seen = new Set();
   for (const attempt of attempts ?? []) {
     if (!attempt.attemptId || seen.has(attempt.attemptId)) issues.push('provider attempt IDs must be present and unique');
     seen.add(attempt.attemptId);
-    if (!Number.isFinite(attempt.status)) issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks correlated response status`);
+    const expectedTimeoutAbort = attempt.attemptId === expectedTimeoutAbortAttemptId;
+    if (!Number.isFinite(attempt.status) && !(expectedTimeoutAbort && attempt.outcome === 'failed')) {
+      issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks correlated response status`);
+    }
     if (!['finished', 'failed'].includes(attempt.outcome)) issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks terminal outcome`);
     if (!attempt.networkSessionId || !attempt.networkId) issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks Fetch/Network correlation`);
     if (!Number.isFinite(attempt.startedAt) || !Number.isFinite(attempt.settledAt) || attempt.settledAt < attempt.startedAt) {
       issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks valid terminal settlement`);
       continue;
     }
-    if (attempt.outcome === 'failed') issues.push(`provider attempt ${attempt.attemptId} failed: ${attempt.error ?? 'unknown network error'}`);
+    if (expectedTimeoutAbort && attempt.outcome !== 'failed') {
+      issues.push(`expected timeout provider attempt ${attempt.attemptId} lacks terminal failed outcome`);
+    } else if (attempt.outcome === 'failed' && !expectedTimeoutAbort) {
+      issues.push(`provider attempt ${attempt.attemptId} failed: ${attempt.error ?? 'unknown network error'}`);
+    }
     intervals.push({ at: attempt.startedAt, delta: 1 }, { at: attempt.settledAt, delta: -1 });
   }
   intervals.sort((a, b) => a.at - b.at || a.delta - b.delta);
@@ -320,20 +327,23 @@ export function deriveScrollAcceptanceLatency(expectedIds, viewportEntryAtById, 
   return { latencyMsById, prefetchAcceptedIds, issues };
 }
 
-export function deriveScrollAggregateMetrics(scrollBands, viewportEntryAtById, acceptedAtById) {
-  const latency = deriveScrollAcceptanceLatency((scrollBands ?? []).flatMap(band => band.ids), viewportEntryAtById, acceptedAtById);
+export function deriveScrollAggregateMetrics(scrollBands, viewportEntryAtById, acceptedAtById, expectedAcceptedIds = null) {
+  const acceptedIds = expectedAcceptedIds ?? (scrollBands ?? []).flatMap(band => band.ids);
+  const acceptedIdSet = new Set(acceptedIds);
+  const latency = deriveScrollAcceptanceLatency(acceptedIds, viewportEntryAtById, acceptedAtById);
   const byBand = (scrollBands ?? []).map(({ band, ids }) => {
-    const values = ids.map(id => latency.latencyMsById[id]).filter(Number.isFinite).sort((a, b) => a - b);
+    const measurableIds = ids.filter(id => acceptedIdSet.has(id));
+    const values = measurableIds.map(id => latency.latencyMsById[id]).filter(Number.isFinite).sort((a, b) => a - b);
     const middle = Math.floor(values.length / 2);
     return {
-      band, targetCount: ids.length, measurableCount: values.length, prefetchCount: ids.filter(id => latency.prefetchAcceptedIds.includes(id)).length,
+      band, targetCount: measurableIds.length, measurableCount: values.length, prefetchCount: measurableIds.filter(id => latency.prefetchAcceptedIds.includes(id)).length,
       meanMs: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null,
       medianMs: values.length ? (values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2) : null,
       maxMs: values.length ? values.at(-1) : null,
     };
   });
-  const entries = Object.values(viewportEntryAtById ?? {});
-  const accepted = Object.values(acceptedAtById ?? {});
+  const entries = acceptedIds.map(id => viewportEntryAtById?.[id]).filter(Number.isFinite);
+  const accepted = acceptedIds.map(id => acceptedAtById?.[id]).filter(Number.isFinite);
   const lastViewportEntryAt = entries.length ? Math.max(...entries) : null;
   const fullAcceptanceAt = accepted.length ? Math.max(...accepted) : null;
   const completionLatencyMs = Number.isFinite(lastViewportEntryAt) && Number.isFinite(fullAcceptanceAt)

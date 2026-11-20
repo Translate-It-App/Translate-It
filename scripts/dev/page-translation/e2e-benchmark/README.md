@@ -98,6 +98,18 @@ BENCH_RESILIENCE_PROBES=gemini-structured-recovery \
 
 The separate `*-resilience-gemini-structured-recovery.json` artifact retains every physical attempt while excluding only the intentionally malformed primary response from canonical source accounting. It records production `PRIMARY_TRANSLATION` and `STRUCTURED_RECOVERY` execution purposes and verifies that the recovery retains the affected message, Page session, and targets; no QueueManager retry, API-key failover, parent/recursive recovery, or unaffected-batch retransmission occurs; and logical and physical concurrency remain within the observed effective limit of three. Exact translations, unique acceptance of all targets, real Restore, and strict runtime-resource/terminal cleanup must pass. Any missing correlation or unexpected request fails closed. This is a production-pipeline resilience check, not a live Gemini latency or quality test.
 
+### Isolated Google V2 production timeout probe (Phase 2.3.5)
+
+```sh
+BENCH_RESILIENCE_PROBES=googlev2-timeout \
+  BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/googlev2-timeout-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The probe holds one actual 25-target Google V2 Fetch request after concrete Page AUTO source resolution. It does not synthesize a response or timeout: production's 60-second batch deadline and cancellation execute normally, while sibling requests receive ordinary deterministic Google responses. Only the held-request observation is extended (to allow the actual 60-second deadline); other harness deadlines remain unchanged. The `*-resilience-googlev2-timeout.json` artifact separates the content `OPERATION_TIMEOUT` from the internal provider abort and retains exact request/message/session/controller/root/physical/QueueManager evidence. Passing requires one QueueManager attempt with no retry or failover, successful unrelated requests, logical and physical concurrency no greater than two, exactly 975 accepted writes and 25 unchanged/unmarked/unaccepted targets, exact Restore, strict runtime-resource validation, and settled held Fetch plus drained request handlers before Chrome teardown. Cleanup releases the held request on every path and fails closed if its release or handler drain is unproven. This is a correctness probe, not a performance sample or live Google test.
+
 ### Custom provider offline matrix
 
 This opt-in lane exercises the production `CustomProvider` and parser through the real scheduler and provider pipeline. The harness intercepts the exact synthetic `https://benchmark-custom.invalid/v1/chat/completions` POST only when `BENCH_PROVIDER=custom` selects this lane; requests to that endpoint are blocked in discovery runs and other provider lanes. The fixed model is `benchmark-custom-model`; the harness sets `CUSTOM_API_KEY` blank, rejects Authorization headers, validates the actual JSON request, and returns reversed structured translations with the exact wire IDs. No credentials or live provider traffic are used. HTTP sequence `ids` are fixture target IDs mapped from request texts; Custom parser wire IDs are recorded separately as `wireIds`. Each successful trial requires one HTTP request per observed logical batch, exact source and DOM accounting, and correlated terminal network outcomes; retries or structured-recovery requests fail the trial.

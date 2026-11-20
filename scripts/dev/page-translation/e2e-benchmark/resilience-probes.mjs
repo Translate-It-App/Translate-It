@@ -1,14 +1,14 @@
 export function parseResilienceProbeSelection(value) {
   if (!value) return [];
   const selections = value.split(',').map(item => item.trim()).filter(Boolean);
-  if (selections.length !== 1 || !['googlev2-503', 'custom-429', 'custom-400', 'gemini-structured-recovery'].includes(selections[0])) {
-    throw new TypeError('BENCH_RESILIENCE_PROBES supports only googlev2-503, custom-429, custom-400, or gemini-structured-recovery.');
+  if (selections.length !== 1 || !['googlev2-503', 'googlev2-timeout', 'custom-429', 'custom-400', 'gemini-structured-recovery'].includes(selections[0])) {
+    throw new TypeError('BENCH_RESILIENCE_PROBES supports only googlev2-503, googlev2-timeout, custom-429, custom-400, or gemini-structured-recovery.');
   }
   return selections;
 }
 
 export function shouldEnableResilienceQueueProbe(probe) {
-  return probe === 'googlev2-503' || probe === 'custom-429' || probe === 'custom-400' || probe === 'gemini-structured-recovery';
+  return probe === 'googlev2-503' || probe === 'googlev2-timeout' || probe === 'custom-429' || probe === 'custom-400' || probe === 'gemini-structured-recovery';
 }
 
 export function validateResilienceProbeIsolation({ selected, probe, provider, optimizationLevel, modes, scenario, schedulingMode, competingProbe }) {
@@ -20,7 +20,7 @@ export function validateResilienceProbeIsolation({ selected, probe, provider, op
       || modes !== undefined && modes !== 'sliced'
       || scenario !== undefined && scenario !== 'scroll-through'
       || schedulingMode !== undefined && schedulingMode !== 'fluid') {
-    throw new TypeError(`${gemini ? 'Gemini structured recovery' : custom ? 'Custom 429' : 'Google V2 503'} resilience probe requires an isolated ${gemini ? 'Gemini' : custom ? 'Custom' : 'Google V2'} Level 3 Sliced/scroll-through/Fluid run.`);
+    throw new TypeError(`${gemini ? 'Gemini structured recovery' : custom ? 'Custom 429' : probe === 'googlev2-timeout' ? 'Google V2 timeout' : 'Google V2 503'} resilience probe requires an isolated ${gemini ? 'Gemini' : custom ? 'Custom' : 'Google V2'} Level 3 Sliced/scroll-through/Fluid run.`);
   }
   return true;
 }
@@ -428,6 +428,226 @@ export function selectResolvedGoogleAttempt({ request, classification, resolver,
     return { selected: false, reason: 'request-source-does-not-match-resolved-page-source' };
   }
   return { selected: true, source: resolver.effectiveSourceLanguage, target: resolver.effectiveTargetLanguage };
+}
+
+export function selectResolvedGoogleTimeoutBatch({ request, classification, resolver, roots = [], failedCount, armed = false }) {
+  if (!armed) return { selected: false, reason: 'initial-band-not-yet-accepted' };
+  const selected = selectResolvedGoogleAttempt({ request, classification, resolver, failedCount });
+  if (!selected.selected) return selected;
+  const matches = roots.filter(root => root.sessionId === request.sessionId
+    && typeof root.messageId === 'string' && root.messageId
+    && Array.isArray(root.texts) && JSON.stringify(root.texts) === JSON.stringify(request.texts));
+  const targetIds = request.targetIds;
+  if (request.texts?.length !== 25 || matches.length !== 1
+      || !Array.isArray(targetIds) || targetIds.length !== 25
+      || targetIds.some(id => typeof id !== 'string') || new Set(targetIds).size !== 25) {
+    return { selected: false, reason: 'batch-size-or-logical-correlation-not-unique' };
+  }
+  return { ...selected, selected: true, messageId: matches[0].messageId,
+    sessionId: matches[0].sessionId, targetIds: [...targetIds], texts: [...request.texts] };
+}
+
+export function requireGoogleTimeoutReservation(reservation) {
+  if (typeof reservation?.hold !== 'function' || typeof reservation.waitForRelease !== 'function'
+      || typeof reservation.release !== 'function') {
+    throw new Error('Google timeout probe requires a request-lifecycle Fetch reservation.');
+  }
+  return reservation;
+}
+
+export function claimGoogleTimeoutRequest(protocol) {
+  if (!protocol || protocol.claimed || protocol.held) return false;
+  protocol.claimed = true;
+  return true;
+}
+
+export function commitGoogleTimeoutRequest(protocol, hold) {
+  if (!protocol?.claimed || protocol.held || !hold) return false;
+  protocol.held = hold;
+  protocol.claimed = false;
+  return true;
+}
+
+export function findGoogleTimeoutCancelMessage(operations, messageId, sessionId) {
+  return (operations ?? []).find(item => item.kind === 'runtime.cancel.send'
+    && item.action === 'CANCEL_TRANSLATION' && item.messageId === messageId
+    && (item.targetSessionId == null || item.targetSessionId === sessionId)
+    && item.status === 'fulfilled' && item.response?.success === true) ?? null;
+}
+
+export function findGoogleTimeoutBatchError(operations, sessionId, targetIds) {
+  const matchesTargets = item => JSON.stringify(item?.targetIds) === JSON.stringify(targetIds);
+  const batches = (operations ?? []).filter(item => item.kind === 'scheduler.batch'
+    && item.sessionId === sessionId && matchesTargets(item));
+  const errors = (operations ?? []).filter(item => item.kind === 'scheduler.batch.error'
+    && item.sessionId === sessionId && matchesTargets(item) && item.errorType === 'OPERATION_TIMEOUT');
+  if (batches.length !== 1 || errors.length !== 1) return null;
+  const [batch] = batches;
+  const [error] = errors;
+  if (batch.status !== 'fulfilled' || !Number.isFinite(batch.settledAt)) return null;
+  return {
+    ...error,
+    startedAt: batch.startedAt,
+    settledAt: error.wallTime,
+    schedulerBatchStatus: batch.status,
+    schedulerBatchSettledAt: batch.settledAt ?? null,
+  };
+}
+
+export function validateGoogleTimeoutEvidence(evidence) {
+  const issues = [];
+  const held = evidence.heldRequest;
+  const timedOut = evidence.timeout;
+  const cancel = evidence.cancel;
+  const serviceTimeout = evidence.serviceTimeout;
+  const queue = evidence.queueAttemptEvidence;
+  const attempts = evidence.attempts ?? [];
+  const translation = evidence.translation ?? {};
+  const expectedTargets = new Set(translation.expectedTargetIds ?? []);
+  const elapsed = timedOut?.settledAt - timedOut?.startedAt;
+  if (!held?.messageId || held?.sessionId !== evidence.sessionId || held?.method !== 'POST'
+      || typeof held?.url !== 'string' || !held.url || typeof held?.requestBody !== 'string'
+      || held?.targetIds?.length !== 25 || new Set(held?.targetIds ?? []).size !== 25) {
+    issues.push('held Google request lacks one session-owned 25-target provider message');
+  }
+  if (timedOut?.errorType !== 'OPERATION_TIMEOUT' || timedOut?.sessionId !== evidence.sessionId
+      || JSON.stringify(timedOut?.targetIds) !== JSON.stringify(held?.targetIds)
+      || timedOut?.schedulerBatchStatus !== 'fulfilled'
+      || !Number.isFinite(timedOut?.schedulerBatchSettledAt)
+      || timedOut.schedulerBatchSettledAt < timedOut.settledAt
+      || !Number.isFinite(elapsed) || elapsed < 59_000 || elapsed > 65_000
+      || !Number.isFinite(held?.startedAt) || timedOut.startedAt > held.startedAt) {
+    issues.push('affected batch did not surface production OPERATION_TIMEOUT after approximately 60 seconds');
+  }
+  if (cancel?.action !== 'CANCEL_TRANSLATION' || cancel?.messageId !== held?.messageId
+      || cancel?.targetSessionId && cancel.targetSessionId !== evidence.sessionId
+      || cancel?.status !== 'fulfilled' || cancel?.response?.success !== true
+      || serviceTimeout?.messageId !== held?.messageId || serviceTimeout?.sessionId !== evidence.sessionId
+      || serviceTimeout?.status !== 'fulfilled' || serviceTimeout?.controllerMatched !== true
+      || serviceTimeout?.controllerAbortedBefore !== false || serviceTimeout?.controllerAbortedAfter !== true
+      || serviceTimeout?.response?.handled !== true || serviceTimeout?.response?.success !== true) {
+    issues.push('real cancellation did not acknowledge the exact affected message and Page session');
+  }
+  if (evidence.controller?.messageId !== held?.messageId || evidence.controller?.sessionId !== evidence.sessionId
+      || evidence.controller?.sequence <= serviceTimeout?.sequence || evidence.controller?.aborted !== true) {
+    issues.push('matching provider request controller abort was not observed after timeout');
+  }
+  if (evidence.providerRoot?.messageId !== held?.messageId || evidence.providerRoot?.status !== 'rejected'
+      || evidence.providerRoot?.operationAborted !== true
+      || evidence.providerRoot?.settledSequence <= evidence.controller?.sequence
+      || evidence.physicalMatchCount !== 1
+      || evidence.physical?.messageId !== held?.messageId || evidence.physical?.status !== 'rejected'
+        || evidence.physical?.sessionId !== held?.sessionId
+        || evidence.physical?.url !== held?.url || evidence.physical?.method !== held?.method
+        || evidence.physical?.requestBody !== held?.requestBody
+        || evidence.physical?.controllerAbortedAtEnd !== true
+        || evidence.physical?.settledSequence <= evidence.controller?.sequence
+        || !(evidence.physical?.operationAborted === true || evidence.physical?.abortReasonMatched === true)
+        || evidence.physical.errorType === 'OPERATION_TIMEOUT') {
+    issues.push('provider root and physical request did not settle after the matching abort');
+  }
+  if (evidence.classification?.userFacingType !== 'OPERATION_TIMEOUT'
+      || evidence.classification?.userFacingName !== timedOut?.errorName
+      || evidence.classification?.userFacingErrorType !== 'OPERATION_TIMEOUT'
+      || evidence.classification?.internalAbortType !== 'OPERATION_ABORTED'
+      || evidence.classification?.internalAbortName !== (evidence.physical?.errorName ?? null)) {
+    issues.push('user-facing timeout and internal provider abort are not distinctly classified');
+  }
+  if (queue?.ok !== true) issues.push(...(queue?.issues ?? ['QueueManager single-attempt timeout evidence unavailable']));
+  if (evidence.retries?.length || evidence.failovers?.length) issues.push('retry or provider failover was observed');
+  if (evidence.unnecessaryRetransmits?.length) issues.push('affected timeout targets were retransmitted in another physical request');
+  if (evidence.selectionFailures?.length) issues.push('eligible complete Google batch failed strict timeout selection');
+  const selectedAttempts = attempts.filter(item => item.selected === true);
+  const siblingAttempts = attempts.filter(item => item.selected !== true);
+  const attemptIdentities = attempts.map(item => `${item.networkSessionId}:${item.networkId}`);
+  const siblingAttemptIdentities = siblingAttempts.map(item => `${item.networkSessionId}:${item.networkId}`).sort();
+  const siblingEvidenceIdentities = (evidence.siblingRequests ?? []).map(item => `${item.networkSessionId}:${item.networkId}`).sort();
+  const physicalTargetCounts = new Map();
+  for (const attempt of attempts) {
+    if (!Array.isArray(attempt.targetIds) || !attempt.targetIds.length || attempt.targetIds.length > 25
+        || new Set(attempt.targetIds).size !== attempt.targetIds.length
+        || attempt.targetIds.some(id => typeof id !== 'string' || !expectedTargets.has(id))) {
+      issues.push('physical Google attempt has invalid, duplicate, or out-of-fixture target IDs');
+    }
+    for (const id of attempt.targetIds ?? []) physicalTargetCounts.set(id, (physicalTargetCounts.get(id) ?? 0) + 1);
+  }
+  const duplicatePhysicalTargets = [...physicalTargetCounts].filter(([, count]) => count !== 1).map(([id]) => id);
+  const missingPhysicalTargets = [...expectedTargets].filter(id => physicalTargetCounts.get(id) !== 1);
+  if (expectedTargets.size !== 1000 || missingPhysicalTargets.length || duplicatePhysicalTargets.length) {
+    issues.push('physical Google attempts do not cover every expected target exactly once');
+  }
+  if (!attempts.length || selectedAttempts.length !== 1
+       || selectedAttempts[0]?.networkId !== held?.networkId
+       || selectedAttempts[0]?.networkSessionId !== held?.networkSessionId
+       || selectedAttempts[0]?.logicalMessageId !== held?.messageId
+       || JSON.stringify(selectedAttempts[0]?.targetIds) !== JSON.stringify(held?.targetIds)
+       || selectedAttempts[0]?.targetIds?.length !== 25
+       || selectedAttempts[0]?.outcome !== 'failed'
+       || siblingAttempts.some(item => item.outcome !== 'finished' || item.status !== 200)
+       || evidence.siblingRequests?.length !== siblingAttempts.length
+       || JSON.stringify(siblingEvidenceIdentities) !== JSON.stringify(siblingAttemptIdentities)
+       || new Set((evidence.siblingRequests ?? []).map(item => `${item.networkSessionId}:${item.networkId}`)).size !== siblingAttempts.length
+       || (evidence.siblingRequests ?? []).some(item => item.outcome !== 'finished' || item.status !== 200)
+       || attemptIdentities.some(identity => identity.endsWith(':null') || identity.startsWith('null:'))
+       || new Set(attemptIdentities).size !== attempts.length) {
+    issues.push('expected exactly one selected held request and successful, uniquely correlated siblings');
+  }
+  if (evidence.concurrency?.peakPhysical > 2 || evidence.concurrency?.peakLogical > 2
+      || !Number.isFinite(evidence.concurrency?.peakPhysical) || !Number.isFinite(evidence.concurrency?.peakLogical)) {
+    issues.push('logical or physical concurrency exceeded two or is unavailable');
+  }
+  const expectedAccepted = [...expectedTargets].filter(id => !held?.targetIds?.includes(id));
+  const observedAccepted = new Set(translation.acceptedWriteIds ?? []);
+  const failedDOMIds = evidence.failedTargetDOM?.expected?.map(item => item?.[0]) ?? [];
+  if (translation.targetCount !== 1000 || translation.acceptedTargetCount !== 975
+      || translation.failedTargetCount !== 25 || translation.exact !== true
+      || translation.restoreExact !== true || translation.failedSourcePreserved !== true
+      || translation.failedTargetsUnmarked !== true || translation.acceptedWriteCount !== 975
+      || translation.acceptedUniqueCount !== 975 || evidence.failedTargetDOM?.ok !== true
+      || translation.terminal !== true || translation.sessionOwner !== evidence.sessionId
+      || translation.duplicateAcceptedIds?.length
+      || !Array.isArray(translation.acceptedWriteIds) || translation.acceptedWriteIds.length !== 975
+      || translation.acceptedWriteIds.some(id => held?.targetIds?.includes(id))
+      || new Set(translation.acceptedWriteIds).size !== 975
+      || expectedTargets.size !== 1000 || expectedAccepted.length !== 975
+      || expectedAccepted.some(id => !observedAccepted.has(id))
+      || [...observedAccepted].some(id => !expectedTargets.has(id))
+      || JSON.stringify(failedDOMIds) !== JSON.stringify(held?.targetIds)) {
+    issues.push('Google timeout did not produce exact 975 accepted / 25 unchanged partial accounting and Restore');
+  }
+  if (evidence.cleanup?.ok !== true || evidence.cleanup?.heldFetchSettled !== true
+      || evidence.cleanup?.handlersDrained !== true || evidence.cleanup?.handlerCount !== 0
+      || evidence.cleanup?.heldFetch?.requestId !== held?.requestId
+      || evidence.cleanup?.heldFetch?.handlerSettled !== true
+      || !evidence.cleanup?.heldFetch?.releaseOutcome
+      || !evidence.cleanup?.heldFetch?.releaseClassification
+      || evidence.cleanup?.requestLifecycle?.ok !== true
+      || evidence.cleanup?.resourceValidation?.ok !== true
+      || evidence.cleanup?.contentDrain?.pendingOperations !== 0
+      || evidence.cleanup?.workerDrain?.ledger?.pending !== 0
+      || evidence.cleanup?.workerDrain?.providerRoots?.some(root => root.status === 'pending')) {
+    issues.push('runtime resources or held Fetch handlers did not settle cleanly');
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+export function validateGoogleTimeoutQueueEvidence(events, { messageId } = {}) {
+  const matched = (events ?? []).filter(event => event.messageId === messageId
+    && ['queueManager.processItem.start', 'queueManager.processItem.end'].includes(event.name));
+  const starts = matched.filter(event => event.name.endsWith('.start'));
+  const ends = matched.filter(event => event.name.endsWith('.end'));
+  const start = starts[0];
+  const end = ends[0];
+  const issues = [];
+  if (!messageId || starts.length !== 1 || ends.length !== 1) issues.push('expected exactly one QueueManager start and settlement for the affected timeout message');
+  if (!start?.queueItemId || start.queueItemId !== end?.queueItemId || start.messageId !== messageId || end.messageId !== messageId) {
+    issues.push('QueueManager timeout attempt did not retain one queue item and message ID');
+  }
+  if (start?.attemptNumber !== 1 || end?.attemptNumber !== 1 || end?.attempts !== 1
+      || end?.status !== 'failed' || end?.retryTimerActive !== false) {
+    issues.push('QueueManager timeout was not one terminal attempt without retry');
+  }
+  return { ok: issues.length === 0, issues, observed: { messageId: messageId ?? null, starts, ends } };
 }
 
 export function validateResilienceAccounting(evidence) {
