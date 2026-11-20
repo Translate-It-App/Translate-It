@@ -18,7 +18,7 @@ import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, find
 import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, modeOrder, mapProviderBatchIds, parseProviderLane, providerLaneSettings, providerLaneFinalization, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
-import { findSessionOwnedPendingRequest, parseResilienceProbeSelection, selectResolvedGoogleAttempt, selectResolvedGeminiAttempt, shouldEnableResilienceQueueProbe, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './resilience-probes.mjs';
+import { findSessionOwnedPendingRequest, isCustom400ProbeWindowRequest, parseResilienceProbeSelection, partitionBandAcceptance, selectResolvedCustom400Batch, selectResolvedGoogleAttempt, selectResolvedGeminiAttempt, shouldEnableResilienceQueueProbe, validateCustom400Evidence, validateCustom400QueueEvidence, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './resilience-probes.mjs';
 
 const root = process.cwd();
 const providerLane = parseProviderLane(process.env);
@@ -423,6 +423,9 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
   const custom429Protocol = resilienceProbe === 'custom-429' ? {
     armed: false, roles: new Map(), releaseStates: new Map(), error: null, evidence: { events: [] },
   } : null;
+  const custom400Protocol = resilienceProbe === 'custom-400' ? {
+    armed: false, considered: false, injected: false, initialTargetIds: [], evidence: { injected400: [], attempts: [], selectionFailures: [], unexpectedRecovery: [], queueRetries: [], keyFailovers: [], circuitBreakers: [] },
+  } : null;
   const releaseCustomPaused = async (role, status, body, headers = [{ name: 'Content-Type', value: 'application/json' }]) => {
     if (!custom429Protocol || custom429Protocol.releaseStates.has(role)) throw new Error(`Custom 429 ${role} Fetch already has a settlement in progress or completed.`);
     const claim = custom429Protocol.roles.get(role);
@@ -611,6 +614,66 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           requestRecord.batchIds = decoded.ids;
           requestRecord.batchTexts = body;
           responseBody = mapCustomResponse(decoded);
+          if (custom400Protocol?.armed) {
+            const networkId = event.params.networkId ?? null;
+            const startedWallMs = providerNetworkEvents.get(`${event.sessionId}:${networkId}`)?.wallTime ?? null;
+            if (isCustom400ProbeWindowRequest(requestRecord, custom400Protocol.armedWallMs)) {
+              const consider400 = !custom400Protocol.considered;
+              if (consider400) custom400Protocol.considered = true;
+            const resources = await evaluate(chrome, workerSession,
+              `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false);
+            const snapshot = await evaluate(chrome, workerSession,
+              'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
+            const resolver = resources?.sourceResolvers?.[trial.sessionId];
+            const targetIds = decoded.texts.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
+            const selection = consider400 ? selectResolvedCustom400Batch({
+              request: {
+                networkId, sessionId: trial.sessionId, texts: decoded.texts, targetIds,
+                physicalStartedWallMs: Number.isFinite(startedWallMs) ? startedWallMs : requestRecord.startedAt,
+              },
+              classification, resolver, roots: snapshot?.providerRoots ?? [],
+              failedCount: custom400Protocol.injected ? 1 : 0,
+              initialTargetIds: custom400Protocol.initialTargetIds,
+              armedWallMs: custom400Protocol.armedWallMs,
+            }) : { selected: false, reason: 'request-started-before-arm' };
+            if (consider400 && !selection.selected) custom400Protocol.evidence.selectionFailures.push({
+              reason: selection.reason, networkId, targetIds, texts: decoded.texts,
+            });
+            const roots = (snapshot?.providerRoots ?? []).filter(root => root.sessionId === trial.sessionId
+              && sameProviderTexts(root.texts, decoded.texts));
+            const root = roots.length === 1 ? roots[0] : null;
+            const attempt = {
+              attemptId: `custom-400-${custom400Protocol.evidence.attempts.length + 1}`,
+              networkId, networkSessionId: event.sessionId,
+              logicalMessageId: root?.messageId ?? null, pageSessionId: trial.sessionId,
+              targetIds, texts: decoded.texts, status: 200,
+            };
+            custom400Protocol.evidence.attempts.push(attempt);
+            if (selection.selected) {
+              custom400Protocol.injected = true;
+              attempt.status = 400;
+              const failure = {
+                ...attempt, status: 400, selectedAt: now(),
+                errorBody: { error: { code: 400, message: 'Invalid request parameters' } },
+                source: selection.source, target: selection.target,
+              };
+              custom400Protocol.evidence.injected400.push(failure);
+              requestRecord.custom400Failure = failure;
+              if (fixtureConfig.scenario === 'scroll-through' && pageSession && contentContext) {
+                requestRecord.requestViewport = await evaluate(chrome, pageSession,
+                  `(()=>{const sources=${JSON.stringify(body)};return {at:performance.now(),scrollY,targets:sources.map(source=>{const el=[...document.querySelectorAll('[data-bench-id]')].find(node=>node.textContent===source);if(!el)return {source,id:null,classification:'unmapped'};const r=el.getBoundingClientRect();const visible=r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth;const buffered=r.bottom>-50&&r.top<innerHeight+50&&r.right>-50&&r.left<innerWidth+50;return {source,id:el.dataset.benchId,classification:visible?'viewport':buffered?'permitted-50px-buffer':'outside-buffer'}})}})()`,
+                  contentContext, false);
+              }
+              await sendBySession.get(event.sessionId)('Fetch.fulfillRequest', {
+                requestId, responseCode: 400,
+                responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+                body: Buffer.from(JSON.stringify(failure.errorBody)).toString('base64'),
+              }, event.sessionId);
+              requestRecord.response = { status: 400, endedAt: now() };
+              return;
+            }
+            }
+          }
         } else if (providerLane?.provider === 'gemini') {
           const decoded = decodeGeminiRequest({
             method: request.method, url: request.url, body: request.postData ?? '',
@@ -1465,6 +1528,29 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         };
         resilienceEvidence.arm = custom429Protocol.evidence.armed;
       }
+      if (custom400Protocol) {
+        const armed = await until(async () => {
+          const [resources, pageState] = await Promise.all([
+            evaluate(chrome, workerSession,
+              `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(sessionId)}])`, undefined, false),
+            evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+          ]);
+          const resolver = resources?.sourceResolvers?.[sessionId];
+          if (!resolver?.present || resolver.resolutionPending !== false
+              || !resolver.effectiveSourceLanguage || resolver.effectiveSourceLanguage === 'auto'
+              || !resolver.effectiveTargetLanguage || pageState?.translationSessionId !== sessionId) return null;
+          return { resolver, pageState };
+        }, 60_000);
+        custom400Protocol.armed = true;
+        custom400Protocol.armedWallMs = now();
+        custom400Protocol.initialTargetIds = [...initialIds];
+        resilienceEvidence.arm = {
+          atWallMs: now(), sessionId, resolver: armed.resolver,
+          pageTranslationSessionId: armed.pageState.translationSessionId,
+          initialAcceptedTargetIds: initialIds,
+        };
+        custom400Protocol.evidence.arm = resilienceEvidence.arm;
+      }
       const phases = [];
       const bandedProviderLane = usesBandedProviderScroll(providerLane?.provider);
       for (const [label, y, bandIndex, waitBeforeMs] of scrollThroughPhases(bandedProviderLane)) {
@@ -1478,10 +1564,17 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           if (!visibleValidation.ok) throw new Error(`Native scroll did not expose the complete ${label}: ${visibleValidation.issues.join('; ')}`);
           const accepted = await until(async () => {
             const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
-            return band.ids.every(id => state?.acceptedIds.includes(id)) ? state : null;
+            const failedIds = new Set(custom400Protocol?.evidence.injected400?.[0]?.targetIds ?? []);
+            return band.ids.every(id => failedIds.has(id) || state?.acceptedIds.includes(id)) ? state : null;
           }, 30_000);
-          trial.scrollThrough.bandAcceptance.push({ band: band.band, targetCount: band.ids.length, acceptedIds: band.ids,
-            acceptedCount: accepted.acceptedIds.length, acceptedAtById: Object.fromEntries(band.ids.map(id => [id, accepted.acceptedPerformanceAtById?.[id] ?? null])) });
+          const { acceptedIds, failedTargetIds } = partitionBandAcceptance(
+            band.ids, accepted.acceptedIds, custom400Protocol?.evidence.injected400[0]?.targetIds ?? []);
+          const checkpointAcceptedIds = custom400Protocol ? acceptedIds : band.ids;
+          trial.scrollThrough.bandAcceptance.push({ band: band.band, targetCount: band.ids.length,
+            ...(custom400Protocol ? { failedTargetIds } : {}),
+            acceptedIds: checkpointAcceptedIds,
+            acceptedCount: custom400Protocol ? acceptedIds.length : accepted.acceptedIds.length,
+            acceptedAtById: Object.fromEntries(band.ids.map(id => [id, accepted.acceptedPerformanceAtById?.[id] ?? null])) });
         }
         if (!bandedProviderLane && label === 'revisit-band-2') {
           await new Promise(resolve => setTimeout(resolve, 750));
@@ -2940,7 +3033,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           const expectedCount = fixtureConfig.scenario === 'shadow-dom' ? fixtureConfig.shadowTargets.length
             : fixtureConfig.targets.length + (fixtureConfig.dynamicCohorts?.reduce((total, cohort) => total + cohort.targets.length, 0) ?? 0);
           const terminal = fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'shadow-dom' || fixtureConfig.scenario === 'scroll-through'
-            ? findFinalTranslationTerminal(events, sessionId, expectedCount)
+            ? findFinalTranslationTerminal(events, sessionId, expectedCount,
+              resilienceProbe === 'custom-400' ? 25 : 0)
             : events.find(event => ['page-translate-complete', 'page-translate-idle'].some(action => isSessionEvent(event, action, sessionId)));
           if (terminal) trial.terminal = terminal;
           if (fixtureConfig.scenario === 'dynamic-dom' && dynamicCohortsInserted === 1) {
@@ -2996,15 +3090,42 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
             }
             trial.shadowDOM.acceptedTargetStates = acceptedStates;
           }
-          const dom = await evaluate(chrome, pageSession,
-            fixtureConfig.scenario === 'shadow-dom'
-              ? `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;return ${JSON.stringify(fixtureConfig.shadowTargets.map(target => target.id))}.map(id=>{const el=t.get(id);return [id,el?.dataset.benchKind==='title'?el.getAttribute('title'):el?.textContent]})})()`
-              : `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
-          trial.rawDOM.translated = dom;
-          return dom.length === originals.length && dom.every(([id, value]) => {
-            const source = originalById.get(id);
-            return source !== undefined && value === `\u200efixture translation: ${source}`;
-          }) ? { terminal, dom } : null;
+           const dom = await evaluate(chrome, pageSession,
+             fixtureConfig.scenario === 'shadow-dom'
+               ? `(()=>{const t=window.__pageTranslationBenchmark.shadowTargetById;return ${JSON.stringify(fixtureConfig.shadowTargets.map(target => target.id))}.map(id=>{const el=t.get(id);return [id,el?.dataset.benchKind==='title'?el.getAttribute('title'):el?.textContent]})})()`
+               : `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>[el.dataset.benchId,el.textContent])`, contentContext, false);
+           trial.rawDOM.translated = dom;
+           const failedIds = new Set(custom400Protocol?.evidence.injected400[0]?.targetIds ?? []);
+           if (custom400Protocol?.evidence.injected400[0]) {
+             const failedTargets = [...failedIds];
+             const observed = await evaluate(chrome, pageSession,
+               `(${JSON.stringify(failedTargets)}).map(id=>{const el=document.querySelector('[data-bench-id="'+CSS.escape(id)+'"]');return [id,el?.textContent??null,{pageTranslated:el?.hasAttribute('data-page-translated')??false,hasOriginal:el?.hasAttribute('data-has-original')??false}]})`,
+               contentContext, false);
+             custom400Protocol.evidence.failedTargetDOM = {
+               expected: failedTargets.map(id => [id, originalById.get(id), { pageTranslated: false, hasOriginal: false }]),
+               observed,
+             };
+           }
+           const translationReady = dom.length === originals.length && dom.every(([id, value]) => {
+             const source = originalById.get(id);
+             if (source === undefined) return false;
+             return failedIds.has(id) ? value === source : value === `\u200efixture translation: ${source}`;
+           });
+           if (!translationReady) return null;
+           if (custom400Protocol) {
+             const preArmRequests = trial.requests.filter(request => request.category === 'provider-translation'
+               && request.startedAt < custom400Protocol.armedWallMs);
+             const outstanding = preArmRequests.filter(request => {
+               const network = providerNetworkEvents.get(`${request.targetSessionId}:${request.networkId}`);
+               return !Number.isFinite(request.endedAt) || !['finished', 'failed'].includes(network?.outcome);
+             });
+             if (outstanding.length) return null;
+             custom400Protocol.evidence.preRestorePreArmDrain = {
+               ok: true, requestCount: preArmRequests.length, outstandingCount: 0,
+               networkIds: preArmRequests.map(request => request.networkId ?? null),
+             };
+           }
+           return { terminal, dom };
         }, 60_000);
         trial.timestamps.terminalObservedByHarness = now();
         return accepted;
@@ -3070,6 +3191,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     if (fixtureConfig.scenario === 'scroll-through') {
       const scrollValidation = validateScrollThroughEvidence({
         expectedIds: fixtureConfig.targets.map(target => target.id),
+        expectedAcceptedIds: resilienceProbe === 'custom-400'
+          ? fixtureConfig.targets.map(target => target.id).filter(id =>
+            !custom400Protocol.evidence.injected400[0]?.targetIds.includes(id))
+          : undefined,
         viewportEntryAtById: contentTrace.viewportEntryAtById,
         acceptedAtById: contentTrace.acceptedPerformanceAtById,
         pipelineStages: contentTrace.scrollThroughStages,
@@ -3196,10 +3321,13 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     trial.selectedBatchMembers = contentObservation.selectedBatchMembers;
     trial.acceptedDomOrder = contentEvents.filter(event => event.name === 'dom.acceptedWrite').map(event => event.id);
     trial.duplicateAcceptedWriteIds = contentTrace.duplicateAcceptedIds ?? [];
+    const expectedAcceptedIds = custom400Protocol?.evidence.injected400[0]
+      ? expectedIds.filter(id => !custom400Protocol.evidence.injected400[0].targetIds.includes(id))
+      : expectedIds;
     const orderValidation = [
       validateExactTargetIds('Scheduler enqueue', enqueuedIds, expectedIds),
       validateExactTargetIds('filtered primitive admission', admissionIds, expectedIds),
-      validateExactTargetIds('accepted DOM write', acceptedIds, expectedIds),
+      validateExactTargetIds('accepted DOM write', acceptedIds, expectedAcceptedIds),
       validateExactTargetIds('selected scheduler batch', selectedBatchIds, expectedIds),
     ];
     const orderIssues = orderValidation.flatMap(validation => validation.issues);
@@ -3247,6 +3375,10 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           && providerAttempts.length !== trial.providerLogicalBatches.logicalBatchCount + 1) {
         throw new Error(`Custom 429 probe must observe one extra physical retry: ${providerAttempts.length}/${trial.providerLogicalBatches.logicalBatchCount + 1}`);
       }
+      if (providerLane.provider === 'custom' && resilienceProbe === 'custom-400'
+          && providerAttempts.length !== trial.providerLogicalBatches.logicalBatchCount) {
+        throw new Error(`Custom 400 probe must observe one physical request per logical batch: ${providerAttempts.length}/${trial.providerLogicalBatches.logicalBatchCount}`);
+      }
       if (providerLane.provider === 'custom' && !resilienceProbe && providerAttempts.length !== trial.providerLogicalBatches.logicalBatchCount) {
         throw new Error(`Custom physical request count must equal logical batch count (no retries/recovery): ${providerAttempts.length}/${trial.providerLogicalBatches.logicalBatchCount}`);
       }
@@ -3261,16 +3393,30 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         ? Math.min(...Object.values(contentTrace.firstAcceptedAtById).filter(Number.isFinite)) : null;
       trial.totalCompletionAt = trial.terminal?.receivedAt ?? null;
     }
+    const custom400FailedIds = new Set(custom400Protocol?.evidence.injected400[0]?.targetIds ?? []);
+    const custom400FailedTexts = new Set(custom400Protocol?.evidence.injected400[0]?.texts ?? []);
+    const validationOriginals = custom400FailedIds.size
+      ? originalsFromDom.filter(([id]) => !custom400FailedIds.has(id)) : originalsFromDom;
+    const validationTranslated = custom400FailedIds.size
+      ? translatedFromDom.filter(([id]) => !custom400FailedIds.has(id)) : translatedFromDom;
+    const validationRestored = custom400FailedIds.size
+      ? new Map([...new Map(restoredLifecycle.dom)].filter(([id]) => !custom400FailedIds.has(id)))
+      : new Map(restoredLifecycle.dom);
     trial.validation = validateTranslation({
-      originals: originalsFromDom,
-      translated: translatedFromDom,
-      requests: providerSources,
-      restored: new Map(restoredLifecycle.dom),
-      expectedCount: originals.length,
-      acceptedIds,
-      enqueuedIds,
-      admittedIds: admissionIds,
+      originals: validationOriginals,
+      translated: validationTranslated,
+      requests: custom400FailedIds.size ? providerSources.filter(text => !custom400FailedTexts.has(text)) : providerSources,
+      restored: validationRestored,
+      expectedCount: validationOriginals.length,
+      acceptedIds: custom400FailedIds.size ? acceptedIds.filter(id => !custom400FailedIds.has(id)) : acceptedIds,
+      enqueuedIds: custom400FailedIds.size ? enqueuedIds.filter(id => !custom400FailedIds.has(id)) : enqueuedIds,
+      admittedIds: custom400FailedIds.size ? admissionIds.filter(id => !custom400FailedIds.has(id)) : admissionIds,
     });
+    if (custom400FailedIds.size && (
+      JSON.stringify(restoredLifecycle.dom) !== JSON.stringify(originals)
+      || custom400FailedIds.size !== 25
+      || originalsFromDom.filter(([id]) => custom400FailedIds.has(id)).length !== 25
+    )) throw new Error('Custom 400 failed targets were not preserved/restored exactly.');
     if (!trial.validation.ok) throw new Error(trial.validation.issues.join('; '));
     const unexpectedExternal = trial.requests.find(request => request.category === 'blocked');
     if (unexpectedExternal) throw new Error(`Unexpected external request blocked: ${unexpectedExternal.url}`);
@@ -3296,7 +3442,9 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       if (!trial.providerSchedulerValidation.ok) throw new Error(trial.providerSchedulerValidation.issues.join('; '));
     }
     if (resilienceProbe) {
-      const terminalMessageIds = resilienceProbe === 'custom-429'
+      const terminalMessageIds = resilienceProbe === 'custom-400'
+        ? [custom400Protocol.evidence.injected400[0]?.logicalMessageId].filter(id => typeof id === 'string')
+        : resilienceProbe === 'custom-429'
         ? ['A', 'B'].map(role => custom429Protocol.evidence.roles?.[role]?.messageId)
           .concat(custom429Protocol.evidence.pending?.messageId).filter(id => typeof id === 'string')
         : resilienceProbe === 'gemini-structured-recovery'
@@ -3314,16 +3462,19 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         logicalByTexts.get(key).push(attempt);
       }
       for (const attempts of logicalByTexts.values()) {
-        const failedAttemptId = (resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
+        const failedAttemptId = (resilienceProbe === 'custom-400' ? custom400Protocol.evidence.injected400[0]
+          : resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
           : resilienceProbe === 'gemini-structured-recovery' ? resilienceEvidence.injectedMalformed[0] : resilienceEvidence.injected503[0])?.attemptId;
         if (attempts.length > 1 && attempts.some(attempt => attempt.attemptId !== failedAttemptId
             && attempt.retryOf !== failedAttemptId)) {
           resilienceEvidence.unnecessaryRetransmits.push({ texts: attempts[0].texts, attempts });
         }
       }
-        const failedIds = new Set((resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
+        const failedIds = new Set((resilienceProbe === 'custom-400' ? custom400Protocol.evidence.injected400[0]
+          : resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
           : resilienceProbe === 'gemini-structured-recovery' ? resilienceEvidence.injectedMalformed[0] : resilienceEvidence.injected503[0])?.targetIds ?? []);
-      const failedAttemptId = (resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
+      const failedAttemptId = (resilienceProbe === 'custom-400' ? custom400Protocol.evidence.injected400[0]
+        : resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
         : resilienceProbe === 'gemini-structured-recovery' ? resilienceEvidence.injectedMalformed[0] : resilienceEvidence.injected503[0])?.attemptId;
       for (const attempt of resilienceEvidence.attempts) {
         if (attempt.attemptId === failedAttemptId || attempt.retryOf === failedAttemptId) continue;
@@ -3331,9 +3482,12 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         if (overlap.length) resilienceEvidence.unnecessaryRetransmits.push({ texts: attempt.texts, targetIds: overlap, attemptId: attempt.attemptId });
       }
       const translated = trial.rawDOM.translated ?? [];
-      const expectedTranslated = fixtureConfig.targets.map(({ id, source }) => [id, `\u200efixture translation: ${source}`]);
+      const custom400FailedIds = resilienceProbe === 'custom-400' ? failedIds : new Set();
+      const expectedTranslated = fixtureConfig.targets.filter(({ id }) => !custom400FailedIds.has(id))
+        .map(({ id, source }) => [id, `\u200efixture translation: ${source}`]);
       const failedTargetIds = failedIds;
-      const failed = resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
+      const failed = resilienceProbe === 'custom-400' ? custom400Protocol.evidence.injected400[0]
+        : resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
         : resilienceProbe === 'gemini-structured-recovery' ? resilienceEvidence.injectedMalformed[0] : resilienceEvidence.injected503[0];
       if (resilienceProbe === 'custom-429') {
         for (const attempt of resilienceEvidence.attempts) {
@@ -3412,6 +3566,73 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         resilienceEvidence.concurrency = {
           peakPhysical: physicalSummary.peakPhysicalConcurrency,
           peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
+        };
+      }
+      if (resilienceProbe === 'custom-400') {
+        const workerEvents = traceEvents(workerTrace);
+        const failed = custom400Protocol.evidence.injected400[0];
+        const request = providerAttempts.find(item => item.networkId === failed?.networkId);
+        const network = request ? providerNetworkEvents.get(`${request.targetSessionId}:${request.networkId}`) : null;
+        if (failed) {
+          failed.networkStatus = network?.status ?? null;
+          failed.networkOutcome = network?.outcome ?? null;
+          failed.queueItemId = workerEvents.find(event => event.messageId === failed.logicalMessageId
+            && event.name === 'queueManager.processItem.start')?.queueItemId ?? null;
+        }
+        resilienceEvidence.injected400 = custom400Protocol.evidence.injected400;
+        resilienceEvidence.selectionFailures = custom400Protocol.evidence.selectionFailures;
+        const sourceToFixtureId = new Map(fixtureConfig.targets.map(target => [target.source, target.id]));
+        const probeWindowPhysicalAttempts = providerAttempts.flatMap(attempt =>
+          isCustom400ProbeWindowRequest(attempt, custom400Protocol.armedWallMs)
+            ? [{ attemptId: attempt.physicalAttemptId ?? null, networkId: attempt.networkId ?? null,
+              networkSessionId: attempt.targetSessionId ?? null }]
+            : []);
+        resilienceEvidence.attempts = custom400Protocol.evidence.attempts.map(item => {
+          const request = providerAttempts.find(attempt => attempt.networkId === item.networkId
+            && attempt.targetSessionId === item.networkSessionId);
+          const networkAttempt = providerNetworkEvents.get(`${item.networkSessionId}:${item.networkId}`) ?? {};
+          const targetIds = (item.texts ?? []).map(text => sourceToFixtureId.get(text) ?? null);
+          return {
+            ...item, attemptId: request?.physicalAttemptId ?? null,
+            networkId: item.networkId ?? null, pageSessionId: item.pageSessionId ?? null,
+            targetIds, status: networkAttempt.status ?? null, networkStatus: networkAttempt.status ?? null,
+            networkOutcome: networkAttempt.outcome ?? null,
+          };
+        });
+        resilienceEvidence.probeWindowPhysicalAttempts = probeWindowPhysicalAttempts;
+        resilienceEvidence.expectedProbeWindowPhysicalAttemptCount = probeWindowPhysicalAttempts.length;
+        resilienceEvidence.preRestorePreArmDrain = custom400Protocol.evidence.preRestorePreArmDrain;
+        resilienceEvidence.failedTargetDOM = custom400Protocol.evidence.failedTargetDOM;
+        resilienceEvidence.expectedLogicalBatchCount = trial.providerLogicalBatches?.logicalBatchCount ?? null;
+        resilienceEvidence.providerPhysicalAttemptCount = providerAttempts.length;
+        resilienceEvidence.queueAttemptEvidence = validateCustom400QueueEvidence(workerEvents, {
+          messageId: failed?.logicalMessageId, targetIds: failed?.targetIds,
+        });
+        resilienceEvidence.queueRetries = workerEvents.filter(event => event.messageId === failed?.logicalMessageId
+          && event.name === 'queueManager.processItem.start' && event.attemptNumber > 1);
+        resilienceEvidence.keyFailovers = providerAttempts.filter(item => item.networkId !== failed?.networkId
+          && JSON.stringify(item.batchTexts) === JSON.stringify(failed?.texts));
+        resilienceEvidence.unexpectedRecovery = resilienceEvidence.attempts.filter(item =>
+          item.logicalMessageId === failed?.logicalMessageId && item.networkId !== failed?.networkId);
+        const failedIds = new Set(failed?.targetIds ?? []);
+        resilienceEvidence.unnecessaryRetransmits = providerAttempts.flatMap(item => {
+          if (item.networkId === failed?.networkId) return [];
+          const ids = item.batchTexts?.map(text =>
+            fixtureConfig.targets.find(target => target.source === text)?.id ?? null) ?? [];
+          const overlap = ids.filter(id => failedIds.has(id));
+          return overlap.length ? [{ networkId: item.networkId ?? null, targetIds: overlap }] : [];
+        });
+        resilienceEvidence.circuitBreakers = workerEvents.filter(event => event.messageId === failed?.logicalMessageId
+          && /circuit.?breaker/i.test(event.name ?? ''));
+        const physicalSummary = summarizePhysicalProviderAttempts(providerPhysicalAttempts.map(attempt => {
+          const attemptNetwork = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
+          return { ...attempt, startedAt: attemptNetwork?.startedAt ?? null, settledAt: attemptNetwork?.settledAt ?? null,
+            status: attemptNetwork?.status ?? null, outcome: attemptNetwork?.outcome ?? null };
+        }));
+        resilienceEvidence.concurrency = {
+          peakPhysical: physicalSummary.peakPhysicalConcurrency,
+          peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
+          effectiveProviderLimiterCapacity: trial.providerRuntimeObserved?.limiterCapacity ?? null,
         };
       }
       if (resilienceProbe === 'gemini-structured-recovery') {
@@ -3515,17 +3736,28 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         : validateQueueRetryEvidence(traceEvents(workerTrace), {
           messageId: resilienceEvidence.injected503[0]?.logicalMessageId,
         });
+      const successfulTranslations = custom400FailedIds.size
+        ? translated.filter(([id]) => !custom400FailedIds.has(id)) : translated;
       trial.resilience = { ...resilienceEvidence, resources, pageScheduler, queueRetryEvidence, translation: {
-        exact: JSON.stringify(translated) === JSON.stringify(expectedTranslated),
+        exact: JSON.stringify(successfulTranslations) === JSON.stringify(expectedTranslated),
         duplicates: translated.length - new Set(translated.map(([id]) => id)).size,
         targetCount: originals.length,
         sourceCount: providerSources.length,
-        restoreExact: trial.validation.ok && restoredLifecycle.dom.length === originals.length,
+        restoreExact: resilienceProbe === 'custom-400'
+          ? JSON.stringify(restoredLifecycle.dom) === JSON.stringify(originals) && trial.scrollThrough.validation?.ok === true
+          : trial.validation.ok && restoredLifecycle.dom.length === originals.length,
         terminal: !!trial.terminal?.receivedAt,
         sessionOwner: resilienceProbe === 'custom-429'
           ? trial.scrollThrough?.finalSchedulerState?.translationSessionId ?? null : sessionId,
         duplicateAcceptedIds: trial.duplicateAcceptedWriteIds ?? [],
         acceptedTargetCount: acceptedIds?.length ?? null,
+        failedTargetCount: custom400FailedIds.size,
+        failedSourcePreserved: custom400FailedIds.size === 0
+          || JSON.stringify(custom400Protocol.evidence.failedTargetDOM?.observed)
+            === JSON.stringify(custom400Protocol.evidence.failedTargetDOM?.expected),
+        successfulTargetsAcceptedOnce: custom400FailedIds.size === 0
+          || acceptedIds?.length === originals.length - custom400FailedIds.size
+            && new Set(acceptedIds).size === acceptedIds.length,
         expectedTargetIds: expectedTranslated.map(([id]) => id), observed: translated,
       }, cleanup: { ok: cleanupOk, runtimeResources: resourceValidation } };
       if (custom429Protocol) trial.resilience.protocol = custom429Protocol.evidence;
@@ -3542,6 +3774,9 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           roles: resilienceEvidence.roles, concurrency: resilienceEvidence.concurrency,
         });
       }
+      if (resilienceProbe === 'custom-400') {
+        trial.resilience.validation = validateCustom400Evidence(trial.resilience);
+      }
       if (resilienceProbe === 'gemini-structured-recovery') {
         trial.resilience.validation = validateGeminiStructuredRecovery(trial.resilience);
       }
@@ -3550,7 +3785,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     trial.status = 'passed';
   } catch (error) {
     trial.status = 'failed';
-    if (resilienceEvidence) trial.resilience = { ...resilienceEvidence,
+    if (resilienceEvidence) trial.resilience = { ...resilienceEvidence, ...trial.resilience,
       ...(custom429Protocol ? { protocol: custom429Protocol.evidence } : {}),
       failureStage: trial.stage ?? null };
     trial.error = { name: error.name, message: error.message, stack: error.stack };

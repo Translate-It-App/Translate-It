@@ -14,7 +14,7 @@ import { registryIdToName } from '../../../src/features/translation/providers/Pr
 import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
 import { AIResponseParser } from '../../../src/features/translation/providers/utils/AIResponseParser.js';
 import { ResponseFormat } from '../../../src/features/translation/core/ProviderConfigurations.js';
-import { findSessionOwnedPendingRequest, parseResilienceProbeSelection, selectResolvedGoogleAttempt, selectResolvedGeminiAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
+import { findSessionOwnedPendingRequest, isCustom400ProbeWindowRequest, parseResilienceProbeSelection, partitionBandAcceptance, selectResolvedCustom400Batch, selectResolvedGoogleAttempt, selectResolvedGeminiAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom400Evidence, validateCustom400QueueEvidence, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
 
 describe('page translation benchmark measurements', () => {
   it('includes the queue projector in provenance and keeps Google resilience injection Google-only 503', () => {
@@ -90,6 +90,134 @@ describe('page translation benchmark measurements', () => {
     expect(validateResilienceAccounting({ ...evidence, injected503: [failed, failed] }).ok).toBe(false);
     expect(validateResilienceAccounting({ ...evidence, injected503: [{ ...failed, status: 200 }] }).ok).toBe(false);
     expect(validateResilienceAccounting({ ...evidence, attempts: [failed, { ...failed, networkId: 'network-2', retryOf: 'failed', status: 200, logicalMessageId: null }] }).ok).toBe(false);
+  });
+  it('validates isolated Custom permanent-failure probes and exact partial-success evidence', () => {
+    const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
+    expect(parseResilienceProbeSelection('custom-400')).toEqual(['custom-400']);
+    expect(shouldEnableResilienceQueueProbe('custom-400')).toBe(true);
+    expect(runSource).toContain('requestRecord.requestViewport = await evaluate(chrome, pageSession');
+    expect(runSource).toContain('translated.filter(([id]) => !custom400FailedIds.has(id))');
+    expect(runSource).toContain('const ids = item.batchTexts?.map(text =>');
+    expect(runSource).not.toContain('const ids = item.batchIds ??');
+    expect(runSource).toContain("el?.hasAttribute('data-page-translated')");
+    expect(runSource).toContain("el?.hasAttribute('data-has-original')");
+    expect(runSource).toContain('if (custom400Protocol?.armed)');
+    expect(runSource).toContain('isCustom400ProbeWindowRequest(requestRecord, custom400Protocol.armedWallMs)');
+    expect(runSource).toContain('const consider400 = !custom400Protocol.considered;');
+    expect(validateResilienceProbeIsolation({
+      selected: true, probe: 'custom-400', provider: 'custom', optimizationLevel: 3,
+      modes: 'sliced', scenario: 'scroll-through', schedulingMode: 'fluid',
+    })).toBe(true);
+    expect(() => validateResilienceProbeIsolation({
+      selected: true, probe: 'custom-400', provider: 'custom', optimizationLevel: 3,
+      modes: 'sliced', scenario: 'scroll-through', schedulingMode: 'fluid', competingProbe: true,
+    })).toThrow();
+
+    const texts = Array.from({ length: 25 }, (_, index) => `source-${index}`);
+    const targetIds = Array.from({ length: 25 }, (_, index) => `target-${index}`);
+    expect(partitionBandAcceptance(['a', 'b', 'c'], ['a', 'c'], ['b'])).toEqual({
+      acceptedIds: ['a', 'c'], failedTargetIds: ['b'],
+    });
+    expect(partitionBandAcceptance(['a', 'b'], ['a', 'b'], ['b'])).toEqual({
+      acceptedIds: ['a'], failedTargetIds: ['b'],
+    });
+    expect(isCustom400ProbeWindowRequest({ startedAt: 120 }, 100)).toBe(true);
+    expect(isCustom400ProbeWindowRequest({ startedAt: 120 }, 130)).toBe(false);
+    expect(isCustom400ProbeWindowRequest({}, 100)).toBe(false);
+    const resolver = { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' };
+    const request = { networkId: 'network-a', sessionId: 'session-a', texts, targetIds, physicalStartedWallMs: 200 };
+    const root = { messageId: 'message-a', sessionId: 'session-a', texts };
+    const classification = { kind: 'provider-translation', provider: 'custom' };
+    expect(selectResolvedCustom400Batch({ request, classification, resolver, roots: [root], failedCount: 0, armedWallMs: 100 }))
+      .toMatchObject({ selected: true, messageId: 'message-a', targetIds });
+    expect(selectResolvedCustom400Batch({ request: { ...request, texts: texts.slice(0, 24) },
+      classification, resolver, roots: [root], failedCount: 0 }).selected).toBe(false);
+    expect(selectResolvedCustom400Batch({ request, classification, resolver, roots: [root, root], failedCount: 0 }).selected).toBe(false);
+    expect(selectResolvedCustom400Batch({ request: { ...request, physicalStartedWallMs: 99 },
+      classification, resolver, roots: [root], failedCount: 0, armedWallMs: 100 }).selected).toBe(false);
+    expect(selectResolvedCustom400Batch({ request: { ...request, targetIds: [...targetIds.slice(1), targetIds[1]] },
+      classification, resolver, roots: [root], failedCount: 0, armedWallMs: 100 }).selected).toBe(false);
+
+    const queueEvents = [
+      { name: 'queueManager.processItem.start', queueItemId: 'item-a', messageId: 'message-a', attemptNumber: 1 },
+      { name: 'queueManager.processItem.end', queueItemId: 'item-a', messageId: 'message-a', attemptNumber: 1,
+        attempts: 1, status: 'failed', lastErrorType: 'HTTP_ERROR', retryTimerActive: false, retryScheduledAt: null, retryAt: null },
+    ];
+    const queueAttemptEvidence = validateCustom400QueueEvidence(queueEvents, { messageId: 'message-a', targetIds });
+    expect(queueAttemptEvidence.ok).toBe(true);
+    expect(validateCustom400QueueEvidence([], { messageId: 'message-a' }).ok).toBe(false);
+    expect(validateCustom400QueueEvidence([...queueEvents, queueEvents[0]], { messageId: 'message-a' }).ok).toBe(false);
+    expect(validateCustom400QueueEvidence(queueEvents.map(event => event.name.endsWith('.end')
+      ? { ...event, lastErrorType: 'SERVER_ERROR' } : event), { messageId: 'message-a' }).ok).toBe(false);
+    expect(validateCustom400QueueEvidence(queueEvents.map(event => event.name.endsWith('.end')
+      ? { ...event, retryTimerActive: true } : event), { messageId: 'message-a' }).ok).toBe(false);
+
+    const failed = {
+      attemptId: 'attempt-a', networkId: 'network-a', networkSessionId: 'network-session', status: 400, networkStatus: 400,
+      networkOutcome: 'finished', errorBody: { error: { code: 400, message: 'Invalid request parameters' } },
+      logicalMessageId: 'message-a', queueItemId: 'item-a', pageSessionId: 'session-a', targetIds, texts,
+    };
+    const evidence = {
+      injected400: [failed], attempts: Array.from({ length: 40 }, (_, index) => ({
+        attemptId: index === 0 ? 'attempt-a' : `attempt-${index}`,
+        networkId: index === 0 ? 'network-a' : `network-${index}`,
+        networkSessionId: 'network-session',
+        logicalMessageId: index === 0 ? 'message-a' : `message-${index}`,
+        pageSessionId: 'session-a', targetIds: index === 0 ? targetIds : [`fixture-target-${index}`],
+        status: index === 0 ? 400 : 200, networkStatus: index === 0 ? 400 : 200, networkOutcome: 'finished',
+      })),
+      probeWindowPhysicalAttempts: Array.from({ length: 40 }, (_, index) => ({
+        attemptId: index === 0 ? 'attempt-a' : `attempt-${index}`,
+        networkId: index === 0 ? 'network-a' : `network-${index}`,
+        networkSessionId: 'network-session',
+      })),
+      expectedProbeWindowPhysicalAttemptCount: 40,
+      preRestorePreArmDrain: { ok: true, requestCount: 14, outstandingCount: 0, networkIds: [] },
+      arm: { sessionId: 'session-a' }, selectionFailures: [],
+      failedTargetDOM: {
+        expected: targetIds.map((id, index) => [id, texts[index], { pageTranslated: false, hasOriginal: false }]),
+        observed: targetIds.map((id, index) => [id, texts[index], { pageTranslated: false, hasOriginal: false }]),
+      },
+      expectedLogicalBatchCount: 40, providerPhysicalAttemptCount: 40,
+      queueAttemptEvidence, unnecessaryRetransmits: [], unexpectedRecovery: [], queueRetries: [], keyFailovers: [], circuitBreakers: [],
+      translation: { exact: true, targetCount: 1000, acceptedTargetCount: 975, failedTargetCount: 25,
+        duplicates: 0, duplicateAcceptedIds: [], failedSourcePreserved: true, successfulTargetsAcceptedOnce: true,
+        restoreExact: true, terminal: true, sessionOwner: 'session-a' },
+      concurrency: { peakPhysical: 2, peakLogical: 2, effectiveProviderLimiterCapacity: 2 },
+      resources: { rateLimit: { Custom: { isCircuitOpen: false } } },
+      cleanup: { ok: true },
+    };
+    expect(validateCustom400Evidence(evidence)).toEqual({ ok: true, issues: [] });
+    expect(validateCustom400Evidence({ ...evidence, injected400: [] }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, attempts: [failed, { ...failed, networkId: 'network-retry' }] }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, attempts: evidence.attempts.slice(1) }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence,
+      probeWindowPhysicalAttempts: evidence.probeWindowPhysicalAttempts.slice(1),
+    }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, attempts: evidence.attempts.map((attempt, index) =>
+      index === 1 ? { ...attempt, networkOutcome: null } : attempt) }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, attempts: evidence.attempts.map((attempt, index) =>
+      index === 1 ? { ...attempt, networkId: evidence.attempts[0].networkId } : attempt) }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, attempts: evidence.attempts.map((attempt, index) =>
+      index === 0 ? { ...attempt, networkStatus: 200 } : attempt) }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, failedTargetDOM: {
+      ...evidence.failedTargetDOM, observed: evidence.failedTargetDOM.observed.map((item, index) =>
+        index === 0 ? [item[0], item[1], { pageTranslated: true, hasOriginal: true }] : item),
+    } }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, unexpectedRecovery: [{ networkId: 'network-retry' }] }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, unnecessaryRetransmits: [{ targetIds: ['target-0'] }] }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, injected400: [{ ...failed, errorBody: null }] }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, translation: { ...evidence.translation, acceptedTargetCount: 1000 } }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, translation: { ...evidence.translation, exact: false } }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, translation: { ...evidence.translation, failedSourcePreserved: false } }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, translation: { ...evidence.translation, successfulTargetsAcceptedOnce: false } }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, expectedLogicalBatchCount: 41 }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, selectionFailures: [{ reason: 'bad batch' }] }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, concurrency: { ...evidence.concurrency, peakPhysical: 1, peakLogical: 1 } }).ok).toBe(true);
+    expect(validateCustom400Evidence({ ...evidence, concurrency: { ...evidence.concurrency, peakPhysical: 3 } }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, concurrency: { ...evidence.concurrency, peakLogical: null } }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, resources: { rateLimit: { Custom: { isCircuitOpen: true } } } }).ok).toBe(false);
+    expect(validateCustom400Evidence({ ...evidence, resources: { rateLimit: { Custom: {} } } }).ok).toBe(false);
   });
   it('selects and validates one isolated Gemini structured recovery with production call-purpose attribution', () => {
     expect(parseResilienceProbeSelection('gemini-structured-recovery')).toEqual(['gemini-structured-recovery']);

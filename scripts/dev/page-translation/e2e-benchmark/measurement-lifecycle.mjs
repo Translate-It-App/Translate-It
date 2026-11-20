@@ -103,8 +103,9 @@ export function trackAcceptedTarget({ id, at, acceptedIds, firstAcceptedAtById, 
   return firstObservation;
 }
 
-export function findFinalTranslationTerminal(events, sessionId, expectedCount) {
+export function findFinalTranslationTerminal(events, sessionId, expectedCount, expectedFailedCount = 0) {
   if (!Array.isArray(events) || typeof sessionId !== 'string' || !Number.isInteger(expectedCount) || expectedCount < 1) return null;
+  if (!Number.isInteger(expectedFailedCount) || expectedFailedCount < 0 || expectedFailedCount > expectedCount) return null;
   return events.find(event => {
     const message = event?.message ?? event;
     const payload = message?.data?.data ?? message?.data ?? {};
@@ -112,9 +113,9 @@ export function findFinalTranslationTerminal(events, sessionId, expectedCount) {
     return message?.action === 'page-translation-frame-lifecycle'
       && ['page-translate-complete', 'page-translate-idle'].includes(message?.data?.action)
       && eventSessionId === sessionId
-      && payload.translatedCount === expectedCount
+      && payload.translatedCount === expectedCount - expectedFailedCount
       && payload.totalCount === expectedCount
-      && payload.failedCount === 0;
+      && payload.failedCount === expectedFailedCount;
   }) ?? null;
 }
 

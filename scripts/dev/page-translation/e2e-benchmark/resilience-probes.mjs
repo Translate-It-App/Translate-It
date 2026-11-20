@@ -1,19 +1,19 @@
 export function parseResilienceProbeSelection(value) {
   if (!value) return [];
   const selections = value.split(',').map(item => item.trim()).filter(Boolean);
-  if (selections.length !== 1 || !['googlev2-503', 'custom-429', 'gemini-structured-recovery'].includes(selections[0])) {
-    throw new TypeError('BENCH_RESILIENCE_PROBES supports only googlev2-503, custom-429, or gemini-structured-recovery.');
+  if (selections.length !== 1 || !['googlev2-503', 'custom-429', 'custom-400', 'gemini-structured-recovery'].includes(selections[0])) {
+    throw new TypeError('BENCH_RESILIENCE_PROBES supports only googlev2-503, custom-429, custom-400, or gemini-structured-recovery.');
   }
   return selections;
 }
 
 export function shouldEnableResilienceQueueProbe(probe) {
-  return probe === 'googlev2-503' || probe === 'custom-429' || probe === 'gemini-structured-recovery';
+  return probe === 'googlev2-503' || probe === 'custom-429' || probe === 'custom-400' || probe === 'gemini-structured-recovery';
 }
 
 export function validateResilienceProbeIsolation({ selected, probe, provider, optimizationLevel, modes, scenario, schedulingMode, competingProbe }) {
   if (!selected) return true;
-  const custom = probe === 'custom-429';
+  const custom = probe === 'custom-429' || probe === 'custom-400';
   const gemini = probe === 'gemini-structured-recovery';
   const selectedProvider = gemini ? 'gemini' : custom ? 'custom' : 'googlev2';
   if (competingProbe || provider !== selectedProvider || optimizationLevel !== 3
@@ -144,6 +144,158 @@ export function selectResolvedCustomAttempt({ request, classification, resolver,
       || !resolver.effectiveSourceLanguage || resolver.effectiveSourceLanguage === 'auto'
       || !resolver.effectiveTargetLanguage) return { selected: false, reason: 'source-not-concretely-resolved' };
   return { selected: true, source: resolver.effectiveSourceLanguage, target: resolver.effectiveTargetLanguage };
+}
+
+export function selectResolvedCustom400Batch({ request, classification, resolver, roots = [], failedCount, initialTargetIds = [], armedWallMs }) {
+  if (classification?.kind !== 'provider-translation' || classification.provider !== 'custom'
+      || failedCount !== 0 || !request?.networkId) return { selected: false, reason: 'not-first-custom-400-batch' };
+  if (!resolver?.present || resolver.resolutionPending !== false
+      || !resolver.effectiveSourceLanguage || resolver.effectiveSourceLanguage === 'auto'
+      || !resolver.effectiveTargetLanguage) return { selected: false, reason: 'source-not-concretely-resolved' };
+  if (!Number.isFinite(request.physicalStartedWallMs) || !Number.isFinite(armedWallMs)
+      || request.physicalStartedWallMs < armedWallMs) return { selected: false, reason: 'request-did-not-start-after-arm' };
+  const matching = roots.filter(root => root.sessionId === request.sessionId
+    && JSON.stringify(root.texts) === JSON.stringify(request.texts));
+  if (request.texts?.length !== 25 || matching.length !== 1 || !matching[0]?.messageId
+      || matching[0]?.sessionId !== request.sessionId) {
+    return { selected: false, reason: 'batch-size-or-logical-correlation-not-unique' };
+  }
+  const targetIds = request.targetIds;
+  if (!Array.isArray(targetIds) || targetIds.length !== 25 || targetIds.some(id => typeof id !== 'string')
+      || new Set(targetIds).size !== 25 || targetIds.some(id => initialTargetIds.includes(id))) {
+    return { selected: false, reason: 'batch-targets-invalid-or-initial' };
+  }
+  return { selected: true, source: resolver.effectiveSourceLanguage,
+    target: resolver.effectiveTargetLanguage, messageId: matching[0].messageId,
+    sessionId: matching[0].sessionId, targetIds: [...targetIds], texts: [...request.texts] };
+}
+
+export function isCustom400ProbeWindowRequest(request, armedWallMs) {
+  return Number.isFinite(request?.startedAt) && Number.isFinite(armedWallMs) && request.startedAt >= armedWallMs;
+}
+
+export function validateCustom400QueueEvidence(events, { messageId, targetIds } = {}) {
+  const matched = (events ?? []).filter(event => event.messageId === messageId
+    && ['queueManager.processItem.start', 'queueManager.processItem.end'].includes(event.name));
+  const starts = matched.filter(event => event.name.endsWith('.start'));
+  const ends = matched.filter(event => event.name.endsWith('.end'));
+  const start = starts[0];
+  const end = ends[0];
+  const issues = [];
+  if (!messageId || starts.length !== 1 || ends.length !== 1) issues.push('expected exactly one QueueManager start and terminal settlement for the affected Custom 400 message');
+  if (!start?.queueItemId || start.queueItemId !== end?.queueItemId
+      || start?.messageId !== messageId || end?.messageId !== messageId) issues.push('QueueManager attempt did not retain one queue item and message ID');
+  if (start?.attemptNumber !== 1 || end?.attemptNumber !== 1 || end?.attempts !== 1) issues.push('QueueManager Custom 400 attempt was not exactly attempt 1');
+  if (end?.status !== 'failed' || end?.lastErrorType !== 'HTTP_ERROR'
+      || end?.retryTimerActive !== false) issues.push('QueueManager did not terminally fail the HTTP error without retry');
+  if (start?.previousErrorType != null || start?.retryScheduledAt != null
+      || end?.retryScheduledAt != null || end?.retryAt != null) issues.push('QueueManager retry scheduling evidence was present');
+  return { ok: issues.length === 0, issues, observed: {
+    messageId: messageId ?? null, queueItemId: start?.queueItemId ?? null, starts, ends,
+    attempts: starts.map(event => event.attemptNumber), errorType: end?.lastErrorType ?? null,
+    finalStatus: end?.status ?? null, retryTimerActive: end?.retryTimerActive ?? null,
+    targetIds: Array.isArray(targetIds) ? [...targetIds] : null,
+  } };
+}
+
+export function partitionBandAcceptance(bandIds, acceptedIds, failedTargetIds = []) {
+  const accepted = new Set(acceptedIds);
+  const failed = new Set(failedTargetIds);
+  return {
+    acceptedIds: bandIds.filter(id => accepted.has(id) && !failed.has(id)),
+    failedTargetIds: bandIds.filter(id => failed.has(id)),
+  };
+}
+
+export function validateCustom400Evidence(evidence) {
+  const issues = [];
+  const failed = evidence.injected400?.[0];
+  if (evidence.injected400?.length !== 1 || failed?.status !== 400
+      || failed?.errorBody?.error?.code !== 400
+      || failed?.errorBody?.error?.message !== 'Invalid request parameters'
+      || failed.networkStatus !== 400 || failed.networkOutcome !== 'finished'
+      || !failed.networkId) issues.push('expected exactly one physical HTTP 400 with the canonical error response');
+  if (evidence.selectionFailures?.length) issues.push('first eligible post-arm Custom batch failed closed instead of selecting an exact 25-target batch');
+  if (evidence.preRestorePreArmDrain?.ok !== true || evidence.preRestorePreArmDrain?.outstandingCount !== 0) {
+    issues.push('pre-arm provider requests were not proven drained before Restore');
+  }
+  if (!failed?.logicalMessageId || !failed?.queueItemId || !failed?.pageSessionId
+      || failed.pageSessionId !== evidence.arm?.sessionId
+      || !Array.isArray(failed.targetIds) || failed.targetIds.length !== 25
+      || new Set(failed.targetIds).size !== 25
+      || failed.texts?.length !== 25) issues.push('injected failure lacks unique 25-target message/session/queue correlation');
+  if (evidence.expectedLogicalBatchCount !== evidence.providerPhysicalAttemptCount
+      || evidence.attempts?.length !== evidence.expectedProbeWindowPhysicalAttemptCount
+      || evidence.probeWindowPhysicalAttempts?.length !== evidence.expectedProbeWindowPhysicalAttemptCount
+      || evidence.attempts?.filter(item => item.logicalMessageId === failed?.logicalMessageId).length !== 1) issues.push('physical provider attempts do not match logical batches or affected message was retransmitted');
+  const attemptIds = new Set();
+  const networkIds = new Set();
+  const attempts = evidence.attempts ?? [];
+  const expectedNetworkAttempts = new Map((evidence.probeWindowPhysicalAttempts ?? [])
+    .map(item => [`${item.networkSessionId}:${item.networkId}`, item.attemptId]));
+  const expectedNetworkIdentities = new Set(expectedNetworkAttempts.keys());
+  const observedNetworkIdentities = new Set();
+  const observedAttemptByNetwork = new Map();
+  for (const attempt of evidence.attempts ?? []) {
+    if (!attempt.attemptId || !attempt.networkId || !attempt.logicalMessageId || !attempt.pageSessionId
+        || !attempt.networkSessionId
+        || attempt.pageSessionId !== evidence.arm?.sessionId || attemptIds.has(attempt.attemptId)
+        || networkIds.has(attempt.networkId)
+        || !Array.isArray(attempt.targetIds) || !attempt.targetIds.length
+        || attempt.targetIds.some(id => typeof id !== 'string')
+        || ![200, 400].includes(attempt.status) || attempt.status !== attempt.networkStatus
+        || attempt.networkOutcome !== 'finished') {
+      issues.push('Custom physical attempt ledger has a missing identity, fixture target, or valid HTTP/network outcome');
+      break;
+    }
+    attemptIds.add(attempt.attemptId);
+    networkIds.add(attempt.networkId);
+    const networkIdentity = `${attempt.networkSessionId}:${attempt.networkId}`;
+    observedNetworkIdentities.add(networkIdentity);
+    observedAttemptByNetwork.set(networkIdentity, attempt.attemptId);
+  }
+  if (expectedNetworkIdentities.size !== evidence.expectedProbeWindowPhysicalAttemptCount
+      || observedNetworkIdentities.size !== expectedNetworkIdentities.size
+      || [...expectedNetworkIdentities].some(id => !observedNetworkIdentities.has(id)
+        || observedAttemptByNetwork.get(id) !== expectedNetworkAttempts.get(id))) {
+    issues.push('armed Custom attempt ledger does not match the independently counted probe-window physical attempts');
+  }
+  const failedAttempts = attempts.filter(attempt => attempt.status === 400);
+  if (failedAttempts.length !== 1 || failedAttempts[0]?.networkId !== failed?.networkId
+      || failedAttempts[0]?.networkSessionId !== failed?.networkSessionId
+      || failedAttempts[0]?.logicalMessageId !== failed?.logicalMessageId
+      || failedAttempts[0]?.pageSessionId !== failed?.pageSessionId
+      || JSON.stringify(failedAttempts[0]?.targetIds) !== JSON.stringify(failed?.targetIds)
+      || attempts.some(attempt => attempt !== failedAttempts[0] && (attempt.status !== 200 || attempt.networkOutcome !== 'finished'))) {
+    issues.push('Custom attempt ledger must contain exactly the injected HTTP 400 and only successful HTTP 200 siblings');
+  }
+  if (evidence.unnecessaryRetransmits?.length || evidence.unexpectedRecovery?.length
+      || evidence.queueRetries?.length || evidence.keyFailovers?.length || evidence.circuitBreakers?.length) {
+    issues.push('retransmission, recovery, retry, key failover, or circuit breaker was observed');
+  }
+  if (evidence.queueAttemptEvidence?.ok !== true) issues.push(...(evidence.queueAttemptEvidence?.issues ?? ['QueueManager terminal failure evidence is unavailable']));
+  const translation = evidence.translation ?? {};
+  const dom = evidence.failedTargetDOM;
+  if (!Array.isArray(dom?.expected) || !Array.isArray(dom?.observed)
+      || JSON.stringify(dom.expected) !== JSON.stringify(dom.observed)
+      || dom.expected.length !== 25
+      || dom.observed.some(item => !Array.isArray(item) || item[2]?.pageTranslated !== false || item[2]?.hasOriginal !== false)) {
+    issues.push('failed target pre-Restore DOM text or translation-marker evidence is missing or incorrect');
+  }
+  if (translation.exact !== true || translation.targetCount !== 1000
+      || translation.acceptedTargetCount !== 975 || translation.failedTargetCount !== 25
+      || translation.duplicates !== 0 || translation.duplicateAcceptedIds?.length
+      || translation.failedSourcePreserved !== true || translation.successfulTargetsAcceptedOnce !== true
+      || translation.restoreExact !== true || translation.terminal !== true
+      || translation.sessionOwner !== failed?.pageSessionId) {
+    issues.push('Custom 400 partial-success accounting, failed-source preservation, terminal, session, or Restore evidence failed');
+  }
+  if (!Number.isFinite(evidence.concurrency?.peakPhysical) || evidence.concurrency.peakPhysical > 2
+      || !Number.isFinite(evidence.concurrency?.peakLogical) || evidence.concurrency.peakLogical > 2
+      || evidence.concurrency?.effectiveProviderLimiterCapacity !== 2) issues.push('Custom Level 3 concurrency exceeded two or lacks exact limiter-capacity evidence');
+  if (evidence.resources?.rateLimit?.Custom?.isCircuitOpen !== false) issues.push('Custom provider circuit-breaker state is open or unavailable');
+  if (evidence.cleanup?.ok !== true) issues.push('runtime resources did not settle cleanly');
+  return { ok: issues.length === 0, issues };
 }
 
 export function findSessionOwnedPendingRequest(queueItems, sessionId, excludedMessageIds = []) {

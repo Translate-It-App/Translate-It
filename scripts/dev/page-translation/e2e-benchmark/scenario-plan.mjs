@@ -393,15 +393,16 @@ export function validateScrollThroughObservations(expectedIds, phases, selection
   return { ok: issues.length === 0, issues };
 }
 
-export function validateScrollThroughEvidence({ expectedIds, viewportEntryAtById, acceptedAtById, pipelineStages, checkpoints, selectionViewport, terminalAt, acceptedIds, duplicateAcceptedIds = [], providerRequests = [], schedulerState, restoreOriginals, expectedOriginals, cleanupErrors = [] }) {
+export function validateScrollThroughEvidence({ expectedIds, expectedAcceptedIds = expectedIds, viewportEntryAtById, acceptedAtById, pipelineStages, checkpoints, selectionViewport, terminalAt, acceptedIds, duplicateAcceptedIds = [], providerRequests = [], schedulerState, restoreOriginals, expectedOriginals, cleanupErrors = [] }) {
   const issues = [];
   const stageValidation = validateScrollThroughStages(expectedIds, pipelineStages);
   issues.push(...stageValidation.issues);
   const observationValidation = validateScrollThroughObservations(expectedIds, checkpoints, selectionViewport);
   issues.push(...observationValidation.issues);
-  const latency = deriveScrollAcceptanceLatency(expectedIds, viewportEntryAtById, acceptedAtById);
+  const latency = deriveScrollAcceptanceLatency(expectedAcceptedIds, viewportEntryAtById, acceptedAtById);
   issues.push(...latency.issues);
-  issues.push(...validateExactTargetIds('scroll acceptance', acceptedIds, expectedIds ?? []).issues);
+  issues.push(...validateExactTargetIds('scroll acceptance', acceptedIds, expectedAcceptedIds ?? []).issues);
+  issues.push(...validateExactTargetIds('accepted DOM-write timestamp', Object.keys(acceptedAtById ?? {}), expectedAcceptedIds ?? []).issues);
   if (duplicateAcceptedIds.length) issues.push(`redundant accepted writes: ${duplicateAcceptedIds.join(',')}`);
   const requestIds = (providerRequests ?? []).flatMap(request => request.requestViewport?.targets?.map(target => target.id).filter(Boolean) ?? []);
   issues.push(...validateExactTargetIds('physical provider request', requestIds, expectedIds ?? []).issues);

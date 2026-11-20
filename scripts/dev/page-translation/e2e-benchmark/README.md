@@ -70,6 +70,20 @@ BENCH_RESILIENCE_PROBES=custom-429 \
 
 After the initial visible band is accepted, the probe records a concrete AUTO resolver/session and arms only for later bands. It claims and holds two disjoint same-session Fetch requests (A/B), injects the 429 into A, and observes the typed QueueManager settlement plus server/limiter deadlines. Because both Page scheduler flush slots are occupied, it fulfills B once the cooldown is established; B must complete Network and worker settlement before the unchanged deadline. The newly freed slot lets the next normal Page batch P enter the real Custom limiter queue, where the probe verifies same-session ownership, spare capacity, and that P remains queued before the deadline. No physical request may start prematurely. The validator also requires one successful A retry retaining its QueueManager item/message, exact 1,000-target DOM/Restore/session evidence, and logical/physical concurrency no greater than two. Any timeout fails closed and settles held Fetches once; partial evidence is retained in the raw artifact. This is an offline resilience correctness check, not a live Custom service or latency test.
 
+### Isolated Custom permanent HTTP 400 resilience probe (Phase 2.3.4)
+
+This opt-in probe runs the blank-key strict Custom fixture in a fresh Chrome Page Translation session at Optimization Level 3, Sliced discovery, Fluid scheduling, and 1,000 targets. After the Page AUTO resolver selects a concrete source/target pair, it injects one HTTP 400 response with `Invalid request parameters` for one complete 25-target batch. All other batches receive the ordinary deterministic fixture response. No live traffic or real credentials are used.
+
+```sh
+BENCH_RESILIENCE_PROBES=custom-400 \
+  BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/custom-400-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The separate `*-resilience-custom-400.json` artifact retains the selected physical request and correlates its HTTP/network status, message/session/QueueManager item, and exact target IDs. Validation requires one terminal QueueManager `HTTP_ERROR` attempt with no retry, API-key failover, structured recovery, or circuit-breaker activation; unaffected batches must continue without retransmitting successful siblings. The expected partial outcome is exactly 975 translated and accepted targets, 25 failed targets that remain unchanged and unaccepted, and 1,000 targets total. Logical and physical concurrency must remain within the observed effective limit of two. Exact Restore of every target and strict runtime cleanup are still required. Partial-success allowances are scoped to this probe and do not alter normal benchmark validation. This is an offline provider-resilience check, not a live Custom service or latency test.
+
 ### Isolated Gemini structured-recovery resilience probe (Phase 2.3.3)
 
 This opt-in probe uses the existing strict synthetic Gemini adapter in a fresh Chrome Page Translation run with Optimization Level 3, Sliced discovery, Fluid scheduling, and 1,000 targets. It waits until the Page AUTO source resolver has selected a concrete source/target pair, then returns exactly one malformed JSON model answer inside an otherwise valid Gemini HTTP 200 response envelope. The production parser must trigger `FULL_STRUCTURED_RETRY`; `BaseAIProvider` must issue one same-batch recovery request, whose valid structured items are returned in reverse order to exercise response-identity mapping. The dummy Gemini query credential and `.invalid` endpoint are enforced by the adapter; no live traffic or real credentials are used.

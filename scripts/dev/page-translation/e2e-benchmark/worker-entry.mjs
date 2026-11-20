@@ -357,8 +357,10 @@ const marker = {
           queueItems: state.queues && typeof state.queues === 'object'
             ? projectRateLimitQueueItems(state.queues, tracker?.requests)
             : null,
-          isProcessingQueue: state.isProcessingQueue ?? null,
-        }]))
+           isProcessingQueue: state.isProcessingQueue ?? null,
+           isCircuitOpen: state.isCircuitOpen ?? null,
+           consecutiveFailures: state.consecutiveFailures ?? null,
+         }]))
         : null,
       lease,
     };
