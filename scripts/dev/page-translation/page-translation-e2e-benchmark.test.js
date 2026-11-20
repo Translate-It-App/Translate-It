@@ -9,15 +9,156 @@ import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetText
 import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
 import { classifyHeldFetchRelease, createCancellationLedger, createCancellationRequestLifecycle, ensureCancellationAbortObserver, installCancellationRuntimeMessageObserver } from './e2e-benchmark/cancellation-probes.mjs';
-import { registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
+import { cleanupMeasurementBeforeResources, registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
+import { createNetworkCleanupSteps, createNetworkRequestLifecycle, failPausedFetch, fulfillPausedFetch, runNetworkGuardNegativeProbe } from './e2e-benchmark/network-interception.mjs';
 import { matchesAutoTranslateRule } from '../../../src/utils/ui/exclusion.js';
 import { registryIdToName } from '../../../src/features/translation/providers/ProviderConstants.js';
 import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
 import { AIResponseParser } from '../../../src/features/translation/providers/utils/AIResponseParser.js';
 import { ResponseFormat } from '../../../src/features/translation/core/ProviderConfigurations.js';
 import { claimGoogleTimeoutRequest, commitGoogleTimeoutRequest, findGoogleTimeoutBatchError, findGoogleTimeoutCancelMessage, findSessionOwnedPendingRequest, isCustom400ProbeWindowRequest, parseResilienceProbeSelection, partitionBandAcceptance, requireGoogleTimeoutReservation, selectResolvedCustom400Batch, selectResolvedGoogleAttempt, selectResolvedGoogleTimeoutBatch, selectResolvedGeminiAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom400Evidence, validateCustom400QueueEvidence, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateGoogleTimeoutEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
+import { finalizeGoogleV2_503Evidence } from './e2e-benchmark/resilience/googlev2-503.mjs';
+import { collectCustom429Evidence } from './e2e-benchmark/resilience/custom-429.mjs';
+import { collectGeminiStructuredRecoveryEvidence } from './e2e-benchmark/resilience/gemini-structured-recovery.mjs';
 
 describe('page translation benchmark measurements', () => {
+  it('records fulfilled Fetch response metadata only after settlement and omits it on failure', async () => {
+    let settle;
+    let clock = 0;
+    const requestRecord = {};
+    const pendingSend = new Promise(resolve => { settle = resolve; });
+    const fulfillment = fulfillPausedFetch({
+      send: () => pendingSend, sessionId: 'session', requestId: 'request', status: 503,
+      body: { error: true }, requestRecord, now: () => ++clock, response: { retryAfter: null },
+    });
+    expect(requestRecord.response).toBeUndefined();
+    settle();
+    await fulfillment;
+    expect(requestRecord.response).toMatchObject({ status: 503, body: { error: true }, retryAfter: null, endedAt: 1 });
+
+    const failedRecord = {};
+    await expect(fulfillPausedFetch({
+      send: async () => { throw new Error('send failed'); }, sessionId: 'session', requestId: 'request',
+      status: 400, body: {}, requestRecord: failedRecord, now: () => 2,
+    })).rejects.toThrow('send failed');
+    expect(failedRecord.response).toBeUndefined();
+
+    const googleSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/resilience/googlev2-503.mjs', 'utf8');
+    const customSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/resilience/custom-400.mjs', 'utf8');
+    expect(googleSource).not.toMatch(/response:\s*\{[^}]*endedAt\s*:/s);
+    expect(customSource).not.toMatch(/response:\s*\{[^}]*endedAt\s*:/s);
+  });
+
+  it('records failed Fetch metadata after settlement and never records it after a rejected send', async () => {
+    let settle;
+    let clock = 0;
+    const requestRecord = {};
+    const pendingSend = new Promise(resolve => { settle = resolve; });
+    const failure = failPausedFetch({
+      send: () => pendingSend, sessionId: 'session', requestId: 'request', errorReason: 'Aborted',
+      requestRecord, now: () => ++clock, response: { reason: 'late cancellation' },
+    });
+    expect(requestRecord.response).toBeUndefined();
+    settle();
+    await failure;
+    expect(requestRecord.response).toEqual({
+      failed: true, reason: 'late cancellation', endedAt: 1,
+    });
+
+    const failedRecord = {};
+    await expect(failPausedFetch({
+      send: async () => { throw new Error('fail send failed'); }, sessionId: 'session',
+      requestId: 'request', errorReason: 'Aborted', requestRecord: failedRecord, now: () => 2,
+      response: { reason: 'late cancellation' },
+    })).rejects.toThrow('fail send failed');
+    expect(failedRecord.response).toBeUndefined();
+  });
+
+  it('preserves late-cancelled response metadata after reservation settlement', async () => {
+    let settle;
+    let clock = 0;
+    const requestRecord = {};
+    const lifecycle = createNetworkRequestLifecycle({
+      now: () => ++clock,
+      sendBySession: new Map([['session', () => new Promise(resolve => { settle = resolve; })]]),
+    });
+    const reservation = lifecycle.reserve({ requestId: 'request', sessionId: 'session', requestRecord });
+    const release = reservation.release('fail', {
+      errorReason: 'Aborted', response: { failed: true, reason: 'late-A-session-cancelled' },
+    });
+    await Promise.resolve();
+    expect(requestRecord.response).toBeUndefined();
+    settle();
+    await release;
+    expect(requestRecord.response).toEqual({
+      failed: true, reason: 'late-A-session-cancelled', endedAt: 1,
+    });
+  });
+
+  it('retains completed network guard observations when a later observation fails', async () => {
+    const probeResults = [];
+    let fetchCalls = 0;
+    const requests = [];
+    await expect(runNetworkGuardNegativeProbe({
+      requests, chrome: {}, pageSession: 'page', contentContext: 2, processId: 1, now: () => 1,
+      evaluate: async (_chrome, _session, expression) => {
+        if (expression.includes('Boolean(window.__pageTranslationBenchmark')) return true;
+        fetchCalls++;
+        if (fetchCalls === 2) throw new Error('second fetch failed');
+        const url = expression.match(/fetch\((".*?"),/)?.[1];
+        const parsedUrl = JSON.parse(url);
+        requests.push({ url: parsedUrl, blocked: true, category: 'blocked' });
+        return { resolved: false };
+      },
+      until: async read => read(),
+      probeResults,
+    })).rejects.toThrow('second fetch failed');
+    expect(probeResults).toHaveLength(1);
+    expect(probeResults[0].passed).toBe(true);
+  });
+
+  it('evaluates both network-guard worlds before validating their observations', async () => {
+    const probeResults = [];
+    const worlds = [];
+    const requests = [];
+    await expect(runNetworkGuardNegativeProbe({
+      requests, chrome: {}, pageSession: 'page', contentContext: 2, processId: 1, now: () => 1,
+      evaluate: async (_chrome, _session, expression, contextId) => {
+        if (expression.includes('Boolean(window.__pageTranslationBenchmark')) return true;
+        const world = contextId === undefined ? 'page-main-world' : 'extension-isolated-world';
+        worlds.push(world);
+        const url = expression.match(/fetch\((".*?"),/)?.[1];
+        requests.push({ url: JSON.parse(url), blocked: world !== 'page-main-world', category: 'blocked' });
+        return { resolved: false };
+      },
+      until: async read => read(),
+      probeResults,
+    })).rejects.toThrow('Negative network probe failed to prove blocked page and content-world fetches.');
+    expect(worlds).toEqual(['page-main-world', 'extension-isolated-world']);
+    expect(probeResults).toHaveLength(2);
+    expect(probeResults[0].passed).toBe(false);
+  });
+
+  it('runs individual cleanup steps in order and attempts every network unsubscribe after failures', async () => {
+    const calls = [];
+    const steps = createNetworkCleanupSteps({
+      requestUnsubscribe: () => { calls.push('request'); throw new Error('request failed'); },
+      eventUnsubscribe: () => calls.push('event'),
+      pageEventUnsubscribe: () => calls.push('page'),
+      subscriptionsBySession: new Map([
+        ['one', () => { calls.push('network-one'); throw new Error('network one failed'); }],
+        ['two', () => calls.push('network-two')],
+      ]),
+    });
+    const errors = [];
+    await cleanupMeasurementBeforeResources({
+      state: { attempted: false, stopped: false, stopAttempts: 0 },
+      stopMeasurement: async () => {}, resources: steps, cleanupErrors: errors,
+    });
+    expect(calls).toEqual(['request', 'event', 'page', 'network-one', 'network-two']);
+    expect(errors).toEqual(['request failed', 'Network subscriptions failed to close.']);
+  });
+
   it('selects and validates one production Google timeout without retry or sibling loss', () => {
     expect(parseResilienceProbeSelection('googlev2-timeout')).toEqual(['googlev2-timeout']);
     expect(shouldEnableResilienceQueueProbe('googlev2-timeout')).toBe(true);
@@ -143,37 +284,40 @@ describe('page translation benchmark measurements', () => {
   });
   it('keeps timeout execution separate from status injection and drains its held Fetch lifecycle', () => {
     const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/trial-runner.mjs', 'utf8');
+    const networkSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/network-interception.mjs', 'utf8');
+    const timeoutSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/resilience/googlev2-timeout.mjs', 'utf8');
     const contentSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/content-entry.mjs', 'utf8');
     expect(runSource).toContain("if (googleTimeoutProtocol && classification.provider === 'googlev2')");
-    expect(runSource).toContain('? { armed: false, claimed: false, held: null, selectionFailures: [], releaseRequested: false } : null');
-    expect(runSource).toContain('failedCount: googleTimeoutProtocol.held || googleTimeoutProtocol.claimed ? 1 : 0, armed: googleTimeoutProtocol.armed');
-    expect(runSource).toContain('if (!claimGoogleTimeoutRequest(googleTimeoutProtocol))');
-    expect(runSource).toContain('commitGoogleTimeoutRequest(googleTimeoutProtocol, timeoutHold)');
-    expect(runSource).toContain('controllerAborted: settled.controllerAbort.sequence > settled.serviceTimeout.sequence');
-    expect(runSource).toContain('controllerAbortSequence: settled.controllerAbort.sequence');
-    expect(runSource).toContain('if (googleTimeoutProtocol) googleTimeoutProtocol.armed = true;');
-    expect(runSource).toContain('if (googleTimeoutProtocol.armed && resolver?.resolutionPending === false');
+    expect(timeoutSource).toContain('return { armed: false, claimed: false, held: null, selectionFailures: [], releaseRequested: false }');
+    expect(timeoutSource).toContain('failedCount: googleTimeoutProtocol.held || googleTimeoutProtocol.claimed ? 1 : 0, armed: googleTimeoutProtocol.armed');
+    expect(timeoutSource).toContain('if (!claimGoogleTimeoutRequest(googleTimeoutProtocol))');
+    expect(timeoutSource).toContain('commitGoogleTimeoutRequest(googleTimeoutProtocol, timeoutHold)');
+    expect(timeoutSource).toContain('controllerAborted: settled.controllerAbort.sequence > settled.serviceTimeout.sequence');
+    expect(timeoutSource).toContain('controllerAbortSequence: settled.controllerAbort.sequence');
+    expect(runSource).toContain('if (googleTimeoutProtocol) armGoogleV2Timeout(googleTimeoutProtocol);');
+    expect(timeoutSource).toContain('if (googleTimeoutProtocol.armed && resolver?.resolutionPending === false');
     expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol)');
     expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || resilienceProbe)');
     expect(runSource).toContain('else if (googleTimeoutProtocol) trial.resilience.workerInstrumentation = workerInstrumentation;');
     expect(runSource).toContain('const instrumentationOwner = trial.cancellation ?? trial.staleSuccess ?? trial.resilience;');
-    expect(runSource).toContain('findGoogleTimeoutBatchError(contentOperations, trial.sessionId, targetIds)');
-    expect(runSource).toContain('findGoogleTimeoutCancelMessage(contentOperations, root.messageId, trial.sessionId)');
+    expect(timeoutSource).toContain('findGoogleTimeoutBatchError(contentOperations, sessionId, targetIds)');
+    expect(timeoutSource).toContain('findGoogleTimeoutCancelMessage(contentOperations, root.messageId, sessionId)');
     expect(runSource).toContain('window.__pageTranslationBenchmark.cancellationSnapshot()');
-    expect(runSource).toContain('await captureRequestViewport(body)');
-    expect(runSource).toContain('requireGoogleTimeoutReservation(reservation).hold()');
+    expect(timeoutSource).toContain('await captureRequestViewport(body)');
+    expect(timeoutSource).toContain('requireGoogleTimeoutReservation(reservation).hold()');
     expect(runSource).toMatch(/const handlerLifecycle = cancellationControl\?\.requestLifecycle\s*\?\?\s*\(googleTimeoutProtocol \? requestLifecycle : null\);/);
-    expect(runSource).toContain('const reservation = handlerLifecycle?.reserve({');
-    expect(runSource).toContain('(handlerLifecycle ?? requestLifecycle).trackHandler(reservation, job)');
-    expect(runSource).toContain('item.kind === \'service.handleTimeout\'');
-    expect(runSource).toContain('cancellationDiagnostics.workerSnapshot = snapshot ?? null');
-    expect(runSource).toContain('cancellationDiagnostics.contentSnapshot = content ?? null');
-    expect(runSource).toContain('cancellationDiagnostics.error = { name: error?.name ?? \'Error\'');
+    expect(runSource).toContain('return handlerLifecycle?.reserve({');
+    expect(runSource).toContain('handlerJobTracker.track(lifecycle, reservation, job');
+    expect(networkSource).toContain('lifecycle.trackHandler(reservation, job)');
+    expect(timeoutSource).toContain('item.kind === \'service.handleTimeout\'');
+    expect(timeoutSource).toContain('cancellationDiagnostics.workerSnapshot = snapshot ?? null');
+    expect(timeoutSource).toContain('cancellationDiagnostics.contentSnapshot = content ?? null');
+    expect(timeoutSource).toContain('cancellationDiagnostics.error = { name: error?.name ?? \'Error\'');
     expect(runSource).toContain('cancellationDiagnostics: googleTimeoutProtocol.held.cancellationDiagnostics ?? null');
-    expect(runSource).toContain('await reservation.release(\'fail\', { errorReason: \'Aborted\', reason: \'production-timeout-cancel\' })');
-    expect(runSource).toContain('requestLifecycle.closeAndDrain({');
+    expect(timeoutSource).toContain('await reservation.release(\'fail\', { errorReason: \'Aborted\', reason: \'production-timeout-cancel\' })');
+    expect(networkSource).toContain('lifecycle.closeAndDrain({');
     expect(runSource).toContain('heldReservation?.handlerSettled === true');
-    expect(runSource).toContain('validateGoogleTimeoutEvidence(trial.resilience)');
+    expect(runSource).toContain('validateGoogleV2TimeoutEvidence(trial.resilience)');
     expect(runSource).not.toContain("if (resilienceProbe && classification.provider === 'googlev2')");
     expect(contentSource).toContain('errorType: error?.type ?? null');
     expect(contentSource).toContain("ledger.record('scheduler.batch.error', sessionId");
@@ -332,12 +476,84 @@ describe('page translation benchmark measurements', () => {
     const source = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
     expect(source).toContain("'scripts/dev/page-translation/e2e-benchmark/rate-limit-queue.mjs'");
     const trialSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/trial-runner.mjs', 'utf8');
+    const networkSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/network-interception.mjs', 'utf8');
+    const googleSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/resilience/googlev2-503.mjs', 'utf8');
     expect(trialSource).toContain('const handlerLifecycle = cancellationControl?.requestLifecycle');
-    expect(trialSource).toContain('(handlerLifecycle ?? requestLifecycle).trackHandler(reservation, job)');
+    expect(trialSource).toContain('handlerJobTracker.track(lifecycle, reservation, job');
+    expect(networkSource).toContain('lifecycle.trackHandler(reservation, job)');
     expect(trialSource).toContain('? resilienceEvidence.queueRetryEvidence ?? null');
-    const googleBranch = trialSource.split("if (resilienceProbe === 'googlev2-503' && classification.provider === 'googlev2')")[1]?.split("if (googleTimeoutProtocol && classification.provider === 'googlev2')")[0];
-    expect(googleBranch).toContain('responseCode: 503');
-    expect(googleBranch).not.toMatch(/custom-429|Retry-After|retryAfterSeconds|status: 429/);
+    expect(trialSource).toContain("executeGoogleV2_503({");
+    expect(googleSource).toContain('status: 503');
+    expect(googleSource).not.toMatch(/custom-429|Retry-After|retryAfterSeconds|status: 429/);
+  });
+
+  it('keeps interception and resilience execution at the approved module boundaries', () => {
+    const base = 'scripts/dev/page-translation/e2e-benchmark';
+    const network = readFileSync(`${base}/network-interception.mjs`, 'utf8');
+    expect(network).toContain('createFetchRequestListener');
+    expect(network).toContain('createProviderNetworkObserver');
+    expect(network).toContain('decodeProviderRequest');
+    expect(network).toContain('fulfillPausedFetch');
+    expect(network).toContain('failPausedFetch');
+    expect(network).toContain('continuePausedFetch');
+    expect(network).toContain('closeNetworkRequestLifecycle');
+    expect(network).toContain('runNetworkGuardNegativeProbe');
+
+    const boundaries = [
+      ['googlev2-503.mjs', 'executeGoogleV2_503'],
+      ['googlev2-timeout.mjs', 'executeGoogleV2Timeout'],
+      ['custom-429.mjs', 'executeCustom429Request'],
+      ['custom-400.mjs', 'executeCustom400'],
+      ['gemini-structured-recovery.mjs', 'executeGeminiStructuredRecovery'],
+    ];
+    for (const [file, executionOwner] of boundaries) {
+      const source = readFileSync(`${base}/resilience/${file}`, 'utf8');
+      expect(source).toContain(`function ${executionOwner}`);
+      expect(source).toContain(file === 'googlev2-503.mjs' ? 'evidence.attempts.push(base)' : 'collect');
+      expect(source).toMatch(/validate.*Evidence/);
+      expect(source).not.toMatch(/\btrial\b/);
+    }
+    const runner = readFileSync(`${base}/trial-runner.mjs`, 'utf8');
+    expect(network).not.toMatch(/\btrial\b/);
+    expect(runner).toContain('guardSessions, now, requests: trial.requests,');
+    expect(runner).toContain('requests: trial.requests, chrome, pageSession');
+    for (const owner of [
+      'executeGoogleV2_503', 'executeGoogleV2Timeout', 'executeCustom429Request',
+      'executeCustom400', 'executeGeminiStructuredRecovery', 'collectGoogleV2TimeoutEvidence',
+      'collectCustom429Evidence', 'collectCustom400Evidence', 'collectGeminiStructuredRecoveryEvidence',
+    ]) {
+      expect(runner).not.toMatch(new RegExp(`${owner}\\(\\{[^}]*\\btrial\\s*(?:,|}|:)`));
+    }
+    expect(runner).toContain('sessionId: trial.sessionId');
+    expect(runner).toContain('trial.resilience = { ...resilienceEvidence, ...timeoutEvidence };');
+    expect(runner).not.toContain("if (resilienceProbe === 'googlev2-503' && classification.provider === 'googlev2') {\n          const networkId");
+    expect(runner).toContain('shouldEnableResilienceQueueProbe(resilienceProbe)');
+    expect(runner).toContain('shouldEnableResilienceQueueProbe,');
+    expect(runner).toContain('texts: decodedProvider.texts');
+    expect(runner).not.toContain('texts: decoded.texts');
+  });
+  it('collects only successful same-session Google 503 siblings with non-overlapping target identity', () => {
+    const failed = { attemptId: 'failed', pageSessionId: 'session-a', targetIds: ['target-a'], status: 503 };
+    const sameSessionSibling = { attemptId: 'sibling', pageSessionId: 'session-a', targetIds: ['target-b'], status: 200 };
+    const evidence = {
+      injected503: [failed],
+      attempts: [
+        failed,
+        sameSessionSibling,
+        { attemptId: 'wrong-session', pageSessionId: 'session-b', targetIds: ['target-c'], status: 200 },
+        { attemptId: 'overlap', pageSessionId: 'session-a', targetIds: ['target-a', 'target-b'], status: 200 },
+        { attemptId: 'empty-targets', pageSessionId: 'session-a', targetIds: [], status: 200 },
+        { attemptId: 'failed-attempt', pageSessionId: 'session-a', targetIds: ['target-c'], status: 503 },
+      ],
+      siblingRequests: [],
+    };
+    finalizeGoogleV2_503Evidence(evidence);
+    expect(evidence.siblingRequests).toEqual([sameSessionSibling]);
+    const runner = readFileSync('scripts/dev/page-translation/e2e-benchmark/trial-runner.mjs', 'utf8');
+    const finalizeAt = runner.indexOf('finalizeGoogleV2_503Evidence(trial.resilience);');
+    const validateAt = runner.indexOf("trial.resilience.validation = resilienceProbe === 'googlev2-503'");
+    expect(finalizeAt).toBeGreaterThanOrEqual(0);
+    expect(finalizeAt).toBeLessThan(validateAt);
   });
 
   it('selects only a first Google V2 attempt after concrete AUTO source resolution and validates retry accounting', () => {
@@ -405,17 +621,18 @@ describe('page translation benchmark measurements', () => {
   });
   it('validates isolated Custom permanent-failure probes and exact partial-success evidence', () => {
     const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/trial-runner.mjs', 'utf8');
+    const probeSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/resilience/custom-400.mjs', 'utf8');
     expect(parseResilienceProbeSelection('custom-400')).toEqual(['custom-400']);
     expect(shouldEnableResilienceQueueProbe('custom-400')).toBe(true);
-    expect(runSource).toContain('requestRecord.requestViewport = await evaluate(chrome, pageSession');
+    expect(probeSource).toContain('requestRecord.requestViewport = await evaluate(chrome, pageSession');
     expect(runSource).toContain('translated.filter(([id]) => !custom400FailedIds.has(id))');
-    expect(runSource).toContain('const ids = item.batchTexts?.map(text =>');
-    expect(runSource).not.toContain('const ids = item.batchIds ??');
+    expect(probeSource).toContain('const ids = item.batchTexts?.map(text =>');
+    expect(probeSource).not.toContain('const ids = item.batchIds ??');
     expect(runSource).toContain("el?.hasAttribute('data-page-translated')");
     expect(runSource).toContain("el?.hasAttribute('data-has-original')");
     expect(runSource).toContain('if (custom400Protocol?.armed)');
-    expect(runSource).toContain('isCustom400ProbeWindowRequest(requestRecord, custom400Protocol.armedWallMs)');
-    expect(runSource).toContain('const consider400 = !custom400Protocol.considered;');
+    expect(probeSource).toContain('isCustom400ProbeWindowRequest(requestRecord, protocol.armedWallMs)');
+    expect(probeSource).toContain('const consider400 = !protocol.considered;');
     expect(validateResilienceProbeIsolation({
       selected: true, probe: 'custom-400', provider: 'custom', optimizationLevel: 3,
       modes: 'sliced', scenario: 'scroll-through', schedulingMode: 'fluid',
@@ -694,6 +911,43 @@ describe('page translation benchmark measurements', () => {
     expect(validateCustom429Evidence({ ...evidence, serverRetryAt: 5_996 }).ok).toBe(false);
     expect(validateCustom429Evidence({ ...evidence, concurrency: { peakPhysical: 3, peakLogical: 2 } }).ok).toBe(false);
     expect(validateCustom429Evidence({ ...evidence, translation: { ...evidence.translation, restoreExact: false } }).ok).toBe(false);
+  });
+  it('collects Custom 429 protocol evidence from the supplied protocol', () => {
+    const roles = { A: { attemptId: 'failed' }, B: { attemptId: 'sibling' } };
+    const protocol = { evidence: {
+      roles, serverRetryAt: 10, limiterRetryAt: 20, limiterRetryAtAfterSibling: 20,
+      pendingStillQueuedAfterSibling: true, cooldownEstablishedWallMs: 15,
+    } };
+    const failed = { attemptId: 'failed', logicalMessageId: 'message-a', pageSessionId: 'session-a',
+      targetIds: ['target-a'], responseMonoMs: 10, responseWallMs: 10 };
+    const evidence = { attempts: [], injected429: [failed], cooldownObserved: {} };
+    collectCustom429Evidence({
+      evidence, protocol, failed, resources: { rateLimit: { Custom: { queueItems: [] } } },
+      workerTrace: {}, providerAttempts: [], providerNetworkEvents: new Map(), sessionId: 'session-a',
+      providerPhysicalAttempts: [], traceEvents: () => [], summarizePhysicalProviderAttempts: () => ({ peakPhysicalConcurrency: 1 }),
+      validateQueueRetryEvidence: () => ({ ok: true, observed: {} }), peakLogicalConcurrency: 1,
+    });
+    expect(evidence.roles).toBe(roles);
+    expect(evidence.serverRetryAt).toBe(10);
+    expect(evidence.limiterRetryAtAfterSibling).toBe(20);
+    expect(evidence.pendingStillQueuedAfterSibling).toBe(true);
+    expect(evidence.cooldown).toMatchObject({ establishedWallMs: 15, limiterRetryAt: 20 });
+  });
+  it('collects Gemini structured-recovery evidence without a free-variable selection guard', () => {
+    const evidence = { attempts: [], injectedMalformed: [] };
+    collectGeminiStructuredRecoveryEvidence({
+      evidence, failed: { messageId: 'message-a', texts: ['source'], targetIds: ['target-a'] },
+      workerTrace: {}, traceEvents: () => [], providerAttempts: [], providerNetworkEvents: new Map(),
+      sessionId: 'session-a', isMappedGeminiResponse: () => false, providerPhysicalAttempts: [],
+      summarizePhysicalProviderAttempts: () => ({ peakPhysicalConcurrency: 2 }),
+      validateGeminiQueueAttemptEvidence: () => ({ ok: true }), peakLogicalConcurrency: 3,
+      effectiveProviderLimiterCapacity: 4,
+    });
+    expect(evidence).toMatchObject({
+      executionCalls: [], structuredRecoveryEntries: [], physicalAttempts: [],
+      unexpectedPhysicalAttempts: [], parentRecoveries: [],
+      concurrency: { peakPhysical: 2, peakLogical: 3, effectiveProviderLimiterCapacity: 4 },
+    });
   });
 
   it('validates Edge and Google V2 lanes without changing legacy selection', () => {

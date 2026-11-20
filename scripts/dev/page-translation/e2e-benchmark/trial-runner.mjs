@@ -2,16 +2,22 @@ import { Buffer } from 'node:buffer';
 import { resolve } from 'node:path';
 import process from 'node:process';
 import { launchChrome } from './chrome.mjs';
-import { canonicalProviderSourceAttempts, classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, summarizeLongTasks, validateEffectiveSettings, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
-import { decodeGoogleV2Request, GOOGLE_V2_ENDPOINT, mapGoogleV2Response } from './google-v2-fixture.mjs';
-import { CUSTOM_FIXTURE_ENDPOINT, decodeCustomRequest, mapCustomResponse } from './custom-fixture.mjs';
-import { decodeGeminiRequest, GEMINI_FIXTURE_KEY, isMappedGeminiResponse, mapGeminiResponse, mapMalformedGeminiResponse } from './gemini-fixture.mjs';
+import { canonicalProviderSourceAttempts, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, summarizeLongTasks, validateEffectiveSettings, validateTranslation, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
+import { GOOGLE_V2_ENDPOINT } from './google-v2-fixture.mjs';
+import { CUSTOM_FIXTURE_ENDPOINT } from './custom-fixture.mjs';
+import { isMappedGeminiResponse, mapMalformedGeminiResponse } from './gemini-fixture.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
 import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, mapProviderBatchIds, providerLaneSettings, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
-import { classifyHeldFetchRelease, createCancellationRequestLifecycle, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
+import { classifyHeldFetchRelease, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
-import { claimGoogleTimeoutRequest, commitGoogleTimeoutRequest, findGoogleTimeoutBatchError, findGoogleTimeoutCancelMessage, findSessionOwnedPendingRequest, isCustom400ProbeWindowRequest, partitionBandAcceptance, requireGoogleTimeoutReservation, selectResolvedCustom400Batch, selectResolvedGoogleAttempt, selectResolvedGoogleTimeoutBatch, selectResolvedGeminiAttempt, shouldEnableResilienceQueueProbe, validateCustom400Evidence, validateCustom400QueueEvidence, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateGoogleTimeoutEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting } from './resilience-probes.mjs';
+import { isCustom400ProbeWindowRequest, partitionBandAcceptance, shouldEnableResilienceQueueProbe, validateCustom400QueueEvidence, validateGeminiQueueAttemptEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting } from './resilience-probes.mjs';
+import { createProviderNetworkObserver, createNetworkRequestLifecycle, createHandlerJobTracker, createFetchRequestListener, createCustomFetchSettlement, createNetworkSessionState, registerGuardedSession, closeNetworkRequestLifecycle, createNetworkCleanupSteps, enableFetchGuard, enableProviderNetworkObservation, fulfillPausedFetch, failPausedFetch, continuePausedFetch, runNetworkGuardNegativeProbe, classifyPausedRequest, decodeProviderRequest } from './network-interception.mjs';
+import { createGoogleV2_503Evidence, executeGoogleV2_503, finalizeGoogleV2_503Evidence, validateGoogleV2_503Evidence } from './resilience/googlev2-503.mjs';
+import { createGoogleV2TimeoutProtocol, armGoogleV2Timeout, executeGoogleV2Timeout, collectGoogleV2TimeoutEvidence, recordGoogleTimeoutFailedTargetDOM, validateGoogleV2TimeoutEvidence } from './resilience/googlev2-timeout.mjs';
+import { createCustom429Protocol, armCustom429, claimCustom429Request, executeCustom429Request, collectCustom429Evidence, validateCustom429ProbeEvidence } from './resilience/custom-429.mjs';
+import { createCustom400Protocol, armCustom400, executeCustom400, collectCustom400Evidence, recordCustom400PreRestorePreArmDrain, recordCustom400FailedTargetDOM, validateCustom400ProbeEvidence } from './resilience/custom-400.mjs';
+import { createGeminiStructuredRecoveryEvidence, executeGeminiStructuredRecovery, collectGeminiStructuredRecoveryEvidence, validateGeminiStructuredRecoveryEvidence } from './resilience/gemini-structured-recovery.mjs';
 
 const now = () => Date.now();
 const wait = ms => new Promise(resolveWait => setTimeout(resolveWait, ms));
@@ -170,123 +176,41 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
   let pageSession;
   let contentContext;
   const measurementState = { attempted: false, started: false, stopped: false, stopAttempts: 0 };
-  const guardSessions = new Set();
-  const sendBySession = new Map();
-  const extensionOriginBySession = new Map();
+  const networkSessions = createNetworkSessionState();
+  const guardSessions = networkSessions.guardedSessions;
+  const sendBySession = networkSessions.sendBySession;
+  const extensionOriginBySession = networkSessions.extensionOriginBySession;
   let requestUnsubscribe;
   let eventUnsubscribe;
   let pageEventUnsubscribe;
-  const networkEventUnsubscribes = new Map();
+  const networkEventUnsubscribes = networkSessions.subscriptionsBySession;
   const providerNetworkEvents = new Map();
   const providerPhysicalAttempts = [];
-  const resilienceEvidence = resilienceProbe ? { injected503: [], injected429: [], injectedMalformed: [], recovery: [], attempts: [], unnecessaryRetransmits: [], siblingRequests: [] } : null;
+  const resilienceEvidence = resilienceProbe ? {
+    ...createGoogleV2_503Evidence(),
+    ...createGeminiStructuredRecoveryEvidence(),
+    injected429: [],
+  } : null;
   if (resilienceEvidence) trial.resilience = resilienceEvidence;
-  const googleTimeoutProtocol = resilienceProbe === 'googlev2-timeout'
-    ? { armed: false, claimed: false, held: null, selectionFailures: [], releaseRequested: false } : null;
-  const custom429Protocol = resilienceProbe === 'custom-429' ? {
-    armed: false, roles: new Map(), releaseStates: new Map(), error: null, evidence: { events: [] },
-  } : null;
-  const custom400Protocol = resilienceProbe === 'custom-400' ? {
-    armed: false, considered: false, injected: false, initialTargetIds: [], evidence: { injected400: [], attempts: [], selectionFailures: [], unexpectedRecovery: [], queueRetries: [], keyFailovers: [], circuitBreakers: [] },
-  } : null;
-  const releaseCustomPaused = async (role, status, body, headers = [{ name: 'Content-Type', value: 'application/json' }]) => {
-    if (!custom429Protocol || custom429Protocol.releaseStates.has(role)) throw new Error(`Custom 429 ${role} Fetch already has a settlement in progress or completed.`);
-    const claim = custom429Protocol.roles.get(role);
-    if (!claim) throw new Error(`Custom 429 ${role} Fetch is not claimed.`);
-    custom429Protocol.releaseStates.set(role, 'fulfill-in-flight');
-    claim.settlementPromise = Promise.resolve().then(() => sendBySession.get(claim.event.sessionId)('Fetch.fulfillRequest', {
-      requestId: claim.event.params.requestId, responseCode: status, responseHeaders: headers,
-      body: Buffer.from(JSON.stringify(body)).toString('base64'),
-    }, claim.event.sessionId)).then(() => {
-      custom429Protocol.releaseStates.set(role, 'fulfilled');
-      claim.requestRecord.response = { status, retryAfter: status === 429 ? '5' : null, endedAt: now() };
-    }, error => {
-      custom429Protocol.releaseStates.set(role, 'fulfill-failed');
-      claim.requestRecord.releaseError = error?.message ?? String(error);
-      custom429Protocol.evidence.events.push({ type: 'fulfill-send-failed', role, at: now(), message: claim.requestRecord.releaseError });
-      throw error;
-    });
-    await claim.settlementPromise;
-    return claim;
-  };
-  const failCustomHeldFetches = async reason => {
-    if (!custom429Protocol) return;
-    for (const [role, claim] of custom429Protocol.roles) {
-      let state = custom429Protocol.releaseStates.get(role);
-      if (state === 'fulfill-in-flight') {
-        await claim.settlementPromise?.catch(() => {});
-        state = custom429Protocol.releaseStates.get(role);
-      }
-      if (state === 'fulfilled' || state === 'failed' || state === 'fail-in-flight' || state === 'fail-failed') continue;
-      custom429Protocol.releaseStates.set(role, 'fail-in-flight');
-      try {
-        await sendBySession.get(claim.event.sessionId)?.('Fetch.failRequest', {
-          requestId: claim.event.params.requestId, errorReason: 'Aborted',
-        }, claim.event.sessionId);
-        custom429Protocol.releaseStates.set(role, 'failed');
-        claim.requestRecord.response = { failed: true, reason, endedAt: now() };
-      } catch (error) {
-        custom429Protocol.releaseStates.set(role, 'fail-failed');
-        claim.requestRecord.releaseError ??= error?.message ?? String(error);
-        custom429Protocol.evidence.events.push({ type: 'fail-send-failed', role, at: now(), message: claim.requestRecord.releaseError });
-      }
-    }
-  };
-  let providerAttemptSequence = 0;
-  const providerNetworkObserver = event => {
-    const params = event.params ?? {};
-    const id = params.requestId;
-    if (!id) return;
-    const sessionId = event.sessionId;
-    if (!sessionId) return;
-    const key = `${sessionId}:${id}`;
-    let entry = providerNetworkEvents.get(key);
-    if (event.method === 'Network.requestWillBeSent') {
-      let url;
-      try { url = new URL(params.request?.url); } catch { return; }
-       if (!((url.origin === 'https://edge.microsoft.com' && url.pathname === '/translate/translatetext')
-            || (url.origin === GOOGLE_V2_ENDPOINT.origin && url.pathname === GOOGLE_V2_ENDPOINT.pathname)
-            || (url.origin === CUSTOM_FIXTURE_ENDPOINT.origin && url.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname)
-            || (url.origin === 'https://benchmark-gemini.invalid' && url.pathname === '/v1beta/models/benchmark-gemini-model:generateContent'))) return;
-       entry = { sessionId, networkId: id, startedAt: Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null,
-         wallTime: Number.isFinite(params.wallTime) ? params.wallTime * 1000 : null };
-      providerNetworkEvents.set(key, entry);
-    } else if (entry && event.method === 'Network.responseReceived') {
-      entry.status = params.response?.status ?? null;
-      entry.responseAtMonoMs = Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null;
-      entry.responseWallTime = Number.isFinite(entry.wallTime) && Number.isFinite(entry.startedAt) && Number.isFinite(entry.responseAtMonoMs)
-        ? entry.wallTime + entry.responseAtMonoMs - entry.startedAt : null;
-    } else if (entry && event.method === 'Network.loadingFinished') {
-      entry.settledAt = Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null;
-      entry.outcome = 'finished';
-    } else if (entry && event.method === 'Network.loadingFailed') {
-      entry.settledAt = Number.isFinite(params.timestamp) ? params.timestamp * 1000 : null;
-      entry.outcome = 'failed';
-      entry.error = params.errorText ?? 'Network loading failed';
-    }
-  };
-  const requestHandlerJobs = new Set();
-  const requestLifecycle = createCancellationRequestLifecycle(async (reservation, action, detail) => {
-    const send = sendBySession.get(reservation.sessionId);
-    if (!send) throw new Error(`No CDP session remains for held Fetch ${reservation.requestId}.`);
-    if (action === 'continue') {
-      await send('Fetch.continueRequest', { requestId: reservation.requestId }, reservation.sessionId);
-      reservation.requestRecord.response = { continued: true, endedAt: now(), releasedDuringCleanup: detail?.reason === 'teardown' };
-    } else if (action === 'fail') {
-      await send('Fetch.failRequest', { requestId: reservation.requestId, errorReason: detail?.errorReason ?? 'Aborted' }, reservation.sessionId);
-    } else if (action === 'fulfill') {
-      const bodyString = JSON.stringify(detail?.body);
-      await send('Fetch.fulfillRequest', {
-        requestId: reservation.requestId, responseCode: detail?.responseCode ?? 200,
-        responseHeaders: detail?.responseHeaders ?? [{ name: 'Content-Type', value: 'application/json' }],
-        body: Buffer.from(bodyString).toString('base64'),
-      }, reservation.sessionId);
-      reservation.requestRecord.response = { status: detail?.responseCode ?? 200, body: detail?.body, endedAt: now(), releasedAfterPause: reservation.held };
-    } else {
-      throw new TypeError(`Unsupported Fetch release action: ${action}`);
-    }
-    return { ok: true, action, requestId: reservation.requestId };
+  const googleTimeoutProtocol = resilienceProbe === 'googlev2-timeout' ? createGoogleV2TimeoutProtocol() : null;
+  const custom429Protocol = resilienceProbe === 'custom-429' ? createCustom429Protocol() : null;
+  const custom400Protocol = resilienceProbe === 'custom-400' ? createCustom400Protocol() : null;
+  const { release: releaseCustomPaused, failHeld: failCustomHeldFetches } = createCustomFetchSettlement({
+    protocol: custom429Protocol, sendBySession, now,
   });
+  let providerAttemptSequence = 0;
+  const providerNetworkObserver = createProviderNetworkObserver({
+    providerNetworkEvents,
+    endpoints: [
+      { origin: 'https://edge.microsoft.com', pathname: '/translate/translatetext' },
+      GOOGLE_V2_ENDPOINT,
+      CUSTOM_FIXTURE_ENDPOINT,
+      { origin: 'https://benchmark-gemini.invalid', pathname: '/v1beta/models/benchmark-gemini-model:generateContent' },
+    ],
+  });
+  const handlerJobTracker = createHandlerJobTracker();
+  const requestHandlerJobs = handlerJobTracker.jobs;
+  const requestLifecycle = createNetworkRequestLifecycle({ now, sendBySession });
   let staleContextDisposed = false;
   const cancellationControl = cancellationProbe || staleSuccessProbe ? {
     probe: cancellationProbe ?? 'stale-success',
@@ -330,7 +254,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     const networkTarget = networkEventRouter?.targetForSession(event.sessionId) ?? null;
     requestRecord.targetSessionId = event.sessionId;
     requestRecord.targetId = networkTarget?.targetId ?? null;
-    const classification = classifyTransportRequest(request, {
+    const classification = classifyPausedRequest(request, {
       fixtureOrigin: new URL(trial.fixture.url).origin,
       extensionOrigin: extensionOriginBySession.get(event.sessionId),
       selectedProvider: providerLane?.provider,
@@ -366,479 +290,48 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
           providerPhysicalAttempts.push(attempt);
           requestRecord.physicalAttempt = attempt;
         }
-        let body;
-        let responseBody;
-        if (providerLane?.provider === 'googlev2') {
-          const decoded = decodeGoogleV2Request({ method: request.method, url: request.url, body: request.postData ?? '' });
-          body = decoded.texts;
-          requestRecord.sourceLanguageQuery = decoded.sourceLanguage;
-          requestRecord.batchTexts = body;
-          responseBody = mapGoogleV2Response(body);
-        } else if (providerLane?.provider === 'custom') {
-          const decoded = decodeCustomRequest({
-            method: request.method, url: request.url, body: request.postData ?? '',
-            headers: request.headers ?? {}, expectedTexts: fixtureConfig.targetTexts,
-          });
-          body = decoded.texts;
-          requestRecord.batchIds = decoded.ids;
-          requestRecord.batchTexts = body;
-          responseBody = mapCustomResponse(decoded);
-          if (custom400Protocol?.armed) {
-            const networkId = event.params.networkId ?? null;
-            const startedWallMs = providerNetworkEvents.get(`${event.sessionId}:${networkId}`)?.wallTime ?? null;
-            if (isCustom400ProbeWindowRequest(requestRecord, custom400Protocol.armedWallMs)) {
-              const consider400 = !custom400Protocol.considered;
-              if (consider400) custom400Protocol.considered = true;
-            const resources = await evaluate(chrome, workerSession,
-              `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false);
-            const snapshot = await evaluate(chrome, workerSession,
-              'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
-            const resolver = resources?.sourceResolvers?.[trial.sessionId];
-            const targetIds = decoded.texts.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
-            const selection = consider400 ? selectResolvedCustom400Batch({
-              request: {
-                networkId, sessionId: trial.sessionId, texts: decoded.texts, targetIds,
-                physicalStartedWallMs: Number.isFinite(startedWallMs) ? startedWallMs : requestRecord.startedAt,
-              },
-              classification, resolver, roots: snapshot?.providerRoots ?? [],
-              failedCount: custom400Protocol.injected ? 1 : 0,
-              initialTargetIds: custom400Protocol.initialTargetIds,
-              armedWallMs: custom400Protocol.armedWallMs,
-            }) : { selected: false, reason: 'request-started-before-arm' };
-            if (consider400 && !selection.selected) custom400Protocol.evidence.selectionFailures.push({
-              reason: selection.reason, networkId, targetIds, texts: decoded.texts,
-            });
-            const roots = (snapshot?.providerRoots ?? []).filter(root => root.sessionId === trial.sessionId
-              && sameProviderTexts(root.texts, decoded.texts));
-            const root = roots.length === 1 ? roots[0] : null;
-            const attempt = {
-              attemptId: `custom-400-${custom400Protocol.evidence.attempts.length + 1}`,
-              networkId, networkSessionId: event.sessionId,
-              logicalMessageId: root?.messageId ?? null, pageSessionId: trial.sessionId,
-              targetIds, texts: decoded.texts, status: 200,
-            };
-            custom400Protocol.evidence.attempts.push(attempt);
-            if (selection.selected) {
-              custom400Protocol.injected = true;
-              attempt.status = 400;
-              const failure = {
-                ...attempt, status: 400, selectedAt: now(),
-                errorBody: { error: { code: 400, message: 'Invalid request parameters' } },
-                source: selection.source, target: selection.target,
-              };
-              custom400Protocol.evidence.injected400.push(failure);
-              requestRecord.custom400Failure = failure;
-              if (fixtureConfig.scenario === 'scroll-through' && pageSession && contentContext) {
-                requestRecord.requestViewport = await evaluate(chrome, pageSession,
-                  `(()=>{const sources=${JSON.stringify(body)};return {at:performance.now(),scrollY,targets:sources.map(source=>{const el=[...document.querySelectorAll('[data-bench-id]')].find(node=>node.textContent===source);if(!el)return {source,id:null,classification:'unmapped'};const r=el.getBoundingClientRect();const visible=r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth;const buffered=r.bottom>-50&&r.top<innerHeight+50&&r.right>-50&&r.left<innerWidth+50;return {source,id:el.dataset.benchId,classification:visible?'viewport':buffered?'permitted-50px-buffer':'outside-buffer'}})}})()`,
-                  contentContext, false);
-              }
-              await sendBySession.get(event.sessionId)('Fetch.fulfillRequest', {
-                requestId, responseCode: 400,
-                responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-                body: Buffer.from(JSON.stringify(failure.errorBody)).toString('base64'),
-              }, event.sessionId);
-              requestRecord.response = { status: 400, endedAt: now() };
-              return;
-            }
-            }
+          const decodedProvider = decodeProviderRequest(classification.provider, request, fixtureConfig.targetTexts);
+          let body = decodedProvider.texts;
+          let responseBody = decodedProvider.responseBody;
+          if (classification.provider === 'googlev2') {
+            requestRecord.sourceLanguageQuery = decodedProvider.sourceLanguage;
+            requestRecord.batchTexts = body;
+          } else if (classification.provider === 'custom') {
+            requestRecord.batchIds = decodedProvider.ids;
+            requestRecord.batchTexts = body;
+            if (custom400Protocol?.armed) {
+            if (await executeCustom400({
+              protocol: custom400Protocol, event, requestId, requestRecord, classification, texts: decodedProvider.texts,
+              fixtureConfig, sessionId: trial.sessionId, sendBySession, providerNetworkEvents, chrome, workerSession, pageSession, contentContext,
+              evaluate, now, sameProviderTexts,
+            })) return;
           }
-        } else if (providerLane?.provider === 'gemini') {
-          const decoded = decodeGeminiRequest({
-            method: request.method, url: request.url, body: request.postData ?? '',
-            headers: request.headers ?? {}, expectedTexts: fixtureConfig.targetTexts,
-          });
-          body = decoded.texts;
-          requestRecord.batchIds = decoded.ids;
-          requestRecord.batchTexts = body;
-          responseBody = mapGeminiResponse(decoded);
-          if (resilienceProbe === 'gemini-structured-recovery') {
-            const resources = trial.sessionId ? await evaluate(chrome, workerSession,
-              `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false) : null;
-            const roots = await evaluate(chrome, workerSession,
-              'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
-            const resolver = resources?.sourceResolvers?.[trial.sessionId];
-            const selected = selectResolvedGeminiAttempt({
-              request: { networkId: event.params.networkId ?? null, sessionId: trial.sessionId, texts: body },
-              classification, resolver, roots: roots?.providerRoots ?? [],
-              failedCount: resilienceEvidence.injectedMalformed.length,
-            });
-            const matchingRoots = (roots?.providerRoots ?? []).filter(item => item.sessionId === trial.sessionId
-              && JSON.stringify(item.texts) === JSON.stringify(body));
-            const root = matchingRoots.length === 1 ? matchingRoots[0] : null;
-            const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
-            const attempt = {
-              attemptId: `gemini-structured-${resilienceEvidence.attempts.length + 1}`,
-              networkId: event.params.networkId ?? null, sessionId: trial.sessionId,
-              messageId: root?.messageId ?? null, texts: body, targetIds,
-              keyIdentity: (() => { try { return new URL(request.url).searchParams.get('key') === GEMINI_FIXTURE_KEY ? 'synthetic-fixture' : 'unexpected'; } catch { return 'unexpected'; } })(),
-              selection: selected, source: resolver?.effectiveSourceLanguage ?? null,
-              target: resolver?.effectiveTargetLanguage ?? null,
-            };
-            resilienceEvidence.attempts.push(attempt);
-            requestRecord.geminiStructuredRecovery = attempt;
-            if (selected.selected) {
-              if (resilienceEvidence.injectedMalformed.length) throw new Error('Gemini structured-recovery probe selected more than one malformed primary.');
-              const malformed = { ...attempt, httpStatus: 200, jsonValid: false, envelopeValid: true };
-              resilienceEvidence.injectedMalformed.push(malformed);
-              requestRecord.geminiMalformedPrimary = malformed;
-              requestRecord.canonicalSourceExcluded = true;
-              responseBody = mapMalformedGeminiResponse();
-            } else if (resilienceEvidence.injectedMalformed.length
-                && attempt.messageId === resilienceEvidence.injectedMalformed[0].messageId
-                && JSON.stringify(targetIds) === JSON.stringify(resilienceEvidence.injectedMalformed[0].targetIds)) {
-              attempt.retryOf = resilienceEvidence.injectedMalformed[0].attemptId;
-              resilienceEvidence.recovery.push({ ...attempt, valid: true });
-            }
+          } else if (classification.provider === 'gemini') {
+            requestRecord.batchIds = decodedProvider.ids;
+            requestRecord.batchTexts = body;
+            if (resilienceProbe === 'gemini-structured-recovery') {
+            responseBody = await executeGeminiStructuredRecovery({
+              event, request, requestRecord, classification, body, fixtureConfig, sessionId: trial.sessionId,
+              evidence: resilienceEvidence, chrome, workerSession, evaluate, mapMalformedGeminiResponse,
+            }) ?? responseBody;
           }
-        } else {
-          body = JSON.parse(request.postData ?? 'null');
-          responseBody = mapEdgeResponse(body);
-        }
+          }
         requestRecord.bodyLength = request.postData?.length ?? 0;
         requestRecord.bodyBytes = Buffer.byteLength(request.postData ?? '', 'utf8');
         requestRecord.batchSize = body.length;
         requestRecord.batchTexts ??= body;
         requestRecord.fixtureDelayMs = fixtureConfig.responseDelayMs;
         if (resilienceProbe === 'googlev2-503' && classification.provider === 'googlev2') {
-          const networkId = event.params.networkId ?? null;
-          const network = networkId ? providerNetworkEvents.get(`${event.sessionId}:${networkId}`) : null;
-          const resources = trial.sessionId ? await evaluate(chrome, workerSession,
-            `globalThis.__pageTranslationBenchmark.resourceSnapshot([],[${JSON.stringify(trial.sessionId)}])`, undefined, false) : null;
-          const resolver = resources?.sourceResolvers?.[trial.sessionId];
-          const roots = await evaluate(chrome, workerSession,
-            'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
-          const matchingRoots = (roots?.providerRoots ?? []).filter(root => root.sessionId === trial.sessionId
-            && sameProviderTexts(root.texts, body));
-          const logicalRoots = [...new Map(matchingRoots.map(root => [root.messageId, root])).values()];
-          const root = logicalRoots.length === 1 ? logicalRoots[0] : null;
-          const selection = selectResolvedGoogleAttempt({ request: { networkId, sourceLanguage: requestRecord.sourceLanguageQuery }, classification, resolver, failedCount: resilienceEvidence.injected503.length });
-          const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
-          const base = { attemptId: `resilience-${resilienceEvidence.attempts.length + 1}`, networkId,
-            pageSessionId: trial.sessionId, logicalMessageId: root?.messageId ?? null, texts: body, targetIds,
-            physicalStartedWallMs: network?.wallTime ?? null,
-            source: resolver?.effectiveSourceLanguage ?? null, sourceLanguageQuery: requestRecord.sourceLanguageQuery ?? null,
-            target: resolver?.effectiveTargetLanguage ?? null };
-          const injected = resilienceEvidence.injected503;
-          if (injected.length && sameProviderTexts(injected[0].texts, body)) {
-            base.retryOf = injected[0].attemptId;
-          }
-          resilienceEvidence.attempts.push(base);
-          requestRecord.resilienceCorrelation = { ...base, resolver, matchingRootCount: logicalRoots.length, selection };
-          if (selection.selected) {
-            if (!root || !targetIds.length || targetIds.some(id => id === null)) throw new Error('Resolved Google request lacks unique QueueManager/logical target correlation.');
-            const failure = { ...base, status: 503, selectedAt: now() };
-            base.status = failure.status;
-            resilienceEvidence.injected503.push(failure);
-            requestRecord.resilienceInjected503 = failure;
-            const send = sendBySession.get(event.sessionId);
-            await send('Fetch.fulfillRequest', { requestId, responseCode: 503,
-              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-              body: Buffer.from(JSON.stringify({ error: { code: 503, message: 'Benchmark injected transient failure' } })).toString('base64') }, event.sessionId);
-            requestRecord.response = { status: 503, retryAfter: null, endedAt: now() };
-            return;
-          }
+          if (await executeGoogleV2_503({
+            event, requestId, classification, requestRecord, body, fixtureConfig, sessionId: trial.sessionId,
+            evidence: resilienceEvidence, providerNetworkEvents, chrome, workerSession, evaluate, now, sendBySession, sameProviderTexts,
+          })) return;
         }
         if (googleTimeoutProtocol && classification.provider === 'googlev2') {
-          const networkId = event.params.networkId ?? null;
-          const resources = trial.sessionId ? await evaluate(chrome, workerSession,
-            `globalThis.__pageTranslationBenchmark.resourceSnapshot([],[${JSON.stringify(trial.sessionId)}])`, undefined, false) : null;
-          const resolver = resources?.sourceResolvers?.[trial.sessionId];
-          const roots = await evaluate(chrome, workerSession,
-            'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
-          const logicalRoots = (roots?.providerRoots ?? []).filter(root => root.sessionId === trial.sessionId
-            && sameProviderTexts(root.texts, body));
-          const uniqueRoots = [...new Map(logicalRoots.map(root => [root.messageId, root])).values()];
-          const root = uniqueRoots.length === 1 ? uniqueRoots[0] : null;
-          const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
-          const selection = selectResolvedGoogleTimeoutBatch({
-            request: { networkId, sessionId: trial.sessionId, sourceLanguage: requestRecord.sourceLanguageQuery, texts: body, targetIds },
-            classification, resolver, roots: roots?.providerRoots ?? [],
-            failedCount: googleTimeoutProtocol.held || googleTimeoutProtocol.claimed ? 1 : 0, armed: googleTimeoutProtocol.armed,
-          });
-          const physical = providerNetworkEvents.get(`${event.sessionId}:${networkId}`);
-          requestRecord.googleTimeoutCorrelation = {
-            networkId, sessionId: trial.sessionId, messageId: root?.messageId ?? null,
-            targetIds, texts: body, source: resolver?.effectiveSourceLanguage ?? null,
-            target: resolver?.effectiveTargetLanguage ?? null, selection,
-          };
-          const attempt = {
-            attemptId: requestRecord.physicalAttemptId ?? `googlev2-timeout-${resilienceEvidence.attempts.length + 1}`,
-            networkId, networkSessionId: event.sessionId, pageSessionId: trial.sessionId,
-            logicalMessageId: root?.messageId ?? null, targetIds, texts: body,
-            status: null, outcome: null, selected: selection.selected,
-          };
-          resilienceEvidence.attempts.push(attempt);
-          if (selection.selected) {
-            if (!claimGoogleTimeoutRequest(googleTimeoutProtocol)) {
-              throw new Error('A Google timeout Fetch request was already claimed or held.');
-            }
-            if (!root || !requireGoogleTimeoutReservation(reservation).hold()) {
-              throw new Error('Could not hold the uniquely correlated Google timeout Fetch request.');
-            }
-            const timeoutHold = {
-              ...attempt,
-              networkId, networkSessionId: event.sessionId, requestId,
-              pageSessionId: trial.sessionId, messageId: root.messageId, targetIds,
-              texts: body, startedAt: requestRecord.startedAt,
-              physicalStartedWallMs: physical?.wallTime ?? null,
-              reservation, requestRecord,
-            };
-            if (!commitGoogleTimeoutRequest(googleTimeoutProtocol, timeoutHold)) {
-              throw new Error('Could not commit the Google timeout Fetch request claim.');
-            }
-            await captureRequestViewport(body);
-            requestRecord.heldFetch = { requestId, messageId: root.messageId, sessionId: trial.sessionId, handlerSettled: false };
-            const cancellationDiagnostics = timeoutHold.cancellationDiagnostics = {
-              startedAt: now(), workerSnapshot: null, contentSnapshot: null, lastObservedAt: null, samples: 0,
-            };
-            let cancellation;
-            try {
-              cancellation = await until(async () => {
-                if (reservation.releaseRequested) return { teardown: true };
-                const snapshot = await evaluate(chrome, workerSession,
-                  `globalThis.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(trial.sessionId)})`, undefined, false);
-                cancellationDiagnostics.workerSnapshot = snapshot ?? null;
-                const operations = snapshot?.ledger?.operations ?? [];
-                const content = await evaluate(chrome, pageSession,
-                  'window.__pageTranslationBenchmark.cancellationSnapshot()', contentContext, false);
-                cancellationDiagnostics.contentSnapshot = content ?? null;
-                cancellationDiagnostics.lastObservedAt = now();
-                cancellationDiagnostics.samples++;
-                const contentOperations = content?.operations ?? [];
-                const serviceTimeout = operations.find(item => item.kind === 'service.handleTimeout' && item.messageId === root.messageId);
-                const controllerAbort = operations.find(item => item.kind === 'controller.abort' && item.messageId === root.messageId);
-                const controllerState = snapshot?.controllers?.find(item => item.messageId === root.messageId);
-                const timedOut = findGoogleTimeoutBatchError(contentOperations, trial.sessionId, targetIds);
-                const cancelMessage = findGoogleTimeoutCancelMessage(contentOperations, root.messageId, trial.sessionId);
-                if (!serviceTimeout || !controllerAbort || controllerState?.aborted !== true || !timedOut || !cancelMessage) return null;
-                return { snapshot, content, serviceTimeout, controllerAbort, controllerState, timedOut, cancelMessage };
-              }, 70_000);
-            } catch (error) {
-              cancellationDiagnostics.error = { name: error?.name ?? 'Error', message: error?.message ?? String(error) };
-              cancellationDiagnostics.elapsedMs = now() - cancellationDiagnostics.startedAt;
-              throw error;
-            }
-            if (cancellation.teardown) return;
-            timeoutHold.cancellation = {
-              serviceTimeout: cancellation.serviceTimeout,
-              controllerAbort: cancellation.controllerAbort,
-              controllerState: cancellation.controllerState,
-              timedOut: cancellation.timedOut,
-              cancelMessage: cancellation.cancelMessage,
-            };
-            timeoutHold.fetchRelease = await reservation.release('fail', { errorReason: 'Aborted', reason: 'production-timeout-cancel' });
-            const settled = await until(async () => {
-              const snapshot = await evaluate(chrome, workerSession,
-                `globalThis.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(trial.sessionId)})`, undefined, false);
-              const ledger = snapshot?.ledger?.operations ?? [];
-              const providerRoot = ledger.find(item => item.kind === 'provider.root' && item.messageId === root.messageId);
-              const physicalMatches = ledger.filter(item => item.kind === 'provider.physical'
-                && item.sessionId === trial.sessionId && item.messageId === root.messageId
-                && item.url === requestRecord.url && item.method === requestRecord.method
-                && item.requestBody === requestRecord.postData);
-              const physical = physicalMatches.length === 1 ? physicalMatches[0] : null;
-              const serviceTimeout = ledger.find(item => item.kind === 'service.handleTimeout' && item.messageId === root.messageId);
-              const controllerAbort = ledger.find(item => item.kind === 'controller.abort' && item.messageId === root.messageId);
-              return providerRoot?.status === 'rejected' && physical?.status === 'rejected'
-                && serviceTimeout?.status === 'fulfilled' && serviceTimeout.controllerAbortedAfter === true
-                && serviceTimeout.response?.handled === true && serviceTimeout.response?.success === true && controllerAbort
-                ? { providerRoot, physical, physicalMatchCount: physicalMatches.length, serviceTimeout, controllerAbort } : null;
-            }, 10_000);
-            timeoutHold.cancellation.providerRoot = settled.providerRoot;
-            timeoutHold.cancellation.physical = settled.physical;
-            timeoutHold.cancellation.serviceTimeout = settled.serviceTimeout;
-            timeoutHold.cancellation.controllerAbort = settled.controllerAbort;
-            timeoutHold.cancellation.physicalMatchCount = settled.physicalMatchCount;
-            const networkOutcome = providerNetworkEvents.get(`${event.sessionId}:${networkId}`);
-            const releaseClassification = classifyHeldFetchRelease({
-              heldRequestId: requestId, matchedRequestId: requestId,
-              releaseOutcome: timeoutHold.fetchRelease,
-              networkCanceled: networkOutcome?.outcome === 'failed' && /abort|cancel/i.test(networkOutcome?.error ?? ''),
-              controllerAborted: settled.controllerAbort.sequence > settled.serviceTimeout.sequence,
-              cancelTargetMatched: settled.serviceTimeout.messageId === root.messageId,
-              providerRootStatus: settled.providerRoot.status, physicalStatus: settled.physical.status,
-              physicalControllerAborted: settled.physical.controllerAbortedAtEnd,
-              controllerAbortSequence: settled.controllerAbort.sequence,
-              providerRootSettledSequence: settled.providerRoot.settledSequence,
-              physicalSettledSequence: settled.physical.settledSequence,
-            });
-            timeoutHold.fetchReleaseClassification = releaseClassification;
-            if (!timeoutHold.reservation.classifyRelease(releaseClassification)) {
-              throw new Error(`Timed-out Fetch release could not be classified: ${releaseClassification.issues.join('; ')}`);
-            }
-            return;
-          }
-          if (googleTimeoutProtocol.armed && resolver?.resolutionPending === false && resolver.effectiveSourceLanguage !== 'auto'
-              && body.length === 25 && selection.reason !== 'not-first-google-physical-attempt') {
-            googleTimeoutProtocol.selectionFailures.push({ networkId, reason: selection.reason, targetIds });
-          }
+          if (await executeGoogleV2Timeout({ googleTimeoutProtocol, classification, event, requestRecord, requestId, body, fixtureConfig, sessionId: trial.sessionId, providerNetworkEvents, resilienceEvidence, chrome, workerSession, pageSession, contentContext, evaluate, captureRequestViewport, until, now, reservation, classifyHeldFetchRelease, sameProviderTexts })) return;
         }
         if (custom429Protocol && classification.provider === 'custom') {
-          if (requestRecord.custom429Role && fixtureConfig.scenario === 'scroll-through' && pageSession && contentContext) {
-            const requestViewport = await evaluate(chrome, pageSession,
-              `(()=>{const sources=${JSON.stringify(body)};return {at:performance.now(),scrollY,targets:sources.map(source=>{const el=[...document.querySelectorAll('[data-bench-id]')].find(node=>node.textContent===source);if(!el)return {source,id:null,classification:'unmapped'};const r=el.getBoundingClientRect();const visible=r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth;const buffered=r.bottom>-50&&r.top<innerHeight+50&&r.right>-50&&r.left<innerWidth+50;return {source,id:el.dataset.benchId,classification:visible?'viewport':buffered?'permitted-50px-buffer':'outside-buffer'}})}})()`, contentContext, false);
-            requestRecord.requestViewport = requestViewport;
-          }
-          const networkId = event.params.networkId ?? null;
-          const resources = await evaluate(chrome, workerSession,
-            `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false);
-          const resolver = resources?.sourceResolvers?.[trial.sessionId];
-          const roots = await evaluate(chrome, workerSession,
-            'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
-          const matchingRoots = (roots?.providerRoots ?? []).filter(root => root.sessionId === trial.sessionId
-            && sameProviderTexts(root.texts, body));
-          const logicalRoots = [...new Map(matchingRoots.map(root => [root.messageId, root])).values()];
-          const root = logicalRoots.length === 1 ? logicalRoots[0] : null;
-          const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
-          const base = { attemptId: `resilience-${resilienceEvidence.attempts.length + 1}`, networkId,
-            pageSessionId: trial.sessionId, logicalMessageId: root?.messageId ?? null, texts: body, targetIds,
-            physicalStartedWallMs: providerNetworkEvents.get(`${event.sessionId}:${networkId}`)?.wallTime ?? null,
-            physicalStartedMonoMs: providerNetworkEvents.get(`${event.sessionId}:${networkId}`)?.startedAt ?? null,
-            source: resolver?.effectiveSourceLanguage ?? null, target: resolver?.effectiveTargetLanguage ?? null };
-          const failed = resilienceEvidence.injected429[0];
-          if (failed && sameProviderTexts(failed.texts, body)) base.retryOf = failed.attemptId;
-          resilienceEvidence.attempts.push(base);
-          requestRecord.resilienceCorrelation = { ...base, resolver, matchingRootCount: logicalRoots.length };
-          const role = requestRecord.custom429Role;
-          if (!role) {
-            if (requestRecord.response?.status === 200) base.status = 200;
-          } else {
-            const claim = custom429Protocol.roles.get(role);
-            claim.correlation = { ...base, root, resolver, responseBody, requestRecord };
-            const matchingClaims = ['A', 'B'].map(name => custom429Protocol.roles.get(name));
-            if (matchingClaims.every(item => item?.correlation)) {
-              const [a, b] = matchingClaims;
-              const distinct = a.networkId !== b.networkId && a.event.sessionId === b.event.sessionId
-                && a.correlation.root?.messageId && b.correlation.root?.messageId
-                && a.correlation.root.messageId !== b.correlation.root.messageId
-                && a.targetIds.every(id => !b.targetIds.includes(id));
-              const resolved = [a, b].every(item => item.correlation.resolver?.present
-                && item.correlation.resolver.resolutionPending === false
-                && item.correlation.resolver.effectiveSourceLanguage
-                && item.correlation.resolver.effectiveSourceLanguage !== 'auto'
-                && item.correlation.resolver.effectiveTargetLanguage);
-              if (!distinct || !resolved) throw new Error('Custom 429 roles A/B lack distinct same-session physical/root/target/AUTO correlation.');
-              custom429Protocol.evidence.roles = {
-                A: { attemptId: a.correlation.attemptId, networkId: a.networkId, messageId: a.correlation.root.messageId,
-                  sessionId: a.correlation.root.sessionId, targetIds: a.targetIds, physicalStartedWallMs: a.correlation.physicalStartedWallMs,
-                  physicalStartedMonoMs: a.correlation.physicalStartedMonoMs,
-                  source: a.correlation.resolver.effectiveSourceLanguage, target: a.correlation.resolver.effectiveTargetLanguage,
-                  fetchHeldAt429: true },
-                B: { attemptId: b.correlation.attemptId, networkId: b.networkId, messageId: b.correlation.root.messageId,
-                  sessionId: b.correlation.root.sessionId, targetIds: b.targetIds, physicalStartedWallMs: b.correlation.physicalStartedWallMs,
-                  physicalStartedMonoMs: b.correlation.physicalStartedMonoMs,
-                  source: b.correlation.resolver.effectiveSourceLanguage, target: b.correlation.resolver.effectiveTargetLanguage,
-                  heldThroughCooldownEstablished: true },
-              };
-              custom429Protocol.evidence.events.push({ type: 'roles-correlated', at: now() });
-            }
-            await until(() => {
-              if (custom429Protocol.error) throw custom429Protocol.error;
-              return custom429Protocol.roles.get('A')?.correlation && custom429Protocol.roles.get('B')?.correlation;
-            }, 10_000);
-            if (role === 'A') {
-              const a = custom429Protocol.roles.get('A');
-              const failure = {
-                attemptId: a.correlation.attemptId, networkId: a.networkId,
-                pageSessionId: a.correlation.root.sessionId, logicalMessageId: a.correlation.root.messageId,
-                texts: [...a.correlation.texts], targetIds: [...a.targetIds],
-                physicalStartedWallMs: a.correlation.physicalStartedWallMs,
-                physicalStartedMonoMs: a.correlation.physicalStartedMonoMs,
-                source: a.correlation.resolver.effectiveSourceLanguage,
-                target: a.correlation.resolver.effectiveTargetLanguage,
-                status: 429, retryAfterSeconds: 5,
-              };
-              resilienceEvidence.injected429.push(failure);
-              a.requestRecord.resilienceInjected429 = failure;
-              await releaseCustomPaused('A', 429, { error: { code: 429, message: 'Benchmark injected rate limit' } },
-                [{ name: 'Content-Type', value: 'application/json' }, { name: 'Retry-After', value: '5' }]);
-              failure.retryAfterHeader = a.requestRecord.response?.retryAfter ?? null;
-              const responseNetwork = await until(() => {
-                const network = providerNetworkEvents.get(`${a.event.sessionId}:${a.networkId}`);
-                return network?.status === 429 && Number.isFinite(network.responseWallTime)
-                  ? network : null;
-              }, 10_000);
-              failure.responseWallMs = responseNetwork.responseWallTime;
-              failure.responseMonoMs = responseNetwork.responseAtMonoMs;
-              custom429Protocol.evidence.responseWallMs = failure.responseWallMs;
-              const cooldown = await until(async () => {
-                const [snapshot, trace] = await Promise.all([
-                  evaluate(chrome, workerSession,
-                    `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false),
-                  evaluate(chrome, workerSession, 'globalThis.__pageTranslationBenchmark.snapshot()', undefined, false),
-                ]);
-                const itemEnd = trace?.events?.find(item => item.name === 'queueManager.processItem.end'
-                  && item.messageId === a.correlation.root.messageId && item.status === 'retrying'
-                  && item.lastErrorType === 'RATE_LIMIT_REACHED');
-                const rate = snapshot?.rateLimit?.Custom;
-                return itemEnd && Number.isFinite(itemEnd.retryAt) && Number.isFinite(rate?.retryAt)
-                  ? { itemEnd, rate } : null;
-              }, 10_000);
-              custom429Protocol.evidence.serverRetryAt = cooldown.itemEnd.retryAt;
-              custom429Protocol.evidence.limiterRetryAt = cooldown.rate.retryAt;
-              custom429Protocol.evidence.cooldownEstablishedWallMs = cooldown.itemEnd.at;
-              custom429Protocol.evidence.cooldownCapacity = {
-                activeRequests: cooldown.rate.activeRequests, capacity: cooldown.rate.capacity,
-                observedAtWallMs: cooldown.rate.now,
-              };
-              failure.queueRetryAt = cooldown.itemEnd.retryAt;
-              failure.queueItemId = cooldown.itemEnd.queueItemId;
-              const b = custom429Protocol.roles.get('B');
-              custom429Protocol.evidence.roles.B.responseReleasedWallMs = now();
-              custom429Protocol.evidence.roles.B.responseReleasedMonoMs =
-                b.correlation.physicalStartedMonoMs + custom429Protocol.evidence.roles.B.responseReleasedWallMs
-                  - b.correlation.physicalStartedWallMs;
-              await releaseCustomPaused('B', 200, b.correlation.responseBody);
-              const limiterDeadline = cooldown.rate.retryAt;
-              const sibling = await until(async () => {
-                const [network, snapshot, state] = await Promise.all([
-                  Promise.resolve(providerNetworkEvents.get(`${b.event.sessionId}:${b.networkId}`)),
-                  evaluate(chrome, workerSession,
-                    `globalThis.__pageTranslationBenchmark.cancellationSnapshot()`, undefined, false),
-                  evaluate(chrome, workerSession, 'globalThis.__pageTranslationBenchmark.snapshot()', undefined, false),
-                ]);
-                const end = state?.events?.find(item => item.name === 'queueManager.processItem.end'
-                  && item.messageId === b.correlation.root.messageId && item.status === 'completed');
-                const rootState = state?.events?.length && (await evaluate(chrome, workerSession,
-                  `globalThis.__pageTranslationBenchmark.cancellationSnapshot()`, undefined, false))
-                  ?.providerRoots?.find(item => item.messageId === b.correlation.root.messageId);
-                if (network?.status === 200 && network.outcome === 'finished' && end && rootState?.status === 'fulfilled') {
-                  const completedWallMs = network.wallTime + network.settledAt - network.startedAt;
-                  if (completedWallMs >= limiterDeadline) throw new Error('Custom 429 B settled at or after unchanged limiter deadline.');
-                  return { network, end, rootState, completedWallMs };
-                }
-                return null;
-              }, 10_000);
-              custom429Protocol.evidence.sibling = {
-                success: true, messageId: b.correlation.root.messageId, sessionId: trial.sessionId,
-                networkId: b.networkId, completedWallMs: sibling.completedWallMs,
-                queueSettledAt: sibling.end.at, rootStatus: sibling.rootState.status,
-              };
-              const after = await until(async () => {
-                const snapshot = await evaluate(chrome, workerSession,
-                  `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false);
-                const rate = snapshot?.rateLimit?.Custom;
-                const pending = findSessionOwnedPendingRequest(rate?.queueItems, trial.sessionId,
-                  [a.correlation.root.messageId, b.correlation.root.messageId]);
-                if (!pending || !Number.isFinite(rate?.retryAt) || rate.retryAt !== limiterDeadline
-                    || !(rate.activeRequests < rate.capacity) || !(rate.now < limiterDeadline)) return null;
-                return { rate, pending };
-              }, 10_000);
-              custom429Protocol.evidence.pending = { ...after.pending, observedAtWallMs: after.rate.now,
-                activeRequests: after.rate.activeRequests, capacity: after.rate.capacity };
-              custom429Protocol.evidence.pendingObservedBeforeDeadline = after.rate.now < limiterDeadline;
-              custom429Protocol.evidence.limiterRetryAtAfterSibling = after.rate.retryAt;
-              custom429Protocol.evidence.pendingStillQueuedAfterSibling = !!after.rate.queueItems?.some(item =>
-                item.messageId === after.pending.messageId && item.sessionId === trial.sessionId);
-              custom429Protocol.evidence.events.push({ type: 'B-settled', at: now() });
-              resilienceEvidence.cooldownObserved = custom429Protocol.evidence;
-              resilienceEvidence.pendingLimiterSibling = custom429Protocol.evidence.pending;
-              resilienceEvidence.siblingObserved = custom429Protocol.evidence.sibling;
-            }
-            base.status = role === 'A' ? 429 : 200;
-            return;
-          }
+          if (await executeCustom429Request({ custom429Protocol, classification, event, requestRecord, body, responseBody, fixtureConfig, pageSession, contentContext, evaluate, chrome, workerSession, sessionId: trial.sessionId, providerNetworkEvents, now, until, sameProviderTexts, resilienceEvidence, releaseCustomPaused })) return;
         }
         await captureRequestViewport(body);
         if (cancellationProbe || staleSuccessProbe) {
@@ -925,10 +418,13 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
               requestRecord.lateCancelledAController = abortedEvidence;
               if (!abortedEvidence?.aborted) throw new Error(`Late A provider request is not yet controller-aborted: ${root.messageId}`);
               const cancellation = reservation
-                ? await reservation.release('fail', { errorReason: 'Aborted', reason: 'A session invalidated before this sibling Fetch fulfilled' })
-                : await send('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, event.sessionId);
+                ? await reservation.release('fail', {
+                  errorReason: 'Aborted', reason: 'A session invalidated before this sibling Fetch fulfilled',
+                  response: { failed: true, reason: 'late-A-session-cancelled' },
+                })
+                : await failPausedFetch({ send, sessionId: event.sessionId, requestId, errorReason: 'Aborted', requestRecord, now,
+                  response: { reason: 'late-A-session-cancelled' } });
               requestRecord.lateCancelledARelease = cancellation;
-              requestRecord.response = { failed: true, reason: 'late-A-session-cancelled', endedAt: now() };
               return;
             }
             responseBody = mapStaleSuccessResponse(body, root.sessionId, cancellationControl.initialSessionId, cancellationControl.replacementSessionId);
@@ -988,53 +484,29 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
               await wait(fixtureConfig.responseDelayMs);
               if (reservation) await reservation.release('fulfill', { body: responseBody, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }] });
               else {
-                const bodyString = JSON.stringify(responseBody);
-                await send('Fetch.fulfillRequest', {
-                  requestId, responseCode: 200,
-                  responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-                  body: Buffer.from(bodyString).toString('base64'),
-                }, event.sessionId);
-                requestRecord.response = { status: 200, body: responseBody, endedAt: now() };
+                await fulfillPausedFetch({ send, sessionId: event.sessionId, requestId, status: 200, body: responseBody, requestRecord, now });
               }
             }
           } else {
             await wait(fixtureConfig.responseDelayMs);
             if (reservation) await reservation.release('fulfill', { body: responseBody, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }] });
             else {
-              const bodyString = JSON.stringify(responseBody);
-              await send('Fetch.fulfillRequest', {
-                requestId, responseCode: 200,
-                responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-                body: Buffer.from(bodyString).toString('base64'),
-              }, event.sessionId);
-              requestRecord.response = { status: 200, body: responseBody, endedAt: now() };
+              await fulfillPausedFetch({ send, sessionId: event.sessionId, requestId, status: 200, body: responseBody, requestRecord, now });
             }
           }
         } else {
           await wait(fixtureConfig.responseDelayMs);
-        const bodyString = JSON.stringify(responseBody);
-        await send('Fetch.fulfillRequest', {
-          requestId, responseCode: 200,
-          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-          body: Buffer.from(bodyString).toString('base64'),
-        }, event.sessionId);
-        requestRecord.response = { status: 200, body: responseBody, endedAt: now() };
+        await fulfillPausedFetch({ send, sessionId: event.sessionId, requestId, status: 200, body: responseBody, requestRecord, now });
         }
       } else if (classification.kind === 'startup-metadata-fixture') {
         if (reservation) await reservation.release('fulfill', { body: startupVoicesResponse, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }] });
         else {
-          await send('Fetch.fulfillRequest', {
-            requestId, responseCode: 200,
-            responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-            body: Buffer.from(JSON.stringify(startupVoicesResponse)).toString('base64'),
-          }, event.sessionId);
-          requestRecord.response = { status: 200, body: startupVoicesResponse, endedAt: now() };
+          await fulfillPausedFetch({ send, sessionId: event.sessionId, requestId, status: 200, body: startupVoicesResponse, requestRecord, now });
         }
       } else if (classification.kind === 'local') {
         if (reservation) await reservation.release('continue');
         else {
-          await send('Fetch.continueRequest', { requestId }, event.sessionId);
-          requestRecord.response = { continued: true, endedAt: now() };
+          await continuePausedFetch({ send, sessionId: event.sessionId, requestId, requestRecord, now });
         }
       } else if (classification.kind === 'invalid-extension-placeholder') {
         requestRecord.blocked = true;
@@ -1042,12 +514,12 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         trial.nonHttpBlockedRequests ??= [];
         trial.nonHttpBlockedRequests.push(requestRecord);
         if (reservation) await reservation.release('fail', { errorReason: 'BlockedByClient' });
-        else await send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, event.sessionId);
+        else await failPausedFetch({ send, sessionId: event.sessionId, requestId, errorReason: 'BlockedByClient', requestRecord, now });
       } else {
         requestRecord.blocked = true;
         requestRecord.error = classification.reason;
         if (reservation) await reservation.release('fail', { errorReason: 'BlockedByClient' });
-        else await send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, event.sessionId);
+        else await failPausedFetch({ send, sessionId: event.sessionId, requestId, errorReason: 'BlockedByClient', requestRecord, now });
       }
     } catch (error) {
       if (custom429Protocol && requestRecord.custom429Role) {
@@ -1064,7 +536,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       trial.transportErrors.push(error.message);
       if (!requestRecord.response) {
         if (reservation) await reservation.release('fail', { errorReason: 'BlockedByClient', reason: 'request-handler-error' });
-        else await send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, event.sessionId).catch(() => {});
+        else await failPausedFetch({ send, sessionId: event.sessionId, requestId, errorReason: 'BlockedByClient', requestRecord, now }).catch(() => {});
       }
     } finally {
       if (resilienceProbe && requestRecord.resilienceCorrelation && requestRecord.response?.status === 200) {
@@ -1079,69 +551,35 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     }
   };
 
-  const requestListener = event => {
-    if (event.method !== 'Fetch.requestPaused' || !guardSessions.has(event.sessionId)) return;
-    const { request, requestId } = event.params;
-    const requestRecord = {
-      startedAt: now(), url: request.url, method: request.method,
-      postData: request.postData ?? null,
-      initiator: request.initiator ?? null,
-    };
-    trial.requests.push(requestRecord);
-    if (custom429Protocol?.armed && custom429Protocol.roles.size < 2) {
-      const classification = classifyTransportRequest(request, {
-        fixtureOrigin: new URL(trial.fixture.url).origin,
-        extensionOrigin: extensionOriginBySession.get(event.sessionId),
-        selectedProvider: 'custom',
+  const requestListener = createFetchRequestListener({
+    guardSessions, now, requests: trial.requests,
+    onRequest: (event, request, requestRecord) => {
+      if (!custom429Protocol) return;
+      claimCustom429Request({
+        protocol: custom429Protocol, event, request, requestRecord, now, providerNetworkEvents, fixtureConfig,
+        classify: (candidate, sessionId) => classifyPausedRequest(candidate, {
+          fixtureOrigin: new URL(trial.fixture.url).origin,
+          extensionOrigin: extensionOriginBySession.get(sessionId), selectedProvider: 'custom',
+        }),
       });
-      if (classification.kind === 'provider-translation' && classification.provider === 'custom'
-          && event.params.networkId) {
-        try {
-          const network = providerNetworkEvents.get(`${event.sessionId}:${event.params.networkId}`);
-          if (Number.isFinite(network?.wallTime) && network.wallTime >= custom429Protocol.armedWallMs) {
-          const decoded = decodeCustomRequest({
-            method: request.method, url: request.url, body: request.postData ?? '',
-            headers: request.headers ?? {}, expectedTexts: fixtureConfig.targetTexts,
-          });
-          const targetIds = decoded.texts.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
-          const claimedIds = new Set([...custom429Protocol.roles.values()].flatMap(role => role.targetIds));
-          if (targetIds.every(Boolean) && !targetIds.some(id => custom429Protocol.initialTargetIds.has(id))
-              && targetIds.every(id => !claimedIds.has(id))) {
-            const role = custom429Protocol.roles.size === 0 ? 'A' : 'B';
-            custom429Protocol.roles.set(role, { event, requestRecord, networkId: event.params.networkId, targetIds, texts: decoded.texts });
-            requestRecord.custom429Role = role;
-            custom429Protocol.evidence.events.push({ type: 'claimed', role, at: now(), networkId: event.params.networkId, targetIds });
-          }
-          }
-        } catch (error) {
-          custom429Protocol.evidence.events.push({ type: 'claim-rejected', at: now(), reason: error.message });
-        }
-      }
-    }
-    const handlerLifecycle = cancellationControl?.requestLifecycle
-      ?? (googleTimeoutProtocol ? requestLifecycle : null);
-    const reservation = handlerLifecycle?.reserve({
-      requestId,
-      sessionId: event.sessionId,
-      networkId: event.params.networkId ?? null,
-      requestRecord,
-    }) ?? null;
-    const job = processRequestPaused(event, requestRecord, reservation);
-    {
-      const trackedJob = (handlerLifecycle ?? requestLifecycle).trackHandler(reservation, job);
-      requestHandlerJobs.add(trackedJob);
-      trackedJob.then(
-        () => requestHandlerJobs.delete(trackedJob),
-        error => {
-          requestHandlerJobs.delete(trackedJob);
-          trial.transportErrors ??= [];
-          trial.transportErrors.push(error?.message ?? String(error));
-        },
-      );
-      return trackedJob;
-    }
-    return job;
-  };
+    },
+    reserveRequest: (event, requestRecord, requestId) => {
+      const handlerLifecycle = cancellationControl?.requestLifecycle
+        ?? (googleTimeoutProtocol ? requestLifecycle : null);
+      return handlerLifecycle?.reserve({
+        requestId, sessionId: event.sessionId, networkId: event.params.networkId ?? null, requestRecord,
+      }) ?? null;
+    },
+    handlePaused: processRequestPaused,
+    trackHandler: (reservation, job) => {
+      const lifecycle = cancellationControl?.requestLifecycle
+        ?? (googleTimeoutProtocol ? requestLifecycle : null) ?? requestLifecycle;
+      return handlerJobTracker.track(lifecycle, reservation, job, error => {
+        trial.transportErrors ??= [];
+        trial.transportErrors.push(error?.message ?? String(error));
+      });
+    },
+  });
 
   try {
     fixture = await startFixture(fixtureConfig);
@@ -1153,14 +591,12 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         if (targetInfo.type !== 'service_worker' || !targetInfo.url.startsWith('chrome-extension://')) return;
         const workerUrl = new URL(targetInfo.url);
         const extensionOrigin = workerUrl.protocol === 'chrome-extension:' ? `chrome-extension://${workerUrl.host}` : null;
-        guardSessions.add(sessionId);
-        sendBySession.set(sessionId, send);
-        extensionOriginBySession.set(sessionId, extensionOrigin);
+        registerGuardedSession(networkSessions, sessionId, send, extensionOrigin);
         if (!eventUnsubscribe) eventUnsubscribe = onEvent(event => recordEvent(event, trial));
         if (!requestUnsubscribe) requestUnsubscribe = onEvent(requestListener);
         if (providerLane && !networkEventUnsubscribes.has(sessionId)) {
           networkEventUnsubscribes.set(sessionId, onEvent(providerNetworkObserver));
-          await send('Network.enable', {}, sessionId);
+          await enableProviderNetworkObservation(send, sessionId);
         }
         if (cancellationProbe || staleSuccessProbe) {
           if (!networkEventRouter?.register(sessionId, targetInfo)) throw new Error(`Could not register Network observer target for CDP session ${sessionId}.`);
@@ -1170,9 +606,9 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
             const unsubscribe = onEvent(networkEventRouter.observerForSession(sessionId));
             networkEventUnsubscribes.set(sessionId, unsubscribe);
           }
-          await send('Network.enable', {}, sessionId);
+          await enableProviderNetworkObservation(send, sessionId);
         }
-        await send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId);
+        await enableFetchGuard(send, sessionId);
         trial.workerTargets ??= [];
         trial.workerTargets.push(targetInfo);
       },
@@ -1220,12 +656,10 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     pageEventUnsubscribe = chrome.onEvent(event => recordEvent(event, trial));
     if (providerLane) {
       networkEventUnsubscribes.set(pageSession, chrome.onEvent(providerNetworkObserver));
-      await chrome.send('Network.enable', {}, pageSession);
+      await enableProviderNetworkObservation(chrome.send, pageSession);
     }
-    guardSessions.add(pageSession);
-    sendBySession.set(pageSession, chrome.send);
-    extensionOriginBySession.set(pageSession, testExtensionOrigin);
-    await chrome.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, pageSession);
+    registerGuardedSession(networkSessions, pageSession, chrome.send, testExtensionOrigin);
+    await enableFetchGuard(chrome.send, pageSession);
     await chrome.send('Emulation.setDeviceMetricsOverride', {
       width: fixtureConfig.viewport.width,
       height: fixtureConfig.viewport.height,
@@ -1251,19 +685,11 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     contentContext = await contentContextPromise;
     if (networkGuardProbe) {
       trial.stage = 'negative-network-guard-probe';
-      await until(() => evaluate(chrome, pageSession,
-        'Boolean(window.__pageTranslationBenchmark?.entry)', contentContext, false).catch(() => false));
-      const probeResults = [];
-      for (const [world, contextId] of [['page-main-world', undefined], ['extension-isolated-world', contentContext]]) {
-        const url = `https://unexpected-${process.pid}-${now()}-${world}.example.test/blocked`;
-        const fetch = await evaluate(chrome, pageSession,
-          `fetch(${JSON.stringify(url)}, { cache: 'no-store' }).then(()=>({resolved:true}),error=>({resolved:false,name:error.name,message:error.message}))`,
-          contextId, true);
-        const request = await until(async () => trial.requests.find(candidate => candidate.url === url));
-        probeResults.push({ world, url, fetch, request, passed: request.blocked === true && request.category === 'blocked' && fetch.resolved === false });
-      }
-      trial.networkGuardProbe = probeResults;
-      if (probeResults.length !== 2 || probeResults.some(result => !result.passed)) throw new Error('Negative network probe failed to prove blocked page and content-world fetches.');
+      trial.networkGuardProbe = [];
+      await runNetworkGuardNegativeProbe({
+        requests: trial.requests, chrome, pageSession, contentContext, evaluate, until, now, processId: process.pid,
+        probeResults: trial.networkGuardProbe,
+      });
       trial.status = 'passed';
       return trial;
     }
@@ -1408,52 +834,18 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
         return initialIds.every(id => state?.acceptedIds.includes(id)) ? state : null;
       }, 60_000), bandAcceptance: [] };
-      if (googleTimeoutProtocol) googleTimeoutProtocol.armed = true;
+      if (googleTimeoutProtocol) armGoogleV2Timeout(googleTimeoutProtocol);
       if (custom429Protocol) {
-        const armed = await until(async () => {
-          const [resources, pageState] = await Promise.all([
-            evaluate(chrome, workerSession,
-              `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(sessionId)}])`, undefined, false),
-            evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
-          ]);
-          const resolver = resources?.sourceResolvers?.[sessionId];
-          if (!resolver?.present || resolver.resolutionPending !== false
-              || !resolver.effectiveSourceLanguage || resolver.effectiveSourceLanguage === 'auto'
-              || !resolver.effectiveTargetLanguage || pageState?.translationSessionId !== sessionId) return null;
-          return { resolver, pageState };
-        }, 60_000);
-        custom429Protocol.armed = true;
-        custom429Protocol.armedWallMs = now();
-        custom429Protocol.initialTargetIds = new Set(initialIds);
-        custom429Protocol.evidence.armed = {
-          atWallMs: custom429Protocol.armedWallMs, sessionId,
-          resolver: armed.resolver, pageTranslationSessionId: armed.pageState.translationSessionId,
-          initialAcceptedTargetIds: initialIds,
-        };
-        resilienceEvidence.arm = custom429Protocol.evidence.armed;
+        await armCustom429({
+          protocol: custom429Protocol, resilienceEvidence, initialIds, sessionId,
+          chrome, workerSession, pageSession, contentContext, evaluate, until, now,
+        });
       }
       if (custom400Protocol) {
-        const armed = await until(async () => {
-          const [resources, pageState] = await Promise.all([
-            evaluate(chrome, workerSession,
-              `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(sessionId)}])`, undefined, false),
-            evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
-          ]);
-          const resolver = resources?.sourceResolvers?.[sessionId];
-          if (!resolver?.present || resolver.resolutionPending !== false
-              || !resolver.effectiveSourceLanguage || resolver.effectiveSourceLanguage === 'auto'
-              || !resolver.effectiveTargetLanguage || pageState?.translationSessionId !== sessionId) return null;
-          return { resolver, pageState };
-        }, 60_000);
-        custom400Protocol.armed = true;
-        custom400Protocol.armedWallMs = now();
-        custom400Protocol.initialTargetIds = [...initialIds];
-        resilienceEvidence.arm = {
-          atWallMs: now(), sessionId, resolver: armed.resolver,
-          pageTranslationSessionId: armed.pageState.translationSessionId,
-          initialAcceptedTargetIds: initialIds,
-        };
-        custom400Protocol.evidence.arm = resilienceEvidence.arm;
+        await armCustom400({
+          protocol: custom400Protocol, resilienceEvidence, initialIds, sessionId,
+          chrome, workerSession, pageSession, contentContext, evaluate, until, now,
+        });
       }
       const phases = [];
       const bandedProviderLane = usesBandedProviderScroll(providerLane?.provider);
@@ -3017,8 +2409,8 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
                 expected: failedTargets.map(id => [id, originalById.get(id), { pageTranslated: false, hasOriginal: false }]),
                 observed,
               };
-              if (custom400Protocol) custom400Protocol.evidence.failedTargetDOM = failedTargetDOM;
-              if (googleTimeoutProtocol) googleTimeoutProtocol.failedTargetDOM = failedTargetDOM;
+              if (custom400Protocol) recordCustom400FailedTargetDOM(custom400Protocol, failedTargetDOM);
+              if (googleTimeoutProtocol) recordGoogleTimeoutFailedTargetDOM(googleTimeoutProtocol, failedTargetDOM);
             }
            const translationReady = dom.length === originals.length && dom.every(([id, value]) => {
              const source = originalById.get(id);
@@ -3027,17 +2419,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
            });
            if (!translationReady) return null;
            if (custom400Protocol) {
-             const preArmRequests = trial.requests.filter(request => request.category === 'provider-translation'
-               && request.startedAt < custom400Protocol.armedWallMs);
-             const outstanding = preArmRequests.filter(request => {
-               const network = providerNetworkEvents.get(`${request.targetSessionId}:${request.networkId}`);
-               return !Number.isFinite(request.endedAt) || !['finished', 'failed'].includes(network?.outcome);
-             });
-             if (outstanding.length) return null;
-             custom400Protocol.evidence.preRestorePreArmDrain = {
-               ok: true, requestCount: preArmRequests.length, outstandingCount: 0,
-               networkIds: preArmRequests.map(request => request.networkId ?? null),
-             };
+              if (!recordCustom400PreRestorePreArmDrain(custom400Protocol, trial.requests, providerNetworkEvents)) return null;
            }
            return { terminal, dom };
         }, 60_000);
@@ -3365,109 +2747,19 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       if (!trial.providerSchedulerValidation.ok) throw new Error(trial.providerSchedulerValidation.issues.join('; '));
     }
     if (googleTimeoutProtocol) {
-      const hold = googleTimeoutProtocol.held;
-      if (!hold?.messageId || !hold.cancellation) throw new Error('Google timeout did not observe its production timeout and matching cancellation.');
-      const terminalMessageIds = [hold.messageId];
-      resilienceEvidence.terminalMessageIds = terminalMessageIds;
-      const [resources, pageScheduler, contentDrain, workerDrain] = await Promise.all([
-        evaluate(chrome, workerSession,
-          `globalThis.__pageTranslationBenchmark.resourceSnapshot(${JSON.stringify(terminalMessageIds)}, [${JSON.stringify(sessionId)}])`, undefined, false),
-        evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
-        evaluate(chrome, pageSession,
-          `window.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(sessionId)})`, contentContext, false),
-        evaluate(chrome, workerSession,
-          `globalThis.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(sessionId)})`, undefined, false),
-      ]);
-      const workerEvents = traceEvents(workerTrace);
-      const queueAttemptEvidence = validateGoogleTimeoutQueueEvidence(workerEvents, { messageId: hold.messageId });
-      const queueEvents = queueAttemptEvidence.observed.starts.concat(queueAttemptEvidence.observed.ends);
-      const timeout = hold.cancellation.timedOut;
-      const cancel = hold.cancellation.cancelMessage;
-      const serviceTimeout = hold.cancellation.serviceTimeout;
-      const controller = { ...hold.cancellation.controllerAbort, ...hold.cancellation.controllerState };
-      const physical = hold.cancellation.physical;
-      const providerRoot = hold.cancellation.providerRoot;
-      const failedTargetDOM = {
-        ok: JSON.stringify(googleTimeoutProtocol.failedTargetDOM?.observed) === JSON.stringify(googleTimeoutProtocol.failedTargetDOM?.expected),
-        expected: googleTimeoutProtocol.failedTargetDOM?.expected ?? null,
-        observed: googleTimeoutProtocol.failedTargetDOM?.observed ?? null,
-      };
-      const failedIds = new Set(hold.targetIds);
-      const acceptedWrites = trial.acceptedDomOrder ?? [];
-      const translated = trial.rawDOM.translated ?? [];
-      const successfulTranslations = translated.filter(([id]) => !failedIds.has(id));
-      const expectedTranslated = fixtureConfig.targets.filter(target => !failedIds.has(target.id))
-        .map(({ id, source }) => [id, `\u200efixture translation: ${source}`]);
-      const physicalSummary = summarizePhysicalProviderAttempts(providerPhysicalAttempts.map(attempt => {
-        const network = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
-        return { ...attempt, startedAt: network?.startedAt ?? null, settledAt: network?.settledAt ?? null,
-          status: network?.status ?? null, outcome: network?.outcome ?? null };
-      }), { expectedTimeoutAbortAttemptId: hold.attemptId });
-      for (const attempt of resilienceEvidence.attempts) {
-        const network = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
-        attempt.status = network?.status ?? null;
-        attempt.outcome = network?.outcome ?? null;
-      }
-      resilienceEvidence.unnecessaryRetransmits = resilienceEvidence.attempts
-        .filter(attempt => attempt.attemptId !== hold.attemptId
-          && attempt.targetIds?.some(id => failedIds.has(id)));
-      resilienceEvidence.siblingRequests = resilienceEvidence.attempts.filter(attempt => attempt.attemptId !== hold.attemptId);
-      const resourceValidation = validateRuntimeResources(resources, { terminalMessageIds, sessionIds: [sessionId], final: true });
-      const cleanupOk = resourceValidation.ok && contentDrain?.pendingOperations === 0
-        && workerDrain?.ledger?.pending === 0 && !workerDrain?.providerRoots?.some(root => root.status === 'pending')
-        && pageScheduler?.managerTranslating === false
-        && pageScheduler.activeFlushes === 0 && pageScheduler.queueIds?.length === 0
-        && pageScheduler.pendingSettlementCount === 0 && pageScheduler.batchTimerActive === false
-        && pageScheduler.completionTimerActive === false;
-      trial.resilience = {
-        ...resilienceEvidence, sessionId, selectionFailures: googleTimeoutProtocol.selectionFailures,
-        heldRequest: {
-          messageId: hold.messageId, sessionId: hold.pageSessionId, requestId: hold.requestId,
-          networkSessionId: hold.networkSessionId, networkId: hold.networkId,
-          targetIds: hold.targetIds, texts: hold.texts,
-          url: hold.requestRecord.url, method: hold.requestRecord.method, requestBody: hold.requestRecord.postData,
-          startedAt: hold.startedAt,
-        },
-        timeout, cancel, serviceTimeout, controller, providerRoot, physical,
-        physicalMatchCount: hold.cancellation.physicalMatchCount,
-        classification: {
-          userFacingType: timeout.errorType, userFacingName: timeout.errorName,
-          internalAbortType: providerRoot?.operationAborted === true
-            ? 'OPERATION_ABORTED' : physical?.errorType ?? physical?.errorName ?? null,
-          internalAbortName: physical?.errorName ?? null,
-          userFacingErrorType: timeout.errorType,
-        },
-        queueEvents, queueAttemptEvidence,
-        retries: workerEvents.filter(event => event.messageId === hold.messageId
-          && event.name === 'queueManager.processItem.start' && event.attemptNumber > 1),
-        failovers: providerAttempts.filter(request => request.networkId !== hold.networkId
-          && JSON.stringify(request.batchTexts) === JSON.stringify(hold.texts)),
-        concurrency: {
-          peakPhysical: physicalSummary.peakPhysicalConcurrency,
-          peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
-          effectiveProviderLimiterCapacity: trial.providerRuntimeObserved?.limiterCapacity ?? null,
-        },
-        failedTargetDOM,
-        resources, pageScheduler,
-        translation: {
-          exact: JSON.stringify(successfulTranslations) === JSON.stringify(expectedTranslated),
-          targetCount: originals.length, acceptedTargetCount: acceptedIds.length, failedTargetCount: failedIds.size,
-          acceptedWriteCount: acceptedWrites.length, acceptedUniqueCount: new Set(acceptedWrites).size,
-          acceptedWriteIds: acceptedWrites,
-          expectedTargetIds: originals.map(([id]) => id),
-          duplicateAcceptedIds: trial.duplicateAcceptedWriteIds ?? [],
-          failedTargetsUnmarked: failedTargetDOM.ok,
-          failedSourcePreserved: failedTargetDOM.ok,
-          restoreExact: JSON.stringify(restoredLifecycle.dom) === JSON.stringify(originals),
-          terminal: !!trial.terminal?.receivedAt, sessionOwner: sessionId,
-        },
-        cleanup: {
-          ok: cleanupOk, heldFetchSettled: false, handlersDrained: false,
-          contentDrain, workerDrain, resourceValidation,
-        },
-      };
+      const timeoutEvidence = await collectGoogleV2TimeoutEvidence({
+        protocol: googleTimeoutProtocol, evidence: resilienceEvidence, evaluate, chrome, workerSession, pageSession,
+        contentContext, sessionId, traceEvents, workerTrace, validateGoogleTimeoutQueueEvidence,
+        providerPhysicalAttempts, summarizePhysicalProviderAttempts, providerNetworkEvents, providerAttempts,
+        validateRuntimeResources, fixtureConfig, acceptedIds, originals, restoredDOM: restoredLifecycle.dom,
+        acceptedDomOrder: trial.acceptedDomOrder, translated: trial.rawDOM.translated,
+        duplicateAcceptedWriteIds: trial.duplicateAcceptedWriteIds, terminalReceivedAt: trial.terminal?.receivedAt,
+        peakLogicalConcurrency: trial.providerLogicalBatches?.peakLogicalBatchConcurrency,
+        effectiveProviderLimiterCapacity: trial.providerRuntimeObserved?.limiterCapacity,
+      });
+      trial.resilience = { ...resilienceEvidence, ...timeoutEvidence };
     }
-    if (resilienceProbe && !googleTimeoutProtocol) {
+if (resilienceProbe && !googleTimeoutProtocol) {
       const terminalMessageIds = resilienceProbe === 'custom-400'
         ? [custom400Protocol.evidence.injected400[0]?.logicalMessageId].filter(id => typeof id === 'string')
         : resilienceProbe === 'custom-429'
@@ -3511,247 +2803,29 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       const custom400FailedIds = resilienceProbe === 'custom-400' ? failedIds : new Set();
       const expectedTranslated = fixtureConfig.targets.filter(({ id }) => !custom400FailedIds.has(id))
         .map(({ id, source }) => [id, `\u200efixture translation: ${source}`]);
-      const failedTargetIds = failedIds;
       const failed = resilienceProbe === 'custom-400' ? custom400Protocol.evidence.injected400[0]
         : resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
         : resilienceProbe === 'gemini-structured-recovery' ? resilienceEvidence.injectedMalformed[0] : resilienceEvidence.injected503[0];
-      if (resilienceProbe === 'custom-429') {
-        for (const attempt of resilienceEvidence.attempts) {
-          const request = providerAttempts.find(item => item.resilienceCorrelation?.attemptId === attempt.attemptId);
-          const physical = request?.physicalAttempt;
-          if (physical && Number.isFinite(physical.startedAt) && Number.isFinite(physical.settledAt)) {
-            const network = providerNetworkEvents.get(`${request.targetSessionId}:${request.networkId}`);
-            attempt.physicalEndedWallMs = Number.isFinite(network?.wallTime)
-              ? network.wallTime + physical.settledAt - physical.startedAt : null;
-          }
-          const queueEvents = traceEvents(workerTrace).filter(event => event.messageId === attempt.logicalMessageId
-            && event.name === 'queueManager.processItem.start');
-          attempt.queueItemId = queueEvents.find(event => event.attemptNumber === (attempt.retryOf ? 2 : 1))?.queueItemId ?? null;
-        }
-      }
-      resilienceEvidence.siblingRequests = resilienceEvidence.attempts.filter(attempt => attempt.status === 200
-        && attempt.pageSessionId === failed?.pageSessionId
-        && attempt.targetIds?.length && attempt.targetIds.every(id => !failedTargetIds.has(id)));
-      const resourceRate = resources?.rateLimit?.Custom;
-      if (resilienceProbe === 'custom-429') {
-        const itemEvent = traceEvents(workerTrace).find(event => event.messageId === failed?.logicalMessageId
-          && event.name === 'queueManager.processItem.end' && event.status === 'retrying');
-        const itemId = itemEvent?.queueItemId ?? null;
-        failed.queueItemId = itemId;
-        failed.queueRetryAt = itemEvent?.retryAt ?? null;
-        for (const attempt of resilienceEvidence.attempts) {
-          const start = traceEvents(workerTrace).find(event => event.messageId === failed?.logicalMessageId
-            && event.name === 'queueManager.processItem.start' && event.attemptNumber === 2);
-          if (attempt.retryOf === failed?.attemptId) {
-            attempt.queueItemId = start?.queueItemId ?? itemId;
-            attempt.physicalStartedWallMs ??= null;
-          }
-        }
-        const customQueueEvidence = validateQueueRetryEvidence(traceEvents(workerTrace), {
-          messageId: failed?.logicalMessageId, expectedErrorType: 'RATE_LIMIT_REACHED',
-          minDelayMs: 4900, maxDelayMs: Number.MAX_SAFE_INTEGER, expectedAttemptLimit: 5,
-        });
-        resilienceEvidence.queueRetryEvidence = customQueueEvidence;
-        resilienceEvidence.pendingLimiterSibling ??= resourceRate?.queueItems?.find(item =>
-          item.messageId !== failed?.logicalMessageId && item.sessionId === sessionId) ?? null;
-        resilienceEvidence.cooldown = {
-          establishedWallMs: itemEvent?.at ?? null,
-          establishedMonoMs: Number.isFinite(failed?.responseMonoMs) && Number.isFinite(itemEvent?.at)
-            ? failed.responseMonoMs + itemEvent.at - failed.responseWallMs : null,
-          limiterRetryAt: resilienceEvidence.cooldownObserved?.limiterRetryAt ?? null,
-          limiterRetryAtMonoMs: Number.isFinite(failed?.responseMonoMs)
-            && Number.isFinite(resilienceEvidence.cooldownObserved?.limiterRetryAt)
-            ? failed.responseMonoMs + resilienceEvidence.cooldownObserved.limiterRetryAt - failed.responseWallMs : null,
-          retainedAfterSiblingSuccess: resilienceEvidence.cooldownObserved?.limiterRetryAtAfterSibling
-            === resilienceEvidence.cooldownObserved?.limiterRetryAt,
-        };
-        const sibling = resilienceEvidence.siblingRequests.find(attempt => attempt.physicalEndedWallMs != null);
-        resilienceEvidence.sibling = resilienceEvidence.siblingObserved
-          ?? (sibling ? { success: true, completedWallMs: sibling.physicalEndedWallMs, attemptId: sibling.attemptId } : null);
-        const retryAttempt = resilienceEvidence.attempts.find(attempt => attempt.retryOf === failed?.attemptId);
-        if (retryAttempt) retryAttempt.physicalStartedWallMs ??= null;
-        resilienceEvidence.prematurePhysicalStarts = resilienceEvidence.attempts.filter(attempt =>
-          Number.isFinite(attempt.physicalStartedMonoMs)
-          && attempt.physicalStartedMonoMs >= failed.responseMonoMs
-          && attempt.physicalStartedMonoMs < resilienceEvidence.cooldown.limiterRetryAtMonoMs
-          && attempt.attemptId !== failed?.attemptId);
-        resilienceEvidence.pendingLimiterSibling ??= resourceRate?.queueItems?.find(item =>
-          item.messageId !== failed?.logicalMessageId && item.sessionId === sessionId) ?? null;
-        resilienceEvidence.roles = custom429Protocol.evidence.roles;
-        resilienceEvidence.serverRetryAt = custom429Protocol.evidence.serverRetryAt;
-        resilienceEvidence.limiterRetryAt = custom429Protocol.evidence.limiterRetryAt;
-        resilienceEvidence.limiterRetryAtAfterSibling = custom429Protocol.evidence.limiterRetryAtAfterSibling;
-        resilienceEvidence.pendingStillQueuedAfterSibling = custom429Protocol.evidence.pendingStillQueuedAfterSibling;
-        resilienceEvidence.cooldown.establishedWallMs = custom429Protocol.evidence.cooldownEstablishedWallMs;
-        resilienceEvidence.cooldown.limiterRetryAt = custom429Protocol.evidence.limiterRetryAt;
-        const physicalSummary = summarizePhysicalProviderAttempts(providerPhysicalAttempts.map(attempt => {
-          const network = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
-          return { ...attempt, startedAt: network?.startedAt ?? null, settledAt: network?.settledAt ?? null,
-            status: network?.status ?? null, outcome: network?.outcome ?? null };
-        }));
-        resilienceEvidence.concurrency = {
-          peakPhysical: physicalSummary.peakPhysicalConcurrency,
-          peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
-        };
-      }
-      if (resilienceProbe === 'custom-400') {
-        const workerEvents = traceEvents(workerTrace);
-        const failed = custom400Protocol.evidence.injected400[0];
-        const request = providerAttempts.find(item => item.networkId === failed?.networkId);
-        const network = request ? providerNetworkEvents.get(`${request.targetSessionId}:${request.networkId}`) : null;
-        if (failed) {
-          failed.networkStatus = network?.status ?? null;
-          failed.networkOutcome = network?.outcome ?? null;
-          failed.queueItemId = workerEvents.find(event => event.messageId === failed.logicalMessageId
-            && event.name === 'queueManager.processItem.start')?.queueItemId ?? null;
-        }
-        resilienceEvidence.injected400 = custom400Protocol.evidence.injected400;
-        resilienceEvidence.selectionFailures = custom400Protocol.evidence.selectionFailures;
-        const sourceToFixtureId = new Map(fixtureConfig.targets.map(target => [target.source, target.id]));
-        const probeWindowPhysicalAttempts = providerAttempts.flatMap(attempt =>
-          isCustom400ProbeWindowRequest(attempt, custom400Protocol.armedWallMs)
-            ? [{ attemptId: attempt.physicalAttemptId ?? null, networkId: attempt.networkId ?? null,
-              networkSessionId: attempt.targetSessionId ?? null }]
-            : []);
-        resilienceEvidence.attempts = custom400Protocol.evidence.attempts.map(item => {
-          const request = providerAttempts.find(attempt => attempt.networkId === item.networkId
-            && attempt.targetSessionId === item.networkSessionId);
-          const networkAttempt = providerNetworkEvents.get(`${item.networkSessionId}:${item.networkId}`) ?? {};
-          const targetIds = (item.texts ?? []).map(text => sourceToFixtureId.get(text) ?? null);
-          return {
-            ...item, attemptId: request?.physicalAttemptId ?? null,
-            networkId: item.networkId ?? null, pageSessionId: item.pageSessionId ?? null,
-            targetIds, status: networkAttempt.status ?? null, networkStatus: networkAttempt.status ?? null,
-            networkOutcome: networkAttempt.outcome ?? null,
-          };
-        });
-        resilienceEvidence.probeWindowPhysicalAttempts = probeWindowPhysicalAttempts;
-        resilienceEvidence.expectedProbeWindowPhysicalAttemptCount = probeWindowPhysicalAttempts.length;
-        resilienceEvidence.preRestorePreArmDrain = custom400Protocol.evidence.preRestorePreArmDrain;
-        resilienceEvidence.failedTargetDOM = custom400Protocol.evidence.failedTargetDOM;
-        resilienceEvidence.expectedLogicalBatchCount = trial.providerLogicalBatches?.logicalBatchCount ?? null;
-        resilienceEvidence.providerPhysicalAttemptCount = providerAttempts.length;
-        resilienceEvidence.queueAttemptEvidence = validateCustom400QueueEvidence(workerEvents, {
-          messageId: failed?.logicalMessageId, targetIds: failed?.targetIds,
-        });
-        resilienceEvidence.queueRetries = workerEvents.filter(event => event.messageId === failed?.logicalMessageId
-          && event.name === 'queueManager.processItem.start' && event.attemptNumber > 1);
-        resilienceEvidence.keyFailovers = providerAttempts.filter(item => item.networkId !== failed?.networkId
-          && JSON.stringify(item.batchTexts) === JSON.stringify(failed?.texts));
-        resilienceEvidence.unexpectedRecovery = resilienceEvidence.attempts.filter(item =>
-          item.logicalMessageId === failed?.logicalMessageId && item.networkId !== failed?.networkId);
-        const failedIds = new Set(failed?.targetIds ?? []);
-        resilienceEvidence.unnecessaryRetransmits = providerAttempts.flatMap(item => {
-          if (item.networkId === failed?.networkId) return [];
-          const ids = item.batchTexts?.map(text =>
-            fixtureConfig.targets.find(target => target.source === text)?.id ?? null) ?? [];
-          const overlap = ids.filter(id => failedIds.has(id));
-          return overlap.length ? [{ networkId: item.networkId ?? null, targetIds: overlap }] : [];
-        });
-        resilienceEvidence.circuitBreakers = workerEvents.filter(event => event.messageId === failed?.logicalMessageId
-          && /circuit.?breaker/i.test(event.name ?? ''));
-        const physicalSummary = summarizePhysicalProviderAttempts(providerPhysicalAttempts.map(attempt => {
-          const attemptNetwork = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
-          return { ...attempt, startedAt: attemptNetwork?.startedAt ?? null, settledAt: attemptNetwork?.settledAt ?? null,
-            status: attemptNetwork?.status ?? null, outcome: attemptNetwork?.outcome ?? null };
-        }));
-        resilienceEvidence.concurrency = {
-          peakPhysical: physicalSummary.peakPhysicalConcurrency,
-          peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
-          effectiveProviderLimiterCapacity: trial.providerRuntimeObserved?.limiterCapacity ?? null,
-        };
-      }
-      if (resilienceProbe === 'gemini-structured-recovery') {
-        const workerEvents = traceEvents(workerTrace);
-        const affectedMessageId = failed?.messageId;
-        resilienceEvidence.queueAttemptEvidence = validateGeminiQueueAttemptEvidence(workerEvents, { messageId: affectedMessageId });
-        resilienceEvidence.executionCalls = workerEvents
-          .filter(event => event.name === 'providerRequestEngine.executeApiCall.start'
-            && event.sessionId === sessionId && event.messageId === affectedMessageId)
-          .map(({ callPurpose, messageId, sessionId: callSessionId, texts }) => ({
-            callPurpose, messageId, sessionId: callSessionId, texts,
-          }));
-        resilienceEvidence.structuredRecoveryEntries = workerEvents
-          .filter(event => event.name === 'baseAIProvider.translateBatch.entry'
-            && event.callPurpose === 'STRUCTURED_RECOVERY' && event.messageId === affectedMessageId
-            && event.sessionId === sessionId)
-          .map(({ callPurpose, fullParseRecoveryRetry, messageId, sessionId: callSessionId, texts }) => ({
-            callPurpose, fullParseRecoveryRetry, messageId, sessionId: callSessionId, texts,
-          }));
-        const matchingRequests = providerAttempts.filter(item => JSON.stringify(item.batchTexts) === JSON.stringify(failed?.texts));
-        const malformedRequest = matchingRequests.find(item => item.geminiMalformedPrimary);
-        const recoveryRequest = matchingRequests.find(item => item !== malformedRequest
-          && item.geminiStructuredRecovery && item.geminiStructuredRecovery.selection.selected === false);
-        const affectedRootRequests = providerAttempts.filter(item =>
-          item.geminiStructuredRecovery?.messageId === affectedMessageId);
-        const describePhysical = (requestRecord, role) => {
-          const network = providerNetworkEvents.get(`${requestRecord.targetSessionId}:${requestRecord.networkId}`);
-          return {
-            role, networkId: requestRecord.networkId ?? null, messageId: affectedMessageId,
-            sessionId: requestRecord.geminiStructuredRecovery?.sessionId ?? null,
-            responseStatus: requestRecord.response?.status ?? null,
-            networkStatus: network?.status ?? null, networkOutcome: network?.outcome ?? null,
-            keyIdentity: requestRecord.geminiStructuredRecovery?.keyIdentity ?? 'unknown',
-          };
-        };
-        if (malformedRequest) {
-          failed.requestId = malformedRequest.networkId;
-          failed.httpStatus = malformedRequest.response?.status ?? null;
-          failed.envelopeValid = malformedRequest.response?.body?.candidates?.length === 1
-            && malformedRequest.response.body.candidates[0]?.finishReason === 'STOP'
-            && malformedRequest.response.body.candidates[0]?.content?.role === 'model';
-        }
-        if (recoveryRequest) {
-          const purpose = resilienceEvidence.executionCalls.find(call => call.callPurpose === 'STRUCTURED_RECOVERY'
-            && call.messageId === affectedMessageId);
-          const network = providerNetworkEvents.get(`${recoveryRequest.targetSessionId}:${recoveryRequest.networkId}`);
-          const outputValid = isMappedGeminiResponse(recoveryRequest.response?.body, {
-            ids: recoveryRequest.batchIds ?? [], texts: failed.texts,
-          });
-          resilienceEvidence.recovery = purpose ? [{
-            ...recoveryRequest.geminiStructuredRecovery,
-            valid: recoveryRequest.response?.status === 200 && network?.status === 200
-              && network?.outcome === 'finished' && outputValid,
-            httpStatus: recoveryRequest.response?.status ?? null,
-            networkStatus: network?.status ?? null, networkOutcome: network?.outcome ?? null,
-            envelopeValid: outputValid, outputValid,
-            messageId: purpose.messageId, sessionId: purpose.sessionId,
-            texts: failed.texts, targetIds: failed.targetIds,
-          }] : [];
-        }
-        resilienceEvidence.physicalAttempts = [
-          ...(malformedRequest ? [describePhysical(malformedRequest, 'malformed-primary')] : []),
-          ...(recoveryRequest ? [describePhysical(recoveryRequest, 'structured-recovery')] : []),
-        ];
-        const expectedPhysical = new Set([malformedRequest, recoveryRequest].filter(Boolean));
-        const unexpectedPhysical = [...new Set([...affectedRootRequests, ...matchingRequests])]
-          .filter(item => !expectedPhysical.has(item));
-        resilienceEvidence.unexpectedPhysicalAttempts = unexpectedPhysical
-          .map(item => describePhysical(item, 'unexpected'));
-        resilienceEvidence.unexpectedRetransmits = matchingRequests.length === 2
-          && affectedRootRequests.length === 2 ? [] : [...new Set([...affectedRootRequests, ...matchingRequests])].map(item =>
-            describePhysical(item, expectedPhysical.has(item) ? 'unexpected-count' : 'unexpected'));
-        resilienceEvidence.queueRetries = workerEvents.filter(event =>
-          event.messageId === affectedMessageId && event.name === 'queueManager.processItem.start'
-          && event.attemptNumber > 1);
-        resilienceEvidence.keyFailovers = [...new Set([...affectedRootRequests, ...matchingRequests])]
-          .filter(item => item.geminiStructuredRecovery?.keyIdentity !== 'synthetic-fixture'
-            || !expectedPhysical.has(item))
-          .map(item => describePhysical(item, 'key-failover-or-unexpected-attempt'));
-        resilienceEvidence.parentRecoveries = resilienceEvidence.executionCalls.filter(call =>
-          call.callPurpose === 'PARENT_RECOVERY');
-        const physicalSummary = summarizePhysicalProviderAttempts(providerPhysicalAttempts.map(attempt => {
-          const network = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
-          return { ...attempt, startedAt: network?.startedAt ?? null, settledAt: network?.settledAt ?? null,
-            status: network?.status ?? null, outcome: network?.outcome ?? null };
-        }));
-        resilienceEvidence.concurrency = {
-          peakPhysical: physicalSummary.peakPhysicalConcurrency,
-          peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
-          effectiveProviderLimiterCapacity: trial.providerRuntimeObserved?.limiterCapacity ?? null,
-        };
-      }
-      const resourceValidation = validateRuntimeResources(resources, { terminalMessageIds, sessionIds: [sessionId], final: true });
+       if (resilienceProbe === 'custom-429') collectCustom429Evidence({
+         evidence: resilienceEvidence, protocol: custom429Protocol, failed, resources, workerTrace, providerAttempts,
+         providerNetworkEvents, sessionId, providerPhysicalAttempts, traceEvents, summarizePhysicalProviderAttempts,
+         validateQueueRetryEvidence, peakLogicalConcurrency: trial.providerLogicalBatches?.peakLogicalBatchConcurrency,
+       });
+ if (resilienceProbe === 'custom-400') collectCustom400Evidence({
+   protocol: custom400Protocol, evidence: resilienceEvidence, providerAttempts, providerNetworkEvents,
+   providerPhysicalAttempts, fixtureConfig, workerTrace, traceEvents, summarizePhysicalProviderAttempts,
+   validateCustom400QueueEvidence, isCustom400ProbeWindowRequest,
+   expectedLogicalBatchCount: trial.providerLogicalBatches?.logicalBatchCount,
+   peakLogicalConcurrency: trial.providerLogicalBatches?.peakLogicalBatchConcurrency,
+   effectiveProviderLimiterCapacity: trial.providerRuntimeObserved?.limiterCapacity,
+ });
+ if (resilienceProbe === 'gemini-structured-recovery') collectGeminiStructuredRecoveryEvidence({
+   evidence: resilienceEvidence, failed, workerTrace, traceEvents, providerAttempts, providerNetworkEvents,
+   sessionId, isMappedGeminiResponse, providerPhysicalAttempts, summarizePhysicalProviderAttempts,
+   validateGeminiQueueAttemptEvidence, peakLogicalConcurrency: trial.providerLogicalBatches?.peakLogicalBatchConcurrency,
+   effectiveProviderLimiterCapacity: trial.providerRuntimeObserved?.limiterCapacity,
+ });
+const resourceValidation = validateRuntimeResources(resources, { terminalMessageIds, sessionIds: [sessionId], final: true });
       const cleanupOk = resourceValidation.ok
         && pageScheduler?.managerTranslating === false
         && pageScheduler.activeFlushes === 0 && pageScheduler.queueIds?.length === 0
@@ -3787,9 +2861,11 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         expectedTargetIds: expectedTranslated.map(([id]) => id), observed: translated,
       }, cleanup: { ok: cleanupOk, runtimeResources: resourceValidation } };
       if (custom429Protocol) trial.resilience.protocol = custom429Protocol.evidence;
-      trial.resilience.validation = validateResilienceAccounting(trial.resilience);
+       if (resilienceProbe === 'googlev2-503') finalizeGoogleV2_503Evidence(trial.resilience);
+       trial.resilience.validation = resilienceProbe === 'googlev2-503'
+          ? validateGoogleV2_503Evidence(trial.resilience) : validateResilienceAccounting(trial.resilience);
       if (resilienceProbe === 'custom-429') {
-        trial.resilience.validation = validateCustom429Evidence({
+        trial.resilience.validation = validateCustom429ProbeEvidence({
           ...trial.resilience, injected429: resilienceEvidence.injected429,
           pendingLimiterSibling: resilienceEvidence.pendingLimiterSibling,
           cooldown: resilienceEvidence.cooldown, sibling: resilienceEvidence.sibling,
@@ -3801,10 +2877,10 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         });
       }
       if (resilienceProbe === 'custom-400') {
-        trial.resilience.validation = validateCustom400Evidence(trial.resilience);
+        trial.resilience.validation = validateCustom400ProbeEvidence(trial.resilience);
       }
       if (resilienceProbe === 'gemini-structured-recovery') {
-        trial.resilience.validation = validateGeminiStructuredRecovery(trial.resilience);
+        trial.resilience.validation = validateGeminiStructuredRecoveryEvidence(trial.resilience);
       }
       if (!trial.resilience.validation.ok) throw new Error(trial.resilience.validation.issues.join('; '));
     }
@@ -3862,6 +2938,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
           outcome: network.outcome ?? null, status: network.status ?? null, error: network.error ?? null,
         });
       }
+      if (resilienceProbe === 'googlev2-503') finalizeGoogleV2_503Evidence(trial.resilience ?? resilienceEvidence);
       trial.physicalProviderAccounting = summarizePhysicalProviderAttempts(providerPhysicalAttempts, {
         expectedTimeoutAbortAttemptId: googleTimeoutProtocol?.held?.attemptId ?? null,
       });
@@ -3987,16 +3064,8 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     }
     if ((custom429Protocol || googleTimeoutProtocol) && !cancellationControl) {
       try {
-        const requestCleanup = await requestLifecycle.closeAndDrain({
-          timeoutMs: 8_000,
-          disableFetch: async () => {
-            if (!chrome || !guardSessions.size) throw new Error('Fetch target sessions unavailable while closing request admission.');
-            const sessions = [...guardSessions];
-            const results = await Promise.allSettled(sessions.map(sessionId => chrome.send('Fetch.disable', {}, sessionId)));
-            const failures = results.flatMap((result, index) => result.status === 'rejected'
-              ? [`${sessions[index]}: ${result.reason?.message ?? String(result.reason)}`] : []);
-            if (failures.length) throw new AggregateError(failures.map(message => new Error(message)), `Fetch.disable failed for ${failures.length} target(s).`);
-          },
+        const requestCleanup = await closeNetworkRequestLifecycle({
+          lifecycle: requestLifecycle, guardedSessions: guardSessions, chrome,
         });
         if (!cancellationControl) {
           try { await until(() => requestHandlerJobs.size === 0 ? true : null, 8_000); }
@@ -4016,7 +3085,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
             resourceValidation: trial.resilience.cleanup?.resourceValidation ?? { ok: false, issues: ['final resource validation unavailable'] },
           };
           trial.resilience.requestLifecycleCleanup = requestCleanup;
-          trial.resilience.validation = validateGoogleTimeoutEvidence(trial.resilience);
+          trial.resilience.validation = validateGoogleV2TimeoutEvidence(trial.resilience);
           if (!trial.resilience.validation.ok) {
             trial.status = 'failed';
             trial.error ??= { name: 'GoogleTimeoutProbeValidationError', message: trial.resilience.validation.issues.join('; ') };
@@ -4028,22 +3097,15 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         if (googleTimeoutProtocol && trial.resilience) {
           trial.resilience.cleanup = { ...trial.resilience.cleanup, ok: false, heldFetchSettled: false, handlersDrained: false,
             requestLifecycle: { ok: false, errors: [error?.message ?? String(error)] } };
-          trial.resilience.validation = validateGoogleTimeoutEvidence(trial.resilience);
+          trial.resilience.validation = validateGoogleV2TimeoutEvidence(trial.resilience);
         }
         trial.cleanupErrors.push(`${googleTimeoutProtocol ? 'Google timeout' : 'Custom 429'} request cleanup failed: ${error?.message ?? String(error)}`);
       }
     }
     if (cancellationControl) {
       try {
-        const requestCleanup = await cancellationControl.requestLifecycle.closeAndDrain({
-        timeoutMs: 8_000,
-        disableFetch: async () => {
-          if (!chrome || !guardSessions.size) throw new Error('Fetch target sessions unavailable while closing request admission.');
-          const results = await Promise.allSettled([...guardSessions].map(sessionId => chrome.send('Fetch.disable', {}, sessionId)));
-          const failures = results.flatMap((result, index) => result.status === 'rejected'
-            ? [`${[...guardSessions][index]}: ${result.reason?.message ?? String(result.reason)}`] : []);
-          if (failures.length) throw new AggregateError(failures.map(message => new Error(message)), `Fetch.disable failed for ${failures.length} target(s).`);
-        },
+        const requestCleanup = await closeNetworkRequestLifecycle({
+          lifecycle: cancellationControl.requestLifecycle, guardedSessions: guardSessions, chrome,
         });
         const evidence = trial.cancellation ?? trial.staleSuccess;
         evidence.cleanup.requestLifecycle = requestCleanup;
@@ -4145,11 +3207,8 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       } catch (error) { trial.cleanupErrors.push(`Stale-success raw DOM evidence could not drain: ${error.message}`); }
     }
     const cleanups = [
-      async () => requestUnsubscribe?.(),
-      async () => eventUnsubscribe?.(),
-      async () => pageEventUnsubscribe?.(),
-      async () => { await Promise.all([...networkEventUnsubscribes.values()].map(unsubscribe => unsubscribe())); },
-      async () => { if (chrome) { const instance = chrome; await instance.close(); trial.chromeStderr = instance.metadata.stderr ?? null; } },
+       ...createNetworkCleanupSteps({ requestUnsubscribe, eventUnsubscribe, pageEventUnsubscribe, subscriptionsBySession: networkEventUnsubscribes }),
+       async () => { if (chrome) { const instance = chrome; await instance.close(); trial.chromeStderr = instance.metadata.stderr ?? null; } },
       async () => { if (fixture?.server.listening) await new Promise((resolveClose, reject) => fixture.server.close(error => error ? reject(error) : resolveClose())); },
     ];
     await cleanupMeasurementBeforeResources({

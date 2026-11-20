@@ -6,7 +6,7 @@ Run the real MV3 background/content entries against a local synthetic page. Tran
 
 ## Module responsibilities
 
-`run.mjs` owns CLI configuration, build orchestration, execution planning, aggregation, and artifact finalization. `trial-runner.mjs` owns one isolated trial's browser/fixture lifecycle, probe behavior, measurement, and teardown; it receives the immutable settings and provider-lane configuration explicitly. Probe implementations remain nested in the trial lifecycle so their request handling and cleanup stay together.
+`run.mjs` owns CLI configuration, build orchestration, execution planning, aggregation, and artifact finalization. `trial-runner.mjs` owns one trial's Chrome/fixture lifetime, high-level orchestration, measurement, and teardown. `network-interception.mjs` owns paused-request admission, request tracking, provider request classification/decoding, session-qualified Network correlation, and Fetch settlement/lifecycle primitives. Each `resilience/` module owns its probe-specific arming, selection/claim, execution, fault injection, and evidence collection/validation; shared selectors and validators remain in `resilience-probes.mjs`. Cancellation and stale-success request execution remain in `trial-runner.mjs` pending Phase 2.3.R.3.
 
 ```sh
 pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
