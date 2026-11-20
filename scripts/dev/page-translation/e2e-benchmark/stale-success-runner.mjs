@@ -1,6 +1,7 @@
 import { createCancellationCommandSender } from './cancellation-runner.mjs';
 import { validatePostInvalidationEvidence } from './cancellation-probes.mjs';
-import { resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateStaleSuccessEvidence, validateSuccessfulReplyCapture, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
+import { classifyHeldFetchRelease } from './cancellation-probes.mjs';
+import { isValidatedStaleCancellation, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateStaleSiblingDrain, validateStaleSuccessEvidence, validateSuccessfulReplyCapture, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
 
 export async function waitForSuccessfulReplyCapture({ snapshot, until }) {
   return until(async () => {
@@ -17,7 +18,7 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
   const { chrome, pageSession, contentContext, evaluate } = page;
   const { workerSession } = worker;
   const { sessionId, cancellationControl, staleSuccessProbe, requestHandlerJobs } = probe;
-  const { now, until, isSessionEvent, formatCommandFailure, sessionIdFromStart, mapStaleSuccessResponse } = helpers;
+  const { now, until, isSessionEvent, formatCommandFailure, sessionIdFromStart, mapStaleSuccessResponse, mapCustomStaleSuccessResponse } = helpers;
   const expectedIds = fixtureConfig.targets.map(target => target.id);
   const sourceToId = new Map(fixtureConfig.targets.map(target => [target.source, target.id]));
   const snapshotContent = async owner => {
@@ -101,9 +102,16 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
   const physicalA = workerAtCapture.probe.ledger.operations.find(operation => operation.kind === 'provider.physical'
     && operation.messageId === capturedMessage.messageId && operation.sessionId === sessionIdA);
   const requestA = trial.requests.find(request => request.category === 'provider-translation'
+    && request.cancellationCorrelation?.pageSessionId === sessionIdA
+    && request.cancellationCorrelation?.batchMessageId === capturedMessage.messageId
     && JSON.stringify(request.batchTexts) === JSON.stringify(selected.members.map(member => member.text)));
   if (!requestA || requestA.response?.status !== 200 || rootA?.status !== 'fulfilled' || physicalA?.status !== 'fulfilled') {
     throw new Error('A source transport/provider root/physical request did not positively fulfill before its successful runtime reply was gated.');
+  }
+  if (requestA.cancellationCorrelation?.physicalOperationSessionId !== sessionIdA
+      || requestA.cancellationCorrelation?.physicalOperationMessageId !== capturedMessage.messageId
+      || (trial.provider === 'custom' && !Array.isArray(requestA.cancellationCorrelation?.customWireIds))) {
+    throw new Error('A selected Custom/Edge physical operation is not exactly attributable to the captured Page batch.');
   }
   if (!requestA.targetSessionId || !requestA.targetId || !requestA.networkId) {
     throw new Error('A Fetch request lacks exact Network CDP session/target/networkId correlation.');
@@ -158,6 +166,101 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
     throw new Error(`${staleSuccessProbe} changed DOM before the late A reply was released.`);
   }
   trial.staleSuccess.invalidation = { command: invalidationCommand, terminalEvent, event: invalidated.event, sequence: invalidationSequence, order: invalidationOrder, dom: afterInvalidation };
+
+  if (staleSuccessProbe === 'custom-stale-success') {
+    const heldSiblings = cancellationControl.heldRequests.filter(item => item.pageSessionId === sessionIdA
+      && item.record.role === 'stale-A-sibling' && !item.record.released);
+    for (const held of heldSiblings) {
+      const aborted = await until(async () => {
+        const state = await snapshotWorker(sessionIdA, [capturedMessage.messageId, held.batchMessageId], [sessionIdA]);
+        const controller = state.probe.controllers.find(item => item.sessionId === sessionIdA && item.messageId === held.batchMessageId);
+        return controller?.aborted === true ? { controller } : null;
+      }, 5_000);
+      held.controllerAbortedAfterInvalidation = aborted.controller;
+      held.record.controllerAbortedAfterInvalidation = aborted.controller;
+      held.record.invalidationSequence = invalidationSequence;
+      held.released = true;
+      held.releaseOutcome = await held.reservation.release('fail', {
+        errorReason: 'Aborted', reason: 'A session invalidated before Custom sibling Fetch fulfilled',
+        response: { reason: 'late-A-session-cancelled' },
+      });
+      await until(() => held.record.handlerSettled ? true : null, 5_000);
+      held.record.settledOrder = ++causalOrder;
+      held.record.controllerAborted = held.record.controllerAbortedAfterInvalidation?.aborted === true;
+      const requestRecord = held.reservation.requestRecord;
+      const current = await snapshotWorker(sessionIdA, [held.batchMessageId], [sessionIdA]);
+      const root = current.probe.providerRoots.find(item => item.sessionId === sessionIdA && item.messageId === held.batchMessageId);
+      const physical = current.probe.ledger.operations.find(item => item.kind === 'provider.physical'
+        && item.sessionId === sessionIdA && item.messageId === held.batchMessageId);
+      const abort = current.probe.ledger.operations.find(item => item.kind === 'controller.abort'
+        && item.sessionId === sessionIdA && item.messageId === held.batchMessageId);
+      const networkEvent = (trial.staleSuccess.networkEvents ?? []).find(item => item.sessionId === held.sessionId
+        && item.targetId === held.targetId && item.params?.requestId === held.networkId
+        && item.method === 'Network.loadingFailed');
+      const classification = classifyHeldFetchRelease({
+        heldRequestId: held.requestId, matchedRequestId: held.reservation.requestId,
+        releaseOutcome: held.releaseOutcome, networkCanceled: networkEvent?.params?.canceled === true
+          && networkEvent.params.errorText === 'net::ERR_ABORTED',
+        controllerAborted: held.record.controllerAborted,
+        cancelTargetMatched: abort?.sessionId === sessionIdA && abort?.messageId === held.batchMessageId,
+        providerRootStatus: root?.status, physicalStatus: physical?.status,
+        physicalControllerAborted: physical?.controllerAbortedAtEnd === true,
+        controllerAbortSequence: abort?.sequence,
+        providerRootSettledSequence: root?.settledSequence,
+        physicalSettledSequence: physical?.settledSequence,
+        requireExactCorrelation: true,
+        correlation: {
+          fetchRequestId: held.reservation.requestId, fetchSessionId: held.reservation.sessionId,
+          fetchTargetId: requestRecord.targetId, networkSessionId: networkEvent?.sessionId,
+          networkTargetId: networkEvent?.targetId, networkId: networkEvent?.params?.requestId,
+          pageSessionId: held.pageSessionId, providerMessageId: held.batchMessageId,
+          controllerSessionId: abort?.sessionId, controllerMessageId: abort?.messageId,
+          rootSessionId: root?.sessionId, rootMessageId: root?.messageId,
+          physicalSessionId: physical?.sessionId, physicalMessageId: physical?.messageId,
+          invalidationObserved: held.record.invalidationSequence === invalidationSequence,
+          networkEventMatched: !!networkEvent,
+          networkCanceled: networkEvent?.params?.canceled === true && networkEvent.params.errorText === 'net::ERR_ABORTED',
+        },
+      });
+      held.record.releaseClassification = classification;
+      if (classification.ok) {
+        held.reservation.classifyRelease(classification);
+        if (classification.classification !== 'fetch-release-command-acknowledged') {
+          requestRecord.lateCancelledAClassification = classification;
+          requestRecord.lateCancelledA = true;
+          requestRecord.validatedCancellationAttemptId = requestRecord.physicalAttempt?.attemptId ?? null;
+        }
+      } else if (held.releaseOutcome?.error === 'Invalid InterceptionId.') {
+        throw new Error(`Custom stale-A sibling invalid Fetch release was not positively classified: ${classification.issues.join('; ')}`);
+      }
+    }
+    const siblings = await until(async () => {
+      const state = await snapshotWorker(sessionIdA, [capturedMessage.messageId], [sessionIdA]);
+      const otherRoots = state.probe.providerRoots.filter(root => root.sessionId === sessionIdA
+        && root.messageId !== capturedMessage.messageId);
+      const pending = otherRoots.filter(root => root.status === 'pending');
+      if (pending.length) return null;
+      const siblingEvidence = otherRoots.map(root => {
+        const held = heldSiblings.find(item => item.batchMessageId === root.messageId);
+        return held ? {
+          role: held.record.role, messageId: root.messageId,
+          invalidationSequence: held.record.invalidationSequence,
+          controllerAborted: held.record.controllerAborted,
+          releaseAction: held.record.releaseAction,
+          releaseClassification: held.record.releaseClassification,
+          handlerSettled: held.record.handlerSettled,
+          settledOrder: held.record.settledOrder,
+          root,
+        } : { role: 'settled-before-invalidation', messageId: root.messageId, root };
+      });
+      if (siblingEvidence.some(({ role, root, controllerAborted }) => role === 'stale-A-sibling'
+          && (root.status === 'rejected' && controllerAborted !== true))) {
+        throw new Error('A Custom sibling settled as rejected without a positive production controller abort.');
+      }
+      return { worker: state, siblings: siblingEvidence };
+    }, 15_000);
+    trial.staleSuccess.aSiblingDrain = siblings;
+  }
 
   const validateSourceDom = (snapshot, label) => {
     const issues = [];
@@ -294,7 +397,7 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
     };
   };
 
-  if (staleSuccessProbe !== 'replacement') {
+  if (staleSuccessProbe !== 'replacement' && staleSuccessProbe !== 'custom-stale-success') {
     const schedulerBeforeRelease = await evaluate(chrome, pageSession,
       'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
     const beforeDrain = await until(async () => {
@@ -371,8 +474,9 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
 
   cancellationControl.replacementSessionId = null;
   await evaluate(chrome, pageSession, "window.__pageTranslationBenchmark.translationPrefix='fixture translation B:'", contentContext);
+  const customReplacement = staleSuccessProbe === 'custom-stale-success';
   const startBResponse = await sendCommand('page-translate', {
-    provider: 'edge', targetLanguage: 'fr', isAuto: true, preserveAcceptedTranslations: true,
+    provider: customReplacement ? 'custom' : 'edge', targetLanguage: 'fr', isAuto: true, preserveAcceptedTranslations: true,
   });
   if (!startBResponse?.success) throw new Error(formatCommandFailure('PAGE_TRANSLATE replacement B', startBResponse));
   const sessionIdB = sessionIdFromStart(startBResponse);
@@ -404,6 +508,14 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
   const workerAtB = await snapshotWorker(sessionIdB, [capturedMessage.messageId, heldB.batchMessageId], [sessionIdA, sessionIdB]);
   const rootB = workerAtB.probe.providerRoots.find(root => root.messageId === heldB.batchMessageId && root.sessionId === sessionIdB);
   const controllerB = workerAtB.probe.controllers.find(controller => controller.messageId === heldB.batchMessageId && controller.sessionId === sessionIdB);
+  const requestB = trial.requests.find(request => request.heldFetch === heldB
+    && request.cancellationCorrelation?.pageSessionId === sessionIdB
+    && request.cancellationCorrelation?.batchMessageId === heldB.batchMessageId);
+  if (!requestB || requestB.cancellationCorrelation?.physicalOperationSessionId !== sessionIdB
+      || requestB.cancellationCorrelation?.physicalOperationMessageId !== heldB.batchMessageId
+      || (customReplacement && !Array.isArray(requestB.cancellationCorrelation?.customWireIds))) {
+    throw new Error('B held Fetch lacks exact Custom/Edge physical operation correlation.');
+  }
   const trustedBStart = await acceptedLifecycle('page-translate-start', sessionIdB);
   if (!heldB || heldB.controllerAbortedAtPause !== false || heldB.providerRootStatusAtPause !== 'pending'
       || rootB?.status !== 'pending' || controllerB?.aborted !== false || !trustedBStart) {
@@ -429,6 +541,7 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
       targetCount: fixtureConfig.targetCount,
       firstBatchSize: bFirstBatchIds.length,
       settlementOperations: content.operations,
+      allowConcurrentBatches: customReplacement,
     });
     const observation = { at: now(), scheduler, validation };
     if (bDiscoveryWait.observations.length < 64) bDiscoveryWait.observations.push(observation);
@@ -534,6 +647,16 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
   const aProof = await releaseAndProveA({
     replacement: { sessionId: sessionIdB, held: heldB, messageId: heldB.batchMessageId, worker: workerImmediatelyBeforeRelease, scheduler: schedulerImmediatelyBeforeRelease },
   });
+  if (customReplacement) {
+    const siblingValidation = validateStaleSiblingDrain({
+      siblings: trial.staleSuccess.aSiblingDrain?.siblings.filter(sibling => sibling.role === 'stale-A-sibling'),
+      invalidationSequence,
+      invalidationOrder,
+      aReplyReleaseOrder: aProof.gate.releaseOrder,
+    });
+    trial.staleSuccess.aSiblingDrain.validation = siblingValidation;
+    if (!siblingValidation.ok) throw new Error(`Custom A sibling drain failed: ${siblingValidation.issues.join('; ')}`);
+  }
   trial.staleSuccess.replyGate = { ...trial.staleSuccess.replyGate, afterRelease: aProof.probe, releaseOrder: aProof.gate.releaseOrder };
   trial.staleSuccess.ownershipProof = {
     ...aProof,
@@ -549,7 +672,9 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
   for (const control of cancellationControl.heldRequests.filter(item => item.pageSessionId === sessionIdB && !item.record.released)) {
     const request = trial.requests.find(item => item.heldFetch === control.record);
     await control.reservation.release('fulfill', {
-      body: mapStaleSuccessResponse(request.batchTexts, sessionIdB, sessionIdA, sessionIdB),
+      body: customReplacement
+        ? mapCustomStaleSuccessResponse(request, 'B')
+        : mapStaleSuccessResponse(request.batchTexts, sessionIdB, sessionIdA, sessionIdB),
       responseCode: 200,
       responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
     });
@@ -620,7 +745,9 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
     correlation: request.cancellationCorrelation, correlationIssues: request.cancellationCorrelationIssues,
   }));
   const failedProviderResponse = trial.requests.find(request => request.category === 'provider-translation'
-    && !request.lateCancelledA && request.response?.status !== 200);
+    && !(request.lateCancelledA === true
+      && (trial.provider !== 'custom' || isValidatedStaleCancellation(request)))
+    && request.response?.status !== 200);
   if (failedProviderResponse) throw new Error('A or B provider request did not receive a fixture HTTP 200 response.');
   if (trial.staleSuccess.observationErrors.length) throw new Error(`Stale-success instrumentation had errors: ${JSON.stringify(trial.staleSuccess.observationErrors)}`);
   if (trial.requests.some(request => request.category === 'blocked')) throw new Error('Unexpected external request blocked during stale-success probe.');

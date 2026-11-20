@@ -1,14 +1,60 @@
 import { observeControllerAbort } from '../e2e-firefox/controller-abort-observer.mjs';
+import { CUSTOM_FIXTURE_ENDPOINT } from './custom-fixture.mjs';
 
 export const cancellationProbeNames = Object.freeze(['stop', 'restore', 'replacement']);
+
+export function selectCustomProviderRoot({ roots, wireIds, texts }) {
+  if (!Array.isArray(roots) || !Array.isArray(wireIds) || !wireIds.length
+      || !Array.isArray(texts) || wireIds.length !== texts.length) {
+    return { root: null, matches: [], issues: ['Custom provider root identity is malformed'] };
+  }
+  const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const candidates = roots.filter(root => {
+    const rootTexts = root?.texts ?? root?.operation?.texts;
+    const rootIds = root?.ids ?? root?.wireIds ?? root?.operation?.ids ?? root?.operation?.wireIds;
+    return typeof root?.sessionId === 'string' && typeof root.messageId === 'string'
+      && Array.isArray(rootTexts) && same(rootTexts, texts)
+      && (rootIds === undefined || Array.isArray(rootIds) && same(rootIds, wireIds));
+  });
+  const active = candidates.filter(root => root.status === 'pending' && root.controllerAborted === false);
+  return {
+    root: active.length === 1 ? active[0] : null,
+    matches: active,
+    issues: active.length === 1 ? [] : [`Custom active provider root match count ${active.length}`],
+  };
+}
 
 export function matchProviderPhysicalRoot({ url, body, sessionId, roots }) {
   if (typeof sessionId !== 'string' || !sessionId || typeof body !== 'string'
       || new TextEncoder().encode(body).byteLength > 64 * 1024 || !Array.isArray(roots)) return null;
   try {
     const endpoint = new URL(url);
-    if (endpoint.protocol !== 'https:' || endpoint.hostname !== 'edge.microsoft.com'
-        || endpoint.pathname !== '/translate/translatetext') return null;
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.port || endpoint.search || endpoint.hash) return null;
+    if (endpoint.hostname === CUSTOM_FIXTURE_ENDPOINT.origin.replace(/^https:\/\//, '')
+        && endpoint.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname) {
+      const payload = JSON.parse(body);
+      const users = payload?.messages?.filter(item => item?.role === 'user') ?? [];
+      if (!Array.isArray(payload?.messages) || users.length !== 1 || typeof users[0].content !== 'string') return null;
+      const request = JSON.parse(users[0].content);
+      const translations = request?.translations;
+      if (Object.keys(request ?? {}).length !== 1 || !Array.isArray(translations) || !translations.length
+          || translations.some(item => !item || typeof item.id !== 'string' || !item.id
+            || typeof item.text !== 'string' || !item.text)
+          || new Set(translations.map(item => item.id)).size !== translations.length) return null;
+      const ids = translations.map(item => item.id);
+      const texts = translations.map(item => item.text);
+      const matches = roots.filter(root => {
+        const rootTexts = root?.texts ?? root?.operation?.texts;
+        const rootIds = root?.ids ?? root?.wireIds ?? root?.operation?.ids ?? root?.operation?.wireIds;
+        return root?.sessionId === sessionId && typeof root.messageId === 'string'
+          && Array.isArray(rootTexts) && rootTexts.length === texts.length
+          && rootTexts.every((text, index) => text === texts[index])
+          && (rootIds === undefined || Array.isArray(rootIds) && rootIds.length === ids.length
+            && rootIds.every((id, index) => id === ids[index]));
+      });
+      return matches.length === 1 ? matches[0].messageId : null;
+    }
+    if (endpoint.hostname !== 'edge.microsoft.com' || endpoint.pathname !== '/translate/translatetext') return null;
   } catch { return null; }
   let parsed;
   try { parsed = JSON.parse(body); } catch { return null; }
@@ -428,7 +474,7 @@ export function classifyHeldFetchRelease({
   heldRequestId, matchedRequestId, releaseOutcome, networkCanceled,
   controllerAborted, cancelTargetMatched, providerRootStatus, physicalStatus,
   physicalControllerAborted, controllerAbortSequence, providerRootSettledSequence,
-  physicalSettledSequence,
+  physicalSettledSequence, requireExactCorrelation = false, correlation = null,
 }) {
   if (releaseOutcome?.ok === true) return { ok: true, classification: 'fetch-release-command-acknowledged', issues: [] };
   const issues = [];
@@ -443,6 +489,25 @@ export function classifyHeldFetchRelease({
       || !Number.isInteger(providerRootSettledSequence) || providerRootSettledSequence <= controllerAbortSequence
       || !Number.isInteger(physicalSettledSequence) || physicalSettledSequence <= controllerAbortSequence) {
     issues.push('provider promises did not settle after the observed controller abort');
+  }
+  if (requireExactCorrelation) {
+    const exact = correlation?.fetchRequestId === heldRequestId
+      && correlation?.fetchSessionId === correlation?.networkSessionId
+      && typeof correlation?.fetchTargetId === 'string' && !!correlation.fetchTargetId
+      && correlation?.networkTargetId === correlation.fetchTargetId
+      && typeof correlation?.networkId === 'string' && !!correlation.networkId
+      && typeof correlation?.pageSessionId === 'string' && !!correlation.pageSessionId
+      && typeof correlation?.providerMessageId === 'string' && !!correlation.providerMessageId
+      && correlation?.controllerSessionId === correlation.pageSessionId
+      && correlation?.controllerMessageId === correlation.providerMessageId
+      && correlation?.rootSessionId === correlation.pageSessionId
+      && correlation?.rootMessageId === correlation.providerMessageId
+      && correlation?.physicalSessionId === correlation.pageSessionId
+      && correlation?.physicalMessageId === correlation.providerMessageId
+      && correlation?.invalidationObserved === true
+      && correlation?.networkEventMatched === true
+      && correlation?.networkCanceled === true;
+    if (!exact) issues.push('cancellation evidence is not exactly correlated across Fetch, Network, Page session, and provider message');
   }
   if (issues.length) return { ok: false, classification: 'unclassified-cdp-release-error', issues };
   return {

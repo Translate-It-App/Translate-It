@@ -61,6 +61,10 @@ vi.mock('@/config.js', () => ({
 }));
 
 import { PageTranslationScheduler } from '@/features/page-translation/PageTranslationScheduler.js';
+import { CUSTOM_FIXTURE_URL, mapCustomStaleSuccessResponse } from './e2e-benchmark/custom-fixture.mjs';
+import { classifyHeldFetchRelease, matchProviderPhysicalRoot, selectCustomProviderRoot } from './e2e-benchmark/cancellation-probes.mjs';
+import { isValidatedStaleCancellation, parseCustomStaleSuccessScheduling, selectCustomPhysicalOperation, validateStaleSiblingDrain } from './e2e-benchmark/successful-reply-probes.mjs';
+import { shouldRunProviderPerformanceLane } from './e2e-benchmark/scenario-plan.mjs';
 
 function deferred() {
   let resolve;
@@ -72,9 +76,21 @@ function deferred() {
 describe('successful stale Page reply probe', () => {
   it('parses only explicit isolated stale-success cases', () => {
     expect(parseSuccessfulReplyProbeSelection()).toEqual([]);
-    expect(parseSuccessfulReplyProbeSelection('replacement,stop,restore')).toEqual(['replacement', 'stop', 'restore']);
+    expect(parseSuccessfulReplyProbeSelection('replacement,stop,restore,custom-stale-success')).toEqual(['replacement', 'stop', 'restore', 'custom-stale-success']);
     expect(() => parseSuccessfulReplyProbeSelection('stop,stop')).toThrow('Duplicate');
     expect(() => parseSuccessfulReplyProbeSelection('unknown')).toThrow('Unsupported');
+    expect(parseCustomStaleSuccessScheduling()).toBe('fluid');
+    expect(parseCustomStaleSuccessScheduling('fluid')).toBe('fluid');
+    expect(() => parseCustomStaleSuccessScheduling('on-stop')).toThrow('on-stop is unsupported');
+  });
+
+  it('dispatches Custom stale-success away from provider performance while preserving Edge performance dispatch', () => {
+    const customLane = { lane: 'provider', provider: 'custom', optimizationLevel: 3 };
+    const edgeLane = { lane: 'provider', provider: 'edge', optimizationLevel: 3 };
+    expect(shouldRunProviderPerformanceLane(customLane, true)).toBe(false);
+    expect(shouldRunProviderPerformanceLane(customLane, false)).toBe(true);
+    expect(shouldRunProviderPerformanceLane(edgeLane, false)).toBe(true);
+    expect(shouldRunProviderPerformanceLane(null, true)).toBe(false);
   });
 
   it('transforms only the exact opt-in Page safeSendMessage await boundary and fails on source drift', () => {
@@ -634,6 +650,181 @@ describe('successful stale Page reply probe', () => {
       snapshot: ready, sessionId: 'B', targetCount: 1000, firstBatchSize: 25,
       settlementOperations: [{ kind: 'scheduler.settlement', sessionId: 'B', outcome: 'accepted', changed: true }],
     }).ok).toBe(false);
+    expect(validateReplacementDiscoverySnapshot({
+      snapshot: {
+        ...ready, queueIds: ready.queueIds.slice(0, 950),
+        activeBatchIds: Array.from({ length: 50 }, (_, i) => `active-${i}`),
+      },
+      sessionId: 'B', targetCount: 1000, firstBatchSize: 25, allowConcurrentBatches: true,
+    }).ok).toBe(true);
+    expect(validateReplacementDiscoverySnapshot({
+      snapshot: { ...ready, activeBatchIds: Array.from({ length: 50 }, (_, i) => `active-${i}`) },
+      sessionId: 'B', targetCount: 1000, firstBatchSize: 25,
+    }).ok).toBe(false);
+  });
+
+  it('keeps Custom response wire IDs separate from fixture target identity', () => {
+    const response = mapCustomStaleSuccessResponse({
+      ids: ['wire-z', 'wire-a'], texts: ['source z', 'source a'],
+    }, 'B');
+    const translations = JSON.parse(response.choices[0].message.content).translations;
+    expect(translations).toEqual([
+      { id: 'wire-a', text: 'fixture translation B: source a' },
+      { id: 'wire-z', text: 'fixture translation B: source z' },
+    ]);
+    expect(() => mapCustomStaleSuccessResponse({ ids: ['wire-z'], texts: [] }, 'B')).toThrow();
+    expect(() => mapCustomStaleSuccessResponse({ ids: ['wire-z'], texts: ['source z'] }, 'C')).toThrow();
+  });
+
+  it('matches Custom physical roots by session, wire IDs, and exact source texts', () => {
+    const customBody = wireId => JSON.stringify({
+      messages: [
+        { role: 'system', content: 'Translate.' },
+        { role: 'user', content: JSON.stringify({ translations: [{ id: wireId, text: 'overlapping source' }] }) },
+      ],
+    });
+    const roots = [
+      { sessionId: 'A', messageId: 'message-A', ids: ['wire-A'], texts: ['overlapping source'] },
+      { sessionId: 'B', messageId: 'message-B', ids: ['wire-B'], texts: ['overlapping source'] },
+    ];
+    expect(matchProviderPhysicalRoot({
+      url: CUSTOM_FIXTURE_URL, body: customBody('wire-A'), sessionId: 'A', roots,
+    })).toBe('message-A');
+    expect(matchProviderPhysicalRoot({
+      url: CUSTOM_FIXTURE_URL, body: customBody('wire-B'), sessionId: 'B', roots,
+    })).toBe('message-B');
+    expect(matchProviderPhysicalRoot({
+      url: CUSTOM_FIXTURE_URL, body: customBody('wire-A'), sessionId: 'A', roots: [...roots, roots[0]],
+    })).toBeNull();
+    expect(matchProviderPhysicalRoot({
+      url: CUSTOM_FIXTURE_URL,
+      body: JSON.stringify({ messages: [{ role: 'user', content: '{"translations":[{"id":"x","text":"a"},{"id":"x","text":"b"}]}' }] }),
+      sessionId: 'A', roots,
+    })).toBeNull();
+    expect(matchProviderPhysicalRoot({
+      url: CUSTOM_FIXTURE_URL, body: '{malformed', sessionId: 'A', roots,
+    })).toBeNull();
+  });
+
+  it('selects exactly one Custom physical operation for A and B despite shared text', () => {
+    const requestBody = id => JSON.stringify({
+      messages: [{ role: 'user', content: JSON.stringify({ translations: [{ id, text: 'same source' }] }) }],
+    });
+    const operations = [
+      { kind: 'provider.physical', sessionId: 'A', messageId: 'm-A', requestBody: requestBody('wire-A') },
+      { kind: 'provider.physical', sessionId: 'B', messageId: 'm-B', requestBody: requestBody('wire-B') },
+    ];
+    const selectedA = selectCustomPhysicalOperation({
+      operations, sessionId: 'A', messageId: 'm-A', wireIds: ['wire-A'], texts: ['same source'],
+    });
+    const selectedB = selectCustomPhysicalOperation({
+      operations, sessionId: 'B', messageId: 'm-B', wireIds: ['wire-B'], texts: ['same source'],
+    });
+    expect(selectedA).toMatchObject({ ok: true, operation: operations[0] });
+    expect(selectedB).toMatchObject({ ok: true, operation: operations[1] });
+    expect(selectCustomPhysicalOperation({
+      operations: [...operations, operations[0]], sessionId: 'A', messageId: 'm-A',
+      wireIds: ['wire-A'], texts: ['same source'],
+    }).ok).toBe(false);
+    expect(selectCustomPhysicalOperation({
+      operations: [{ ...operations[0], requestBody: '{malformed' }],
+      sessionId: 'A', messageId: 'm-A', wireIds: ['wire-A'], texts: ['same source'],
+    }).ok).toBe(false);
+    expect(selectCustomPhysicalOperation({
+      operations, sessionId: 'A', messageId: 'm-unknown', wireIds: ['wire-A'], texts: ['same source'],
+    }).ok).toBe(false);
+  });
+
+  it('keeps CDP Fetch session separate from the Page owner during Custom root correlation', () => {
+    const cdpSessionId = 'cdp-worker-session';
+    const pageOwnerId = 'page-owner-A';
+    const root = {
+      sessionId: pageOwnerId, messageId: 'batch-A', ids: ['wire-A'], texts: ['source'],
+      status: 'pending', controllerAborted: false,
+    };
+    const selected = selectCustomProviderRoot({ roots: [root], wireIds: ['wire-A'], texts: ['source'] });
+    expect(cdpSessionId).not.toBe(selected.root.sessionId);
+    expect(selected.root).toBe(root);
+    const operation = selectCustomPhysicalOperation({
+      operations: [{ kind: 'provider.physical', sessionId: pageOwnerId, messageId: 'batch-A',
+        requestBody: JSON.stringify({ messages: [{ role: 'user', content: '{"translations":[{"id":"wire-A","text":"source"}]}' }] }) }],
+      sessionId: selected.root.sessionId, messageId: selected.root.messageId,
+      wireIds: ['wire-A'], texts: ['source'],
+    });
+    expect(operation.ok).toBe(true);
+    expect(selectCustomProviderRoot({
+      roots: [root, { ...root, sessionId: 'page-owner-B', messageId: 'batch-B' }],
+      wireIds: ['wire-A'], texts: ['source'],
+    }).root).toBeNull();
+  });
+
+  it('requires A Custom siblings to abort, fail and drain before releasing the selected reply', () => {
+    const sibling = {
+      role: 'stale-A-sibling', messageId: 'sibling-A', invalidationSequence: 7,
+      controllerAborted: true, releaseAction: 'fail', releaseOutcome: { ok: true },
+      handlerSettled: true, settledOrder: 9,
+    };
+    expect(validateStaleSiblingDrain({
+      siblings: [sibling], invalidationSequence: 7, invalidationOrder: 8, aReplyReleaseOrder: 10,
+    })).toMatchObject({ ok: true, issues: [] });
+    expect(validateStaleSiblingDrain({
+      siblings: [{ ...sibling, releaseOutcome: { ok: false, error: 'Invalid InterceptionId.' },
+        releaseClassification: { ok: true, classification: 'network-loadingFailed-canceled-with-provider-settlement' } }],
+      invalidationSequence: 7, invalidationOrder: 8, aReplyReleaseOrder: 10,
+    }).ok).toBe(true);
+    for (const override of [
+      { controllerAborted: false }, { releaseAction: 'fulfill' },
+      { handlerSettled: false }, { settledOrder: 10 }, { invalidationSequence: 6 },
+    ]) {
+      expect(validateStaleSiblingDrain({
+        siblings: [{ ...sibling, ...override }], invalidationSequence: 7, invalidationOrder: 8, aReplyReleaseOrder: 10,
+      }).ok).toBe(false);
+    }
+    expect(validateStaleSiblingDrain({
+      siblings: [{ ...sibling, releaseOutcome: { ok: false, error: 'Invalid InterceptionId.' },
+        releaseClassification: { ok: false, classification: 'unclassified-cdp-release-error' } }],
+      invalidationSequence: 7, invalidationOrder: 8, aReplyReleaseOrder: 10,
+    }).ok).toBe(false);
+    expect(validateStaleSiblingDrain({ siblings: [], invalidationSequence: 7, invalidationOrder: 8, aReplyReleaseOrder: 10 }).ok).toBe(false);
+  });
+
+  it('classifies invalid Fetch IDs only with exact aborted cancellation evidence', () => {
+    const evidence = {
+      heldRequestId: 'fetch-1', matchedRequestId: 'fetch-1',
+      releaseOutcome: { ok: false, error: 'Invalid InterceptionId.' },
+      networkCanceled: true, controllerAborted: true, cancelTargetMatched: true,
+      providerRootStatus: 'rejected', physicalStatus: 'rejected',
+      physicalControllerAborted: true, controllerAbortSequence: 2,
+      providerRootSettledSequence: 3, physicalSettledSequence: 4,
+      requireExactCorrelation: true,
+      correlation: {
+        fetchRequestId: 'fetch-1', fetchSessionId: 'cdp-1', fetchTargetId: 'target-1',
+        networkSessionId: 'cdp-1', networkTargetId: 'target-1', networkId: 'network-1',
+        pageSessionId: 'page-1', providerMessageId: 'message-1',
+        controllerSessionId: 'page-1', controllerMessageId: 'message-1',
+        rootSessionId: 'page-1', rootMessageId: 'message-1',
+        physicalSessionId: 'page-1', physicalMessageId: 'message-1',
+        invalidationObserved: true, networkEventMatched: true, networkCanceled: true,
+      },
+    };
+    expect(classifyHeldFetchRelease(evidence).ok).toBe(true);
+    expect(classifyHeldFetchRelease({
+      ...evidence,
+      matchedRequestId: 'unrelated-fetch',
+      correlation: { ...evidence.correlation, providerMessageId: 'different-message' },
+    }).ok).toBe(false);
+    expect(classifyHeldFetchRelease({
+      ...evidence, networkCanceled: false,
+      correlation: { ...evidence.correlation, networkCanceled: false },
+    }).ok).toBe(false);
+    expect(classifyHeldFetchRelease({
+      ...evidence, requireExactCorrelation: false, networkCanceled: false,
+    }).ok).toBe(true);
+    expect(isValidatedStaleCancellation({ lateCancelledA: true })).toBe(false);
+    expect(isValidatedStaleCancellation({
+      lateCancelledA: true,
+      lateCancelledAClassification: { ok: true, classification: 'network-loadingFailed-canceled-with-provider-settlement' },
+    })).toBe(true);
   });
 
   it('accepts attributed B writes and explicit Restore while rejecting transient A/unowned values in one observer batch', () => {
@@ -749,7 +940,7 @@ describe('successful stale Page reply probe', () => {
 
   it('opens a pending reply unchanged during teardown without cancelling its source promise', async () => {
     const source = deferred();
-    const runtime = { sendMessage(message) { return source.promise; } };
+    const runtime = { sendMessage() { return source.promise; } };
     const context = {};
     const scheduler = {
       translationSessionId: 'A',
@@ -784,7 +975,7 @@ describe('successful stale Page reply probe', () => {
   it('restores only its own wrappers and forwards unmatched/non-success outcomes unchanged', async () => {
     const rejected = new Error('native response rejection');
     const source = deferred();
-    const runtime = { sendMessage: function (message) { return source.promise; } };
+    const runtime = { sendMessage: function () { return source.promise; } };
     const originalSend = runtime.sendMessage;
     const scheduler = {
       _executeBatchRequest(batch, config, context, sessionId) {

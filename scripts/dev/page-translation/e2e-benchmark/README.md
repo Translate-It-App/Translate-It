@@ -249,6 +249,17 @@ BENCH_STALE_SUCCESS_PROBES=replacement,stop,restore \
 
 Each requested case gets a fresh Chrome trial plus the normal network-guard negative probe. Before A starts, a stale-lane-only content bundle transform wraps the real Page scheduler's `safeSendMessage` result. It binds the first current-owner scheduler batch to its exact `PAGE_TRANSLATE_BATCH` message ID, session ID, and serialized item IDs/text, then holds only a genuine successful result after production send, timeout, and cancellation checks have completed, but before the Scheduler's `await` resumes. The real Edge HTTP response and `ProviderRequestEngine.executeApiCall` / provider-root promises must already have fulfilled. Stop or Restore invalidates A through the normal command. The `stop` and `restore` cases release A's held reply without starting B and verify the original DOM remains unchanged (including exact original attributes for Restore); A has accepted zero targets. Only `replacement` starts a distinct trusted auto/preserve B and holds its first real provider Fetch response while releasing A's exact result. It requires B's first batch to overlap targets A never accepted, positive call-through `_ownsFlushSession(false)` evidence after release, fulfilled A scheduler-batch settlement, no post-invalidation A acceptance or unattributed DOM write, and unchanged B counters/queue/context/controller/resources across that boundary. B must accept all 1,000 fixture IDs exactly once with B-prefixed output; the full DOM and original text/attributes after real Restore are checked. A separate raw mutation observer retains per-target old/new text values (including transient same-delivery changes) from invalidation through final drain; any A-prefixed or unknown value fails. Artifacts retain the gate state/events, exact batch message and members, network/provider evidence, scheduler ownership checks, lifecycle/settlement attribution, raw mutation values, full DOM snapshots, runtime resource snapshots and cleanup/drain status. Gate timeout/close always opens the held result unchanged; cleanup first requires actual inactive/discovery-cancelled lifecycle evidence. If Stop/Restore cannot establish it, Chrome is disposed without opening the gate. These probes make no performance comparison and do not replace the separate cancellation tests.
 
+### Custom provider stale-success ownership probe (Phase 2.3.7)
+
+```sh
+BENCH_STALE_SUCCESS_PROBES=custom-stale-success \
+  BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_MODES=sliced BENCH_SCENARIOS=early-visible \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+This isolated case uses the blank-key synthetic Custom adapter, 1,000-target Early-visible fixture, and the production level-3 25-item/two-worker configuration. `BENCH_SCROLL_SCHEDULING=fluid` is recorded as requested probe configuration only; Early-visible does not enable scroll scheduler settings, and `on-stop` is rejected. The case is correctness-only and does not enter provider performance aggregates or run with other correctness probes. Custom replies use the exact request wire IDs (not DOM fixture IDs) in the OpenAI-compatible `choices[0].message.content` envelope; the harness independently maps request text to fixture targets. Concurrent B batches are permitted only when they remain attributed to B and pass the existing active-resource ownership checks. No live provider traffic or credentials are used.
+
 ## Historical small-fixture Chrome result
 
 Artifacts:

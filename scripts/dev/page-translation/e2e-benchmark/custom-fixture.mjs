@@ -58,3 +58,13 @@ export function mapCustomResponse({ ids, texts }) {
   const translations = ids.map((id, index) => ({ id, text: `fixture translation: ${texts[index]}` })).reverse();
   return { choices: [{ message: { content: JSON.stringify({ translations }) } }] };
 }
+
+export function mapCustomStaleSuccessResponse({ ids, texts }, owner) {
+  if (!['A', 'B'].includes(owner)) throw new TypeError('Custom stale-success response owner must be A or B.');
+  const response = mapCustomResponse({ ids, texts });
+  const payload = JSON.parse(response.choices[0].message.content);
+  payload.translations = payload.translations.map(item => ({
+    ...item, text: `fixture translation ${owner}: ${item.text.slice('fixture translation: '.length)}`,
+  }));
+  return { choices: [{ message: { content: JSON.stringify(payload) } }] };
+}

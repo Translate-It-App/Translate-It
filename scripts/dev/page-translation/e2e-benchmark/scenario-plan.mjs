@@ -26,6 +26,10 @@ export function parseProviderLane(env = {}) {
   return Object.freeze({ lane: 'provider', provider, optimizationLevel: Number(env.BENCH_OPTIMIZATION_LEVEL), mode: 'sliced' });
 }
 
+export function shouldRunProviderPerformanceLane(providerLane, customStaleSuccess = false) {
+  return !!providerLane && customStaleSuccess !== true;
+}
+
 export function providerLaneSettings(settings, { provider, optimizationLevel }) {
   return Object.freeze({ ...settings, TRANSLATION_API: provider, PROVIDER_OPTIMIZATION_LEVELS: { [provider]: optimizationLevel },
       ...(provider === 'custom' ? { CUSTOM_API_URL: CUSTOM_FIXTURE_URL, CUSTOM_API_KEY: '', CUSTOM_API_MODEL: CUSTOM_FIXTURE_MODEL,

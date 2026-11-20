@@ -6,13 +6,13 @@ import { dirname, resolve } from 'node:path';
 import process from 'node:process';
 import { buildBenchmarkExtension } from './build.mjs';
 import { runTrial } from './trial-runner.mjs';
-import { validateBuildParity } from './build-environment.mjs';
+import { validateBuildParity, validateSuccessfulReplyBuildParity } from './build-environment.mjs';
 import { writeBenchmarkArtifact } from './artifact-writer.mjs';
 import { longTasksWithinInterval, summarize, summarizeIntervals, summarizeLongTasks, validateRunGate, measureScenarioRuns } from './metrics.mjs';
 import { createFixture } from './fixture.mjs';
-import { modeOrder, parseProviderLane, providerLaneFinalization, parseScenarioSelection, parseScrollSchedulingMode, validateSampleCount, usesBandedProviderScroll } from './scenario-plan.mjs';
+import { modeOrder, parseProviderLane, providerLaneFinalization, parseScenarioSelection, parseScrollSchedulingMode, shouldRunProviderPerformanceLane, validateSampleCount, usesBandedProviderScroll } from './scenario-plan.mjs';
 import { parseCancellationProbeSelection } from './cancellation-probes.mjs';
-import { parseSuccessfulReplyProbeSelection } from './successful-reply-probes.mjs';
+import { parseCustomStaleSuccessScheduling, parseSuccessfulReplyProbeSelection } from './successful-reply-probes.mjs';
 import { parseResilienceProbeSelection, validateResilienceProbeIsolation } from './resilience-probes.mjs';
 
 const root = process.cwd();
@@ -30,7 +30,14 @@ validateResilienceProbeIsolation({
   scenario: process.env.BENCH_SCENARIOS, schedulingMode: process.env.BENCH_SCROLL_SCHEDULING,
   competingProbe: cancellationProbes.length > 0 || staleSuccessProbes.length > 0,
 });
-if (providerLane && (cancellationProbes.length || staleSuccessProbes.length)) throw new TypeError('Provider lane cannot be combined with cancellation or stale-success probes.');
+const customStaleSuccess = staleSuccessProbes.includes('custom-stale-success');
+if (providerLane && (cancellationProbes.length || staleSuccessProbes.length
+    && (!customStaleSuccess || providerLane.provider !== 'custom' || providerLane.optimizationLevel !== 3))) {
+  throw new TypeError('Provider lane can only accompany custom-stale-success at Custom optimization level 3.');
+}
+if (customStaleSuccess && (staleSuccessProbes.length !== 1 || providerLane?.provider !== 'custom' || providerLane.optimizationLevel !== 3)) {
+  throw new TypeError('custom-stale-success requires an isolated Custom provider lane at optimization level 3.');
+}
 const requestedModes = [...new Set((providerLane ? 'sliced' : process.env.BENCH_MODES ?? (isolatedProbes.length ? 'sliced' : 'legacy,sliced,viewport')).split(',').map(value => value.trim()).filter(Boolean))];
 if (isolatedProbes.length && (requestedModes.length !== 1 || requestedModes[0] !== 'sliced')) {
   throw new TypeError('Cancellation and stale-success probes require BENCH_MODES=sliced only.');
@@ -40,9 +47,13 @@ if (isolatedProbes.length && !resilienceProbes.length && process.env.BENCH_SCENA
 }
 const modes = providerLane ? ['sliced'] : isolatedProbes.length ? ['sliced'] : ['legacy', ...requestedModes.filter(mode => mode !== 'legacy')];
 const scenarios = isolatedProbes.length ? [resilienceProbes.length ? 'scroll-through' : 'early-visible'] : parseScenarioSelection(usesBandedProviderScroll(providerLane?.provider) ? process.env.BENCH_SCENARIOS ?? 'scroll-through' : process.env.BENCH_SCENARIOS ?? 'small');
-const scrollSchedulingMode = parseScrollSchedulingMode(process.env.BENCH_SCROLL_SCHEDULING);
+const probeSchedulingMode = customStaleSuccess ? parseCustomStaleSuccessScheduling(process.env.BENCH_SCROLL_SCHEDULING) : null;
+const scrollSchedulingMode = customStaleSuccess ? null : parseScrollSchedulingMode(process.env.BENCH_SCROLL_SCHEDULING);
 if (scenarios.includes('scroll-through') !== (scrollSchedulingMode !== null)) throw new TypeError('BENCH_SCENARIOS=scroll-through requires BENCH_SCROLL_SCHEDULING=fluid or on-stop, and scheduling is only valid with scroll-through.');
-if (usesBandedProviderScroll(providerLane?.provider) && (scenarios.length !== 1 || scenarios[0] !== 'scroll-through')) throw new TypeError(`${providerLane.provider} provider lane requires the scroll-through workload.`);
+if (!customStaleSuccess && usesBandedProviderScroll(providerLane?.provider)
+    && (scenarios.length !== 1 || scenarios[0] !== 'scroll-through')) {
+  throw new TypeError(`${providerLane.provider} provider lane requires the scroll-through workload.`);
+}
 const samples = Number(process.env.BENCH_SAMPLES ?? 5);
 const warmups = Number(process.env.BENCH_WARMUPS ?? 1);
 const defaultArtifact = `/tmp/opencode/page-translation-${providerLane ? 'provider-' : ''}e2e-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}.json`;
@@ -261,6 +272,13 @@ function validateHarnessBuildParity() {
   return parity;
 }
 
+function validateSuccessfulReplyHarnessBuildParity() {
+  const parity = validateSuccessfulReplyBuildParity(harness.builds, modes);
+  harness.buildParity = parity;
+  if (!parity.ok) throw new Error(`Successful stale-reply build parity gate failed: ${parity.issues.join('; ')}`);
+  return parity;
+}
+
 async function runNetworkGuardNegativeProbe(extensionPath, mode = 'legacy') {
   const probeArtifactPath = `${artifactPath.replace(/\.json$/i, '')}-network-guard-probe.json`;
   const run = await runTrial({ mode, scenario: 'small', ordinal: 1, globalRunOrder: ++globalRunOrder, phase: 'non-performance-network-guard-probe', extensionPath, settings, providerLane, fixtureConfig: createFixture('small'), networkGuardProbe: true });
@@ -332,7 +350,7 @@ try {
     harness.comparisonGate = { comparisonsAllowed: false, reason: 'Isolated resilience correctness probe; no performance aggregation.' };
     if (run.status !== 'passed') throw new Error(run.error?.message ?? `${probe} resilience probe failed.`);
     harness.status = 'passed';
-  } else if (providerLane) {
+  } else if (shouldRunProviderPerformanceLane(providerLane, customStaleSuccess)) {
     harness.command = `BENCH_LANE=provider BENCH_PROVIDER=${providerLane.provider} BENCH_OPTIMIZATION_LEVEL=${providerLane.optimizationLevel} BENCH_MODES=sliced node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
     harness.warmups = warmups;
     harness.measuredSamples = samples;
@@ -397,18 +415,21 @@ try {
     };
     harness.status = harness.cancellationGate.passed ? 'passed' : 'failed';
   } else if (staleSuccessProbes.length) {
-    harness.command = `BENCH_STALE_SUCCESS_PROBES=${staleSuccessProbes.join(',')} BENCH_MODES=sliced BENCH_SCENARIOS=early-visible node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
+    harness.command = `${customStaleSuccess ? 'BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 BENCH_SCROLL_SCHEDULING=fluid ' : ''}BENCH_STALE_SUCCESS_PROBES=${staleSuccessProbes.join(',')} BENCH_MODES=sliced BENCH_SCENARIOS=early-visible node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
     harness.warmups = 0;
     harness.measuredSamples = 0;
     harness.successfulReplyExecutionPlan = {
       mode: 'sliced', scenario: 'early-visible', cases: staleSuccessProbes.length,
       warmups: 0, performanceSamples: 0, performanceAggregation: false,
-      perCase: 'A genuine successful safeSendMessage result is gated after production send/timeout/cancellation checks; B first HTTP request remains held while A reply is released.',
+      ...(customStaleSuccess ? { schedulingMode: probeSchedulingMode,
+        schedulingModeSemantics: 'Fluid is recorded as requested probe configuration only; Early-visible has no scroll scheduler settings enabled.' } : {}),
+      perCase: 'A genuine successful safeSendMessage result is gated after production send/timeout/cancellation checks; B provider work remains held while A reply is released.',
     };
     harness.comparisonOrdering = 'Dedicated Sliced-only successful stale-reply correctness probes; no performance aggregation or mode comparison is performed.';
     const slicedOutput = await compileMode('sliced');
     await runNetworkGuardNegativeProbe(slicedOutput, 'sliced');
     const staleSuccessOutput = await compileMode('sliced', { successfulReplyGate: true });
+    if (customStaleSuccess) validateSuccessfulReplyHarnessBuildParity();
     for (const [index, probe] of staleSuccessProbes.entries()) {
       const caseRecord = { probe, ordinal: index + 1, status: 'running', resultIndex: harness.results.length };
       harness.nonPerformanceProbes.successfulStaleReply.cases.push(caseRecord);
@@ -416,7 +437,8 @@ try {
         const trial = await runRecordedTrial({
           mode: 'sliced', scenario: 'early-visible', ordinal: index + 1,
           phase: 'successful-stale-reply-probe', extensionPath: staleSuccessOutput,
-          fixtureConfig: createFixture('early-visible'), staleSuccessProbe: probe,
+          fixtureConfig: createFixture('early-visible', { providerLane: customStaleSuccess }), staleSuccessProbe: probe,
+          probeSchedulingMode: customStaleSuccess ? probeSchedulingMode : null,
         });
         caseRecord.status = trial.status;
         caseRecord.sessionA = trial.staleSuccess?.sessionA ?? null;
@@ -521,7 +543,11 @@ try {
   if (harness.cleanupErrors.length) harness.status = 'failed';
   harness.primaryError = primaryError?.message ?? null;
   if (providerLane) {
-    try { harness.buildParity = validateBuildParity(harness.builds, modes); }
+    try {
+      harness.buildParity = customStaleSuccess
+        ? validateSuccessfulReplyBuildParity(harness.builds, modes)
+        : validateBuildParity(harness.builds, modes);
+    }
     catch (error) { harness.buildParity = { ok: false, issues: [error.message] }; }
     harness.providerLaneFinalization = providerLaneFinalization({
       buildParity: harness.buildParity, cleanupErrors: harness.cleanupErrors, primaryError,

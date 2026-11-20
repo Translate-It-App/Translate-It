@@ -4,13 +4,13 @@ import process from 'node:process';
 import { launchChrome } from './chrome.mjs';
 import { canonicalProviderSourceAttempts, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, summarizeLongTasks, validateEffectiveSettings, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
 import { GOOGLE_V2_ENDPOINT } from './google-v2-fixture.mjs';
-import { CUSTOM_FIXTURE_ENDPOINT } from './custom-fixture.mjs';
+import { CUSTOM_FIXTURE_ENDPOINT, mapCustomStaleSuccessResponse as mapCustomFixtureStaleResponse } from './custom-fixture.mjs';
 import { isMappedGeminiResponse, mapMalformedGeminiResponse } from './gemini-fixture.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
 import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, mapProviderBatchIds, providerLaneSettings, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
-import { classifyHeldFetchRelease, promoteRequestDiagnostics } from './cancellation-probes.mjs';
-import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, validateRawDOMMutationEvidence, validateRuntimeResources } from './successful-reply-probes.mjs';
+import { classifyHeldFetchRelease, promoteRequestDiagnostics, selectCustomProviderRoot } from './cancellation-probes.mjs';
+import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, selectCustomPhysicalOperation, validateRawDOMMutationEvidence, validateRuntimeResources } from './successful-reply-probes.mjs';
 import { isCustom400ProbeWindowRequest, partitionBandAcceptance, shouldEnableResilienceQueueProbe, validateCustom400QueueEvidence, validateGeminiQueueAttemptEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting } from './resilience-probes.mjs';
 import { createProviderNetworkObserver, createNetworkRequestLifecycle, createHandlerJobTracker, createFetchRequestListener, createCustomFetchSettlement, createNetworkSessionState, registerGuardedSession, closeNetworkRequestLifecycle, createNetworkCleanupSteps, enableFetchGuard, enableProviderNetworkObservation, fulfillPausedFetch, failPausedFetch, continuePausedFetch, runNetworkGuardNegativeProbe, classifyPausedRequest, decodeProviderRequest } from './network-interception.mjs';
 import { createGoogleV2_503Evidence, executeGoogleV2_503, finalizeGoogleV2_503Evidence, validateGoogleV2_503Evidence } from './resilience/googlev2-503.mjs';
@@ -150,12 +150,21 @@ function mapStaleSuccessResponse(body, sessionId, sessionA, sessionB) {
     text: `fixture translation ${owner}: ${translation.text.slice('fixture translation: '.length)}`,
   })) }));
 }
+function mapCustomStaleSuccessResponse(request, owner) {
+  if (!Array.isArray(request?.batchIds) || request.batchIds.length !== request.batchTexts?.length) {
+    throw new Error('Custom stale-success response lacks the exact request wire IDs.');
+  }
+  return mapCustomFixtureStaleResponse({ ids: request.batchIds, texts: request.batchTexts }, owner);
+}
 
-export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, settings, providerLane, fixtureConfig = createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, resilienceProbe = null, schedulingMode = null }) {
+export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, settings, providerLane, fixtureConfig = createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, resilienceProbe = null, schedulingMode = null, probeSchedulingMode = null }) {
   const scenarioSettings = settingsForScenario(settings, fixtureConfig.scenario, schedulingMode);
   const trialSettings = providerLane ? providerLaneSettings(scenarioSettings, providerLane) : scenarioSettings;
   const trial = {
-    mode, scenario: fixtureConfig.scenario, ...(providerLane ? { lane: providerLane.lane, provider: providerLane.provider, optimizationLevel: providerLane.optimizationLevel } : {}), ...(schedulingMode ? { schedulingMode } : {}), ordinal, globalRunOrder, phase, status: 'running',
+    mode, scenario: fixtureConfig.scenario, ...(providerLane ? { lane: providerLane.lane, provider: providerLane.provider, optimizationLevel: providerLane.optimizationLevel } : {}), ...(schedulingMode ? { schedulingMode } : {}),
+    ...(probeSchedulingMode ? { probeConfiguration: { schedulingMode: probeSchedulingMode,
+      schedulingModeSemantics: 'Metadata only; Early-visible does not enable scroll scheduler settings.' } } : {}),
+    ordinal, globalRunOrder, phase, status: 'running',
     timestamps: { trialStart: now() },
     contexts: [], workerReadiness: [], contentReadiness: [], commands: [], lifecycle: [],
     console: [], exceptions: [], requests: [], rawDOM: {}, cleanupErrors: [],
@@ -348,21 +357,45 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         if (cancellationProbe || staleSuccessProbe) {
           const workerState = await evaluate(chrome, event.sessionId,
             'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
-          const matchingRoots = workerState?.providerRoots?.filter(candidate => sameProviderTexts(candidate.texts, body)) ?? [];
+          const customRootSelection = providerLane?.provider === 'custom'
+            ? selectCustomProviderRoot({
+              roots: workerState?.providerRoots,
+              wireIds: requestRecord.batchIds,
+              texts: requestRecord.batchTexts,
+            })
+            : null;
+          const matchingRoots = providerLane?.provider === 'custom'
+            ? customRootSelection.matches
+            : workerState?.providerRoots?.filter(candidate => sameProviderTexts(candidate.texts, body)) ?? [];
           const activeRoots = matchingRoots.filter(candidate => candidate.status === 'pending' && candidate.controllerAborted === false);
-          const roots = activeRoots.length ? activeRoots : matchingRoots;
-          const physical = workerState?.ledger?.operations?.filter(operation => operation.kind === 'provider.physical'
-            && sameProviderTexts(JSON.parse(operation.requestBody ?? 'null'), body)) ?? [];
-          const root = roots.length === 1 ? roots[0] : null;
+          const roots = customRootSelection ? customRootSelection.matches : activeRoots.length ? activeRoots : matchingRoots;
+          const root = customRootSelection?.root ?? (roots.length === 1 ? roots[0] : null);
           if (staleSuccessProbe && !root) throw new Error(`Cannot map provider response to exactly one real Page root (matches=${roots.length}).`);
-          const physicalCall = root && physical.find(operation => operation.messageId === root.messageId && operation.sessionId === root.sessionId);
-          const controller = root && workerState.controllers?.find(candidate => candidate.messageId === root.messageId && candidate.sessionId === root.sessionId);
-         const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id
-           ?? (fixtureConfig.spaSources?.includes(text) ? `target-${fixtureConfig.spaSources.indexOf(text)}` : null));
-          if (staleSuccessProbe && (!physicalCall || !controller || targetIds.some(id => id === null))) {
+          const customPhysical = providerLane?.provider === 'custom' && root
+            ? selectCustomPhysicalOperation({
+              operations: workerState?.ledger?.operations,
+              sessionId: root.sessionId, messageId: root.messageId,
+              wireIds: requestRecord.batchIds, texts: requestRecord.batchTexts,
+            }) : null;
+          if (staleSuccessProbe && customPhysical && !customPhysical.ok) {
+            throw new Error(`Custom physical operation correlation failed: ${customPhysical.issues.join('; ')}`);
+          }
+          const physical = workerState?.ledger?.operations?.filter(operation => operation.kind === 'provider.physical'
+            && (providerLane?.provider === 'custom'
+              ? operation.sessionId === root?.sessionId && operation.messageId === root?.messageId
+              : sameProviderTexts(JSON.parse(operation.requestBody ?? 'null'), body))) ?? [];
+          const physicalCall = customPhysical?.operation ?? (root && physical.find(operation => operation.messageId === root.messageId && operation.sessionId === root.sessionId));
+          const controllerMatches = root ? workerState.controllers?.filter(candidate => candidate.messageId === root.messageId
+            && candidate.sessionId === root.sessionId) ?? [] : [];
+          const controller = controllerMatches.length === 1 ? controllerMatches[0] : null;
+          const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id
+            ?? (fixtureConfig.spaSources?.includes(text) ? `target-${fixtureConfig.spaSources.indexOf(text)}` : null));
+          requestRecord.networkId = event.params.networkId ?? null;
+          if (staleSuccessProbe && (!physicalCall || physical.filter(operation => operation.messageId === root.messageId
+            && operation.sessionId === root.sessionId).length !== 1 || !controller || targetIds.some(id => id === null)
+              || !requestId || !requestRecord.networkId || !requestRecord.targetSessionId || !requestRecord.targetId)) {
             throw new Error('Cannot fulfill provider response without exact body/root/physical/controller fixture correlation.');
           }
-          requestRecord.networkId = event.params.networkId ?? null;
           requestRecord.cancellationCorrelation = root && physicalCall && controller ? {
             pageSessionId: root.sessionId,
             batchMessageId: root.messageId,
@@ -374,6 +407,9 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
             networkId: requestRecord.networkId,
             targetSessionId: requestRecord.targetSessionId,
             targetId: requestRecord.targetId,
+            physicalOperationSessionId: physicalCall.sessionId,
+            physicalOperationMessageId: physicalCall.messageId,
+            customWireIds: providerLane?.provider === 'custom' ? [...requestRecord.batchIds] : null,
           } : null;
           if (staleSuccessProbe) {
             if (!pageSession || !contentContext) throw new Error('Cannot prove Page scheduler owner before fulfilling provider response.');
@@ -438,7 +474,9 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
               requestRecord.lateCancelledARelease = cancellation;
               return;
             }
-            responseBody = mapStaleSuccessResponse(body, root.sessionId, cancellationControl.initialSessionId, cancellationControl.replacementSessionId);
+            responseBody = providerLane?.provider === 'custom'
+              ? mapCustomStaleSuccessResponse(requestRecord, root.sessionId === cancellationControl.initialSessionId ? 'A' : 'B')
+              : mapStaleSuccessResponse(body, root.sessionId, cancellationControl.initialSessionId, cancellationControl.replacementSessionId);
           }
           const issues = [];
           if (roots.length !== 1) issues.push(`provider root match count ${roots.length}`);
@@ -456,8 +494,14 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
             if (ordinal === 0) cancellationControl.firstBatchBySession.set(sessionId, { messageId: root.messageId, targetIds, texts: body });
             const isInitialSession = sessionId === cancellationControl.initialSessionId
               || (!cancellationControl.initialSessionId && !cancellationControl.replacementSessionId);
+            const selectedMessageId = staleSuccessProbe === 'custom-stale-success' && isInitialSession
+              ? (await evaluate(chrome, pageSession,
+                'window.__pageTranslationBenchmark.successfulReplySnapshot()?.selectedBatch?.messageId', contentContext, false))
+              : null;
+            const staleASibling = staleSuccessProbe === 'custom-stale-success' && isInitialSession
+              && typeof selectedMessageId === 'string' && root.messageId !== selectedMessageId;
             const shouldHold = cancellationControl.probe === 'stale-success'
-              ? sessionId === cancellationControl.replacementSessionId && !cancellationControl.releaseReplacement
+              ? staleASibling || sessionId === cancellationControl.replacementSessionId && !cancellationControl.releaseReplacement
               : isInitialSession
                 ? ordinal > 0 && !cancellationControl.releaseAllA
                 : cancellationControl.probe === 'replacement' && sessionId !== cancellationControl.initialSessionId
@@ -469,6 +513,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
                 requestId, networkId: requestRecord.networkId, sessionId: event.sessionId, targetId: requestRecord.targetId,
                 pageSessionId: sessionId, batchMessageId: root.messageId, targetIds,
                 providerRootStatusAtPause: root.status, controllerAbortedAtPause: controller?.aborted ?? null,
+                ...(staleASibling ? { role: 'stale-A-sibling' } : {}),
                 released: false, handlerSettled: false,
               };
               const heldControl = { ...held, reservation, record: held };
@@ -630,18 +675,17 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         registerGuardedSession(networkSessions, sessionId, send, extensionOrigin);
         if (!eventUnsubscribe) eventUnsubscribe = onEvent(event => recordEvent(event, trial));
         if (!requestUnsubscribe) requestUnsubscribe = onEvent(requestListener);
-        if (providerLane && !networkEventUnsubscribes.has(sessionId)) {
-          networkEventUnsubscribes.set(sessionId, onEvent(providerNetworkObserver));
-          await enableProviderNetworkObservation(send, sessionId);
-        }
         if (cancellationProbe || staleSuccessProbe) {
           if (!networkEventRouter?.register(sessionId, targetInfo)) throw new Error(`Could not register Network observer target for CDP session ${sessionId}.`);
           trial.networkObserverTargets ??= {};
           trial.networkObserverTargets[sessionId] = networkEventRouter.targetForSession(sessionId);
-          if (!networkEventUnsubscribes.has(sessionId)) {
-            const unsubscribe = onEvent(networkEventRouter.observerForSession(sessionId));
-            networkEventUnsubscribes.set(sessionId, unsubscribe);
-          }
+        }
+        if ((providerLane || cancellationProbe || staleSuccessProbe) && !networkEventUnsubscribes.has(sessionId)) {
+          const routeNetworkEvent = event => {
+            if (providerLane) providerNetworkObserver(event);
+            if (cancellationProbe || staleSuccessProbe) networkEventRouter.observerForSession(sessionId)(event);
+          };
+          networkEventUnsubscribes.set(sessionId, onEvent(routeNetworkEvent));
           await enableProviderNetworkObservation(send, sessionId);
         }
         await enableFetchGuard(send, sessionId);
@@ -1040,7 +1084,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         page: { chrome, pageSession, contentContext, evaluate },
         worker: { workerSession },
         probe: { sessionId, cancellationControl, staleSuccessProbe, requestHandlerJobs },
-        helpers: { now, until, isSessionEvent, formatCommandFailure, sessionIdFromStart, mapStaleSuccessResponse },
+        helpers: { now, until, isSessionEvent, formatCommandFailure, sessionIdFromStart, mapStaleSuccessResponse, mapCustomStaleSuccessResponse },
       });
       return trial;
     }
@@ -1953,9 +1997,22 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
       }
       if (resilienceProbe === 'googlev2-503') finalizeGoogleV2_503Evidence(trial.resilience ?? resilienceEvidence);
        trial.physicalProviderAccounting = summarizePhysicalProviderAttempts(providerPhysicalAttempts, {
-         expectedTimeoutAbortAttemptId: googleTimeoutProtocol?.held?.attemptId
-           ?? customCancellationProtocol?.held?.requestRecord?.physicalAttempt?.attemptId ?? null,
-       });
+          expectedTimeoutAbortAttemptId: googleTimeoutProtocol?.held?.attemptId
+            ?? customCancellationProtocol?.held?.requestRecord?.physicalAttempt?.attemptId ?? null,
+        });
+       const staleSuccessCancellationIds = staleSuccessProbe && providerLane?.provider === 'custom'
+         ? [...new Set(trial.requests.filter(request => request.category === 'provider-translation'
+           && request.lateCancelledAClassification?.ok === true
+           && request.lateCancelledAClassification.classification !== 'fetch-release-command-acknowledged')
+           .map(request => request.validatedCancellationAttemptId).filter(Boolean))]
+         : [];
+       if (staleSuccessCancellationIds.length) {
+         trial.physicalProviderAccounting.expectedCancellationAttemptIds = staleSuccessCancellationIds;
+         trial.physicalProviderAccounting.issues = trial.physicalProviderAccounting.issues.filter(issue =>
+           !staleSuccessCancellationIds.some(attemptId => issue.startsWith(`provider attempt ${attemptId} lacks correlated response status`)
+             || issue.startsWith(`provider attempt ${attemptId} failed:`)));
+         trial.physicalProviderAccounting.ok = trial.physicalProviderAccounting.issues.length === 0;
+       }
        if (customCancellationProtocol) {
          const cancelledAttemptIds = new Set((trial.resilience?.attempts ?? [])
            .filter(attempt => attempt.correlation?.physicalStatus === 'rejected'
