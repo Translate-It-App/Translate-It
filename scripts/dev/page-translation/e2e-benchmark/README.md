@@ -4,6 +4,10 @@
 
 Run the real MV3 background/content entries against a local synthetic page. Translation requests pass through the actual scheduler, background routing, Unified Translation Service, provider and fetch transport; the selected Edge or Google V2 outbound response is supplied synthetically by CDP. The exact startup Edge voice-list metadata `GET` is separately fulfilled with `[]`, which the production `TTSVoiceService` accepts and caches. Other unexpected external HTTP(S) requests are blocked and fail the run. Chrome DevTools Fetch guards the test extension service worker before it resumes and the top-level fixture page before navigation, including the content isolated world; iframes and Chrome process/component-extension traffic outside these targets are not covered.
 
+## Module responsibilities
+
+`run.mjs` owns CLI configuration, build orchestration, execution planning, aggregation, and artifact finalization. `trial-runner.mjs` owns one isolated trial's browser/fixture lifecycle, probe behavior, measurement, and teardown; it receives the immutable settings and provider-lane configuration explicitly. Probe implementations remain nested in the trial lifecycle so their request handling and cleanup stay together.
+
 ```sh
 pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
 # Optional controls

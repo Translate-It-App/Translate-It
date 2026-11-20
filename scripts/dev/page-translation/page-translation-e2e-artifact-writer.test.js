@@ -31,6 +31,12 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
     harness,
     artifactPath: path,
     providerLane,
+    settings: Object.freeze({
+      WHOLE_PAGE_LAZY_LOADING: false,
+      WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: false,
+      WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false,
+      PROXY_ENABLED: false,
+    }),
     requestedModes: providerLane || resilienceProbes.length ? ['sliced'] : ['legacy', 'sliced', 'viewport'],
     cancellationProbes: [],
     staleSuccessProbes: [],

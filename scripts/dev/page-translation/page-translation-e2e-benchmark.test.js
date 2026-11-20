@@ -142,7 +142,7 @@ describe('page translation benchmark measurements', () => {
     expect(validateGoogleTimeoutQueueEvidence([...queueEvents, { ...queueEvents[0], attemptNumber: 2 }], { messageId: 'message-a' }).ok).toBe(false);
   });
   it('keeps timeout execution separate from status injection and drains its held Fetch lifecycle', () => {
-    const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
+    const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/trial-runner.mjs', 'utf8');
     const contentSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/content-entry.mjs', 'utf8');
     expect(runSource).toContain("if (googleTimeoutProtocol && classification.provider === 'googlev2')");
     expect(runSource).toContain('? { armed: false, claimed: false, held: null, selectionFailures: [], releaseRequested: false } : null');
@@ -331,10 +331,11 @@ describe('page translation benchmark measurements', () => {
   it('includes the queue projector in provenance and keeps Google resilience injection Google-only 503', () => {
     const source = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
     expect(source).toContain("'scripts/dev/page-translation/e2e-benchmark/rate-limit-queue.mjs'");
-    expect(source).toContain('const handlerLifecycle = cancellationControl?.requestLifecycle');
-    expect(source).toContain('(handlerLifecycle ?? requestLifecycle).trackHandler(reservation, job)');
-    expect(source).toContain('? resilienceEvidence.queueRetryEvidence ?? null');
-    const googleBranch = source.split("if (resilienceProbe === 'googlev2-503' && classification.provider === 'googlev2')")[1]?.split("if (googleTimeoutProtocol && classification.provider === 'googlev2')")[0];
+    const trialSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/trial-runner.mjs', 'utf8');
+    expect(trialSource).toContain('const handlerLifecycle = cancellationControl?.requestLifecycle');
+    expect(trialSource).toContain('(handlerLifecycle ?? requestLifecycle).trackHandler(reservation, job)');
+    expect(trialSource).toContain('? resilienceEvidence.queueRetryEvidence ?? null');
+    const googleBranch = trialSource.split("if (resilienceProbe === 'googlev2-503' && classification.provider === 'googlev2')")[1]?.split("if (googleTimeoutProtocol && classification.provider === 'googlev2')")[0];
     expect(googleBranch).toContain('responseCode: 503');
     expect(googleBranch).not.toMatch(/custom-429|Retry-After|retryAfterSeconds|status: 429/);
   });
@@ -403,7 +404,7 @@ describe('page translation benchmark measurements', () => {
     expect(validateResilienceAccounting({ ...evidence, attempts: [failed, { ...failed, networkId: 'network-2', retryOf: 'failed', status: 200, logicalMessageId: null }] }).ok).toBe(false);
   });
   it('validates isolated Custom permanent-failure probes and exact partial-success evidence', () => {
-    const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
+    const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/trial-runner.mjs', 'utf8');
     expect(parseResilienceProbeSelection('custom-400')).toEqual(['custom-400']);
     expect(shouldEnableResilienceQueueProbe('custom-400')).toBe(true);
     expect(runSource).toContain('requestRecord.requestViewport = await evaluate(chrome, pageSession');
@@ -615,7 +616,7 @@ describe('page translation benchmark measurements', () => {
     const source = readFileSync('scripts/dev/page-translation/e2e-benchmark/worker-entry.mjs', 'utf8');
     expect(source).toMatch(/function matchGeminiProviderRoot\(body, sessionId\) \{\s*if \(!geminiStructuredRecoveryProbeEnabled\) return null;/);
     expect(source).toMatch(/enableGeminiStructuredRecoveryProbe\(\) \{\s*return installGeminiStructuredRecoveryInstrumentation\(\);/);
-    const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
+    const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/trial-runner.mjs', 'utf8');
     expect(runSource).toMatch(/if \(resilienceProbe === 'gemini-structured-recovery'\)[\s\S]*?enableGeminiStructuredRecoveryProbe\(\)/);
     expect(source).not.toMatch(/^installCallThrough\(BaseAIProvider\.prototype, '_translateBatch'/m);
     expect(source).toMatch(/\.\.\.\(geminiStructuredRecoveryProbeEnabled && \{/);
