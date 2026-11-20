@@ -20,6 +20,9 @@ import { claimGoogleTimeoutRequest, commitGoogleTimeoutRequest, findGoogleTimeou
 import { finalizeGoogleV2_503Evidence } from './e2e-benchmark/resilience/googlev2-503.mjs';
 import { collectCustom429Evidence } from './e2e-benchmark/resilience/custom-429.mjs';
 import { collectGeminiStructuredRecoveryEvidence } from './e2e-benchmark/resilience/gemini-structured-recovery.mjs';
+import { createCancellationCommandSender } from './e2e-benchmark/cancellation-runner.mjs';
+import { waitForSuccessfulReplyCapture } from './e2e-benchmark/stale-success-runner.mjs';
+import { validateTrialTranslation } from './e2e-benchmark/trial-validation.mjs';
 
 describe('page translation benchmark measurements', () => {
   it('records fulfilled Fetch response metadata only after settlement and omits it on failure', async () => {
@@ -514,6 +517,35 @@ describe('page translation benchmark measurements', () => {
       expect(source).not.toMatch(/\btrial\b/);
     }
     const runner = readFileSync(`${base}/trial-runner.mjs`, 'utf8');
+    const cancellationRunner = readFileSync(`${base}/cancellation-runner.mjs`, 'utf8');
+    const staleRunner = readFileSync(`${base}/stale-success-runner.mjs`, 'utf8');
+    const validationRunner = readFileSync(`${base}/trial-validation.mjs`, 'utf8');
+    expect(runner).toContain('runCancellationProbe({');
+    expect(runner).toContain('runStaleSuccessProbe({');
+    expect(runner).toContain('cleanupStaleSuccessProbe({');
+    expect(runner).toContain('validateTrialTranslation');
+    expect(runner).toContain('collectProviderRuntimeEvidence({');
+    expect(cancellationRunner).toContain('export async function runCancellationProbe');
+    expect(cancellationRunner).toContain('trial.cancellation.quiescence =');
+    expect(cancellationRunner).toContain('trial.status = \'passed\'');
+    expect(staleRunner).toContain('export async function runStaleSuccessProbe');
+    expect(staleRunner).toContain('trial.staleSuccess.replacementOverlap =');
+    expect(staleRunner).toContain('export async function cleanupStaleSuccessProbe');
+    expect(staleRunner).toContain('teardownSuccessfulReplyGate({');
+    expect(runner).not.toContain('trial.cancellation.quiescence =');
+    expect(runner).not.toContain('trial.staleSuccess.replacementOverlap =');
+    const fetchDrainAt = runner.indexOf('lifecycle: cancellationControl.requestLifecycle');
+    const gateCleanupAt = runner.indexOf('cleanupStaleSuccessProbe({');
+    const rawMutationDrainAt = runner.indexOf('finishSuccessfulReplyMutationCapture()');
+    const bestEffortRestoreAt = runner.indexOf('Cancellation probe best-effort restore:');
+    const measurementStopAt = runner.indexOf('await cleanupMeasurementBeforeResources({');
+    expect(fetchDrainAt).toBeGreaterThanOrEqual(0);
+    expect(fetchDrainAt).toBeGreaterThan(gateCleanupAt);
+    expect(rawMutationDrainAt).toBeGreaterThan(fetchDrainAt);
+    expect(bestEffortRestoreAt).toBeGreaterThan(rawMutationDrainAt);
+    expect(measurementStopAt).toBeGreaterThan(bestEffortRestoreAt);
+    expect(validationRunner).toContain('validateTranslation');
+    expect(validationRunner).toContain('collectProviderRuntimeEvidence');
     expect(network).not.toMatch(/\btrial\b/);
     expect(runner).toContain('guardSessions, now, requests: trial.requests,');
     expect(runner).toContain('requests: trial.requests, chrome, pageSession');
@@ -531,6 +563,35 @@ describe('page translation benchmark measurements', () => {
     expect(runner).toContain('shouldEnableResilienceQueueProbe,');
     expect(runner).toContain('texts: decodedProvider.texts');
     expect(runner).not.toContain('texts: decoded.texts');
+  });
+  it('dispatches shared probe commands and gates successful reply capture in focused runners', async () => {
+    const commands = [];
+    let clock = 0;
+    const send = createCancellationCommandSender({
+      send: async command => { commands.push(command); return { success: true }; },
+      now: () => ++clock,
+      record: () => {},
+    });
+    expect(await send('page-restore')).toEqual({ success: true });
+    expect(commands).toEqual([{ action: 'page-restore' }]);
+    const gate = await waitForSuccessfulReplyCapture({
+      snapshot: async () => ({ gate: { captured: true } }),
+      until: async read => read(),
+    });
+    expect(gate.gate.captured).toBe(true);
+    await expect(waitForSuccessfulReplyCapture({
+      snapshot: async () => ({ gate: { status: 'failed', error: 'closed' } }),
+      until: async read => read(),
+    })).rejects.toThrow('Successful reply gate failed before capture: closed');
+    expect(validateTrialTranslation({
+      originals: [['target-1', 'source']],
+      translated: [['target-1', '\u200efixture translation: source']],
+      requests: ['source'],
+      restored: new Map([['target-1', 'source']]),
+      acceptedIds: ['target-1'],
+      admittedIds: ['target-1'],
+      enqueuedIds: ['target-1'],
+    })).toMatchObject({ ok: true, translatedCount: 1, originalCount: 1 });
   });
   it('collects only successful same-session Google 503 siblings with non-overlapping target identity', () => {
     const failed = { attemptId: 'failed', pageSessionId: 'session-a', targetIds: ['target-a'], status: 503 };
