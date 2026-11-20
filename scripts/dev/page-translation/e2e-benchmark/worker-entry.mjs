@@ -5,6 +5,7 @@ import { QueueManager, queueManager } from '../../../../src/features/translation
 import { RateLimitManager, rateLimitManager } from '../../../../src/features/translation/core/RateLimitManager.js';
 import { getProviderConfiguration } from '../../../../src/features/translation/core/ProviderConfigurations.js';
 import { registryIdToName } from '../../../../src/features/translation/providers/ProviderConstants.js';
+import { BaseAIProvider } from '../../../../src/features/translation/providers/BaseAIProvider.js';
 import { storageManager } from '../../../../src/shared/storage/core/StorageCore.js';
 import { ProviderRequestEngine } from '../../../../src/features/translation/providers/utils/ProviderRequestEngine.js';
 import { BaseProvider } from '../../../../src/features/translation/providers/BaseProvider.js';
@@ -22,6 +23,18 @@ const controllerAbortObservers = new Map();
 const cancellationInstrumentationErrors = [];
 let cancellationProbeEnabled = false;
 let cancellationInstrumentationReady = false;
+let geminiStructuredRecoveryProbeEnabled = false;
+function matchGeminiProviderRoot(body, sessionId) {
+  if (!geminiStructuredRecoveryProbeEnabled) return null;
+  if (typeof body !== 'string') return null;
+  try {
+    const content = JSON.parse(JSON.parse(body).contents[0].parts[0].text);
+    const texts = content.translations.map(item => item.text);
+    const matches = providerRoots.filter(root => root.sessionId === sessionId
+      && JSON.stringify(root.operation?.texts ?? root.texts) === JSON.stringify(texts));
+    return matches.length === 1 ? matches[0].messageId : null;
+  } catch { return null; }
+}
 installCallThrough(unifiedTranslationService, 'handleTranslationRequest', function ([message]) {
   trace.record('background.translationRequest.entry', {
     action: message?.action ?? null,
@@ -29,6 +42,23 @@ installCallThrough(unifiedTranslationService, 'handleTranslationRequest', functi
     sessionId: message?.data?.sessionId ?? null,
   });
 });
+let geminiBaseAIInstrumentationInstalled = false;
+function installGeminiStructuredRecoveryInstrumentation() {
+  if (geminiBaseAIInstrumentationInstalled) return { enabled: true, alreadyInstalled: true };
+  const installed = installCallThrough(BaseAIProvider.prototype, '_translateBatch', function (args) {
+    const [texts, , , , , , messageId, sessionId, contextMetadata] = args;
+    trace.record('baseAIProvider.translateBatch.entry', {
+      callPurpose: contextMetadata?.callPurpose ?? 'PRIMARY_TRANSLATION',
+      fullParseRecoveryRetry: contextMetadata?.fullParseRecoveryRetry === true,
+      messageId: messageId ?? null,
+      sessionId: sessionId ?? null,
+      texts: Array.isArray(texts) ? texts.map(item => typeof item === 'string' ? item : item?.text ?? null) : null,
+    });
+  });
+  geminiBaseAIInstrumentationInstalled = installed;
+  geminiStructuredRecoveryProbeEnabled = installed;
+  return { enabled: installed, alreadyInstalled: false };
+}
 installCallThrough(QueueManager.prototype, 'enqueue', function (args) {
   const [providerName, , priority, context] = args;
   trace.record('queueManager.enqueue', { providerName, priority, context });
@@ -42,11 +72,25 @@ installCallThrough(RateLimitManager.prototype, 'executeWithRateLimit', function 
 });
 installTimedCallThrough(ProviderRequestEngine, 'executeApiCall', ([provider, options]) => {
   const startedAt = Date.now();
+  const requestBody = typeof options?.fetchOptions?.body === 'string' ? options.fetchOptions.body : null;
+  const messageId = geminiStructuredRecoveryProbeEnabled
+    ? options?.messageId
+      ?? matchProviderPhysicalRoot({ url: options?.url, body: requestBody, sessionId: options?.sessionId, roots: providerRoots })
+      ?? matchGeminiProviderRoot(requestBody, options?.sessionId)
+    : null;
+  const matchingRoot = geminiStructuredRecoveryProbeEnabled
+    ? providerRoots.find(root => root.messageId === messageId && root.sessionId === options?.sessionId)
+    : null;
   trace.record('providerRequestEngine.executeApiCall.start', {
     providerName: provider?.providerName ?? provider?.name ?? null,
     method: options?.fetchOptions?.method ?? null,
     urlOrigin: (() => { try { return new URL(options?.url).origin; } catch { return null; } })(),
-    bodyBytes: typeof options?.fetchOptions?.body === 'string' ? new TextEncoder().encode(options.fetchOptions.body).length : null,
+    bodyBytes: requestBody === null ? null : new TextEncoder().encode(requestBody).length,
+    ...(geminiStructuredRecoveryProbeEnabled && {
+      callPurpose: options?.callPurpose ?? null,
+      messageId: messageId ?? null,
+      texts: matchingRoot?.texts ?? null,
+    }),
     ...(cancellationProbeEnabled ? { sessionId: options?.sessionId ?? null } : {}),
   });
   const controllerMatch = options?.abortController
@@ -135,6 +179,9 @@ const marker = {
   enableResilienceQueueProbe() {
     return installResilienceQueueInstrumentation();
   },
+  enableGeminiStructuredRecoveryProbe() {
+    return installGeminiStructuredRecoveryInstrumentation();
+  },
   enableCancellationProbe() {
     cancellationProbeEnabled = true;
     if (!cancellationInstrumentationReady) {
@@ -147,7 +194,7 @@ const marker = {
           texts,
           controllerAbortedAtStart: options?.abortController?.signal?.aborted ?? null,
         });
-        const root = { operation, messageId: options?.messageId ?? null, sessionId: options?.sessionId ?? null, controller: options?.abortController ?? null };
+        const root = { operation, messageId: options?.messageId ?? null, sessionId: options?.sessionId ?? null, texts, controller: options?.abortController ?? null };
         providerRoots.push(root);
         let result;
         try { result = originalTranslate.call(this, text, sourceLanguage, targetLanguage, options); }

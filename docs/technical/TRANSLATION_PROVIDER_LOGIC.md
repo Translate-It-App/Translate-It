@@ -37,7 +37,7 @@ structured primary request
 → parser/mapping facts
 → BaseAIProvider recovery policy when invalid
 → selective recovery when safe
-→ full sequential recovery when unsafe
+→ one full-batch structured retry when unsafe
 → merge
 → final accepted result
 → OptimizedJsonHandler final validation / streaming
@@ -123,13 +123,21 @@ contract-valid truncated response remains accepted.
 
 ### Full Recovery Fallback
 
-Unsafe or ambiguous mapping uses the existing full sequential structured
-recovery path. This includes malformed or unparseable responses, unresolved or
-duplicate mappings, unknown response IDs, positional fallback, incomplete or
-ambiguous mapping, and cases with no safely preservable valid primary results.
+Unsafe or ambiguous mapping uses one retry of the entire original batch in the
+same structured format. This includes malformed or unparseable responses,
+unresolved or duplicate mappings, unknown response IDs, positional fallback,
+incomplete or ambiguous mapping, and cases with no safely preservable valid
+primary results. A valid retry replaces the rejected primary candidate. If it
+also violates the contract, the batch fails with `API_RESPONSE_INVALID`;
+recovery does not recurse or fall back to scalar translation.
 
-Structured recovery is one provider-local recovery pass. If selective recovery
-fails, the provider batch fails; this path does not return a mixed
+When invalid units are reliably mapped, up to three invalid units use
+sequential scalar repair; four or more use one structured subset retry. Both
+preserve valid primary results and merge repaired values into their original
+indexes. This implementation cutoff is not a provider-wide contract limit.
+
+Structured recovery is one provider-local recovery pass per batch execution.
+If recovery fails, the provider batch fails; this path does not return a mixed
 successful/unresolved result and does not source-fill unresolved output.
 
 ### Repair-Aware Recovery

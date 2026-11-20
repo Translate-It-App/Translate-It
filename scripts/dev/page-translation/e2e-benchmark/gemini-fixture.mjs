@@ -69,3 +69,20 @@ export function mapGeminiResponse({ ids, texts }) {
   const translations = ids.map((id, index) => ({ id, text: `fixture translation: ${texts[index]}` })).reverse();
   return { candidates: [{ finishReason: 'STOP', content: { role: 'model', parts: [{ text: JSON.stringify(translations) }] } }] };
 }
+
+export function mapMalformedGeminiResponse() {
+  return { candidates: [{ finishReason: 'STOP', content: { role: 'model', parts: [{ text: '{"translations": [ malformed' }] } }] };
+}
+
+export function isMappedGeminiResponse(response, { ids, texts }) {
+  if (!Array.isArray(ids) || !Array.isArray(texts) || !ids.length || ids.length !== texts.length
+      || response?.candidates?.length !== 1
+      || response.candidates[0]?.finishReason !== 'STOP'
+      || response.candidates[0]?.content?.role !== 'model'
+      || response.candidates[0]?.content?.parts?.length !== 1) return false;
+  try {
+    const output = JSON.parse(response.candidates[0].content.parts[0].text);
+    const expected = ids.map((id, index) => ({ id, text: `fixture translation: ${texts[index]}` })).reverse();
+    return JSON.stringify(output) === JSON.stringify(expected);
+  } catch { return false; }
+}

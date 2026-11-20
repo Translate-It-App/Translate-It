@@ -69,7 +69,7 @@ flowchart LR
         V -->|contractViolation| DISC[discard primary candidate]
         DISC --> FACTS[parser / mapping facts]
         FACTS -->|safe mapping| SEL[selective recovery<br/>preserve valid primaries]
-        FACTS -->|unsafe mapping| FULL[full sequential recovery<br/>recover full batch]
+        FACTS -->|unsafe mapping| FULL[one full-batch structured retry]
         SEL --> MERGE[merge recovered values<br/>into original indexes]
         FULL --> REPL[recovered batch candidate]
         PC --> FINAL[final candidate]
@@ -82,7 +82,7 @@ flowchart LR
     end
 ```
 
-Separate bounded mechanisms — do not merge them: **retry** (`QueueManager`) is the same item, **key failover** (`ProviderRequestEngine`/`ApiKeyManager`) is the same provider's keys, **structured recovery** (`BaseAIProvider`) is one provider-local pass that is selective when mapping is safe and full sequential otherwise. `AIResponseParser` parses and produces facts; `TranslationContractValidator` decides semantic validity; recovery merges or replaces the candidate before final validation and stream visibility. No single cross-layer total-attempt guard exists. Recovery failure produces a typed provider failure; no second recovery pass or source fallback is introduced.
+Separate bounded mechanisms — do not merge them: **retry** (`QueueManager`) is the same item, **key failover** (`ProviderRequestEngine`/`ApiKeyManager`) is the same provider's keys, **structured recovery** (`BaseAIProvider`) is one provider-local pass per batch execution. Safely mapped invalid units are repaired selectively; unsafe mapping retries the whole batch once in the same structured format. `AIResponseParser` parses and produces facts; `TranslationContractValidator` decides semantic validity; selective recovery merges repairs, while a valid full retry replaces the rejected candidate before final validation and stream visibility. No single cross-layer total-attempt guard exists. Recovery failure produces a typed provider failure; no second recovery pass or source fallback is introduced. See the [Provider Contract](../contracts/PROVIDER_CONTRACT.md#11-structured-ai-response-contract) for policy details.
 
 ---
 

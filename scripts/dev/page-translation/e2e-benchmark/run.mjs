@@ -12,13 +12,13 @@ import { writeBenchmarkArtifact } from './artifact-writer.mjs';
 import { canonicalProviderSourceAttempts, classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validatedLongTaskObservation, validateWindowMembership, measureScenarioRuns } from './metrics.mjs';
 import { decodeGoogleV2Request, GOOGLE_V2_ENDPOINT, mapGoogleV2Response } from './google-v2-fixture.mjs';
 import { CUSTOM_FIXTURE_ENDPOINT, decodeCustomRequest, mapCustomResponse } from './custom-fixture.mjs';
-import { decodeGeminiRequest, mapGeminiResponse } from './gemini-fixture.mjs';
+import { decodeGeminiRequest, GEMINI_FIXTURE_KEY, isMappedGeminiResponse, mapGeminiResponse, mapMalformedGeminiResponse } from './gemini-fixture.mjs';
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
 import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, modeOrder, mapProviderBatchIds, parseProviderLane, providerLaneSettings, providerLaneFinalization, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, createCancellationRequestLifecycle, parseCancellationProbeSelection, promoteRequestDiagnostics, validateActiveReplacementCheckpoint, validateCancellationQuiescence, validateCancellationSetup, validateMatchedCancellation, validatePostInvalidationEvidence, validateReplacementOwnership, validateSingleHeldRequest } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, parseSuccessfulReplyProbeSelection, resolveCleanupSessionEvidence, teardownSuccessfulReplyGate, validateCleanupInvalidation, validateRawDOMMutationEvidence, validateReplacementDiscoverySnapshot, validateReplacementStability, validateRuntimeResources, validateSuccessfulReplyCapture, validateStaleSuccessEvidence, validateWorkerNetworkCompletion } from './successful-reply-probes.mjs';
-import { findSessionOwnedPendingRequest, parseResilienceProbeSelection, selectResolvedGoogleAttempt, shouldEnableResilienceQueueProbe, validateCustom429Evidence, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './resilience-probes.mjs';
+import { findSessionOwnedPendingRequest, parseResilienceProbeSelection, selectResolvedGoogleAttempt, selectResolvedGeminiAttempt, shouldEnableResilienceQueueProbe, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './resilience-probes.mjs';
 
 const root = process.cwd();
 const providerLane = parseProviderLane(process.env);
@@ -63,6 +63,7 @@ const sourcePaths = [
   'src/features/translation/providers/GoogleTranslateV2Provider.js',
   'src/features/translation/providers/CustomProvider.js',
   'src/features/translation/providers/GoogleGemini.js',
+  'src/features/translation/providers/BaseAIProvider.js',
   'src/features/translation/providers/utils/AIResponseParser.js',
   'src/features/translation/providers/ProviderManifest.js',
   'src/features/translation/core/ProviderConfigurations.js',
@@ -73,6 +74,7 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/google-v2-fixture.mjs',
   'scripts/dev/page-translation/e2e-benchmark/custom-fixture.mjs',
   'scripts/dev/page-translation/e2e-benchmark/gemini-fixture.mjs',
+  'scripts/dev/page-translation/e2e-benchmark/resilience-probes.mjs',
   'scripts/dev/page-translation/e2e-benchmark/build.mjs',
   'scripts/dev/page-translation/e2e-benchmark/build-environment.mjs',
   'scripts/dev/page-translation/e2e-benchmark/chrome.mjs',
@@ -87,7 +89,6 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/cancellation-probes.mjs',
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-probes.mjs',
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-gate.mjs',
-  'scripts/dev/page-translation/e2e-benchmark/resilience-probes.mjs',
   'scripts/dev/page-translation/page-translation-e2e-runtime.test.js',
   'scripts/dev/page-translation/page-translation-e2e-benchmark.test.js',
   'scripts/dev/page-translation/page-translation-e2e-measurement.test.js',
@@ -417,7 +418,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
   const networkEventUnsubscribes = new Map();
   const providerNetworkEvents = new Map();
   const providerPhysicalAttempts = [];
-  const resilienceEvidence = resilienceProbe ? { injected503: [], injected429: [], attempts: [], unnecessaryRetransmits: [], siblingRequests: [] } : null;
+  const resilienceEvidence = resilienceProbe ? { injected503: [], injected429: [], injectedMalformed: [], recovery: [], attempts: [], unnecessaryRetransmits: [], siblingRequests: [] } : null;
   if (resilienceEvidence) trial.resilience = resilienceEvidence;
   const custom429Protocol = resilienceProbe === 'custom-429' ? {
     armed: false, roles: new Map(), releaseStates: new Map(), error: null, evidence: { events: [] },
@@ -619,6 +620,45 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           requestRecord.batchIds = decoded.ids;
           requestRecord.batchTexts = body;
           responseBody = mapGeminiResponse(decoded);
+          if (resilienceProbe === 'gemini-structured-recovery') {
+            const resources = trial.sessionId ? await evaluate(chrome, workerSession,
+              `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(trial.sessionId)}])`, undefined, false) : null;
+            const roots = await evaluate(chrome, workerSession,
+              'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false);
+            const resolver = resources?.sourceResolvers?.[trial.sessionId];
+            const selected = selectResolvedGeminiAttempt({
+              request: { networkId: event.params.networkId ?? null, sessionId: trial.sessionId, texts: body },
+              classification, resolver, roots: roots?.providerRoots ?? [],
+              failedCount: resilienceEvidence.injectedMalformed.length,
+            });
+            const matchingRoots = (roots?.providerRoots ?? []).filter(item => item.sessionId === trial.sessionId
+              && JSON.stringify(item.texts) === JSON.stringify(body));
+            const root = matchingRoots.length === 1 ? matchingRoots[0] : null;
+            const targetIds = body.map(text => fixtureConfig.targets.find(target => target.source === text)?.id ?? null);
+            const attempt = {
+              attemptId: `gemini-structured-${resilienceEvidence.attempts.length + 1}`,
+              networkId: event.params.networkId ?? null, sessionId: trial.sessionId,
+              messageId: root?.messageId ?? null, texts: body, targetIds,
+              keyIdentity: (() => { try { return new URL(request.url).searchParams.get('key') === GEMINI_FIXTURE_KEY ? 'synthetic-fixture' : 'unexpected'; } catch { return 'unexpected'; } })(),
+              selection: selected, source: resolver?.effectiveSourceLanguage ?? null,
+              target: resolver?.effectiveTargetLanguage ?? null,
+            };
+            resilienceEvidence.attempts.push(attempt);
+            requestRecord.geminiStructuredRecovery = attempt;
+            if (selected.selected) {
+              if (resilienceEvidence.injectedMalformed.length) throw new Error('Gemini structured-recovery probe selected more than one malformed primary.');
+              const malformed = { ...attempt, httpStatus: 200, jsonValid: false, envelopeValid: true };
+              resilienceEvidence.injectedMalformed.push(malformed);
+              requestRecord.geminiMalformedPrimary = malformed;
+              requestRecord.canonicalSourceExcluded = true;
+              responseBody = mapMalformedGeminiResponse();
+            } else if (resilienceEvidence.injectedMalformed.length
+                && attempt.messageId === resilienceEvidence.injectedMalformed[0].messageId
+                && JSON.stringify(targetIds) === JSON.stringify(resilienceEvidence.injectedMalformed[0].targetIds)) {
+              attempt.retryOf = resilienceEvidence.injectedMalformed[0].attemptId;
+              resilienceEvidence.recovery.push({ ...attempt, valid: true });
+            }
+          }
         } else {
           body = JSON.parse(request.postData ?? 'null');
           responseBody = mapEdgeResponse(body);
@@ -1203,6 +1243,11 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       trial.resilienceQueueInstrumentation = await evaluate(chrome, workerSession,
         'globalThis.__pageTranslationBenchmark.enableResilienceQueueProbe()');
       if (!trial.resilienceQueueInstrumentation?.enabled) throw new Error('Resilience-only QueueManager attempt instrumentation was not installed.');
+    }
+    if (resilienceProbe === 'gemini-structured-recovery') {
+      trial.geminiStructuredRecoveryInstrumentation = await evaluate(chrome, workerSession,
+        'globalThis.__pageTranslationBenchmark.enableGeminiStructuredRecoveryProbe()');
+      if (!trial.geminiStructuredRecoveryInstrumentation?.enabled) throw new Error('Gemini structured-recovery instrumentation was not installed.');
     }
 
     const { targetId } = await chrome.send('Target.createTarget', { url: 'about:blank' });
@@ -3020,7 +3065,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
     });
     const contentTrace = lifecycle.measurement;
     const successfulProviderAttempts = canonicalProviderSourceAttempts(
-      trial.requests.filter(request => request.category === 'provider-translation'));
+      trial.requests.filter(request => request.category === 'provider-translation' && !request.canonicalSourceExcluded));
     trial.measurements.content = contentTrace;
     if (fixtureConfig.scenario === 'scroll-through') {
       const scrollValidation = validateScrollThroughEvidence({
@@ -3034,7 +3079,7 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         acceptedIds: contentTrace.acceptedIds,
         duplicateAcceptedIds: contentTrace.duplicateAcceptedIds,
         providerRequests: canonicalProviderSourceAttempts(
-          trial.requests.filter(request => request.category === 'provider-translation')),
+          trial.requests.filter(request => request.category === 'provider-translation' && !request.canonicalSourceExcluded)),
         schedulerState: trial.scrollThrough.finalSchedulerState,
         restoreOriginals: lifecycle.restored?.dom,
         expectedOriginals: originals,
@@ -3188,7 +3233,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
 
     trial.providerRequestOrder = mapProviderBatchIds(providerAttempts.map(request => request.batchTexts ?? []), sourceToId);
     const providerRequestIds = trial.providerRequestOrder.flat();
-    const canonicalSourceIds = mapProviderBatchIds(canonicalProviderSourceAttempts(providerAttempts)
+    const canonicalSourceIds = mapProviderBatchIds(canonicalProviderSourceAttempts(providerAttempts
+      .filter(request => !request.canonicalSourceExcluded))
       .map(request => request.batchTexts ?? []), sourceToId).flat();
     const providerOrderValidation = validateExactTargetIds('provider request source', canonicalSourceIds, expectedIds);
     if (!providerOrderValidation.ok) throw new Error(providerOrderValidation.issues.join('; '));
@@ -3253,7 +3299,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       const terminalMessageIds = resilienceProbe === 'custom-429'
         ? ['A', 'B'].map(role => custom429Protocol.evidence.roles?.[role]?.messageId)
           .concat(custom429Protocol.evidence.pending?.messageId).filter(id => typeof id === 'string')
-        : [];
+        : resilienceProbe === 'gemini-structured-recovery'
+          ? resilienceEvidence.injectedMalformed.map(item => item.messageId).filter(Boolean) : [];
       resilienceEvidence.terminalMessageIds = terminalMessageIds;
       const [resources, pageScheduler] = await Promise.all([
         evaluate(chrome, workerSession,
@@ -3267,14 +3314,17 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
         logicalByTexts.get(key).push(attempt);
       }
       for (const attempts of logicalByTexts.values()) {
-        const failedAttemptId = (resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0] : resilienceEvidence.injected503[0])?.attemptId;
+        const failedAttemptId = (resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
+          : resilienceProbe === 'gemini-structured-recovery' ? resilienceEvidence.injectedMalformed[0] : resilienceEvidence.injected503[0])?.attemptId;
         if (attempts.length > 1 && attempts.some(attempt => attempt.attemptId !== failedAttemptId
             && attempt.retryOf !== failedAttemptId)) {
           resilienceEvidence.unnecessaryRetransmits.push({ texts: attempts[0].texts, attempts });
         }
       }
-        const failedIds = new Set((resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0] : resilienceEvidence.injected503[0])?.targetIds ?? []);
-      const failedAttemptId = (resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0] : resilienceEvidence.injected503[0])?.attemptId;
+        const failedIds = new Set((resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
+          : resilienceProbe === 'gemini-structured-recovery' ? resilienceEvidence.injectedMalformed[0] : resilienceEvidence.injected503[0])?.targetIds ?? []);
+      const failedAttemptId = (resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
+        : resilienceProbe === 'gemini-structured-recovery' ? resilienceEvidence.injectedMalformed[0] : resilienceEvidence.injected503[0])?.attemptId;
       for (const attempt of resilienceEvidence.attempts) {
         if (attempt.attemptId === failedAttemptId || attempt.retryOf === failedAttemptId) continue;
         const overlap = attempt.targetIds?.filter(id => failedIds.has(id)) ?? [];
@@ -3283,7 +3333,8 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
       const translated = trial.rawDOM.translated ?? [];
       const expectedTranslated = fixtureConfig.targets.map(({ id, source }) => [id, `\u200efixture translation: ${source}`]);
       const failedTargetIds = failedIds;
-      const failed = resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0] : resilienceEvidence.injected503[0];
+      const failed = resilienceProbe === 'custom-429' ? resilienceEvidence.injected429[0]
+        : resilienceProbe === 'gemini-structured-recovery' ? resilienceEvidence.injectedMalformed[0] : resilienceEvidence.injected503[0];
       if (resilienceProbe === 'custom-429') {
         for (const attempt of resilienceEvidence.attempts) {
           const request = providerAttempts.find(item => item.resilienceCorrelation?.attemptId === attempt.attemptId);
@@ -3363,15 +3414,107 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
         };
       }
+      if (resilienceProbe === 'gemini-structured-recovery') {
+        const workerEvents = traceEvents(workerTrace);
+        const affectedMessageId = failed?.messageId;
+        resilienceEvidence.queueAttemptEvidence = validateGeminiQueueAttemptEvidence(workerEvents, { messageId: affectedMessageId });
+        resilienceEvidence.executionCalls = workerEvents
+          .filter(event => event.name === 'providerRequestEngine.executeApiCall.start'
+            && event.sessionId === sessionId && event.messageId === affectedMessageId)
+          .map(({ callPurpose, messageId, sessionId: callSessionId, texts }) => ({
+            callPurpose, messageId, sessionId: callSessionId, texts,
+          }));
+        resilienceEvidence.structuredRecoveryEntries = workerEvents
+          .filter(event => event.name === 'baseAIProvider.translateBatch.entry'
+            && event.callPurpose === 'STRUCTURED_RECOVERY' && event.messageId === affectedMessageId
+            && event.sessionId === sessionId)
+          .map(({ callPurpose, fullParseRecoveryRetry, messageId, sessionId: callSessionId, texts }) => ({
+            callPurpose, fullParseRecoveryRetry, messageId, sessionId: callSessionId, texts,
+          }));
+        const matchingRequests = providerAttempts.filter(item => JSON.stringify(item.batchTexts) === JSON.stringify(failed?.texts));
+        const malformedRequest = matchingRequests.find(item => item.geminiMalformedPrimary);
+        const recoveryRequest = matchingRequests.find(item => item !== malformedRequest
+          && item.geminiStructuredRecovery && item.geminiStructuredRecovery.selection.selected === false);
+        const affectedRootRequests = providerAttempts.filter(item =>
+          item.geminiStructuredRecovery?.messageId === affectedMessageId);
+        const describePhysical = (requestRecord, role) => {
+          const network = providerNetworkEvents.get(`${requestRecord.targetSessionId}:${requestRecord.networkId}`);
+          return {
+            role, networkId: requestRecord.networkId ?? null, messageId: affectedMessageId,
+            sessionId: requestRecord.geminiStructuredRecovery?.sessionId ?? null,
+            responseStatus: requestRecord.response?.status ?? null,
+            networkStatus: network?.status ?? null, networkOutcome: network?.outcome ?? null,
+            keyIdentity: requestRecord.geminiStructuredRecovery?.keyIdentity ?? 'unknown',
+          };
+        };
+        if (malformedRequest) {
+          failed.requestId = malformedRequest.networkId;
+          failed.httpStatus = malformedRequest.response?.status ?? null;
+          failed.envelopeValid = malformedRequest.response?.body?.candidates?.length === 1
+            && malformedRequest.response.body.candidates[0]?.finishReason === 'STOP'
+            && malformedRequest.response.body.candidates[0]?.content?.role === 'model';
+        }
+        if (recoveryRequest) {
+          const purpose = resilienceEvidence.executionCalls.find(call => call.callPurpose === 'STRUCTURED_RECOVERY'
+            && call.messageId === affectedMessageId);
+          const network = providerNetworkEvents.get(`${recoveryRequest.targetSessionId}:${recoveryRequest.networkId}`);
+          const outputValid = isMappedGeminiResponse(recoveryRequest.response?.body, {
+            ids: recoveryRequest.batchIds ?? [], texts: failed.texts,
+          });
+          resilienceEvidence.recovery = purpose ? [{
+            ...recoveryRequest.geminiStructuredRecovery,
+            valid: recoveryRequest.response?.status === 200 && network?.status === 200
+              && network?.outcome === 'finished' && outputValid,
+            httpStatus: recoveryRequest.response?.status ?? null,
+            networkStatus: network?.status ?? null, networkOutcome: network?.outcome ?? null,
+            envelopeValid: outputValid, outputValid,
+            messageId: purpose.messageId, sessionId: purpose.sessionId,
+            texts: failed.texts, targetIds: failed.targetIds,
+          }] : [];
+        }
+        resilienceEvidence.physicalAttempts = [
+          ...(malformedRequest ? [describePhysical(malformedRequest, 'malformed-primary')] : []),
+          ...(recoveryRequest ? [describePhysical(recoveryRequest, 'structured-recovery')] : []),
+        ];
+        const expectedPhysical = new Set([malformedRequest, recoveryRequest].filter(Boolean));
+        const unexpectedPhysical = [...new Set([...affectedRootRequests, ...matchingRequests])]
+          .filter(item => !expectedPhysical.has(item));
+        resilienceEvidence.unexpectedPhysicalAttempts = unexpectedPhysical
+          .map(item => describePhysical(item, 'unexpected'));
+        resilienceEvidence.unexpectedRetransmits = matchingRequests.length === 2
+          && affectedRootRequests.length === 2 ? [] : [...new Set([...affectedRootRequests, ...matchingRequests])].map(item =>
+            describePhysical(item, expectedPhysical.has(item) ? 'unexpected-count' : 'unexpected'));
+        resilienceEvidence.queueRetries = workerEvents.filter(event =>
+          event.messageId === affectedMessageId && event.name === 'queueManager.processItem.start'
+          && event.attemptNumber > 1);
+        resilienceEvidence.keyFailovers = [...new Set([...affectedRootRequests, ...matchingRequests])]
+          .filter(item => item.geminiStructuredRecovery?.keyIdentity !== 'synthetic-fixture'
+            || !expectedPhysical.has(item))
+          .map(item => describePhysical(item, 'key-failover-or-unexpected-attempt'));
+        resilienceEvidence.parentRecoveries = resilienceEvidence.executionCalls.filter(call =>
+          call.callPurpose === 'PARENT_RECOVERY');
+        const physicalSummary = summarizePhysicalProviderAttempts(providerPhysicalAttempts.map(attempt => {
+          const network = providerNetworkEvents.get(`${attempt.networkSessionId}:${attempt.networkId}`);
+          return { ...attempt, startedAt: network?.startedAt ?? null, settledAt: network?.settledAt ?? null,
+            status: network?.status ?? null, outcome: network?.outcome ?? null };
+        }));
+        resilienceEvidence.concurrency = {
+          peakPhysical: physicalSummary.peakPhysicalConcurrency,
+          peakLogical: trial.providerLogicalBatches?.peakLogicalBatchConcurrency ?? null,
+          effectiveProviderLimiterCapacity: trial.providerRuntimeObserved?.limiterCapacity ?? null,
+        };
+      }
       const resourceValidation = validateRuntimeResources(resources, { terminalMessageIds, sessionIds: [sessionId], final: true });
       const cleanupOk = resourceValidation.ok
         && pageScheduler?.managerTranslating === false
         && pageScheduler.activeFlushes === 0 && pageScheduler.queueIds?.length === 0
         && pageScheduler.pendingSettlementCount === 0 && pageScheduler.batchTimerActive === false
         && pageScheduler.completionTimerActive === false;
-      const queueRetryEvidence = resilienceProbe === 'custom-429' ? resilienceEvidence.queueRetryEvidence : validateQueueRetryEvidence(traceEvents(workerTrace), {
-        messageId: resilienceEvidence.injected503[0]?.logicalMessageId,
-      });
+      const queueRetryEvidence = resilienceProbe === 'custom-429' || resilienceProbe === 'gemini-structured-recovery'
+        ? resilienceEvidence.queueRetryEvidence ?? null
+        : validateQueueRetryEvidence(traceEvents(workerTrace), {
+          messageId: resilienceEvidence.injected503[0]?.logicalMessageId,
+        });
       trial.resilience = { ...resilienceEvidence, resources, pageScheduler, queueRetryEvidence, translation: {
         exact: JSON.stringify(translated) === JSON.stringify(expectedTranslated),
         duplicates: translated.length - new Set(translated.map(([id]) => id)).size,
@@ -3398,6 +3541,9 @@ async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extens
           pendingStillQueuedAfterSibling: resilienceEvidence.pendingStillQueuedAfterSibling,
           roles: resilienceEvidence.roles, concurrency: resilienceEvidence.concurrency,
         });
+      }
+      if (resilienceProbe === 'gemini-structured-recovery') {
+        trial.resilience.validation = validateGeminiStructuredRecovery(trial.resilience);
       }
       if (!trial.resilience.validation.ok) throw new Error(trial.resilience.validation.issues.join('; '));
     }
@@ -3763,7 +3909,7 @@ try {
   if (resilienceProbes.length) {
     const probe = resilienceProbes[0];
     const custom429 = probe === 'custom-429';
-    const provider = custom429 ? 'custom' : 'googlev2';
+    const provider = probe === 'gemini-structured-recovery' ? 'gemini' : custom429 ? 'custom' : 'googlev2';
     harness.command = `BENCH_RESILIENCE_PROBES=${probe} BENCH_LANE=provider BENCH_PROVIDER=${provider} BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
     harness.warmups = 0;
     harness.measuredSamples = 0;

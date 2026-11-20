@@ -4,7 +4,7 @@ import { canonicalProviderSourceAttempts, classifyTransportRequest, longTasksWit
 import { projectRateLimitQueueItems } from './e2e-benchmark/rate-limit-queue.mjs';
 import { decodeGoogleV2Request, GOOGLE_V2_DELIMITER, mapGoogleV2Response } from './e2e-benchmark/google-v2-fixture.mjs';
 import { CUSTOM_FIXTURE_ENDPOINT, CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL, decodeCustomRequest, mapCustomResponse } from './e2e-benchmark/custom-fixture.mjs';
-import { decodeGeminiRequest, GEMINI_FIXTURE_KEY, GEMINI_FIXTURE_MODEL, GEMINI_FIXTURE_URL, mapGeminiResponse } from './e2e-benchmark/gemini-fixture.mjs';
+import { decodeGeminiRequest, GEMINI_FIXTURE_KEY, GEMINI_FIXTURE_MODEL, GEMINI_FIXTURE_URL, isMappedGeminiResponse, mapGeminiResponse, mapMalformedGeminiResponse } from './e2e-benchmark/gemini-fixture.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
 import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
@@ -14,7 +14,7 @@ import { registryIdToName } from '../../../src/features/translation/providers/Pr
 import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
 import { AIResponseParser } from '../../../src/features/translation/providers/utils/AIResponseParser.js';
 import { ResponseFormat } from '../../../src/features/translation/core/ProviderConfigurations.js';
-import { findSessionOwnedPendingRequest, parseResilienceProbeSelection, selectResolvedGoogleAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom429Evidence, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
+import { findSessionOwnedPendingRequest, parseResilienceProbeSelection, selectResolvedGoogleAttempt, selectResolvedGeminiAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
 
 describe('page translation benchmark measurements', () => {
   it('includes the queue projector in provenance and keeps Google resilience injection Google-only 503', () => {
@@ -22,6 +22,7 @@ describe('page translation benchmark measurements', () => {
     expect(source).toContain("'scripts/dev/page-translation/e2e-benchmark/rate-limit-queue.mjs'");
     expect(source).toContain('const handlerLifecycle = cancellationControl?.requestLifecycle ?? requestLifecycle;');
     expect(source).toContain('handlerLifecycle.trackHandler(reservation, job)');
+    expect(source).toContain('? resilienceEvidence.queueRetryEvidence ?? null');
     const googleBranch = source.split("if (resilienceProbe && classification.provider === 'googlev2')")[1]?.split("if (custom429Protocol && classification.provider === 'custom')")[0];
     expect(googleBranch).toContain('responseCode: 503');
     expect(googleBranch).not.toMatch(/custom-429|Retry-After|retryAfterSeconds|status: 429/);
@@ -89,6 +90,100 @@ describe('page translation benchmark measurements', () => {
     expect(validateResilienceAccounting({ ...evidence, injected503: [failed, failed] }).ok).toBe(false);
     expect(validateResilienceAccounting({ ...evidence, injected503: [{ ...failed, status: 200 }] }).ok).toBe(false);
     expect(validateResilienceAccounting({ ...evidence, attempts: [failed, { ...failed, networkId: 'network-2', retryOf: 'failed', status: 200, logicalMessageId: null }] }).ok).toBe(false);
+  });
+  it('selects and validates one isolated Gemini structured recovery with production call-purpose attribution', () => {
+    expect(parseResilienceProbeSelection('gemini-structured-recovery')).toEqual(['gemini-structured-recovery']);
+    expect(shouldEnableResilienceQueueProbe('gemini-structured-recovery')).toBe(true);
+    expect(validateResilienceProbeIsolation({
+      selected: true, probe: 'gemini-structured-recovery', provider: 'gemini', optimizationLevel: 3,
+      modes: 'sliced', scenario: 'scroll-through', schedulingMode: 'fluid',
+    })).toBe(true);
+    expect(() => validateResilienceProbeIsolation({
+      selected: true, probe: 'gemini-structured-recovery', provider: 'gemini', optimizationLevel: 3,
+      modes: 'sliced', scenario: 'scroll-through', schedulingMode: 'fluid', competingProbe: true,
+    })).toThrow();
+    const root = { messageId: 'message-a', sessionId: 'session-a', texts: ['source-a'] };
+    const request = { networkId: 'network-a', sessionId: 'session-a', texts: root.texts };
+    const resolver = { present: true, resolutionPending: false, effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' };
+    expect(selectResolvedGeminiAttempt({ request, classification: { kind: 'provider-translation', provider: 'gemini' }, resolver, roots: [root], failedCount: 0 }))
+      .toMatchObject({ selected: true, messageId: 'message-a', source: 'en', target: 'fr' });
+    expect(selectResolvedGeminiAttempt({ request, classification: { kind: 'provider-translation', provider: 'gemini' },
+      resolver: { ...resolver, resolutionPending: true }, roots: [root], failedCount: 0 }).selected).toBe(false);
+    expect(selectResolvedGeminiAttempt({ request, classification: { kind: 'provider-translation', provider: 'gemini' },
+      resolver, roots: [root, root], failedCount: 0 }).selected).toBe(false);
+
+    const malformedEnvelope = mapMalformedGeminiResponse();
+    expect(malformedEnvelope.candidates[0].finishReason).toBe('STOP');
+    expect(() => JSON.parse(malformedEnvelope.candidates[0].content.parts[0].text)).toThrow();
+    const texts = ['source-a'];
+    const identity = { attemptId: 'primary', messageId: 'message-a', sessionId: 'session-a', targetIds: ['target-a'], texts };
+    const validMappedResponse = mapGeminiResponse({ ids: ['0'], texts });
+    expect(isMappedGeminiResponse(validMappedResponse, { ids: ['0'], texts })).toBe(true);
+    expect(isMappedGeminiResponse(malformedEnvelope, { ids: ['0'], texts })).toBe(false);
+    const evidence = {
+      injectedMalformed: [{ ...identity, httpStatus: 200, jsonValid: false, envelopeValid: true }],
+      recovery: [{ ...identity, attemptId: 'recovery', valid: true, httpStatus: 200, networkStatus: 200,
+        networkOutcome: 'finished', envelopeValid: true, outputValid: true }],
+      executionCalls: [
+        { callPurpose: 'PRIMARY_TRANSLATION', ...identity },
+        { callPurpose: 'STRUCTURED_RECOVERY', ...identity },
+      ],
+      structuredRecoveryEntries: [{ callPurpose: 'STRUCTURED_RECOVERY', fullParseRecoveryRetry: true, ...identity }],
+      physicalAttempts: [
+        { role: 'malformed-primary', responseStatus: 200, networkStatus: 200, networkOutcome: 'finished', keyIdentity: 'synthetic-fixture' },
+        { role: 'structured-recovery', responseStatus: 200, networkStatus: 200, networkOutcome: 'finished', keyIdentity: 'synthetic-fixture' },
+      ],
+      queueAttemptEvidence: validateGeminiQueueAttemptEvidence([
+        { name: 'queueManager.processItem.start', queueItemId: 'queue-a', messageId: 'message-a', attemptNumber: 1 },
+        { name: 'queueManager.processItem.end', queueItemId: 'queue-a', messageId: 'message-a', attemptNumber: 1, attempts: 1, status: 'completed', retryTimerActive: false },
+      ], { messageId: 'message-a' }),
+      unexpectedPhysicalAttempts: [],
+      unexpectedRetransmits: [], unnecessaryRetransmits: [], queueRetries: [], keyFailovers: [], parentRecoveries: [],
+      concurrency: { peakPhysical: 3, peakLogical: 3, effectiveProviderLimiterCapacity: 3 },
+      translation: { exact: true, duplicates: 0, targetCount: 1000, restoreExact: true, acceptedTargetCount: 1000, duplicateAcceptedIds: [] },
+      cleanup: { ok: true },
+    };
+    expect(validateGeminiStructuredRecovery(evidence)).toEqual({ ok: true, issues: [] });
+    expect(validateGeminiQueueAttemptEvidence([], { messageId: 'message-a' }).ok).toBe(false);
+    const queueAttempt = [
+      { name: 'queueManager.processItem.start', queueItemId: 'queue-a', messageId: 'message-a', attemptNumber: 1 },
+      { name: 'queueManager.processItem.end', queueItemId: 'queue-a', messageId: 'message-a', attemptNumber: 1, attempts: 1, status: 'completed', retryTimerActive: false },
+    ];
+    expect(validateGeminiQueueAttemptEvidence(queueAttempt, { messageId: 'message-a' }).ok).toBe(true);
+    expect(validateGeminiQueueAttemptEvidence([...queueAttempt, queueAttempt[0]], { messageId: 'message-a' }).ok).toBe(false);
+    expect(validateGeminiQueueAttemptEvidence(queueAttempt.map(event => event.name.endsWith('.end')
+      ? { ...event, status: 'retrying', retryTimerActive: true } : event), { messageId: 'message-a' }).ok).toBe(false);
+    expect(validateGeminiQueueAttemptEvidence(queueAttempt.map(event => event.name.endsWith('.end')
+      ? { ...event, attempts: 2 } : event), { messageId: 'message-a' }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, queueAttemptEvidence: undefined }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, recovery: [{ ...evidence.recovery[0], valid: false }] }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, unexpectedRetransmits: [{ targetIds: ['target-a'] }] }).issues)
+      .toContain('unexpected Gemini retransmissions were observed');
+    expect(validateGeminiStructuredRecovery({ ...evidence, executionCalls: [...evidence.executionCalls, evidence.executionCalls[1]] }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, queueRetries: [{ attemptNumber: 2 }] }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, concurrency: { ...evidence.concurrency, peakPhysical: 4 } }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, concurrency: { ...evidence.concurrency, peakLogical: 4 } }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, concurrency: { ...evidence.concurrency, peakLogical: null } }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, concurrency: { ...evidence.concurrency, effectiveProviderLimiterCapacity: 2 } }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, concurrency: { peakPhysical: 3, peakLogical: 3 } }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, physicalAttempts: [...evidence.physicalAttempts, {
+      role: 'unexpected', responseStatus: 200, networkStatus: 200, networkOutcome: 'finished', keyIdentity: 'unexpected',
+    }], unexpectedPhysicalAttempts: [{ role: 'key-failover-or-unexpected-attempt' }], keyFailovers: [{ networkId: 'extra' }] }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, recovery: [{ ...evidence.recovery[0], networkOutcome: 'failed' }] }).ok).toBe(false);
+    expect(validateGeminiStructuredRecovery({ ...evidence, structuredRecoveryEntries: [{ ...evidence.structuredRecoveryEntries[0], fullParseRecoveryRetry: false }] }).ok).toBe(false);
+  });
+  it('gates Gemini payload attribution and BaseAI payload capture behind the selected probe', () => {
+    const source = readFileSync('scripts/dev/page-translation/e2e-benchmark/worker-entry.mjs', 'utf8');
+    expect(source).toMatch(/function matchGeminiProviderRoot\(body, sessionId\) \{\s*if \(!geminiStructuredRecoveryProbeEnabled\) return null;/);
+    expect(source).toMatch(/enableGeminiStructuredRecoveryProbe\(\) \{\s*return installGeminiStructuredRecoveryInstrumentation\(\);/);
+    const runSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/run.mjs', 'utf8');
+    expect(runSource).toMatch(/if \(resilienceProbe === 'gemini-structured-recovery'\)[\s\S]*?enableGeminiStructuredRecoveryProbe\(\)/);
+    expect(source).not.toMatch(/^installCallThrough\(BaseAIProvider\.prototype, '_translateBatch'/m);
+    expect(source).toMatch(/\.\.\.\(geminiStructuredRecoveryProbeEnabled && \{/);
+    expect(source).toContain('callPurpose: options?.callPurpose ?? null');
+    expect(source).toContain('texts: matchingRoot?.texts ?? null');
+    expect(source).toMatch(/const messageId = geminiStructuredRecoveryProbeEnabled/);
+    expect(source).toMatch(/const matchingRoot = geminiStructuredRecoveryProbeEnabled/);
   });
   it('correlates pending limiter queue items to roots owned by the requested page session', () => {
     const queueItems = [{ messageId: 'pending-page' }, { messageId: 'pending-other' }, { messageId: 'excluded' }];

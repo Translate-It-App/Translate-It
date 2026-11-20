@@ -1,27 +1,140 @@
 export function parseResilienceProbeSelection(value) {
   if (!value) return [];
   const selections = value.split(',').map(item => item.trim()).filter(Boolean);
-  if (selections.length !== 1 || !['googlev2-503', 'custom-429'].includes(selections[0])) {
-    throw new TypeError('BENCH_RESILIENCE_PROBES supports only googlev2-503 or custom-429.');
+  if (selections.length !== 1 || !['googlev2-503', 'custom-429', 'gemini-structured-recovery'].includes(selections[0])) {
+    throw new TypeError('BENCH_RESILIENCE_PROBES supports only googlev2-503, custom-429, or gemini-structured-recovery.');
   }
   return selections;
 }
 
 export function shouldEnableResilienceQueueProbe(probe) {
-  return probe === 'googlev2-503' || probe === 'custom-429';
+  return probe === 'googlev2-503' || probe === 'custom-429' || probe === 'gemini-structured-recovery';
 }
 
 export function validateResilienceProbeIsolation({ selected, probe, provider, optimizationLevel, modes, scenario, schedulingMode, competingProbe }) {
   if (!selected) return true;
   const custom = probe === 'custom-429';
-  const selectedProvider = custom ? 'custom' : 'googlev2';
+  const gemini = probe === 'gemini-structured-recovery';
+  const selectedProvider = gemini ? 'gemini' : custom ? 'custom' : 'googlev2';
   if (competingProbe || provider !== selectedProvider || optimizationLevel !== 3
       || modes !== undefined && modes !== 'sliced'
       || scenario !== undefined && scenario !== 'scroll-through'
       || schedulingMode !== undefined && schedulingMode !== 'fluid') {
-    throw new TypeError(`${custom ? 'Custom 429' : 'Google V2 503'} resilience probe requires an isolated ${custom ? 'Custom' : 'Google V2'} Level 3 Sliced/scroll-through/Fluid run.`);
+    throw new TypeError(`${gemini ? 'Gemini structured recovery' : custom ? 'Custom 429' : 'Google V2 503'} resilience probe requires an isolated ${gemini ? 'Gemini' : custom ? 'Custom' : 'Google V2'} Level 3 Sliced/scroll-through/Fluid run.`);
   }
   return true;
+}
+
+export function selectResolvedGeminiAttempt({ request, classification, resolver, failedCount, roots = [] }) {
+  if (classification?.kind !== 'provider-translation' || classification.provider !== 'gemini'
+      || failedCount !== 0 || !request?.networkId) return { selected: false, reason: 'not-first-gemini-physical-attempt' };
+  if (!resolver?.present || resolver.resolutionPending !== false
+      || !resolver.effectiveSourceLanguage || resolver.effectiveSourceLanguage === 'auto'
+      || !resolver.effectiveTargetLanguage) return { selected: false, reason: 'source-not-concretely-resolved' };
+  const matching = roots.filter(root => root.sessionId === request.sessionId
+    && JSON.stringify(root.texts) === JSON.stringify(request.texts));
+  if (matching.length !== 1) return { selected: false, reason: 'logical-batch-correlation-not-unique' };
+  return { selected: true, source: resolver.effectiveSourceLanguage,
+    target: resolver.effectiveTargetLanguage, messageId: matching[0].messageId };
+}
+
+export function validateGeminiQueueAttemptEvidence(events, { messageId } = {}) {
+  const matched = (events ?? []).filter(event => event.messageId === messageId
+    && ['queueManager.processItem.start', 'queueManager.processItem.end'].includes(event.name));
+  const starts = matched.filter(event => event.name.endsWith('.start'));
+  const ends = matched.filter(event => event.name.endsWith('.end'));
+  const start = starts[0];
+  const end = ends[0];
+  const issues = [];
+  if (!messageId || starts.length !== 1 || ends.length !== 1) {
+    issues.push('expected exactly one QueueManager start and settlement for the affected Gemini message');
+  }
+  if (!start?.queueItemId || start.queueItemId !== end?.queueItemId
+      || start?.messageId !== messageId || end?.messageId !== messageId) {
+    issues.push('QueueManager attempt did not retain one nonempty queue item and message ID');
+  }
+  if (start?.attemptNumber !== 1 || end?.attemptNumber !== 1 || end?.attempts !== 1) {
+    issues.push('QueueManager Gemini attempt was not exactly attempt 1');
+  }
+  if (end?.status !== 'completed' || end?.retryTimerActive !== false) {
+    issues.push('QueueManager Gemini attempt did not complete without an active retry timer');
+  }
+  return {
+    ok: issues.length === 0,
+    issues,
+    observed: { messageId: messageId ?? null, queueItemId: start?.queueItemId ?? null,
+      starts, ends },
+  };
+}
+
+export function validateGeminiStructuredRecovery(evidence) {
+  const issues = [];
+  const malformed = evidence.injectedMalformed?.[0];
+  const recovery = evidence.recovery?.[0];
+  if (evidence.injectedMalformed?.length !== 1 || malformed?.httpStatus !== 200
+      || malformed?.jsonValid !== false || malformed?.envelopeValid !== true) {
+    issues.push('expected exactly one malformed model answer in a valid HTTP 200 Gemini envelope');
+  }
+  if (evidence.recovery?.length !== 1 || recovery?.valid !== true) issues.push('expected exactly one valid structured recovery request');
+  if (recovery?.httpStatus !== 200 || recovery?.networkStatus !== 200 || recovery?.networkOutcome !== 'finished'
+      || recovery?.envelopeValid !== true || recovery?.outputValid !== true) {
+    issues.push('structured recovery did not produce one successful physical HTTP response with valid Gemini envelope/output');
+  }
+  if (!malformed?.messageId || malformed.messageId !== recovery?.messageId
+      || malformed.sessionId !== recovery?.sessionId
+      || JSON.stringify(malformed.targetIds) !== JSON.stringify(recovery.targetIds)
+      || JSON.stringify(malformed.texts) !== JSON.stringify(recovery.texts)) {
+    issues.push('structured recovery changed logical message, session, or target identity');
+  }
+  const calls = evidence.executionCalls ?? [];
+  const primary = calls.filter(call => call.callPurpose === 'PRIMARY_TRANSLATION');
+  const structured = calls.filter(call => call.callPurpose === 'STRUCTURED_RECOVERY');
+  if (calls.some(call => !['PRIMARY_TRANSLATION', 'STRUCTURED_RECOVERY'].includes(call.callPurpose))) issues.push('unexpected provider execution purpose was observed');
+  if (primary.length !== 1 || structured.length !== 1
+      || primary[0]?.messageId !== malformed?.messageId || structured[0]?.messageId !== malformed?.messageId
+      || primary[0]?.sessionId !== malformed?.sessionId || structured[0]?.sessionId !== malformed?.sessionId
+      || JSON.stringify(primary[0]?.texts) !== JSON.stringify(malformed?.texts)
+      || JSON.stringify(structured[0]?.texts) !== JSON.stringify(malformed?.texts)) {
+    issues.push('production execution attribution does not prove one primary and one same-batch structured recovery call');
+  }
+  const recoveryEntries = evidence.structuredRecoveryEntries ?? [];
+  if (recoveryEntries.length !== 1 || recoveryEntries[0]?.callPurpose !== 'STRUCTURED_RECOVERY'
+      || recoveryEntries[0]?.fullParseRecoveryRetry !== true
+      || recoveryEntries[0]?.messageId !== malformed?.messageId
+      || recoveryEntries[0]?.sessionId !== malformed?.sessionId
+      || JSON.stringify(recoveryEntries[0]?.texts) !== JSON.stringify(malformed?.texts)) {
+    issues.push('BaseAIProvider did not prove exactly one FULL_STRUCTURED_RETRY entry for the affected batch');
+  }
+  const physical = evidence.physicalAttempts ?? [];
+  if (physical.length !== 2 || physical.filter(attempt => attempt.role === 'malformed-primary').length !== 1
+      || physical.filter(attempt => attempt.role === 'structured-recovery').length !== 1
+      || physical.some(attempt => attempt.responseStatus !== 200 || attempt.networkStatus !== 200
+        || attempt.networkOutcome !== 'finished' || attempt.keyIdentity !== 'synthetic-fixture')) {
+    issues.push('expected exactly two successful same-batch physical requests using the synthetic Gemini fixture key');
+  }
+  if (evidence.unexpectedPhysicalAttempts?.length) issues.push('unexpected affected-root physical provider attempts were observed');
+  if (evidence.unexpectedRetransmits?.length) issues.push('unexpected Gemini retransmissions were observed');
+  if (evidence.unnecessaryRetransmits?.length) issues.push('unaffected Gemini batches were retransmitted');
+  if (evidence.queueRetries?.length || evidence.keyFailovers?.length || evidence.parentRecoveries?.length) issues.push('QueueManager retry, key failover, or parent recovery was observed');
+  if (evidence.queueAttemptEvidence?.ok !== true) {
+    issues.push(...(evidence.queueAttemptEvidence?.issues ?? ['QueueManager single-attempt evidence is unavailable']));
+  }
+  if (!Number.isFinite(evidence.concurrency?.peakPhysical) || evidence.concurrency.peakPhysical > 3) {
+    issues.push('Gemini physical concurrency exceeded three or is unavailable');
+  }
+  if (!Number.isFinite(evidence.concurrency?.peakLogical) || evidence.concurrency.peakLogical > 3) {
+    issues.push('Gemini logical batch concurrency exceeded three or is unavailable');
+  }
+  if (evidence.concurrency?.effectiveProviderLimiterCapacity !== 3) {
+    issues.push('Gemini effective provider limiter capacity was not observed as exactly three');
+  }
+  if (evidence.translation?.exact !== true || evidence.translation?.duplicates !== 0
+      || evidence.translation?.targetCount !== 1000 || evidence.translation?.restoreExact !== true
+      || evidence.translation?.acceptedTargetCount !== 1000 || evidence.translation?.duplicateAcceptedIds?.length) {
+    issues.push('exact 1000-target translation, unique acceptance, or Restore evidence failed');
+  }
+  if (evidence.cleanup?.ok !== true) issues.push('runtime resources did not settle cleanly');
+  return { ok: issues.length === 0, issues };
 }
 
 export function selectResolvedCustomAttempt({ request, classification, resolver, failedCount }) {

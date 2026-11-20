@@ -154,7 +154,7 @@ For the logical identity and split-fragment contract that governs how structured
 Structured (JSON) responses can violate their response contract — for example through unmapped or gap-filled slots, or an unparseable response. The system recovers explicitly instead of silently corrupting results.
 
 - **`AIResponseParser`** parses structured responses and provides parser/mapping facts; it does not decide semantic provider validity or recovery policy.
-- **`BaseAIProvider`** owns the recovery strategy. On a structured contract violation it may use selective recovery when invalid request units are safely attributable, preserving valid primary results and merging recovered values back into their original indexes, or fall back to full sequential recovery when mapping is unsafe or ambiguous.
+- **`BaseAIProvider`** owns structured recovery: it selectively repairs safely mapped invalid units and merges those repairs into the original indexes, or retries the entire original batch once in the same structured format when mapping is unsafe. A valid full retry replaces the rejected primary; a second contract violation fails the batch. See the [Provider Contract](../contracts/PROVIDER_CONTRACT.md#11-structured-ai-response-contract) for guarantees.
 - **Recovery is a provider-local recovery pass**, not a silent result rewrite, and recovery failure remains a provider failure.
 
 A structured contract violation does not unconditionally require recovery of the entire batch. See [`TRANSLATION_PROVIDER_LOGIC.md`](../TRANSLATION_PROVIDER_LOGIC.md) for recovery execution policy and [`PROVIDER_CONTRACT.md`](../contracts/PROVIDER_CONTRACT.md) for provider result/recovery guarantees.

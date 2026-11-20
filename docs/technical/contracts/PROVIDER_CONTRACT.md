@@ -99,12 +99,13 @@ Owned by `ProviderRequestEngine` + `ApiKeyManager`. `executeRequest` iterates th
 
 #### Structured recovery
 Owned by `BaseAIProvider`. On a structured contract violation the provider runs
-**one provider-local recovery pass**. The pass is selective when invalid units
-are reliably and unambiguously mapped — preserving valid primary results and
-merging recovered values back into their original indexes — and falls back to
-full sequential recovery when mapping is unsafe or ambiguous (see
-[Structured AI Response Contract](#11-structured-ai-response-contract)). Not
-recursive.
+**one provider-local recovery pass per batch execution**. A safe selective
+mapping recovers only invalid units, preserving valid primary results and
+merging repairs into their original indexes. Otherwise, the provider retries
+the entire original batch once in the same structured format; a valid retry
+replaces the rejected primary candidate. A second contract violation fails
+with `API_RESPONSE_INVALID`; it does not start another recovery pass (see
+[Structured AI Response Contract](#11-structured-ai-response-contract)).
 
 #### Provider-local partitioning
 Example: `LingvaProvider._partitionByBudget` splits by serialized request-URL length against `FULL_URL_BUDGET`. Provider-local forwarding.
@@ -207,8 +208,9 @@ structured primary call
 - `AIResponseParser` parses and exposes parser/mapping facts; it does not trigger recovery and does not decide semantic provider validity.
 - **Acceptance:** once a valid structured candidate is accepted, `BaseAIProvider` checks the abort signal then commits conversation once.
 - **On contract violation:** discard the primary conversation candidate, then execute a single provider-local recovery pass:
-  - **Selective recovery** when invalid units are reliably and unambiguously mapped: recover only the invalid subset, preserving valid primary results and merging recovered values back into their original request indexes.
-  - **Full sequential recovery** when mapping is unsafe or ambiguous.
+  - **Selective recovery** when invalid units are reliably and unambiguously mapped: recover only the invalid subset, preserving valid primary results and merging recovered values back into their original request indexes. The provider may use scalar repair or a structured subset retry.
+  - **Full structured retry** when mapping is unsafe or ambiguous: retry the entire original batch once in the same structured format. A valid retry replaces the rejected primary candidate; this is not sequential scalar recovery.
+  - If that retry also violates the contract, fail with `API_RESPONSE_INVALID`; do not start another recovery pass or fall back to scalar recovery.
   - Merge and final validation complete before the accepted result is returned downstream.
   - Recovery success returns the merged final result.
   - **Recovery failure fails the provider batch.** No mixed successful/unresolved result is returned through this path, and unresolved values are never source-filled. No second structured-recovery loop is implied.
