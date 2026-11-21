@@ -868,9 +868,9 @@ describe('successful stale Page reply probe', () => {
     expect(select([{ ...root, ids: undefined }]).root).toMatchObject({ sessionId: root.sessionId });
     expect(select([{ ...root, ids: ['page-item-id-not-wire-id'] }]).root).toMatchObject({ sessionId: root.sessionId });
     expect(select([root, { ...root, sessionId: 'page-owner-B', messageId: 'batch-B' }]).root).toBe(root);
-    expect(select([root, { ...root, messageId: 'duplicate-same-session' }]).root).toBeNull();
+    expect(select([root, { ...root, messageId: 'different-message-same-session' }]).root).toBe(root);
     expect(select([{ ...root, sessionId: '' }]).root).toBeNull();
-    expect(select([root], [...operations, { ...operations[0], sessionId: 'page-owner-B', messageId: 'batch-B' }]).root).toBeNull();
+    expect(select([root], [...operations, { ...operations[0], sessionId: 'page-owner-B', messageId: 'batch-B' }]).root).toBe(root);
     expect(select([root], [{ ...operations[0], messageId: null }]).root).toBeNull();
     expect(select([root], [{ ...operations[0], requestBody: '{"translations":[]}' }]).root).toBeNull();
     expect(select([root], [{ ...operations[0], method: 'GET' }]).root).toBeNull();
@@ -890,6 +890,10 @@ describe('successful stale Page reply probe', () => {
       sessionId: 'owner-B', messageId: 'batch-B', texts: ['same source'],
       status: 'pending', controllerAborted: false,
     };
+    const rootC = {
+      sessionId: 'owner-C', messageId: 'batch-C', texts: ['same source'],
+      status: 'pending', controllerAborted: false,
+    };
     const operation = (sessionId, messageId, status) => ({
       kind: 'provider.physical', sessionId, messageId, status,
       url: CUSTOM_FIXTURE_URL, method: 'POST',
@@ -902,12 +906,23 @@ describe('successful stale Page reply probe', () => {
     const pendingB = operation(rootB.sessionId, rootB.messageId, 'pending');
     expect(select([rootA, rootB], [historicalA, pendingB]).root).toBe(rootB);
     expect(select([rootA], [historicalA]).root).toBe(rootA);
+    const currentSettledB = { ...rootB, status: 'fulfilled' };
+    expect(select([currentSettledB], [
+      historicalA, operation(rootB.sessionId, rootB.messageId, 'fulfilled'),
+    ]).root).toBe(currentSettledB);
+    expect(select([currentSettledB], [
+      operation(rootA.sessionId, rootA.messageId, 'pending'),
+      operation(rootB.sessionId, rootB.messageId, 'fulfilled'),
+    ]).root).toBe(currentSettledB);
     const cancelledSibling = { ...rootA, status: 'pending' };
     expect(select([cancelledSibling], [operation(cancelledSibling.sessionId, cancelledSibling.messageId, 'pending')]).root)
       .toBe(cancelledSibling);
-    expect(select([rootA, rootB], [pendingB, operation('owner-C', 'batch-C', 'pending')]).root).toBeNull();
-    expect(select([rootA], [historicalA, operation('owner-C', 'batch-C', 'fulfilled')]).root).toBeNull();
+    expect(select([rootB, rootC], [pendingB, operation(rootC.sessionId, rootC.messageId, 'pending')]).root).toBeNull();
+    expect(select([rootA, { ...rootC, status: 'fulfilled' }], [
+      historicalA, operation(rootC.sessionId, rootC.messageId, 'fulfilled'),
+    ]).root).toBeNull();
     expect(select([rootA], [pendingB, { ...historicalA, messageId: null }]).root).toBeNull();
+    expect(select([{ ...rootA, texts: ['different source'] }], [historicalA]).root).toBeNull();
     expect(select([rootA], [{ ...historicalA, status: 'unknown' }]).root).toBeNull();
   });
 

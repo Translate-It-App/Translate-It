@@ -26,27 +26,38 @@ export function selectCustomProviderRoot({ roots, operations, wireIds, texts, ur
         && same(translations.map(item => item?.text), texts);
     } catch { return false; }
   });
-  const pending = exactPhysical.filter(operation => operation.status === 'pending');
-  const settled = exactPhysical.filter(operation => ['fulfilled', 'rejected'].includes(operation.status));
-  const invalid = exactPhysical.some(operation => typeof operation.sessionId !== 'string' || !operation.sessionId
-    || typeof operation.messageId !== 'string' || !operation.messageId
-    || !['pending', 'fulfilled', 'rejected'].includes(operation.status));
+  const current = [];
+  let invalid = false;
+  for (const operation of exactPhysical) {
+    if (typeof operation.sessionId !== 'string' || !operation.sessionId
+        || typeof operation.messageId !== 'string' || !operation.messageId) {
+      invalid = true;
+      continue;
+    }
+    const owners = roots.filter(root => root?.sessionId === operation.sessionId && root?.messageId === operation.messageId);
+    if (!owners.length) continue;
+    const rootTexts = owners[0]?.texts ?? owners[0]?.operation?.texts;
+    if (owners.length !== 1 || !Array.isArray(rootTexts) || !same(rootTexts, texts)
+        || !['pending', 'fulfilled', 'rejected'].includes(owners[0]?.status)
+        || !['pending', 'fulfilled', 'rejected'].includes(operation.status)) {
+      invalid = true;
+      continue;
+    }
+    current.push({ operation, root: owners[0] });
+  }
+  const pending = current.filter(item => item.operation.status === 'pending');
+  const settled = current.filter(item => ['fulfilled', 'rejected'].includes(item.operation.status));
   const physical = !invalid && pending.length === 1 ? pending
     : !invalid && pending.length === 0 && settled.length === 1 ? settled : [];
-  const sameOwnerTexts = physical.length === 1 ? roots.filter(root => {
-    const rootTexts = root?.texts ?? root?.operation?.texts;
-    return root?.sessionId === physical[0].sessionId && Array.isArray(rootTexts) && same(rootTexts, texts);
-  }) : [];
-  const candidates = sameOwnerTexts.filter(root => root.messageId === physical[0]?.messageId
-    && typeof root?.status === 'string');
-  const selectable = candidates.filter(root => (root.status === 'pending' && root.controllerAborted === false)
-    || root.controllerAborted === true || ['fulfilled', 'rejected'].includes(root.status));
+  const selectedRoot = physical[0]?.root ?? null;
+  const selectable = selectedRoot && ((selectedRoot.status === 'pending' && selectedRoot.controllerAborted === false)
+    || selectedRoot.controllerAborted === true || ['fulfilled', 'rejected'].includes(selectedRoot.status));
   return {
-    root: physical.length === 1 && sameOwnerTexts.length === 1 && candidates.length === 1 && selectable.length === 1 ? selectable[0] : null,
-    matches: sameOwnerTexts,
+    root: physical.length === 1 && selectable ? selectedRoot : null,
+    matches: selectedRoot ? [selectedRoot] : [],
     issues: invalid ? ['Custom physical operation identity or lifecycle status is invalid']
       : physical.length !== 1 ? [`Custom physical operation match count ${pending.length || settled.length}`]
-      : sameOwnerTexts.length === 1 && candidates.length === 1 && selectable.length === 1 ? [] : [`Custom provider root match count ${sameOwnerTexts.length}`],
+        : selectable ? [] : ['Custom provider root lifecycle evidence is invalid'],
   };
 }
 
