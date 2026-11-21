@@ -1,10 +1,15 @@
 import { createSuccessfulReplyGate } from './successful-reply-gate.mjs';
 
-export const successfulReplyProbeNames = Object.freeze(['replacement', 'stop', 'restore']);
+export const successfulReplyProbeNames = Object.freeze(['replacement', 'stop', 'restore', 'custom-stale-success']);
 const PAGE_TRANSLATE_BATCH_WIRE_ACTION = 'page-translate-batch';
 const WORKER_NETWORK_EVENT_METHODS = new Set([
   'Network.requestWillBeSent', 'Network.responseReceived', 'Network.loadingFinished', 'Network.loadingFailed',
 ]);
+
+export function parseCustomStaleSuccessScheduling(value) {
+  if (value == null || value === '' || value === 'fluid') return 'fluid';
+  throw new TypeError('Custom stale-success accepts BENCH_SCROLL_SCHEDULING=fluid as metadata only; on-stop is unsupported.');
+}
 
 function safeNetworkUrl(rawUrl) {
   try {
@@ -202,7 +207,8 @@ export function validateRawDOMMutationEvidence({ evidence, targets, mode }) {
     }
     for (const value of [...transition.oldValues, ...transition.newValues]) {
       if (value === source) continue;
-      if (mode === 'replacement' && value === `\u200efixture translation B: ${source}`) continue;
+      if (['replacement', 'custom-stale-success'].includes(mode)
+          && value === `\u200efixture translation B: ${source}`) continue;
       issues.push(`unexpected raw DOM value for ${transition.id}: ${value}`);
     }
   }
@@ -314,6 +320,64 @@ function messageMembers(message) {
     const members = JSON.parse(message?.data?.text);
     return Array.isArray(members) ? members.map(item => ({ id: item?.id ?? item?.i ?? null, text: item?.text ?? item?.t ?? null })) : null;
   } catch { return null; }
+}
+
+export function selectCustomPhysicalOperation({ operations, sessionId, messageId, wireIds, texts }) {
+  const issues = [];
+  if (!Array.isArray(operations) || typeof sessionId !== 'string' || !sessionId
+      || typeof messageId !== 'string' || !messageId || !Array.isArray(wireIds) || !wireIds.length
+      || !Array.isArray(texts) || wireIds.length !== texts.length
+      || new Set(wireIds).size !== wireIds.length || wireIds.some(id => typeof id !== 'string' || !id)
+      || texts.some(text => typeof text !== 'string' || !text)) {
+    return { ok: false, operation: null, issues: ['Custom physical correlation identity or request members are malformed'] };
+  }
+  const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const candidates = operations.filter(operation => operation?.kind === 'provider.physical'
+    && operation.sessionId === sessionId && operation.messageId === messageId);
+  const matching = candidates.filter(operation => {
+    try {
+      const payload = JSON.parse(operation.requestBody);
+      const users = payload?.messages?.filter(item => item?.role === 'user') ?? [];
+      if (users.length !== 1 || typeof users[0].content !== 'string') return false;
+      const request = JSON.parse(users[0].content);
+      const translations = request?.translations;
+      return Object.keys(request ?? {}).length === 1 && Array.isArray(translations)
+        && same(translations.map(item => item?.id), wireIds)
+        && same(translations.map(item => item?.text), texts);
+    } catch { return false; }
+  });
+  if (matching.length !== 1) {
+    issues.push(matching.length ? 'Custom physical operation correlation is ambiguous'
+      : 'No exact Custom physical operation matches session, message, wire IDs, and source texts');
+  }
+  return { ok: issues.length === 0, operation: matching.length === 1 ? matching[0] : null, issues };
+}
+
+export function validateStaleSiblingDrain({ siblings, invalidationSequence, invalidationOrder, aReplyReleaseOrder }) {
+  const issues = [];
+  if (!Array.isArray(siblings) || !siblings.length || !Number.isInteger(invalidationSequence)
+      || !Number.isInteger(invalidationOrder) || !Number.isInteger(aReplyReleaseOrder)
+      || aReplyReleaseOrder <= invalidationOrder) {
+    return { ok: false, issues: ['A sibling drain evidence or causal release ordering is unavailable'] };
+  }
+  for (const sibling of siblings) {
+    const classifiedCancellation = sibling?.releaseAction === 'fail'
+      && sibling?.releaseClassification?.ok === true
+      && sibling.releaseClassification.classification === 'network-loadingFailed-canceled-with-provider-settlement';
+    if (sibling?.role !== 'stale-A-sibling' || sibling.invalidationSequence !== invalidationSequence
+        || sibling.controllerAborted !== true || !classifiedCancellation
+        || sibling.handlerSettled !== true || !Number.isInteger(sibling.settledOrder)
+        || sibling.settledOrder <= invalidationOrder || sibling.settledOrder >= aReplyReleaseOrder) {
+      issues.push(`A sibling did not abort, fail, and drain before A reply release: ${sibling?.messageId ?? 'unknown'}`);
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+export function isValidatedStaleCancellation(request) {
+  return request?.lateCancelledA === true
+    && request?.lateCancelledAClassification?.ok === true
+    && request.lateCancelledAClassification.classification === 'network-loadingFailed-canceled-with-provider-settlement';
 }
 
 export function validateSuccessfulReplyCapture({ expectedSessionId, selectedBatch, capturedMessage, gateSnapshot }) {
@@ -486,7 +550,7 @@ export function validateReplacementStability({ schedulerBefore, schedulerAfter, 
   return { ok: issues.length === 0, issues, pending, ownership, resourceValidationBefore: beforeValidation, resourceValidationAfter: afterValidation };
 }
 
-export function validateReplacementDiscoverySnapshot({ snapshot, sessionId, targetCount, firstBatchSize, settlementOperations = [] }) {
+export function validateReplacementDiscoverySnapshot({ snapshot, sessionId, targetCount, firstBatchSize, settlementOperations = [], allowConcurrentBatches = false }) {
   const issues = [];
   if (!snapshot || snapshot.translationSessionId !== sessionId || snapshot.isTranslated !== true
       || snapshot.sessionContextOwned !== true || snapshot.bridgeSessionOwned !== true || snapshot.bridgeSessionActive !== true) {
@@ -497,8 +561,19 @@ export function validateReplacementDiscoverySnapshot({ snapshot, sessionId, targ
       || snapshot?.bridgeDiscoveryQueueDepth !== 0 || snapshot?.bridgeDiscoveryCancelled !== false
       || snapshot?.bridgeDiscoveryFailed !== false) issues.push('B Bridge/Scheduler discovery is not fully drained');
   if (!Number.isInteger(snapshot?.totalTasks) || snapshot.totalTasks !== targetCount) issues.push(`B discovery admitted ${snapshot?.totalTasks ?? 'unknown'} of ${targetCount} expected targets`);
-  if (!Array.isArray(snapshot?.queueIds) || snapshot.queueIds.length !== targetCount - firstBatchSize) issues.push('B scheduler queue does not contain exactly the undispatched target remainder');
-  if (!Array.isArray(snapshot?.activeBatchIds) || snapshot.activeBatchIds.length !== firstBatchSize) issues.push('B active batch accounting does not match the held first batch size');
+  if (!Array.isArray(snapshot?.queueIds) || (allowConcurrentBatches
+      ? snapshot.queueIds.length + (snapshot.activeBatchIds?.length ?? 0) !== targetCount
+      : snapshot.queueIds.length !== targetCount - firstBatchSize)) {
+    issues.push(allowConcurrentBatches
+      ? 'B scheduler queue/active batches do not account for every admitted target'
+      : 'B scheduler queue does not contain exactly the undispatched target remainder');
+  }
+  if (!Array.isArray(snapshot?.activeBatchIds)
+      || (allowConcurrentBatches ? snapshot.activeBatchIds.length < firstBatchSize : snapshot.activeBatchIds.length !== firstBatchSize)) {
+    issues.push(allowConcurrentBatches
+      ? 'B active batch accounting is smaller than the held first batch size'
+      : 'B active batch accounting does not match the held first batch size');
+  }
   if (!Number.isInteger(snapshot?.pendingSettlementCount) || snapshot.pendingSettlementCount !== 0) issues.push('B has pre-provider pending settlement records while its first response is held');
   if (snapshot?.translatedCount !== 0 || snapshot?.failedCount !== 0) issues.push('B settled work before the held first provider response');
   const earlySettlements = settlementOperations.filter(operation => operation.kind === 'scheduler.settlement'
@@ -556,10 +631,26 @@ export function installSuccessfulReplyProbe({ runtime, scheduler, gateFactory = 
 
   const restoreWrappers = () => {
     if (wrappersRestored) return;
-    if (runtime) restoreProperty(runtime, 'sendMessage', sendMessage, originalSendDescriptor);
-    restoreProperty(scheduler, '_executeBatchRequest', executeBatch, originalExecuteDescriptor);
-    for (const [instance, guard] of instanceGuardRecords) restoreProperty(instance, '_ownsFlushSession', guard.wrapper, guard.descriptor);
-    wrappersRestored = true;
+    const restorations = [];
+    const restore = (target, key, wrapper, descriptor, expected) => {
+      try { restoreProperty(target, key, wrapper, descriptor); }
+      catch (error) {
+        instrumentationErrors.push(`Failed to restore ${key}: ${error?.message ?? String(error)}`);
+      }
+      const retained = target?.[key] === expected;
+      if (!retained) instrumentationErrors.push(`Could not restore owned ${key} wrapper; a later owner remains installed`);
+      restorations.push(retained);
+    };
+    if (runtime) restore(runtime, 'sendMessage', sendMessage, originalSendDescriptor, originalSendMessage);
+    restore(scheduler, '_executeBatchRequest', executeBatch, originalExecuteDescriptor, originalExecuteBatch);
+    for (const [instance, guard] of instanceGuardRecords) {
+      restore(instance, '_ownsFlushSession', guard.wrapper, guard.descriptor, guard.original);
+    }
+    wrappersRestored = restorations.every(Boolean);
+    if (!wrappersRestored) {
+      record('probe-wrapper-restore-failed', { errors: [...instrumentationErrors] });
+      return;
+    }
     instanceGuardRecords.clear();
     byContext.clear();
     inFlightExecutions.clear();
@@ -644,6 +735,7 @@ export function installSuccessfulReplyProbe({ runtime, scheduler, gateFactory = 
     instanceGuardRecords.set(instance, {
       wrapper: wrapped,
       descriptor,
+      original,
       execution,
       originalMethodName: original.name ?? null,
       originalMethodSource: Function.prototype.toString.call(original).slice(0, 500),

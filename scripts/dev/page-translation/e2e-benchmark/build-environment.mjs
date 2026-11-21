@@ -49,6 +49,37 @@ export function validateBuildParity(builds, modes) {
   return { ok: issues.length === 0, issues };
 }
 
+export function validateSuccessfulReplyBuildParity(builds, modes) {
+  const ordinary = (builds ?? []).filter(build => build?.successfulReplyGate === false);
+  const gated = (builds ?? []).filter(build => build?.successfulReplyGate === true);
+  const ordinaryParity = validateBuildParity(ordinary, modes);
+  const gatedParity = validateBuildParity(gated, modes);
+  const issues = [
+    ...ordinaryParity.issues.map(issue => `ordinary build: ${issue}`),
+    ...gatedParity.issues.map(issue => `successful-reply build: ${issue}`),
+  ];
+  if (ordinary.length + gated.length !== builds?.length) {
+    issues.push('Build evidence must identify ordinary and successful-reply build variants.');
+  }
+
+  const byMode = list => new Map(list.map(build => [build.mode, build]));
+  const ordinaryByMode = byMode(ordinary);
+  const gatedByMode = byMode(gated);
+  if (ordinaryParity.ok && gatedParity.ok) {
+    for (const mode of modes) {
+      if (JSON.stringify(ordinaryByMode.get(mode).environment) !== JSON.stringify(gatedByMode.get(mode).environment)) {
+        issues.push(`Successful-reply build ${mode} environment differs from its ordinary build.`);
+      }
+    }
+  }
+  return {
+    ok: issues.length === 0,
+    issues,
+    ordinary: ordinaryParity,
+    successfulReplyGate: gatedParity,
+  };
+}
+
 function validateProfile(profile, label, issues) {
   const initialIssueCount = issues.length;
   if (!exactKeys(profile, profileKeys)) {

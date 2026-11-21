@@ -4,7 +4,7 @@ import { PageTranslationScheduler } from '../../../../src/features/page-translat
 import { PageTranslationBridge } from '../../../../src/features/page-translation/PageTranslationBridge.js';
 import { MainFrameCoordinator } from '../../../../src/core/content-scripts/main/MainFrameCoordinator.js';
 import { PAGE_TRANSLATION_SLICED_DISCOVERY, PAGE_TRANSLATION_VIEWPORT_FIRST_DISCOVERY } from '../../../../src/features/page-translation/PageTranslationConstants.js';
-import { captureViewportWindow, installCallThrough, installPrimitiveAdmissionObserver } from './trace.mjs';
+import { captureViewportWindow, installCallThrough, installPrimitiveAdmissionObserver, installTimedCallThrough } from './trace.mjs';
 import { drainAndDisconnectMeasurementObservers, groupMutationRecords, isDuplicateAcceptedMutation, registerThenInsertCohort, trackAcceptedTarget, trackCohortAcceptedTarget } from './measurement-lifecycle.mjs';
 import { createCancellationLedger, installCancellationRuntimeMessageObserver, installTrustedLifecycleObserver, sessionIdForTranslationContext } from './cancellation-probes.mjs';
 import { createRawDOMMutationEvidence, installSuccessfulReplyProbe } from './successful-reply-probes.mjs';
@@ -24,7 +24,11 @@ const trace = {
   schedulerEnqueueOrder: [],
   selectedBatchMembers: [],
   schedulerBatchSessions: [],
+  logicalBatchIntervals: [],
   schedulerRequests: [],
+  schedulerBatchConfig: null,
+  providerRuntimeProbeEnabled: false,
+  providerBatchTimingInstalled: false,
   pageTranslationE2E: false,
   pageTranslationStartReporter: null,
   viewportWindowObservation: null,
@@ -77,7 +81,7 @@ const trace = {
   },
   captureSchedulerBatch(message) {
     const targetIds = this.selectedBatchMembers.at(-1);
-    const validTargetId = id => /^target-(?:[0-9]|1[01])$/.test(id)
+    const validTargetId = id => /^target-\d+$/.test(id)
       || (this.dynamicDOMEnabled === true && (/^dynamic-[12]-[1-3]$/.test(id) || this.shadowManifest?.has(id)));
     if (message?.action !== 'page-translate-batch' || typeof message.messageId !== 'string'
         || typeof message.data?.sessionId !== 'string' || !Array.isArray(targetIds) || !targetIds.length
@@ -125,6 +129,7 @@ const trace = {
     const discovery = bridgeSession?.discovery ?? null;
     return {
       translationSessionId: scheduler.translationSessionId ?? null,
+      schedulerBatchConfig: trace.schedulerBatchConfig ? { ...trace.schedulerBatchConfig } : null,
       managerTranslating: manager.isTranslating === true,
       isTranslated: scheduler.isTranslated === true,
       translatedCount: scheduler.translatedCount ?? null,
@@ -150,6 +155,23 @@ const trace = {
       bridgeDiscoveryCancelled: typeof discovery?.cancelled === 'boolean' ? discovery.cancelled : null,
       bridgeDiscoveryFailed: typeof discovery?.failed === 'boolean' ? discovery.failed : null,
     };
+  },
+  enableProviderRuntimeProbe() {
+    if (!trace.providerBatchTimingInstalled) {
+      trace.providerRuntimeProbeEnabled = true;
+      trace.providerBatchTimingInstalled = installTimedCallThrough(PageTranslationScheduler.prototype, '_executeBatchRequest',
+        function ([batch, , , sessionId]) {
+          const operation = { at: performance.now(), sessionId: sessionId ?? this.translationSessionId ?? null,
+            targetIds: Array.isArray(batch) ? batch.map(item => benchmarkTargetId(item?.node)) : [] };
+          trace.logicalBatchIntervals.push(operation);
+          return operation;
+        },
+        function (operation, error) {
+          if (operation) Object.assign(operation, { settledAt: performance.now(), outcome: error ? 'rejected' : 'fulfilled' });
+        });
+      if (!trace.providerBatchTimingInstalled) return false;
+    }
+    return true;
   },
   viewportEntrySnapshot() { return measurement ? { ...measurement.viewportEntryAtById } : null; },
   schedulerSelectionSnapshot() { return trace.scrollThroughStages ? structuredClone(trace.scrollThroughStages.selectionViewport) : null; },
@@ -259,10 +281,13 @@ const trace = {
         if (expectPromise) this.cancellationInstrumentationErrors.push(`${kind} returned a non-Promise result.`);
         return result;
       }
-      const operation = ledger.begin(kind, sessionId, detail);
+      const operation = ledger.begin(kind, sessionId, { ...detail, startedAt: Date.now() });
       result.then(
-        value => ledger.settle(operation, 'fulfilled', { response: value, ...detailOnSettlement(value) }),
-        error => ledger.settle(operation, 'rejected', { errorName: error?.name ?? 'Error', error: error?.message ?? String(error) }),
+        value => ledger.settle(operation, 'fulfilled', { settledAt: Date.now(), response: value, ...detailOnSettlement(value) }),
+        error => ledger.settle(operation, 'rejected', {
+          settledAt: Date.now(), errorName: error?.name ?? 'Error', errorType: error?.type ?? null,
+          error: error?.message ?? String(error),
+        }),
       );
       return result;
     };
@@ -285,6 +310,21 @@ const trace = {
       };
       wrapped.__cancellationObserved = true;
       scheduler._executeBatchRequest = wrapped;
+    }
+    if (typeof scheduler._handleBatchError === 'function' && !scheduler._handleBatchError.__cancellationObserved) {
+      const original = scheduler._handleBatchError;
+      const wrapped = function (error, batch, pageErrorType, sessionId = this.translationSessionId, ...rest) {
+        ledger.record('scheduler.batch.error', sessionId, {
+          targetIds: Array.isArray(batch) ? batch.map(item => benchmarkTargetId(item?.node)) : [],
+          errorName: error?.name ?? 'Error',
+          errorType: error?.type ?? null,
+          error: error?.message ?? String(error),
+          wallTime: Date.now(),
+        });
+        return original.call(this, error, batch, pageErrorType, sessionId, ...rest);
+      };
+      wrapped.__cancellationObserved = true;
+      scheduler._handleBatchError = wrapped;
     }
     if (typeof scheduler._createSettlement === 'function' && !scheduler._createSettlement.__cancellationObserved) {
       const original = scheduler._createSettlement;
@@ -351,12 +391,15 @@ const trace = {
       const wrapped = function (...args) {
         const session = this.session;
         const owner = session ? trace.cancellationSessionOwners.get(session) ?? null : null;
+        const invalidationCallStartedAt = Date.now();
         const result = original.apply(this, args);
+        const invalidationCallCompletedAt = Date.now();
         if (session && owner === null) trace.cancellationInstrumentationErrors.push(`No captured origin session for Bridge.${method}`);
         else if (session) ledger.record('session.invalidation', owner, {
           method, capturedSessionActive: session.active,
           discoveryCancelled: session.discovery?.cancelled ?? null,
           bridgeStillOwnsCapturedSession: this.session === session,
+          invalidationCallStartedAt, invalidationCallCompletedAt,
         });
         return result;
       };
@@ -581,6 +624,21 @@ installCallThrough(PageTranslationScheduler.prototype, 'enqueue', function (args
   if (trace.spaNavigation && trace.spaNavigation.invalidatedAt !== null) trace.spaNavigation.enqueues.push({ id, at: performance.now(), sessionId: this.translationSessionId ?? null });
   trace.record('scheduler.enqueue', { id, score: Number(score) || 0, textLength: typeof text === 'string' ? text.length : null });
 });
+const originalGetBatchConfig = PageTranslationScheduler.prototype._getBatchConfig;
+if (typeof originalGetBatchConfig === 'function') {
+  PageTranslationScheduler.prototype._getBatchConfig = function (...args) {
+    const result = originalGetBatchConfig.apply(this, args);
+    if (!trace.providerRuntimeProbeEnabled) return result;
+    return result.then(config => {
+      trace.schedulerBatchConfig = {
+        ...config,
+        maxConcurrentFlushes: this.settings?.maxConcurrentFlushes ?? null,
+        pageWorkerLimit: this.settings?.maxConcurrentFlushes ?? null,
+      };
+      return config;
+    });
+  };
+}
 installCallThrough(PageTranslationScheduler.prototype, 'flush', function () {
   trace.record('scheduler.flush.entry', { queueLength: this.queue?.length ?? null, activeFlushes: this.activeFlushes ?? null, batchTimerPending: this.batchTimer != null });
 });

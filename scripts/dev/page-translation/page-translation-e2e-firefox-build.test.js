@@ -55,7 +55,7 @@ vi.mock('../../../config/vite/vite.config.base.js', () => ({
 }));
 
 import { buildBenchmarkExtension } from './e2e-benchmark/build.mjs';
-import { validateBuildParity } from './e2e-benchmark/build-environment.mjs';
+import { validateBuildParity, validateSuccessfulReplyBuildParity } from './e2e-benchmark/build-environment.mjs';
 
 const directories = [];
 const originalNodeEnv = process.env.NODE_ENV;
@@ -131,6 +131,17 @@ describe('page translation benchmark build browser support', () => {
     const mismatchedModes = structuredClone(chromeProfiles);
     mismatchedModes[1].environment.content.build.minify = false;
     expect(validateBuildParity(mismatchedModes, ['legacy', 'sliced', 'viewport']).ok).toBe(false);
+
+    const sliced = chromeProfiles.find(build => build.mode === 'sliced');
+    const ordinaryBuild = { ...sliced, successfulReplyGate: false };
+    const gatedBuild = { ...structuredClone(sliced), successfulReplyGate: true };
+    expect(validateSuccessfulReplyBuildParity([ordinaryBuild, gatedBuild], ['sliced'])).toMatchObject({
+      ok: true, issues: [],
+    });
+    gatedBuild.environment.worker.build.minify = false;
+    expect(validateSuccessfulReplyBuildParity([ordinaryBuild, gatedBuild], ['sliced']).ok).toBe(false);
+    expect(validateSuccessfulReplyBuildParity([ordinaryBuild], ['sliced']).ok).toBe(false);
+    expect(validateSuccessfulReplyBuildParity([ordinaryBuild, ordinaryBuild, gatedBuild], ['sliced']).ok).toBe(false);
   });
 
   it('rejects missing or mismatched resolved worker/content environment evidence before callback', async () => {

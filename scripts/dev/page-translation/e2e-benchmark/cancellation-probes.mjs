@@ -1,12 +1,98 @@
+import { observeControllerAbort } from '../e2e-firefox/controller-abort-observer.mjs';
+import { CUSTOM_FIXTURE_ENDPOINT } from './custom-fixture.mjs';
+
 export const cancellationProbeNames = Object.freeze(['stop', 'restore', 'replacement']);
+
+export function selectCustomProviderRoot({ roots, operations, wireIds, texts, url, method }) {
+  if (!Array.isArray(roots) || !Array.isArray(operations) || !Array.isArray(wireIds) || !wireIds.length
+      || !Array.isArray(texts) || wireIds.length !== texts.length
+      || new Set(wireIds).size !== wireIds.length || wireIds.some(id => typeof id !== 'string' || !id)
+      || texts.some(text => typeof text !== 'string' || !text)
+      || typeof url !== 'string' || !url || typeof method !== 'string' || !method) {
+    return { root: null, matches: [], issues: ['Custom provider root identity is malformed'] };
+  }
+  const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const exactPhysical = operations.filter(operation => {
+    if (operation?.kind !== 'provider.physical' || operation.url !== url || operation.method !== method
+        || typeof operation.requestBody !== 'string') return false;
+    try {
+      const payload = JSON.parse(operation.requestBody);
+      const users = payload?.messages?.filter(item => item?.role === 'user') ?? [];
+      if (users.length !== 1 || typeof users[0].content !== 'string') return false;
+      const request = JSON.parse(users[0].content);
+      const translations = request?.translations;
+      return Object.keys(request ?? {}).length === 1 && Array.isArray(translations)
+        && same(translations.map(item => item?.id), wireIds)
+        && same(translations.map(item => item?.text), texts);
+    } catch { return false; }
+  });
+  const current = [];
+  let invalid = false;
+  for (const operation of exactPhysical) {
+    if (typeof operation.sessionId !== 'string' || !operation.sessionId
+        || typeof operation.messageId !== 'string' || !operation.messageId) {
+      invalid = true;
+      continue;
+    }
+    const owners = roots.filter(root => root?.sessionId === operation.sessionId && root?.messageId === operation.messageId);
+    if (!owners.length) continue;
+    const rootTexts = owners[0]?.texts ?? owners[0]?.operation?.texts;
+    if (owners.length !== 1 || !Array.isArray(rootTexts) || !same(rootTexts, texts)
+        || !['pending', 'fulfilled', 'rejected'].includes(owners[0]?.status)
+        || !['pending', 'fulfilled', 'rejected'].includes(operation.status)) {
+      invalid = true;
+      continue;
+    }
+    current.push({ operation, root: owners[0] });
+  }
+  const pending = current.filter(item => item.operation.status === 'pending');
+  const settled = current.filter(item => ['fulfilled', 'rejected'].includes(item.operation.status));
+  const physical = !invalid && pending.length === 1 ? pending
+    : !invalid && pending.length === 0 && settled.length === 1 ? settled : [];
+  const selectedRoot = physical[0]?.root ?? null;
+  const selectable = selectedRoot && ((selectedRoot.status === 'pending' && selectedRoot.controllerAborted === false)
+    || selectedRoot.controllerAborted === true || ['fulfilled', 'rejected'].includes(selectedRoot.status));
+  return {
+    root: physical.length === 1 && selectable ? selectedRoot : null,
+    matches: selectedRoot ? [selectedRoot] : [],
+    issues: invalid ? ['Custom physical operation identity or lifecycle status is invalid']
+      : physical.length !== 1 ? [`Custom physical operation match count ${pending.length || settled.length}`]
+        : selectable ? [] : ['Custom provider root lifecycle evidence is invalid'],
+  };
+}
+
+export function resolveCustomProviderRoot(selection, fallbackRoots) {
+  return selection ? selection.root : fallbackRoots.length === 1 ? fallbackRoots[0] : null;
+}
 
 export function matchProviderPhysicalRoot({ url, body, sessionId, roots }) {
   if (typeof sessionId !== 'string' || !sessionId || typeof body !== 'string'
       || new TextEncoder().encode(body).byteLength > 64 * 1024 || !Array.isArray(roots)) return null;
   try {
     const endpoint = new URL(url);
-    if (endpoint.protocol !== 'https:' || endpoint.hostname !== 'edge.microsoft.com'
-        || endpoint.pathname !== '/translate/translatetext') return null;
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.port || endpoint.hash) return null;
+    if (endpoint.hostname === CUSTOM_FIXTURE_ENDPOINT.origin.replace(/^https:\/\//, '')
+        && endpoint.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname) {
+      if (endpoint.search) return null;
+      const payload = JSON.parse(body);
+      const users = payload?.messages?.filter(item => item?.role === 'user') ?? [];
+      if (!Array.isArray(payload?.messages) || users.length !== 1 || typeof users[0].content !== 'string') return null;
+      const request = JSON.parse(users[0].content);
+      const translations = request?.translations;
+      if (Object.keys(request ?? {}).length !== 1 || !Array.isArray(translations) || !translations.length
+          || translations.some(item => !item || typeof item.id !== 'string' || !item.id
+            || typeof item.text !== 'string' || !item.text)
+          || new Set(translations.map(item => item.id)).size !== translations.length) return null;
+      const texts = translations.map(item => item.text);
+      const matches = roots.filter(root => {
+        const rootTexts = root?.texts ?? root?.operation?.texts;
+        return root?.sessionId === sessionId && typeof root.messageId === 'string'
+          && Array.isArray(rootTexts) && rootTexts.length === texts.length
+          && rootTexts.every((text, index) => text === texts[index]);
+      });
+      return matches.length === 1 ? matches[0].messageId : null;
+    }
+    if (endpoint.hostname !== 'edge.microsoft.com' || endpoint.pathname !== '/translate/translatetext') return null;
   } catch { return null; }
   let parsed;
   try { parsed = JSON.parse(body); } catch { return null; }
@@ -66,6 +152,21 @@ export function createCancellationLedger() {
   };
 }
 
+export function ensureCancellationAbortObserver({ messageId, sessionId, controller, observers, ledger, context, sequence }) {
+  if (typeof messageId !== 'string' || !messageId || typeof sessionId !== 'string' || !sessionId
+      || !controller || !observers || !ledger) return null;
+  const owner = { messageId, sessionId, context: context ?? null, cancelRequestSequence: sequence };
+  let observer = observers.get(messageId);
+  if (!observer) {
+    observer = observeControllerAbort(controller, owner, evidence => {
+      ledger.record('controller.abort', evidence.sessionId, evidence);
+    });
+    if (observer) observers.set(messageId, observer);
+  }
+  observer?.setOwner(owner);
+  return observer ?? null;
+}
+
 export function installTrustedLifecycleObserver(target, method, observe) {
   const original = target?.[method];
   if (typeof original !== 'function') return false;
@@ -122,12 +223,13 @@ export function installCancellationRuntimeMessageObserver(runtime, ledger, onUns
     const data = message?.data?.data ?? message?.data ?? {};
     const lifecycleAction = action === 'page-translation-frame-lifecycle' ? message?.data?.action ?? null : null;
     const sessionId = data?.sessionId ?? data?.messageId ?? null;
+    const messageId = data?.messageId ?? null;
     const isLifecycle = action === 'page-translation-frame-lifecycle';
     const isCancellation = action === 'CANCEL_TRANSLATION' || action === 'CANCEL_SESSION';
     if (!isLifecycle && !isCancellation) return original.call(this, message, ...args);
     const kind = isLifecycle ? 'runtime.lifecycle.send'
       : action === 'CANCEL_TRANSLATION' ? 'runtime.cancel.send' : 'runtime.cancelSession.send';
-    const detail = { action: lifecycleAction ?? action };
+    const detail = { action: lifecycleAction ?? action, messageId, targetSessionId: data?.sessionId ?? null };
     const operation = ledger.begin(kind, sessionId, detail);
     let result;
     try { result = original.call(this, message, ...args); }
@@ -148,6 +250,10 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
   const handlerJobs = new Map();
   let nextId = 0;
   let closing = false;
+  let drainStartedAt = null;
+  let drainCompletedAt = null;
+
+  const needsTeardownRelease = record => !record.releaseRequested && !record.requestRecord?.response;
 
   function reserve({ requestId, sessionId, networkId = null, requestRecord = null }) {
     const id = ++nextId;
@@ -188,7 +294,7 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
       },
     };
     reservations.set(id, record);
-    if (closing) void record.release('fail', { reason: 'admitted-during-cleanup' });
+    if (closing && needsTeardownRelease(record)) record.release('fail', { reason: 'teardown' });
     return record;
   }
 
@@ -211,6 +317,7 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
   }
 
   async function closeAndDrain({ disableFetch, timeoutMs = 5_000 } = {}) {
+    drainStartedAt = Date.now();
     closing = true;
     const errors = [];
     let timedOut = false;
@@ -224,9 +331,10 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
       deadline,
     ]);
 
-    // Close admission before settling the known requests. Later admissions observe `closing`
-    // and self-release; Fetch.disable's acknowledgement is the event-stream barrier.
-    const initialReleases = [...reservations.values()].map(record => record.release('fail', { reason: 'teardown' }));
+    // Close admission before settling held requests; Fetch.disable's acknowledgement is the event-stream barrier.
+    const initialReleases = [...reservations.values()]
+      .filter(needsTeardownRelease)
+      .map(record => record.release('fail', { reason: 'teardown' }));
     if (disableFetch) {
       const disabled = await withinDeadline(Promise.resolve().then(disableFetch));
       if (disabled?.timedOut) errors.push(`Fetch.disable timed out after ${timeoutMs}ms.`);
@@ -244,26 +352,31 @@ export function createCancellationRequestLifecycle(dispatchRelease) {
       errors.push(`Request handlers did not drain before deadline: ${[...handlerJobs.values()].map(entry => entry.requestId ?? entry.jobId).join(',')}`);
     }
 
-    const allReleases = [...reservations.values()].map(record => record.releasePromise ?? record.release('fail', { reason: 'teardown-after-admission' }));
+    const allReleases = [...reservations.values()]
+      .filter(record => record.releaseRequested)
+      .map(record => record.releasePromise);
     const releaseResult = await withinDeadline(Promise.all([...initialReleases, ...allReleases]));
     if (releaseResult?.timedOut) errors.push(`Fetch release commands did not settle before deadline: ${[...reservations.values()].filter(record => record.releaseOutcome === null).map(record => record.requestId).join(',')}`);
     else if (releaseResult?.error) errors.push(`Fetch release tracking failed: ${releaseResult.error.message}`);
 
     for (const record of reservations.values()) {
-      if (!record.releaseOutcome) errors.push(`Fetch ${record.requestId} release outcome unavailable`);
-      else if (record.releaseOutcome.ok !== true && !record.releaseClassification) errors.push(`Fetch ${record.requestId} teardown release failed: ${record.releaseOutcome.error ?? record.releaseOutcome.action}`);
+      if (record.releaseRequested && !record.releaseOutcome) errors.push(`Fetch ${record.requestId} release outcome unavailable`);
+      else if (record.releaseRequested && record.releaseOutcome?.ok !== true && !record.releaseClassification) errors.push(`Fetch ${record.requestId} teardown release failed: ${record.releaseOutcome?.error ?? record.releaseOutcome?.action}`);
       if (!record.handlerSettled) errors.push(`Fetch ${record.requestId} handler did not settle`);
       if (record.handlerError) errors.push(`Fetch ${record.requestId} handler failed: ${record.handlerError.message}`);
     }
+    drainCompletedAt = Date.now();
     clearTimeout(deadlineTimer);
     return {
       ok: errors.length === 0,
       closing,
+      drainInterval: { startedAt: drainStartedAt, completedAt: drainCompletedAt },
       handlerCount: handlerJobs.size,
       reservationCount: reservations.size,
       reservations: [...reservations.values()].map(record => ({
         requestId: record.requestId, sessionId: record.sessionId, networkId: record.networkId,
-        held: record.held, releaseAction: record.releaseAction, releaseOutcome: record.releaseOutcome,
+        held: record.held, releaseRequested: record.releaseRequested,
+        releaseAction: record.releaseAction, releaseOutcome: record.releaseOutcome,
         releaseClassification: record.releaseClassification,
         handlerSettled: record.handlerSettled, handlerError: record.handlerError,
       })),
@@ -399,12 +512,14 @@ export function classifyHeldFetchRelease({
   heldRequestId, matchedRequestId, releaseOutcome, networkCanceled,
   controllerAborted, cancelTargetMatched, providerRootStatus, physicalStatus,
   physicalControllerAborted, controllerAbortSequence, providerRootSettledSequence,
-  physicalSettledSequence,
+  physicalSettledSequence, requireExactCorrelation = false, correlation = null,
 }) {
-  if (releaseOutcome?.ok === true) return { ok: true, classification: 'fetch-release-command-acknowledged', issues: [] };
   const issues = [];
-  if (releaseOutcome?.error !== 'Invalid InterceptionId.') {
+  if (releaseOutcome?.ok !== true && releaseOutcome?.error !== 'Invalid InterceptionId.') {
     issues.push(`unrecognized CDP release error: ${releaseOutcome?.error ?? 'missing raw error'}`);
+  }
+  if (releaseOutcome?.ok === true && networkCanceled !== true) {
+    issues.push('acknowledged Fetch release lacks canceled Network evidence');
   }
   if (!heldRequestId || matchedRequestId !== heldRequestId) issues.push('CDP release error is not correlated to the held Fetch request ID');
   if (controllerAborted !== true || cancelTargetMatched !== true) issues.push('production cancellation did not abort the matched request controller');
@@ -414,6 +529,25 @@ export function classifyHeldFetchRelease({
       || !Number.isInteger(providerRootSettledSequence) || providerRootSettledSequence <= controllerAbortSequence
       || !Number.isInteger(physicalSettledSequence) || physicalSettledSequence <= controllerAbortSequence) {
     issues.push('provider promises did not settle after the observed controller abort');
+  }
+  if (requireExactCorrelation) {
+    const exact = correlation?.fetchRequestId === heldRequestId
+      && correlation?.fetchSessionId === correlation?.networkSessionId
+      && typeof correlation?.fetchTargetId === 'string' && !!correlation.fetchTargetId
+      && correlation?.networkTargetId === correlation.fetchTargetId
+      && typeof correlation?.networkId === 'string' && !!correlation.networkId
+      && typeof correlation?.pageSessionId === 'string' && !!correlation.pageSessionId
+      && typeof correlation?.providerMessageId === 'string' && !!correlation.providerMessageId
+      && correlation?.controllerSessionId === correlation.pageSessionId
+      && correlation?.controllerMessageId === correlation.providerMessageId
+      && correlation?.rootSessionId === correlation.pageSessionId
+      && correlation?.rootMessageId === correlation.providerMessageId
+      && correlation?.physicalSessionId === correlation.pageSessionId
+      && correlation?.physicalMessageId === correlation.providerMessageId
+      && correlation?.invalidationObserved === true
+      && correlation?.networkEventMatched === true
+      && correlation?.networkCanceled === true;
+    if (!exact) issues.push('cancellation evidence is not exactly correlated across Fetch, Network, Page session, and provider message');
   }
   if (issues.length) return { ok: false, classification: 'unclassified-cdp-release-error', issues };
   return {

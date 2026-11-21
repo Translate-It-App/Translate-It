@@ -214,7 +214,8 @@ export async function launchChrome({ extensionPath, binary = '/usr/bin/google-ch
       onEvent: transport.onEvent,
       close,
       extensionId,
-      metadata: { binary, browserVersion, extensionId, extensionPath: unpackedPath, get stderr() { return stderr.trim(); }, get attachErrors() { return [...attachErrors]; } },
+      metadata: { binary, browserVersion, extensionId, extensionPath: unpackedPath, processId: child.pid, profilePath,
+        get stderr() { return stderr.trim(); }, get attachErrors() { return [...attachErrors]; } },
     };
   } catch (error) {
     let cleanupError;

@@ -2,7 +2,11 @@
 
 > **Issue #406 final results:** see the [final benchmark report](../../../../docs/technical/benchmarks/whole-page-issue-406-final-2026-11-19.md) for the complete performance matrix, correctness probes, limitations, and reproduction commands.
 
-Run the real MV3 background/content entries against a local synthetic page. Translation requests pass through the actual scheduler, background routing, Unified Translation Service, provider and fetch transport; only the outbound Edge HTTP response is supplied by CDP. The exact startup Edge voice-list metadata `GET` is separately fulfilled with `[]`, which the production `TTSVoiceService` accepts and caches. Other unexpected external HTTP(S) requests are blocked and fail the run. Chrome DevTools Fetch guards the test extension service worker before it resumes and the top-level fixture page before navigation, including the content isolated world; iframes and Chrome process/component-extension traffic outside these targets are not covered.
+Run the real MV3 background/content entries against a local synthetic page. Translation requests pass through the actual scheduler, background routing, Unified Translation Service, provider and fetch transport; the selected Edge or Google V2 outbound response is supplied synthetically by CDP. The exact startup Edge voice-list metadata `GET` is separately fulfilled with `[]`, which the production `TTSVoiceService` accepts and caches. Other unexpected external HTTP(S) requests are blocked and fail the run. Chrome DevTools Fetch guards the test extension service worker before it resumes and the top-level fixture page before navigation, including the content isolated world; iframes and Chrome process/component-extension traffic outside these targets are not covered.
+
+## Module responsibilities
+
+`run.mjs` owns CLI configuration, build orchestration, execution planning, aggregation, and artifact finalization. `trial-runner.mjs` owns one trial's Chrome/fixture lifetime, shared interception, measurement, and shared teardown ordering. `network-interception.mjs` owns paused-request admission, request tracking, provider request classification/decoding, session-qualified Network correlation, and Fetch settlement/lifecycle primitives. `cancellation-runner.mjs` owns Stop/Restore/Replacement scenario execution and cancellation command recording. `stale-success-runner.mjs` owns successful stale-reply execution, reply-gate capture polling, and fail-closed gate teardown. `trial-validation.mjs` owns shared translation-result validation. Each `resilience/` module owns its probe-specific arming, selection/claim, execution, fault injection, and evidence collection/validation; shared selectors and validators remain in `resilience-probes.mjs`.
 
 ```sh
 pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
@@ -14,6 +18,163 @@ BENCH_MODES=legacy,sliced,viewport BENCH_SCENARIOS=small,early-visible,in-window
 ```
 
 `BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `dynamic-dom`, `shadow-dom`, `spa-navigation`, `early-visible`, `in-window-visible`, `late-visible`, and `scroll-through`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
+
+## Opt-in Edge, Google V2, and Custom provider lanes (Issue #432)
+
+```sh
+BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The lane requires an explicit optimization level (`1`, `3`, or `5`) and forces production-default Sliced discovery. If `BENCH_MODES` is set it must be `sliced`. Google V2 and Custom runs require the scroll-through fixture and one scheduling mode. The default/discovery and Edge scroll-through remain 12 targets and preserve the original burst/settled scroll sequence. Google V2 and Custom use 1,000 unique targets in three bands (334/333/333), spaced 1px apart so each entire band is safely inside the viewport at the runner's existing native scroll offsets; they verify exact visible membership and wait for each band's exact accepted-write set before scrolling onward.
+
+For the six-run Google V2 matrix (optimization levels 1/3/5 × `fluid`/`on-stop`), run once per row with 3 measured trials plus 1 discarded warmup:
+
+```sh
+for level in 1 3 5; do
+  for scheduling in fluid on-stop; do
+    BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL="$level" \
+      BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING="$scheduling" \
+      BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+      BENCH_OUTPUT="/tmp/opencode/googlev2-level-${level}-${scheduling}.json" \
+      pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+  done
+done
+```
+
+This is the minimal matrix spanning all requested optimizer levels and both scroll scheduling modes, with one representative 1,000-target scenario rather than multiplying fixture variants. Provider artifacts persist `scenarioSummaries[scenario].sliced`, aggregated from measured trials only; warmups are excluded. Synthetic Fetch interception returns deterministic parser-compatible legacy Google arrays; it does not contact Google or measure live provider latency/quality. Google V2's configured endpoint is exactly `https://translate.google.com/translate_a/single` POST. The actual `sl` query is recorded per request and is not overridden: the Page AUTO resolver may choose a source code such as `nl` even for this English-language fixture. The fixture's deterministic response metadata reports detected language `en`; this is synthetic parser metadata, separate from and not evidence of the request's `sl` value. Reports record observed provider optimizer/rate-limiter capacity, scheduler chunk/maxChars/parallel execution and Page worker limit, logical batch intervals/sizes/peak overlap, and separately correlated physical HTTP count/peak overlap, each request's latency and terminal settlement, first accepted translation, and total completion. Logical batches are not assumed to map 1:1 to HTTP requests, nor are configured limits presented as observed physical parallelism. With fewer than 40 valid samples, p95 remains unavailable.
+
+### Isolated Google V2 transient 503 resilience probe (Phase 2.3.1)
+
+This opt-in correctness probe runs one fresh Sliced Chrome session at Google V2 Optimization Level 3 with Fluid scheduling. It leaves the normal network guard enabled, waits for an observed concrete Page AUTO source resolver state before selecting a physical Google V2 request, and fulfills exactly one selected request with HTTP 503. The production QueueManager, RateLimitManager, provider, and scheduler remain active; the subsequent request must be an actual 200 retry. It does not create performance samples or run alongside the provider matrix or other isolated probes.
+
+```sh
+BENCH_RESILIENCE_PROBES=googlev2-503 \
+  BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/googlev2-503-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The separate `*-resilience-googlev2-503.json` artifact preserves raw physical attempts, Page/root/QueueManager message and item IDs, resolver state, queue start/settlement status, retry error type/attempt limit/timer state, retry delay, resource cleanup, DOM and Restore evidence. The observed retry delay must be 950–2050ms, allowing 50ms timestamp tolerance around the production SERVER_ERROR 1–2s jitter window. The selector fails closed when the resolver is not concrete or the request cannot be tied to exactly one provider root and fixture target set. This is an offline deterministic harness response, not a live Google service/latency test.
+
+### Isolated Custom 429 shared-cooldown resilience probe (Phase 2.3.2)
+
+This opt-in probe selects the Custom synthetic adapter at Optimization Level 3 with Fluid scheduling, waits for a concrete AUTO resolver, then injects one `429` with `Retry-After: 5`. It uses the blank-key strict Custom fixture and does not send live traffic. It shares the production QueueManager, RateLimitManager and limiter, and writes a separate `*-resilience-custom-429.json` raw artifact without performance summaries or comparisons.
+
+```sh
+BENCH_RESILIENCE_PROBES=custom-429 \
+  BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/custom-429-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+After the initial visible band is accepted, the probe records a concrete AUTO resolver/session and arms only for later bands. It claims and holds two disjoint same-session Fetch requests (A/B), injects the 429 into A, and observes the typed QueueManager settlement plus server/limiter deadlines. Because both Page scheduler flush slots are occupied, it fulfills B once the cooldown is established; B must complete Network and worker settlement before the unchanged deadline. The newly freed slot lets the next normal Page batch P enter the real Custom limiter queue, where the probe verifies same-session ownership, spare capacity, and that P remains queued before the deadline. No physical request may start prematurely. The validator also requires one successful A retry retaining its QueueManager item/message, exact 1,000-target DOM/Restore/session evidence, and logical/physical concurrency no greater than two. Any timeout fails closed and settles held Fetches once; partial evidence is retained in the raw artifact. This is an offline resilience correctness check, not a live Custom service or latency test.
+
+### Isolated Custom permanent HTTP 400 resilience probe (Phase 2.3.4)
+
+This opt-in probe runs the blank-key strict Custom fixture in a fresh Chrome Page Translation session at Optimization Level 3, Sliced discovery, Fluid scheduling, and 1,000 targets. After the Page AUTO resolver selects a concrete source/target pair, it injects one HTTP 400 response with `Invalid request parameters` for one complete 25-target batch. All other batches receive the ordinary deterministic fixture response. No live traffic or real credentials are used.
+
+```sh
+BENCH_RESILIENCE_PROBES=custom-400 \
+  BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/custom-400-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The separate `*-resilience-custom-400.json` artifact retains the selected physical request and correlates its HTTP/network status, message/session/QueueManager item, and exact target IDs. Validation requires one terminal QueueManager `HTTP_ERROR` attempt with no retry, API-key failover, structured recovery, or circuit-breaker activation; unaffected batches must continue without retransmitting successful siblings. The expected partial outcome is exactly 975 translated and accepted targets, 25 failed targets that remain unchanged and unaccepted, and 1,000 targets total. Logical and physical concurrency must remain within the observed effective limit of two. Exact Restore of every target and strict runtime cleanup are still required. Partial-success allowances are scoped to this probe and do not alter normal benchmark validation. This is an offline provider-resilience check, not a live Custom service or latency test.
+
+### Isolated Gemini structured-recovery resilience probe (Phase 2.3.3)
+
+This opt-in probe uses the existing strict synthetic Gemini adapter in a fresh Chrome Page Translation run with Optimization Level 3, Sliced discovery, Fluid scheduling, and 1,000 targets. It waits until the Page AUTO source resolver has selected a concrete source/target pair, then returns exactly one malformed JSON model answer inside an otherwise valid Gemini HTTP 200 response envelope. The production parser must trigger `FULL_STRUCTURED_RETRY`; `BaseAIProvider` must issue one same-batch recovery request, whose valid structured items are returned in reverse order to exercise response-identity mapping. The dummy Gemini query credential and `.invalid` endpoint are enforced by the adapter; no live traffic or real credentials are used.
+
+```sh
+BENCH_RESILIENCE_PROBES=gemini-structured-recovery \
+  BENCH_LANE=provider BENCH_PROVIDER=gemini BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/gemini-structured-recovery.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The separate `*-resilience-gemini-structured-recovery.json` artifact retains every physical attempt while excluding only the intentionally malformed primary response from canonical source accounting. It records production `PRIMARY_TRANSLATION` and `STRUCTURED_RECOVERY` execution purposes and verifies that the recovery retains the affected message, Page session, and targets; no QueueManager retry, API-key failover, parent/recursive recovery, or unaffected-batch retransmission occurs; and logical and physical concurrency remain within the observed effective limit of three. Exact translations, unique acceptance of all targets, real Restore, and strict runtime-resource/terminal cleanup must pass. Any missing correlation or unexpected request fails closed. This is a production-pipeline resilience check, not a live Gemini latency or quality test.
+
+### Isolated Google V2 production timeout probe (Phase 2.3.5)
+
+```sh
+BENCH_RESILIENCE_PROBES=googlev2-timeout \
+  BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/googlev2-timeout-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The probe holds one actual 25-target Google V2 Fetch request after concrete Page AUTO source resolution. It does not synthesize a response or timeout: production's 60-second batch deadline and cancellation execute normally, while sibling requests receive ordinary deterministic Google responses. Only the held-request observation is extended (to allow the actual 60-second deadline); other harness deadlines remain unchanged. The `*-resilience-googlev2-timeout.json` artifact separates the content `OPERATION_TIMEOUT` from the internal provider abort and retains exact request/message/session/controller/root/physical/QueueManager evidence. Passing requires one QueueManager attempt with no retry or failover, successful unrelated requests, logical and physical concurrency no greater than two, exactly 975 accepted writes and 25 unchanged/unmarked/unaccepted targets, exact Restore, strict runtime-resource validation, and settled held Fetch plus drained request handlers before Chrome teardown. Cleanup releases the held request on every path and fails closed if its release or handler drain is unproven. This is a correctness probe, not a performance sample or live Google test.
+
+### Isolated Custom cancellation resilience probe (Phase 2.3.6)
+
+```sh
+GIT_OPTIONAL_LOCKS=0 BENCH_RESILIENCE_PROBES=custom-cancellation \
+  BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/custom-cancellation-resilience.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+This isolated correctness probe uses the blank-key strict Custom fixture, 1,000 targets, and synthetic responses only. It completes the initial visible band and observes concrete AUTO source/target resolution before scrolling to the second band and holding one real Custom Fetch request. Deterministic pending-request and ownership barriers precede the real production Stop command; the held request must correlate to its actual Page session, logical batch, physical operation, controller, and unique fixture target IDs.
+
+Passing requires positive session invalidation, cancellation acknowledgement, matched controller abort and request settlement, with cancellation distinguished from timeout or generic provider failure. Previously accepted translations must remain exact, later targets must stay unaccepted, and no duplicate acceptance, stale write, retry, API-key failover, structured recovery, or new physical request from the cancelled session is allowed after cancellation. Real Restore must return all 1,000 targets and their original DOM metadata exactly. QueueManager, RateLimitManager, source resolver, lifecycle registry, scheduler, and Fetch handlers must drain; unexpected or unclassified Fetch release errors fail closed. Logical and physical concurrency remain subject to the existing Custom level-3 limits.
+
+An already-concurrent second-band sibling may have started before Stop. It is accounted for separately from the single selected held request and must also settle through production cancellation, without accepting its targets. Both cancelled physical operations require positive abort-cause evidence; a cancelled logical root alone cannot excuse a generic transport failure.
+
+The separate `*-resilience-custom-cancellation.json` artifact retains raw commands, correlation, cancellation and DOM evidence, physical request accounting, concurrency, resource cleanup, and source/build provenance. It contributes no performance samples or comparisons. Successful stale-reply injection is not part of this probe (Phase 2.3.7); this does not measure live Custom latency or quality.
+
+### Custom provider offline matrix
+
+This opt-in lane exercises the production `CustomProvider` and parser through the real scheduler and provider pipeline. The harness intercepts the exact synthetic `https://benchmark-custom.invalid/v1/chat/completions` POST only when `BENCH_PROVIDER=custom` selects this lane; requests to that endpoint are blocked in discovery runs and other provider lanes. The fixed model is `benchmark-custom-model`; the harness sets `CUSTOM_API_KEY` blank, rejects Authorization headers, validates the actual JSON request, and returns reversed structured translations with the exact wire IDs. No credentials or live provider traffic are used. HTTP sequence `ids` are fixture target IDs mapped from request texts; Custom parser wire IDs are recorded separately as `wireIds`. Each successful trial requires one HTTP request per observed logical batch, exact source and DOM accounting, and correlated terminal network outcomes; retries or structured-recovery requests fail the trial.
+
+Run each of the six level/scheduling combinations:
+
+```sh
+set -e
+for level in 1 3 5; do
+  for scheduling in fluid on-stop; do
+    BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL="$level" \
+      BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING="$scheduling" \
+      BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+      BENCH_OUTPUT="/tmp/opencode/custom-level-${level}-${scheduling}.json" \
+      pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+  done
+done
+```
+
+The expected Custom configuration is independently checked against observed runtime values: 5,000-character batching, provider concurrency 1/2/4, and Page chunk sizes 50/25/10 with parallel execution and worker/flush limits 1/2/4. Level 1 is expected to remain serial; levels 3 and 5 must exhibit overlapping logical and physical work. Three measured trials plus one discarded warmup are not enough to report p95. Browser scheduling, CDP interception, the fixed 50ms fixture response delay, 1,000-target fixture geometry, and instrumentation contribute overhead; these offline results do not characterize real provider latency, quality, service limits, or network behavior.
+
+### Gemini offline matrix
+
+The Gemini lane runs the production Gemini provider and parser against only the exact synthetic `https://benchmark-gemini.invalid/v1beta/models/benchmark-gemini-model:generateContent` POST. The harness configures that full endpoint, fixed model `benchmark-gemini-model`, and dummy query key `benchmark-dummy-key`; the strict decoder checks the endpoint, query key, request schema, generation config and fixture texts, and rejects Authorization headers. This endpoint is classified as a provider request only when `BENCH_PROVIDER=gemini`; discovery, Edge, Google V2 and Custom runs block it. No real key or live Gemini request is used. The browser URL retains the configured custom endpoint and production routing appends no official Google endpoint.
+
+Run the six level/scheduling combinations (3 measured samples plus one discarded warmup each: 24 trials total):
+
+```sh
+set -e
+for level in 1 3 5; do
+  for scheduling in fluid on-stop; do
+    BENCH_LANE=provider BENCH_PROVIDER=gemini BENCH_OPTIMIZATION_LEVEL="$level" \
+      BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING="$scheduling" \
+      BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
+      BENCH_OUTPUT="/tmp/opencode/gemini-level-${level}-${scheduling}.json" \
+      pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+  done
+done
+```
+
+Expected runtime values are independently checked, not copied from the observed provider snapshot: level 1/3/5 expects provider batching optimal size 50/20/6, 5,000 character limit, and provider concurrency 1/3/6. Scheduler chunk size is 80/30/15, maxChars 15,000, parallel execution enabled, and its flush/worker cap is 1/3/6. The trial retains the existing AUTO source-language resolution; the fixture does not force or claim a particular source code. HTTP target `ids` are mapped from fixture texts and structured Gemini wire IDs are retained separately as `wireIds`.
+
+Logical scheduler batch count/sizes/peak and physical HTTP request count/peak are reported independently. AI retries or recovery can create additional physical requests, so there is deliberately no one-logical-batch/one-HTTP assertion; every physical attempt remains network-correlated, must settle successfully, and participates in exact target/source accounting. The deterministic valid response is reversed and retains request IDs, exercising the real parser's ID-to-input-order mapping. p95 remains unavailable for n=3 (the minimum remains 40). These offline measurements do not represent live Gemini latency, quality, model behavior, service limits or network behavior.
 
 ## Opt-in lazy scroll-through scheduling
 
@@ -87,6 +248,39 @@ BENCH_STALE_SUCCESS_PROBES=replacement,stop,restore \
 ```
 
 Each requested case gets a fresh Chrome trial plus the normal network-guard negative probe. Before A starts, a stale-lane-only content bundle transform wraps the real Page scheduler's `safeSendMessage` result. It binds the first current-owner scheduler batch to its exact `PAGE_TRANSLATE_BATCH` message ID, session ID, and serialized item IDs/text, then holds only a genuine successful result after production send, timeout, and cancellation checks have completed, but before the Scheduler's `await` resumes. The real Edge HTTP response and `ProviderRequestEngine.executeApiCall` / provider-root promises must already have fulfilled. Stop or Restore invalidates A through the normal command. The `stop` and `restore` cases release A's held reply without starting B and verify the original DOM remains unchanged (including exact original attributes for Restore); A has accepted zero targets. Only `replacement` starts a distinct trusted auto/preserve B and holds its first real provider Fetch response while releasing A's exact result. It requires B's first batch to overlap targets A never accepted, positive call-through `_ownsFlushSession(false)` evidence after release, fulfilled A scheduler-batch settlement, no post-invalidation A acceptance or unattributed DOM write, and unchanged B counters/queue/context/controller/resources across that boundary. B must accept all 1,000 fixture IDs exactly once with B-prefixed output; the full DOM and original text/attributes after real Restore are checked. A separate raw mutation observer retains per-target old/new text values (including transient same-delivery changes) from invalidation through final drain; any A-prefixed or unknown value fails. Artifacts retain the gate state/events, exact batch message and members, network/provider evidence, scheduler ownership checks, lifecycle/settlement attribution, raw mutation values, full DOM snapshots, runtime resource snapshots and cleanup/drain status. Gate timeout/close always opens the held result unchanged; cleanup first requires actual inactive/discovery-cancelled lifecycle evidence. If Stop/Restore cannot establish it, Chrome is disposed without opening the gate. These probes make no performance comparison and do not replace the separate cancellation tests.
+
+### Custom provider stale-success ownership probe (Phase 2.3.7)
+
+```sh
+BENCH_STALE_SUCCESS_PROBES=custom-stale-success \
+  BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_MODES=sliced BENCH_SCENARIOS=early-visible \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+This isolated case uses the blank-key synthetic Custom adapter, 1,000-target Early-visible fixture, and the production level-3 25-item/two-worker configuration. `BENCH_SCROLL_SCHEDULING=fluid` is recorded as requested probe configuration only; Early-visible does not enable scroll scheduler settings, and `on-stop` is rejected. The case is correctness-only and does not enter provider performance aggregates or run with other correctness probes. Custom replies use the exact request wire IDs (not DOM fixture IDs) in the OpenAI-compatible `choices[0].message.content` envelope; the harness independently maps request text to fixture targets. Concurrent B batches are permitted only when they remain attributed to B and pass the existing active-resource ownership checks. No live provider traffic or credentials are used.
+
+### Ten-cycle Custom offline soak (Phase 2.4)
+
+Run the bounded 10-cycle, 30-scenario correctness soak in one Chrome process/profile and one reused page target:
+
+```sh
+GIT_OPTIONAL_LOCKS=0 BENCH_SOAK=1 BENCH_LANE=provider BENCH_PROVIDER=custom \
+  BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through \
+  BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/custom-offline-soak.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+Each cycle runs real Complete→Restore, Partial→Stop→Restore with a correlated held Custom Fetch request, then successful stale A→B replacement with all 1,000 B translations and Restore. The shared browser is not reset between scenarios; the same page target navigates to a new fixture document only after Restore, verified resource drainage, and evidence export. The harness validates unique session ownership, exact target/metadata restoration, physical request counts and concurrency, logical batch intervals and overlap, Fetch/handler drainage, and zero active runtime resources at each boundary. Settled instrumentation references are released only after their diagnostic history has been copied to the artifact. Any scenario failure or timeout stops the sequence, closes Chrome, and preserves completed plus partial trial evidence; timeout does not rely on `Promise.race` to cancel work.
+
+This is a deterministic offline correctness soak, not a performance aggregate or live provider test. Custom credentials are blank and all provider responses are locally fulfilled; no live provider traffic is sent. Runner RSS is recorded only as process-level diagnostic context and includes artifact/history overhead. Chrome renderer heap/process memory is not available through this harness, so memory evidence cannot establish or exclude a browser memory leak. The soak makes no claim about browser-owned/component-extension traffic outside guarded targets, paint, live provider quality/latency, or physical user scrolling.
+
+**Final validated result:** `/tmp/opencode/custom-offline-soak-issue-432-final.json` passed all 30 scenarios (10 cycles) on Chrome 157.0.8103.78. It used one Chrome launch/process and one reused page target, with no idle network requests at the end. The run used Custom, optimization level 3, Sliced discovery, Fluid scheduling, and 1,000 targets. Its provenance records HEAD `cabc04375db06e19f2784245e782f969cd6c6f0e` on `issue-432-provider-benchmark`; both production builds passed and `soak.buildParity.ok` is true.
+
+Every scenario passed exact target-text and metadata restoration, and all sampled active-resource counts were zero. Each Partial→Stop→Restore scenario accepted 334 targets before Stop, proved the held Fetch was correlated and cancellation confirmed, and recorded no stale writes. Each stale A→B replacement accepted zero A targets and all 1,000 B targets with valid B ownership and no stale writes. Physical Custom Fetch counts were 42 / 16 / 44 per cycle for Complete / Partial / Stale replacement (1,020 total); peak physical concurrency was 2. Normalized concurrency evidence records logical-batch peaks of 2 for Complete and Partial, and 3 for Stale Replacement, in all 10 cycles. No cleanup errors were reported.
+
+Runner RSS had a 133,386,240-byte baseline and an observed checkpoint range of 1,147,445,248–1,870,258,176 bytes. The last scenario checkpoint was 1,753,575,424 bytes; final Runner RSS was 1,930,133,504 bytes. These are process-level Runner RSS values and include retained evidence/artifact overhead; Chrome Heap was not measured, so Runner RSS cannot establish or exclude a browser memory leak. The final report is [Issue #432 final](../../../../docs/technical/benchmarks/whole-page-issue-432-final-2026-11-21.md).
 
 ## Historical small-fixture Chrome result
 

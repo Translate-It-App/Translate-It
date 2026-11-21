@@ -153,6 +153,18 @@ describe('Sliced discovery cancellation probe evidence', () => {
     expect(classifyHeldFetchRelease({ ...evidence, releaseOutcome: { ok: false, error: 'Target closed.' } }).ok).toBe(false);
     expect(classifyHeldFetchRelease({ ...evidence, releaseOutcome: { ok: false, error: 'Invalid InterceptionId.' }, matchedRequestId: 'fetch-B' }).classification)
       .toBe('unclassified-cdp-release-error');
+    const acknowledged = { ...evidence, releaseOutcome: { ok: true }, networkCanceled: true };
+    expect(classifyHeldFetchRelease(acknowledged)).toMatchObject({
+      ok: true, classification: 'network-loadingFailed-canceled-with-provider-settlement',
+    });
+    for (const override of [
+      { networkCanceled: false }, { networkCanceled: undefined }, { heldRequestId: 'fetch-A', matchedRequestId: 'fetch-B' },
+      { controllerAborted: false }, { cancelTargetMatched: false }, { physicalControllerAborted: false },
+      { providerRootStatus: 'pending' }, { physicalStatus: 'pending' },
+      { providerRootSettledSequence: 4 }, { physicalSettledSequence: 4 },
+    ]) {
+      expect(classifyHeldFetchRelease({ ...acknowledged, ...override }).ok).toBe(false);
+    }
   });
 
   it('closes Fetch admission before sweeping and drains handlers admitted during that close barrier', async () => {
@@ -192,6 +204,30 @@ describe('Sliced discovery cancellation probe evidence', () => {
     expect(result.handlerCount).toBe(0);
     chromeClosed = true;
     expect(chromeClosed).toBe(true);
+  });
+
+  it('tracks unreserved Custom handlers through Fetch-disable and reports a bounded drain failure', async () => {
+    const events = [];
+    const lifecycle = createCancellationRequestLifecycle(async () => ({ ok: true }));
+    let releaseHandler;
+    const handler = lifecycle.trackHandler(null, new Promise(resolve => { releaseHandler = resolve; }));
+    const draining = lifecycle.closeAndDrain({
+      timeoutMs: 500,
+      disableFetch: async () => {
+        events.push('Fetch.disable');
+        releaseHandler();
+      },
+    });
+    handler.then(() => events.push('handler-settled'));
+    const result = await draining;
+    expect(events).toEqual(['Fetch.disable', 'handler-settled']);
+    expect(result).toMatchObject({ ok: true, closing: true, handlerCount: 0, reservationCount: 0 });
+
+    const stuckLifecycle = createCancellationRequestLifecycle(async () => ({ ok: true }));
+    stuckLifecycle.trackHandler(null, new Promise(() => {}));
+    const stuck = await stuckLifecycle.closeAndDrain({ timeoutMs: 20, disableFetch: async () => {} });
+    expect(stuck.ok).toBe(false);
+    expect(stuck.errors.join(' ')).toContain('Request handlers did not drain');
   });
 
   it('keeps promises registered during a drain and preserves origin session attribution', () => {

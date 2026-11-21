@@ -247,7 +247,7 @@ provider/parser candidate invalid
 - A post-merge logical-parent failure discards the parent candidate, even when every physical provider call succeeded.
 - Recovery scope may cover a subset of invalid request units or the full structured batch; conversation semantics are identical either way. The subset or full distinction is a provider recovery-policy concern, not a conversation concern.
 - Recovery is a single provider-local pass (see [TRANSLATION_PROVIDER_LOGIC.md](../TRANSLATION_PROVIDER_LOGIC.md)).
-- Exactly one provider-local structured recovery pass is attempted, using selective or full sequential recovery according to provider policy.
+- Exactly one provider-local structured recovery pass is attempted: safely mapped invalid units are repaired selectively, otherwise the whole batch is retried once in the same structured format. Recovery does not enter normal conversation history; see the [Provider Contract](PROVIDER_CONTRACT.md#11-structured-ai-response-contract).
 
 ---
 

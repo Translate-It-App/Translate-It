@@ -1,3 +1,11 @@
+import { GOOGLE_V2_ENDPOINT } from './google-v2-fixture.mjs';
+import { CUSTOM_FIXTURE_ENDPOINT } from './custom-fixture.mjs';
+import { GEMINI_FIXTURE_ENDPOINT, GEMINI_FIXTURE_KEY } from './gemini-fixture.mjs';
+
+export function measureScenarioRuns(results, scenario, mode, measureMode) {
+  return measureMode(results.filter(run => run.scenario === scenario && run.mode === mode && run.phase === 'measured'));
+}
+
 export function validateTranslation({ originals, translated, requests, restored, expectedCount = originals.length, acceptedIds, admittedIds, enqueuedIds }) {
   const issues = [];
   const expected = new Map();
@@ -135,11 +143,30 @@ export function mapEdgeResponse(body) {
   return body.map(text => ({ translations: [{ text: `fixture translation: ${text}` }] }));
 }
 
-export function classifyTransportRequest({ method, url }, { fixtureOrigin, extensionOrigin } = {}) {
+export function classifyTransportRequest({ method, url }, { fixtureOrigin, extensionOrigin, selectedProvider } = {}) {
   let parsed;
   try { parsed = new URL(url); } catch { return { kind: 'blocked', reason: 'invalid URL' }; }
   if (parsed.protocol === 'https:' && parsed.hostname === 'edge.microsoft.com' && parsed.pathname === '/translate/translatetext') {
+    if (selectedProvider && selectedProvider !== 'edge') return { kind: 'blocked', reason: `unexpected Edge endpoint for selected ${selectedProvider} provider` };
     return method === 'POST' ? { kind: 'provider-translation' } : { kind: 'blocked', reason: `unexpected Edge method: ${method}` };
+  }
+  if (parsed.origin === CUSTOM_FIXTURE_ENDPOINT.origin && parsed.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname
+      && !parsed.username && !parsed.password && !parsed.port && !parsed.search && !parsed.hash) {
+    if (selectedProvider !== 'custom') return { kind: 'blocked', reason: `unexpected Custom endpoint for selected ${selectedProvider ?? 'unspecified'} provider` };
+    return method === CUSTOM_FIXTURE_ENDPOINT.method ? { kind: 'provider-translation', provider: 'custom' }
+      : { kind: 'blocked', reason: `unexpected Custom method: ${method}` };
+  }
+  if (parsed.origin === GEMINI_FIXTURE_ENDPOINT.origin && parsed.pathname === GEMINI_FIXTURE_ENDPOINT.pathname) {
+    if (selectedProvider !== 'gemini') return { kind: 'blocked', reason: `unexpected Gemini endpoint for selected ${selectedProvider ?? 'unspecified'} provider` };
+    if (method !== GEMINI_FIXTURE_ENDPOINT.method || parsed.username || parsed.password || parsed.port || parsed.hash
+        || [...parsed.searchParams.keys()].length !== 1 || parsed.searchParams.get('key') !== GEMINI_FIXTURE_KEY) {
+      return { kind: 'blocked', reason: 'unexpected Gemini method or API key' };
+    }
+    return { kind: 'provider-translation', provider: 'gemini' };
+  }
+  if (selectedProvider === 'googlev2' && parsed.origin === GOOGLE_V2_ENDPOINT.origin && parsed.pathname === GOOGLE_V2_ENDPOINT.pathname) {
+    return method === GOOGLE_V2_ENDPOINT.method ? { kind: 'provider-translation', provider: 'googlev2' }
+      : { kind: 'blocked', reason: `unexpected Google V2 method: ${method}` };
   }
   if (parsed.protocol === 'https:' && parsed.hostname === 'speech.platform.bing.com' && parsed.pathname === '/consumer/speech/synthesize/readaloud/voices/list') {
     return method === 'GET' ? { kind: 'startup-metadata-fixture' } : { kind: 'blocked', reason: `unexpected voice metadata method: ${method}` };
@@ -151,6 +178,19 @@ export function classifyTransportRequest({ method, url }, { fixtureOrigin, exten
   const resourceOrigin = parsed.protocol === 'chrome-extension:' ? `chrome-extension://${parsed.host}` : parsed.origin;
   if (extensionOrigin && resourceOrigin === extensionOrigin && parsed.protocol === 'chrome-extension:' && method === 'GET') return { kind: 'local' };
   return { kind: 'blocked', reason: `unexpected external URL: ${url}` };
+}
+
+export function mapProviderHTTPRequestSequence(providerAttempts, sourceToId, provider) {
+  return providerAttempts.map(request => ({
+    at: request.startedAt,
+    ids: (request.batchTexts ?? []).map(source => sourceToId.get(source) ?? null),
+    ...(['custom', 'gemini'].includes(provider) && request.batchIds !== undefined ? { wireIds: request.batchIds } : {}),
+    bodyBytes: request.bodyBytes,
+  }));
+}
+
+export function canonicalProviderSourceAttempts(providerAttempts) {
+  return providerAttempts.filter(request => !request.resilienceInjected503 && !request.resilienceInjected429);
 }
 
 export function validateRunGate(options = {}) {

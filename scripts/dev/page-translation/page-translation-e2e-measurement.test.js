@@ -78,6 +78,24 @@ describe('translation measurement lifecycle boundary', () => {
     expect(findFinalTranslationTerminal([event('page-translate-complete', 18, 18, 1)], 'session-dynamic', 18)).toBeNull();
   });
 
+  it('allows an explicitly expected terminal failure count without changing the default', () => {
+    const partial = {
+      message: {
+        action: 'page-translation-frame-lifecycle',
+        data: { action: 'page-translate-complete', data: { sessionId: 'session-partial',
+          translatedCount: 975, totalCount: 1000, failedCount: 25 } },
+      },
+    };
+    expect(findFinalTranslationTerminal([partial], 'session-partial', 1000)).toBeNull();
+    expect(findFinalTranslationTerminal([partial], 'session-partial', 1000, 25)).toBe(partial);
+    expect(findFinalTranslationTerminal([partial], 'session-partial', 1000, 24)).toBeNull();
+    expect(findFinalTranslationTerminal([{
+      ...partial,
+      message: { ...partial.message, data: { ...partial.message.data,
+        data: { ...partial.message.data.data, translatedCount: 1000 } } },
+    }], 'session-partial', 1000, 25)).toBeNull();
+  });
+
   it('stops translation observers after exact completion/DOM acceptance and before real Restore', async () => {
     const order = [];
     const state = { attempted: true, started: true, stopped: false, stopAttempts: 0 };

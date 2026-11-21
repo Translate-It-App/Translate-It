@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { modeOrder, mapProviderBatchIds, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount } from './e2e-benchmark/scenario-plan.mjs';
+import { modeOrder, mapProviderBatchIds, parseScenarioSelection, parseScrollSchedulingMode, settingsForScenario, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateSampleCount, validateScrollThroughEvidence } from './e2e-benchmark/scenario-plan.mjs';
 import { createFixture } from './e2e-benchmark/fixture.mjs';
 import { summarizeAcceptanceTimes, isDuplicateAcceptedMutation, trackAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
 import { captureViewportWindow, installPrimitiveAdmissionObserver } from './e2e-benchmark/trace.mjs';
@@ -109,6 +109,34 @@ describe('large-page benchmark plan and geometry checks', () => {
     expect(fixture.html).toContain('top:1120px');
     expect(fixture.html).toContain('top:2220px');
     expect(validateFixtureGeometry(fixture, { targetCount: 12, visibleIds: fixture.visibleIds, viewport: fixture.viewport, scroll: fixture.scroll }).ok).toBe(true);
+  });
+
+  it('allows probe-only partial acceptance while retaining full discovery, requests, and Restore coverage', () => {
+    const ids = ['accepted-a', 'failed-b', 'accepted-c'];
+    const acceptedIds = ['accepted-a', 'accepted-c'];
+    const stages = Object.fromEntries([
+      'bridgeDiscoveredAtById', 'intersectionSchedulerRegisteredAtById', 'intersectionCallbackAtById',
+      'schedulerAdmissionAtById', 'schedulerEnqueueAtById',
+    ].map(name => [name, Object.fromEntries(ids.map(id => [id, 1]))]));
+    const evidence = {
+      expectedIds: ids, expectedAcceptedIds: acceptedIds,
+      viewportEntryAtById: Object.fromEntries(ids.map(id => [id, 2])),
+      acceptedAtById: { 'accepted-a': 3, 'accepted-c': 4 }, pipelineStages: stages,
+      checkpoints: [{ scheduler: { isScrolling: true } }],
+      selectionViewport: [{ at: 1, isScrolling: false, targetIds: ids,
+        targets: ids.map(id => ({ id, classification: 'viewport' })) }],
+      terminalAt: 5, acceptedIds, duplicateAcceptedIds: [],
+      providerRequests: [{ requestViewport: { at: 2,
+        targets: ids.map(id => ({ id, classification: 'viewport' })) } }],
+      schedulerState: { managerTranslating: false, activeFlushes: 0, queueIds: [],
+        pendingSettlementCount: 0, discoveryPending: false },
+      restoreOriginals: ids.map(id => [id, `source:${id}`]),
+      expectedOriginals: ids.map(id => [id, `source:${id}`]), cleanupErrors: [],
+    };
+    expect(validateScrollThroughEvidence(evidence).ok).toBe(true);
+    expect(validateScrollThroughEvidence({ ...evidence, expectedAcceptedIds: undefined }).ok).toBe(false);
+    expect(validateScrollThroughEvidence({ ...evidence,
+      restoreOriginals: [['accepted-a', 'source:accepted-a'], ['accepted-c', 'source:accepted-c']] }).ok).toBe(false);
   });
 
   it('keeps opt-in lazy scheduling independent from discovery flags and defaults', () => {

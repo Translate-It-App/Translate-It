@@ -1,3 +1,6 @@
+import { CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL } from './custom-fixture.mjs';
+import { GEMINI_FIXTURE_KEY, GEMINI_FIXTURE_MODEL, GEMINI_FIXTURE_URL } from './gemini-fixture.mjs';
+
 export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'dynamic-dom', 'shadow-dom', 'spa-navigation', 'early-visible', 'in-window-visible', 'late-visible', 'scroll-through']);
 export const SCROLL_SCHEDULING_MODES = Object.freeze(['fluid', 'on-stop']);
 export const COMPARISON_MODES = Object.freeze(['sliced', 'viewport']);
@@ -6,6 +9,272 @@ export const MODE_DISCOVERY_FLAGS = Object.freeze({
   sliced: Object.freeze({ slicedDiscoveryEnabled: true, viewportFirstDiscoveryEnabled: false }),
   viewport: Object.freeze({ slicedDiscoveryEnabled: true, viewportFirstDiscoveryEnabled: true }),
 });
+export const BENCH_PROVIDERS = Object.freeze(['googlev2', 'custom', 'gemini', 'edge']);
+
+export function parseProviderLane(env = {}) {
+  if (env.BENCH_LANE !== undefined && !['discovery', 'provider'].includes(env.BENCH_LANE)) {
+    throw new TypeError(`Unsupported BENCH_LANE: ${env.BENCH_LANE}`);
+  }
+  if ((env.BENCH_LANE ?? 'discovery') !== 'provider') return null;
+  const provider = env.BENCH_PROVIDER;
+  if (!provider || !BENCH_PROVIDERS.includes(provider)) throw new TypeError(`Provider lane requires BENCH_PROVIDER to be one of: ${BENCH_PROVIDERS.join(', ')}.`);
+  if (!['edge', 'googlev2', 'custom', 'gemini'].includes(provider)) throw new TypeError(`Provider lane adapter "${provider}" is not implemented.`);
+  if (!['1', '3', '5'].includes(env.BENCH_OPTIMIZATION_LEVEL)) throw new TypeError('Provider lane requires BENCH_OPTIMIZATION_LEVEL=1, 3, or 5.');
+  if (env.BENCH_MODES !== undefined && env.BENCH_MODES !== '' && env.BENCH_MODES.split(',').map(value => value.trim()).some(mode => mode !== 'sliced')) {
+    throw new TypeError('Provider lane requires production-default sliced discovery; use BENCH_MODES=sliced or omit BENCH_MODES.');
+  }
+  return Object.freeze({ lane: 'provider', provider, optimizationLevel: Number(env.BENCH_OPTIMIZATION_LEVEL), mode: 'sliced' });
+}
+
+export function shouldRunProviderPerformanceLane(providerLane, customStaleSuccess = false) {
+  return !!providerLane && customStaleSuccess !== true;
+}
+
+export function providerPerformanceCommand({ provider, optimizationLevel, scenarios, scrollSchedulingMode, samples, warmups }) {
+  return `BENCH_LANE=provider BENCH_PROVIDER=${provider} BENCH_OPTIMIZATION_LEVEL=${optimizationLevel} BENCH_MODES=sliced BENCH_SCENARIOS=${scenarios.join(',')}${scenarios.includes('scroll-through') && scrollSchedulingMode ? ` BENCH_SCROLL_SCHEDULING=${scrollSchedulingMode}` : ''} BENCH_SAMPLES=${samples} BENCH_WARMUPS=${warmups} node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
+}
+
+export function providerLaneSettings(settings, { provider, optimizationLevel }) {
+  return Object.freeze({ ...settings, TRANSLATION_API: provider, PROVIDER_OPTIMIZATION_LEVELS: { [provider]: optimizationLevel },
+      ...(provider === 'custom' ? { CUSTOM_API_URL: CUSTOM_FIXTURE_URL, CUSTOM_API_KEY: '', CUSTOM_API_MODEL: CUSTOM_FIXTURE_MODEL,
+      WHOLE_PAGE_TOKEN_WARNING_HIDDEN: true } : {}),
+      ...(provider === 'gemini' ? { GEMINI_API_URL: GEMINI_FIXTURE_URL, GEMINI_API_KEY: GEMINI_FIXTURE_KEY,
+        GEMINI_MODEL: GEMINI_FIXTURE_MODEL, GEMINI_MODEL_SOURCE: 'legacy', WHOLE_PAGE_TOKEN_WARNING_HIDDEN: true } : {}) });
+}
+
+export function pageTranslationStartMessage(provider = 'edge') {
+  return { action: 'page-translate', data: { provider, targetLanguage: 'fr' } };
+}
+
+export function validateProviderRuntime({ requestedProvider, requestedOptimizationLevel, snapshot, expectedBatching }) {
+  const issues = [];
+  if (snapshot?.provider !== requestedProvider) issues.push(`effective provider mismatch: expected ${requestedProvider}, got ${snapshot?.provider ?? 'unavailable'}`);
+  if (snapshot?.optimizationLevel !== requestedOptimizationLevel) issues.push(`effective optimization level mismatch: expected ${requestedOptimizationLevel}, got ${snapshot?.optimizationLevel ?? 'unavailable'}`);
+  const batchingExpectation = expectedBatching ?? snapshot?.expectedBatching;
+  if (!snapshot?.batching || !batchingExpectation || JSON.stringify(snapshot.batching) !== JSON.stringify(batchingExpectation)) issues.push('effective provider batching configuration mismatch');
+  if (!Number.isFinite(snapshot?.maxConcurrent) || snapshot.maxConcurrent < 1) issues.push('effective scheduler concurrency unavailable');
+  else if (Number.isFinite(snapshot.configuredMaxConcurrent) && snapshot.maxConcurrent !== snapshot.configuredMaxConcurrent) issues.push('effective scheduler concurrency mismatch');
+  if (requestedProvider === 'custom') {
+    const expected = { 1: 1, 3: 2, 5: 4 }[requestedOptimizationLevel];
+    if (!expected || snapshot?.batching?.characterLimit !== 5000) issues.push(`Custom characterLimit mismatch: expected 5000, got ${snapshot?.batching?.characterLimit ?? 'unavailable'}`);
+    if (snapshot?.maxConcurrent !== expected) issues.push(`Custom provider limiter mismatch: expected ${expected ?? 'unsupported'}, got ${snapshot?.maxConcurrent ?? 'unavailable'}`);
+  } else if (requestedProvider === 'googlev2') {
+    const expected = { 1: { characterLimit: 7500, maxConcurrent: 1 }, 3: { characterLimit: 5000, maxConcurrent: 4 }, 5: { characterLimit: 3000, maxConcurrent: 8 } }[requestedOptimizationLevel];
+    if (!expected || snapshot?.batching?.characterLimit !== expected.characterLimit) issues.push(`Google V2 characterLimit mismatch: expected ${expected?.characterLimit ?? 'unsupported'}, got ${snapshot?.batching?.characterLimit ?? 'unavailable'}`);
+    if (snapshot?.maxConcurrent !== expected?.maxConcurrent) issues.push(`Google V2 provider limiter mismatch: expected ${expected?.maxConcurrent ?? 'unsupported'}, got ${snapshot?.maxConcurrent ?? 'unavailable'}`);
+  } else if (requestedProvider === 'gemini') {
+    const expected = { 1: { optimalSize: 50, characterLimit: 5000, maxConcurrent: 1 },
+      3: { optimalSize: 20, characterLimit: 5000, maxConcurrent: 3 },
+      5: { optimalSize: 6, characterLimit: 5000, maxConcurrent: 6 } }[requestedOptimizationLevel];
+    if (!expected || snapshot?.batching?.optimalSize !== expected.optimalSize
+        || snapshot?.batching?.characterLimit !== expected.characterLimit) {
+      issues.push(`Gemini batching mismatch: expected ${JSON.stringify(expected ?? 'supported levels 1, 3, 5')}, got ${JSON.stringify(snapshot?.batching ?? null)}`);
+    }
+    if (snapshot?.maxConcurrent !== expected?.maxConcurrent) issues.push(`Gemini provider limiter mismatch: expected ${expected?.maxConcurrent ?? 'unsupported'}, got ${snapshot?.maxConcurrent ?? 'unavailable'}`);
+  }
+  return { ok: issues.length === 0, issues, requestedProvider, requestedOptimizationLevel, observed: snapshot ?? null, expectedBatching };
+}
+
+export function validateProviderSchedulerRuntime({ provider, optimizationLevel, providerRuntime, scheduler }) {
+  const issues = [];
+  const multipliers = { 1: 2, 2: 1.5, 3: 1, 4: 0.7, 5: 0.4 };
+  const expectedChunkSize = provider === 'gemini' ? ({ 1: 80, 3: 30, 5: 15 }[optimizationLevel] ?? null)
+    : provider === 'custom' ? ({ 1: 50, 3: 25, 5: 10 }[optimizationLevel] ?? null)
+    : Math.max(Math.floor(25 * (multipliers[optimizationLevel] ?? 1)), 5);
+  const expectedMaxChars = provider === 'custom' ? 5000 : provider === 'gemini' ? 15000 : providerRuntime?.batching?.characterLimit;
+  const expectedMaxConcurrentFlushes = provider === 'googlev2'
+    ? Math.max(1, Math.min(4, Math.floor((providerRuntime?.maxConcurrent ?? 0) / 2)))
+    : providerRuntime?.maxConcurrent;
+  const pageWorkerLimit = expectedMaxConcurrentFlushes;
+  if (!scheduler || typeof scheduler !== 'object') issues.push('effective PageTranslationScheduler batch configuration unavailable');
+  else {
+    if (scheduler.providerRegistryId !== provider) issues.push(`scheduler provider mismatch: expected ${provider}, got ${scheduler.providerRegistryId ?? 'unavailable'}`);
+    if (scheduler.chunkSize !== expectedChunkSize) issues.push(`scheduler chunkSize mismatch: expected ${expectedChunkSize}, got ${scheduler.chunkSize ?? 'unavailable'}`);
+    if (!Number.isFinite(expectedMaxChars) || scheduler.maxChars !== expectedMaxChars) issues.push(`scheduler maxChars mismatch: expected ${expectedMaxChars ?? 'unavailable'}, got ${scheduler.maxChars ?? 'unavailable'}`);
+    const parallelExecution = ['custom', 'gemini'].includes(provider) || (provider === 'googlev2' && optimizationLevel > 1);
+    if (scheduler.parallelExecution !== parallelExecution) issues.push(`scheduler parallelExecution mismatch: expected ${parallelExecution} for ${provider}, got ${String(scheduler.parallelExecution)}`);
+    if (!Number.isFinite(expectedMaxConcurrentFlushes) || scheduler.maxConcurrentFlushes !== expectedMaxConcurrentFlushes) {
+      issues.push(`scheduler maxConcurrentFlushes mismatch: expected ${expectedMaxConcurrentFlushes ?? 'unavailable'}, got ${scheduler.maxConcurrentFlushes ?? 'unavailable'}`);
+    }
+    if (['googlev2', 'custom', 'gemini'].includes(provider) && scheduler.pageWorkerLimit !== pageWorkerLimit) issues.push(`scheduler pageWorkerLimit mismatch: expected ${pageWorkerLimit}, got ${scheduler.pageWorkerLimit ?? 'unavailable'}`);
+  }
+  return { ok: issues.length === 0, provider, optimizationLevel, expected: {
+    providerRegistryId: provider, chunkSize: expectedChunkSize, maxChars: expectedMaxChars,
+    parallelExecution: ['custom', 'gemini'].includes(provider) || (provider === 'googlev2' && optimizationLevel > 1),
+    maxConcurrentFlushes: expectedMaxConcurrentFlushes, ...(['googlev2', 'custom', 'gemini'].includes(provider) ? { pageWorkerLimit } : {}),
+  }, observed: scheduler ?? null, issues };
+}
+
+export function validateProviderNetworkCorrelation(fetchRequests, networkEvents) {
+  const issues = [];
+  const key = (sessionId, networkId) => `${sessionId}:${networkId}`;
+  const eventsByKey = new Map();
+  for (const event of networkEvents ?? []) {
+    if (!event.sessionId || !event.networkId) {
+      issues.push('provider Network event lacks actual sessionId or network requestId');
+      continue;
+    }
+    const id = key(event.sessionId, event.networkId);
+    if (eventsByKey.has(id)) issues.push(`duplicate provider Network request ID: ${id}`);
+    else eventsByKey.set(id, event);
+  }
+  const seen = new Set();
+  for (const request of fetchRequests ?? []) {
+    const id = request.networkId && request.targetSessionId ? key(request.targetSessionId, request.networkId) : null;
+    if (!id) {
+      issues.push('provider Fetch request lacks correlated Network session/request ID');
+      continue;
+    }
+    if (seen.has(id)) issues.push(`duplicate provider Fetch correlation: ${id}`);
+    seen.add(id);
+    if (!eventsByKey.has(id)) issues.push(`provider Fetch request has no Network request: ${id}`);
+  }
+  for (const id of eventsByKey.keys()) if (!seen.has(id)) issues.push(`orphan provider Network request: ${id}`);
+  return { ok: issues.length === 0, issues };
+}
+
+export function providerLaneFinalization({ buildParity, cleanupErrors = [], primaryError = null }) {
+  return {
+    passed: buildParity?.ok === true && cleanupErrors.length === 0 && !primaryError,
+    comparisonsAllowed: false,
+    reason: 'Provider lane is finalized independently; Legacy qualification and comparison gates do not apply.',
+  };
+}
+
+export function summarizePhysicalProviderAttempts(attempts, { expectedTimeoutAbortAttemptId = null } = {}) {
+  const issues = [];
+  const intervals = [];
+  const seen = new Set();
+  for (const attempt of attempts ?? []) {
+    if (!attempt.attemptId || seen.has(attempt.attemptId)) issues.push('provider attempt IDs must be present and unique');
+    seen.add(attempt.attemptId);
+    const expectedTimeoutAbort = attempt.attemptId === expectedTimeoutAbortAttemptId;
+    if (!Number.isFinite(attempt.status) && !(expectedTimeoutAbort && attempt.outcome === 'failed')) {
+      issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks correlated response status`);
+    }
+    if (!['finished', 'failed'].includes(attempt.outcome)) issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks terminal outcome`);
+    if (!attempt.networkSessionId || !attempt.networkId) issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks Fetch/Network correlation`);
+    if (!Number.isFinite(attempt.startedAt) || !Number.isFinite(attempt.settledAt) || attempt.settledAt < attempt.startedAt) {
+      issues.push(`provider attempt ${attempt.attemptId ?? 'unknown'} lacks valid terminal settlement`);
+      continue;
+    }
+    if (expectedTimeoutAbort && attempt.outcome !== 'failed') {
+      issues.push(`expected timeout provider attempt ${attempt.attemptId} lacks terminal failed outcome`);
+    } else if (attempt.outcome === 'failed' && !expectedTimeoutAbort) {
+      issues.push(`provider attempt ${attempt.attemptId} failed: ${attempt.error ?? 'unknown network error'}`);
+    }
+    intervals.push({ at: attempt.startedAt, delta: 1 }, { at: attempt.settledAt, delta: -1 });
+  }
+  intervals.sort((a, b) => a.at - b.at || a.delta - b.delta);
+  let active = 0, peakConcurrency = 0;
+  for (const interval of intervals) { active += interval.delta; peakConcurrency = Math.max(peakConcurrency, active); }
+  return {
+    physicalRequestCount: attempts?.length ?? 0,
+    peakPhysicalConcurrency: peakConcurrency,
+    attempts: (attempts ?? []).map(attempt => ({ ...attempt,
+      latencyMs: Number.isFinite(attempt.startedAt) && Number.isFinite(attempt.settledAt) ? attempt.settledAt - attempt.startedAt : null })),
+    issues,
+    ok: issues.length === 0,
+    measurement: 'Physical HTTP request lifecycle from CDP Network requestWillBeSent through loadingFinished/loadingFailed; not scheduler batches or worker limits.',
+  };
+}
+
+export function summarizeLogicalProviderBatches(batches, expectedSessionId) {
+  const issues = [];
+  const intervals = [];
+  for (const [index, batch] of (batches ?? []).entries()) {
+    if (!Array.isArray(batch.targetIds) || !batch.targetIds.length) issues.push(`logical batch ${index} has no target IDs`);
+    if (!batch.sessionId || batch.sessionId !== expectedSessionId) issues.push(`logical batch ${index} has incorrect Page session ownership`);
+    if (!Number.isFinite(batch.at) || !Number.isFinite(batch.settledAt) || batch.settledAt < batch.at
+        || !['fulfilled', 'rejected'].includes(batch.outcome)) {
+      issues.push(`logical batch ${index} lacks interval/terminal settlement`);
+      continue;
+    }
+    intervals.push({ at: batch.at, delta: 1 }, { at: batch.settledAt, delta: -1 });
+  }
+  intervals.sort((a, b) => a.at - b.at || a.delta - b.delta);
+  let active = 0, peakConcurrency = 0;
+  for (const interval of intervals) { active += interval.delta; peakConcurrency = Math.max(peakConcurrency, active); }
+  return { logicalBatchCount: batches?.length ?? 0, logicalBatchSizes: (batches ?? []).map(batch => batch.targetIds?.length ?? null),
+    peakLogicalBatchConcurrency: peakConcurrency, batches: batches ?? [], issues, ok: issues.length === 0,
+    measurement: 'Observed PageTranslationScheduler._executeBatchRequest call-to-settlement intervals; logical batches are not assumed to map 1:1 to physical HTTP requests.' };
+}
+
+export function summarizeSpaLogicalProviderBatches(intervals, observedBatches, sessionA, sessionB) {
+  const issues = [];
+  if (!sessionA || !sessionB || sessionA === sessionB) issues.push('SPA logical batch evidence requires distinct A/B Page session IDs');
+  const actual = intervals ?? [];
+  const observed = observedBatches ?? [];
+  const owned = [...actual.filter(batch => batch.sessionId === sessionA), ...actual.filter(batch => batch.sessionId === sessionB)];
+  if (actual.length !== owned.length) issues.push('SPA logical batch intervals include missing or unexpected Page session ownership');
+  if (actual.length !== observed.length) issues.push(`SPA logical batch interval count mismatch: expected ${observed.length}, got ${actual.length}`);
+  for (const sessionId of [sessionA, sessionB]) {
+    const actualForSession = actual.filter(batch => batch.sessionId === sessionId);
+    const observedForSession = observed.filter(batch => batch.sessionId === sessionId);
+    if (actualForSession.length !== observedForSession.length) {
+      issues.push(`SPA logical batch count mismatch for ${sessionId}: expected ${observedForSession.length}, got ${actualForSession.length}`);
+    }
+    for (let index = 0; index < Math.min(actualForSession.length, observedForSession.length); index++) {
+      if (JSON.stringify(actualForSession[index].targetIds) !== JSON.stringify(observedForSession[index].targetIds)) {
+        issues.push(`SPA logical batch target IDs mismatch for ${sessionId} at index ${index}`);
+      }
+    }
+  }
+  const batchesA = summarizeLogicalProviderBatches(actual.filter(batch => batch.sessionId === sessionA), sessionA);
+  const batchesB = summarizeLogicalProviderBatches(actual.filter(batch => batch.sessionId === sessionB), sessionB);
+  return {
+    ...batchesB,
+    logicalBatchCount: batchesA.logicalBatchCount + batchesB.logicalBatchCount,
+    logicalBatchSizes: [...batchesA.logicalBatchSizes, ...batchesB.logicalBatchSizes],
+    peakLogicalBatchConcurrency: Math.max(batchesA.peakLogicalBatchConcurrency, batchesB.peakLogicalBatchConcurrency),
+    batches: [...batchesA.batches, ...batchesB.batches],
+    issues: [...issues, ...batchesA.issues, ...batchesB.issues],
+    ok: issues.length === 0 && batchesA.ok && batchesB.ok,
+  };
+}
+
+export function scrollThroughPhases(googleV2) {
+  return googleV2
+    ? [['band-2', 900, 1, 0], ['band-3', 2000, 2, 0], ['revisit-band-2', 900, 1, 0], ['revisit-initial', 0, null, 0]]
+    : [['burst-band-2', 900, null, 0], ['burst-band-3', 2000, null, 150], ['settled-band-3', 2000, null, 750],
+      ['revisit-band-2', 900, 1, 0], ['revisit-initial', 0, null, 0]];
+}
+
+export function usesBandedProviderScroll(provider) {
+  return ['googlev2', 'custom', 'gemini'].includes(provider);
+}
+
+export function validateProviderConcurrencyObservations({ provider, optimizationLevel, targetCount, logical, physical,
+  pageWorkerLimit, providerLimiterCapacity }) {
+  const issues = [];
+  if (!Number.isFinite(pageWorkerLimit) || pageWorkerLimit < 1) issues.push('observed Page worker limit unavailable');
+  if (!Number.isFinite(logical?.peakLogicalBatchConcurrency) || logical.peakLogicalBatchConcurrency < 1) issues.push('observed logical batch concurrency unavailable');
+  else if (logical?.peakLogicalBatchConcurrency > pageWorkerLimit) issues.push(`observed logical batch concurrency exceeds Page worker limit: ${logical.peakLogicalBatchConcurrency}/${pageWorkerLimit}`);
+  if (!Number.isFinite(providerLimiterCapacity) || providerLimiterCapacity < 1) issues.push('observed provider limiter capacity unavailable');
+  if (!Number.isFinite(physical?.peakPhysicalConcurrency) || physical.peakPhysicalConcurrency < 1) issues.push('observed physical HTTP concurrency unavailable');
+  else if (physical?.peakPhysicalConcurrency > providerLimiterCapacity) issues.push(`observed physical HTTP concurrency exceeds provider limiter capacity: ${physical.peakPhysicalConcurrency}/${providerLimiterCapacity}`);
+  if (['googlev2', 'custom', 'gemini'].includes(provider)) {
+    if (targetCount !== 1000) issues.push(`${provider} concurrency demonstration requires 1000 targets, got ${targetCount ?? 'unavailable'}`);
+    const validLevel = [1, 3, 5].includes(optimizationLevel);
+    if (!validLevel) issues.push(`unsupported Google V2 optimization level: ${optimizationLevel}`);
+    const observedPeaks = [logical?.peakLogicalBatchConcurrency, physical?.peakPhysicalConcurrency];
+    const expected = optimizationLevel === 1 ? 1 : 2;
+    if (validLevel && observedPeaks.some(peak => optimizationLevel === 1 ? peak !== expected : !Number.isFinite(peak) || peak <= 1)) {
+      issues.push(`${provider} observed concurrency mismatch for level ${optimizationLevel}: expected ${optimizationLevel === 1 ? 'serial peak 1' : 'overlap >1'}, got logical=${observedPeaks[0] ?? 'unavailable'}, physical=${observedPeaks[1] ?? 'unavailable'}`);
+    }
+  }
+  return { ok: issues.length === 0, issues, observed: { targetCount, pageWorkerLimit, providerLimiterCapacity,
+    peakLogicalBatchConcurrency: logical?.peakLogicalBatchConcurrency ?? null,
+    peakPhysicalConcurrency: physical?.peakPhysicalConcurrency ?? null } };
+}
+
+export function observedPageWorkerLimit(scheduler) {
+  return scheduler?.pageWorkerLimit ?? scheduler?.maxConcurrentFlushes ?? null;
+}
+
+export function isProviderWorkloadTrial({ networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, phase = '' } = {}) {
+  return !networkGuardProbe && !cancellationProbe && !staleSuccessProbe && !String(phase).startsWith('non-performance-');
+}
 
 export function validateSampleCount(value) {
   if (!Number.isInteger(value) || value < 3 || value > 40) throw new TypeError('BENCH_SAMPLES must be an integer between 3 and 40.');
@@ -66,20 +335,23 @@ export function deriveScrollAcceptanceLatency(expectedIds, viewportEntryAtById, 
   return { latencyMsById, prefetchAcceptedIds, issues };
 }
 
-export function deriveScrollAggregateMetrics(scrollBands, viewportEntryAtById, acceptedAtById) {
-  const latency = deriveScrollAcceptanceLatency((scrollBands ?? []).flatMap(band => band.ids), viewportEntryAtById, acceptedAtById);
+export function deriveScrollAggregateMetrics(scrollBands, viewportEntryAtById, acceptedAtById, expectedAcceptedIds = null) {
+  const acceptedIds = expectedAcceptedIds ?? (scrollBands ?? []).flatMap(band => band.ids);
+  const acceptedIdSet = new Set(acceptedIds);
+  const latency = deriveScrollAcceptanceLatency(acceptedIds, viewportEntryAtById, acceptedAtById);
   const byBand = (scrollBands ?? []).map(({ band, ids }) => {
-    const values = ids.map(id => latency.latencyMsById[id]).filter(Number.isFinite).sort((a, b) => a - b);
+    const measurableIds = ids.filter(id => acceptedIdSet.has(id));
+    const values = measurableIds.map(id => latency.latencyMsById[id]).filter(Number.isFinite).sort((a, b) => a - b);
     const middle = Math.floor(values.length / 2);
     return {
-      band, targetCount: ids.length, measurableCount: values.length, prefetchCount: ids.filter(id => latency.prefetchAcceptedIds.includes(id)).length,
+      band, targetCount: measurableIds.length, measurableCount: values.length, prefetchCount: measurableIds.filter(id => latency.prefetchAcceptedIds.includes(id)).length,
       meanMs: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null,
       medianMs: values.length ? (values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2) : null,
       maxMs: values.length ? values.at(-1) : null,
     };
   });
-  const entries = Object.values(viewportEntryAtById ?? {});
-  const accepted = Object.values(acceptedAtById ?? {});
+  const entries = acceptedIds.map(id => viewportEntryAtById?.[id]).filter(Number.isFinite);
+  const accepted = acceptedIds.map(id => acceptedAtById?.[id]).filter(Number.isFinite);
   const lastViewportEntryAt = entries.length ? Math.max(...entries) : null;
   const fullAcceptanceAt = accepted.length ? Math.max(...accepted) : null;
   const completionLatencyMs = Number.isFinite(lastViewportEntryAt) && Number.isFinite(fullAcceptanceAt)
@@ -139,15 +411,16 @@ export function validateScrollThroughObservations(expectedIds, phases, selection
   return { ok: issues.length === 0, issues };
 }
 
-export function validateScrollThroughEvidence({ expectedIds, viewportEntryAtById, acceptedAtById, pipelineStages, checkpoints, selectionViewport, terminalAt, acceptedIds, duplicateAcceptedIds = [], providerRequests = [], schedulerState, restoreOriginals, expectedOriginals, cleanupErrors = [] }) {
+export function validateScrollThroughEvidence({ expectedIds, expectedAcceptedIds = expectedIds, viewportEntryAtById, acceptedAtById, pipelineStages, checkpoints, selectionViewport, terminalAt, acceptedIds, duplicateAcceptedIds = [], providerRequests = [], schedulerState, restoreOriginals, expectedOriginals, cleanupErrors = [] }) {
   const issues = [];
   const stageValidation = validateScrollThroughStages(expectedIds, pipelineStages);
   issues.push(...stageValidation.issues);
   const observationValidation = validateScrollThroughObservations(expectedIds, checkpoints, selectionViewport);
   issues.push(...observationValidation.issues);
-  const latency = deriveScrollAcceptanceLatency(expectedIds, viewportEntryAtById, acceptedAtById);
+  const latency = deriveScrollAcceptanceLatency(expectedAcceptedIds, viewportEntryAtById, acceptedAtById);
   issues.push(...latency.issues);
-  issues.push(...validateExactTargetIds('scroll acceptance', acceptedIds, expectedIds ?? []).issues);
+  issues.push(...validateExactTargetIds('scroll acceptance', acceptedIds, expectedAcceptedIds ?? []).issues);
+  issues.push(...validateExactTargetIds('accepted DOM-write timestamp', Object.keys(acceptedAtById ?? {}), expectedAcceptedIds ?? []).issues);
   if (duplicateAcceptedIds.length) issues.push(`redundant accepted writes: ${duplicateAcceptedIds.join(',')}`);
   const requestIds = (providerRequests ?? []).flatMap(request => request.requestViewport?.targets?.map(target => target.id).filter(Boolean) ?? []);
   issues.push(...validateExactTargetIds('physical provider request', requestIds, expectedIds ?? []).issues);
