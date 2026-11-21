@@ -223,6 +223,7 @@ const harness = {
   fixtureWarmupSemantics: 'Each trial starts a fresh Chrome process/profile; warmups are discarded cold-profile runs, not persistent-process/JIT warmups.',
   requestedModes: modes,
   ...(providerLane ? { lane: providerLane.lane, provider: providerLane.provider, optimizationLevel: providerLane.optimizationLevel } : {}),
+  ...(providerLane?.pageBatchSize ? { pageBatchSize: providerLane.pageBatchSize, pageWorkerCap: providerLane.pageWorkerCap } : {}),
   warmups,
   measuredSamples: samples,
   startedAt: now(),
@@ -254,7 +255,9 @@ async function writeArtifact() {
   await writeBenchmarkArtifact(artifactPath, harness);
 }
 
-async function compileMode(mode, { successfulReplyGate = false } = {}) {
+async function compileMode(mode, { successfulReplyGate = false, pageBatchOverride = providerLane?.pageBatchSize ? {
+  batchSize: providerLane.pageBatchSize, workerCap: providerLane.pageWorkerCap,
+} : undefined } = {}) {
   const outputDir = await mkdtemp(resolve(tmpdir(), `page-translation-${mode}-`));
   buildDirs.push(outputDir);
   const built = { mode, outputDir, startedAt: now(), successfulReplyGate };
@@ -265,6 +268,7 @@ async function compileMode(mode, { successfulReplyGate = false } = {}) {
       workerEntry: resolve(root, 'scripts/dev/page-translation/e2e-benchmark/worker-entry.mjs'),
       contentEntry: resolve(root, 'scripts/dev/page-translation/e2e-benchmark/content-entry.mjs'),
       successfulReplyGate,
+      pageBatchOverride,
       onBuildEnvironment: environment => { built.environment = environment; },
     });
     built.outputDir = result;
@@ -590,11 +594,14 @@ try {
     harness.command = providerPerformanceCommand({
       provider: providerLane.provider, optimizationLevel: providerLane.optimizationLevel,
       scenarios, scrollSchedulingMode, samples, warmups,
+      pageBatchSize: providerLane.pageBatchSize, pageWorkerCap: providerLane.pageWorkerCap,
     });
     harness.warmups = warmups;
     harness.measuredSamples = samples;
     harness.executionPlan = {
       lane: 'provider', provider: providerLane.provider, optimizationLevel: providerLane.optimizationLevel,
+      ...(providerLane.pageBatchSize ? { pageBatchSize: providerLane.pageBatchSize, pageWorkerCap: providerLane.pageWorkerCap,
+        googleV2PhysicalLimiterCapacity: providerLane.provider === 'googlev2' ? providerLane.pageWorkerCap * 2 : null } : {}),
       discoveryMode: 'sliced', scenarios, warmups, measuredSamples: samples,
       transport: 'Synthetic locally fulfilled Edge fixture; no live provider requests.',
       aggregation: 'Provider attempts are per physical intercepted HTTP request; no discovery comparison artifacts.',

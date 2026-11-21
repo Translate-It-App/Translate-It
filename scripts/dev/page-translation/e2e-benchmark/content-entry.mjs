@@ -624,17 +624,24 @@ installCallThrough(PageTranslationScheduler.prototype, 'enqueue', function (args
   if (trace.spaNavigation && trace.spaNavigation.invalidatedAt !== null) trace.spaNavigation.enqueues.push({ id, at: performance.now(), sessionId: this.translationSessionId ?? null });
   trace.record('scheduler.enqueue', { id, score: Number(score) || 0, textLength: typeof text === 'string' ? text.length : null });
 });
+const benchmarkPageBatchOverride = null;
 const originalGetBatchConfig = PageTranslationScheduler.prototype._getBatchConfig;
 if (typeof originalGetBatchConfig === 'function') {
   PageTranslationScheduler.prototype._getBatchConfig = function (...args) {
     const result = originalGetBatchConfig.apply(this, args);
-    if (!trace.providerRuntimeProbeEnabled) return result;
+    if (!trace.providerRuntimeProbeEnabled && !benchmarkPageBatchOverride) return result;
     return result.then(config => {
-      trace.schedulerBatchConfig = {
-        ...config,
-        maxConcurrentFlushes: this.settings?.maxConcurrentFlushes ?? null,
-        pageWorkerLimit: this.settings?.maxConcurrentFlushes ?? null,
-      };
+      if (benchmarkPageBatchOverride) {
+        config.chunkSize = benchmarkPageBatchOverride.batchSize;
+        this.settings.maxConcurrentFlushes = benchmarkPageBatchOverride.workerCap;
+      }
+      if (trace.providerRuntimeProbeEnabled) {
+        trace.schedulerBatchConfig = {
+          ...config,
+          maxConcurrentFlushes: this.settings?.maxConcurrentFlushes ?? null,
+          pageWorkerLimit: this.settings?.maxConcurrentFlushes ?? null,
+        };
+      }
       return config;
     });
   };
