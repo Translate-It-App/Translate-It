@@ -1,9 +1,10 @@
 # Benchmark reports
 
-Recorded benchmark reports and their original artifacts. Historical reports remain unchanged; the latest Issue #406 synthesis is a separate final record.
+Recorded benchmark reports and their original artifacts. Historical reports remain unchanged; the Issue #406 and Issue #432 syntheses are separate final records.
 
 ## Whole-page translation
 
+- [Issue #432 final report (2026-11-21)](whole-page-issue-432-final-2026-11-21.md) — provider performance matrix, resilience, cancellation/stale-result probes, and the ten-cycle offline soak, with provenance boundaries and evidence gaps.
 - [Issue #406 final report (2026-11-19)](whole-page-issue-406-final-2026-11-19.md) — final Chrome E2E performance matrix and Chrome/Firefox correctness probes.
 - [SPA navigation (2026-10-10)](whole-page-spa-navigation-2026-10-10.md)
 - [SPA reordered notifications (2026-10-10)](whole-page-spa-reordered-notifications-2026-10-10.md)
