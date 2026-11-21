@@ -47,10 +47,12 @@ const safeSendMessage = (...args) => {
   };
 }
 
-export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge, replacementConfig, onBuildEnvironment, successfulReplyGate = false }) {
+export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge, replacementConfig, onBuildEnvironment, successfulReplyGate = false, pageBatchOverride }) {
   if (!flags[mode]) throw new TypeError(`Unknown discovery mode: ${mode}`);
   if (browser !== 'chrome' && browser !== 'firefox') throw new TypeError(`Unknown browser: ${browser}`);
   if (typeof successfulReplyGate !== 'boolean') throw new TypeError('successfulReplyGate must be boolean.');
+  if (pageBatchOverride !== undefined && (!pageBatchOverride || ![10, 25].includes(pageBatchOverride.batchSize)
+      || ![2, 4].includes(pageBatchOverride.workerCap))) throw new TypeError('pageBatchOverride requires batchSize 10/25 and workerCap 2/4.');
   if (successfulReplyGate && (browser !== 'chrome' || mode !== 'sliced' || !contentEntry)) {
     throw new TypeError('successfulReplyGate requires the opt-in sliced Chrome content-entry harness build.');
   }
@@ -92,6 +94,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   const replacementPlugins = replacementConfig ? createReplacementPlugins({ replacementConfig, workerEntry, contentEntry }) : [];
   const firefoxSchedulerBatchPlugin = runtimeBridge?.pageTranslationE2E === true ? createFirefoxSchedulerBatchPlugin() : null;
   const successfulReplyBoundaryPlugin = successfulReplyGate ? createSuccessfulReplyBoundaryPlugin() : null;
+  const pageBatchOverridePlugin = pageBatchOverride ? createPageBatchOverridePlugin(pageBatchOverride) : null;
   const environmentPlugin = role => ({
     name: `benchmark-build-environment-${role}`,
     configResolved(config) { environmentProfiles[role].push(captureBuildEnvironment(config)); },
@@ -132,6 +135,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
      ...bridgePlugins,
      ...replacementPlugins,
      ...(firefoxSchedulerBatchPlugin ? [firefoxSchedulerBatchPlugin] : []),
+     ...(pageBatchOverridePlugin ? [pageBatchOverridePlugin] : []),
   ] });
 
   const workerOut = resolve(outDir, '.worker-build');
@@ -167,6 +171,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     await buildEntry('content', { 'content-entry': contentInput }, contentOut, true);
     successfulReplyBoundaryPlugin?.assertApplied();
     firefoxSchedulerBatchPlugin?.assertApplied();
+    pageBatchOverridePlugin?.assertApplied();
     const environment = { worker: environmentProfiles.worker[0], content: environmentProfiles.content[0] };
     const parity = validateBuildParity([{ mode, status: 'passed', environment }], [mode]);
     if (environmentProfiles.worker.length !== 1 || environmentProfiles.content.length !== 1 || !parity.ok) {
@@ -235,6 +240,38 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
   }
+}
+
+function createPageBatchOverridePlugin({ batchSize, workerCap }) {
+  const schedulerEntry = '/scripts/dev/page-translation/e2e-benchmark/content-entry.mjs';
+  const providerConfig = '/src/features/translation/core/ProviderConfigurations.js';
+  let schedulerApplied = false;
+  let providerConfigApplied = false;
+  return {
+    name: 'benchmark-page-batch-override',
+    enforce: 'pre',
+    transform(source, id) {
+      const normalizedId = id.split('?')[0].replaceAll('\\', '/');
+      if (normalizedId.endsWith(schedulerEntry)) {
+        const anchor = 'const benchmarkPageBatchOverride = null;';
+        if (source.split(anchor).length !== 2) throw new Error(`Page batch override instrumentation drifted in ${normalizedId}`);
+        schedulerApplied = true;
+        return source.replace(anchor, `const benchmarkPageBatchOverride = ${JSON.stringify({ batchSize, workerCap })};`);
+      }
+      if (normalizedId.endsWith(providerConfig)) {
+        const anchor = 'return applyOptimizationLevel(baseConfig, level);';
+        if (source.split(anchor).length !== 2) throw new Error(`Provider limiter override instrumentation drifted in ${normalizedId}`);
+        providerConfigApplied = true;
+        return source.replace(anchor, `const configuration = applyOptimizationLevel(baseConfig, level);
+  if (providerName === 'GoogleTranslateV2') return { ...configuration, rateLimit: { ...configuration.rateLimit, maxConcurrent: ${workerCap * 2} } };
+  return configuration;`);
+      }
+      return null;
+    },
+    assertApplied() {
+      if (!schedulerApplied || !providerConfigApplied) throw new Error('Page batch override instrumentation was not applied to both runtime bundles.');
+    },
+  };
 }
 
 function captureBuildEnvironment(config) {

@@ -21,6 +21,7 @@ export async function collectProviderRuntimeEvidence({ trial, lane, page, worker
     requestedProvider: lane.provider,
     requestedOptimizationLevel: lane.optimizationLevel,
     snapshot: trial.providerRuntimeObserved,
+    pageWorkerCap: lane.pageWorkerCap,
   });
   if (!trial.providerRuntimeValidation.ok) throw new Error(trial.providerRuntimeValidation.issues.join('; '));
   trial.providerSchedulerObserved = await until(() => evaluate(chrome, pageSession,
@@ -31,6 +32,8 @@ export async function collectProviderRuntimeEvidence({ trial, lane, page, worker
     optimizationLevel: lane.optimizationLevel,
     providerRuntime: trial.providerRuntimeObserved,
     scheduler: trial.providerSchedulerObserved,
+    pageBatchSize: lane.pageBatchSize,
+    pageWorkerCap: lane.pageWorkerCap,
   });
   if (!trial.providerSchedulerValidation.ok) throw new Error(trial.providerSchedulerValidation.issues.join('; '));
 }

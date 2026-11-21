@@ -1072,6 +1072,17 @@ describe('page translation benchmark measurements', () => {
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'nope', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('BENCH_PROVIDER');
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'google-v2', BENCH_OPTIMIZATION_LEVEL: '3' })).toThrow('BENCH_PROVIDER');
     expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3' })).toMatchObject({ provider: 'googlev2', optimizationLevel: 3 });
+    expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3' }))
+      .not.toHaveProperty('pageBatchSize');
+    expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3',
+      BENCH_PAGE_BATCH_SIZE: '10', BENCH_PAGE_WORKERS: '4' })).toMatchObject({ pageBatchSize: 10, pageWorkerCap: 4 });
+    expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3',
+      BENCH_PAGE_BATCH_SIZE: '10' })).toThrow('provided together');
+    for (const [key, value] of [['BENCH_PAGE_BATCH_SIZE', '11'], ['BENCH_PAGE_WORKERS', '3']]) {
+      expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3',
+        BENCH_PAGE_BATCH_SIZE: key === 'BENCH_PAGE_BATCH_SIZE' ? value : '10',
+        BENCH_PAGE_WORKERS: key === 'BENCH_PAGE_WORKERS' ? value : '2' })).toThrow(key);
+    }
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'edge', BENCH_OPTIMIZATION_LEVEL: '2' })).toThrow('BENCH_OPTIMIZATION_LEVEL');
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'edge', BENCH_OPTIMIZATION_LEVEL: '3', BENCH_MODES: 'legacy,sliced' })).toThrow('production-default sliced');
     for (const optimizationLevel of [1, 3, 5]) {
@@ -1117,6 +1128,10 @@ describe('page translation benchmark measurements', () => {
     expect(edge).toContain('BENCH_SCENARIOS=small,dynamic-dom');
     expect(edge).toContain('BENCH_SAMPLES=4 BENCH_WARMUPS=1');
     expect(edge).not.toContain('BENCH_SCROLL_SCHEDULING');
+    expect(providerPerformanceCommand({
+      provider: 'googlev2', optimizationLevel: 3, scenarios: ['scroll-through'],
+      scrollSchedulingMode: 'fluid', samples: 3, warmups: 1, pageBatchSize: 10, pageWorkerCap: 4,
+    })).toContain('BENCH_PAGE_BATCH_SIZE=10 BENCH_PAGE_WORKERS=4');
   });
 
   it('strictly decodes Gemini REST requests and returns reversed ID-preserving candidate text', () => {
@@ -1267,6 +1282,29 @@ describe('page translation benchmark measurements', () => {
       expect(validateProviderRuntime({ requestedProvider: 'googlev2', requestedOptimizationLevel: optimizationLevel,
         snapshot: { ...runtime, batching: { characterLimit: characterLimit - 1 } } }).ok).toBe(false);
     }
+    const googleOverride = { provider: 'googlev2', optimizationLevel: 3, batching: { characterLimit: 5000 },
+      expectedBatching: { characterLimit: 5000 }, maxConcurrent: 8, limiterCapacity: 8, configuredMaxConcurrent: 8 };
+    expect(validateProviderRuntime({ requestedProvider: 'googlev2', requestedOptimizationLevel: 3,
+      snapshot: googleOverride, pageWorkerCap: 4 }).ok).toBe(true);
+    expect(validateProviderRuntime({ requestedProvider: 'googlev2', requestedOptimizationLevel: 3,
+      snapshot: googleOverride, pageWorkerCap: 2 }).ok).toBe(false);
+    const googleScheduler = { providerRegistryId: 'googlev2', chunkSize: 10, maxChars: 5000,
+      parallelExecution: true, maxConcurrentFlushes: 4, pageWorkerLimit: 4 };
+    expect(validateProviderSchedulerRuntime({ provider: 'googlev2', optimizationLevel: 3,
+      providerRuntime: googleOverride, scheduler: googleScheduler, pageBatchSize: 10, pageWorkerCap: 4 }).ok).toBe(true);
+    expect(validateProviderSchedulerRuntime({ provider: 'googlev2', optimizationLevel: 3,
+      providerRuntime: googleOverride, scheduler: { ...googleScheduler, chunkSize: 25 }, pageBatchSize: 10, pageWorkerCap: 4 }).ok).toBe(false);
+    expect(validateProviderSchedulerRuntime({ provider: 'googlev2', optimizationLevel: 1,
+      providerRuntime: { ...googleOverride, optimizationLevel: 1, batching: { characterLimit: 7500 }, maxConcurrent: 8 },
+      scheduler: { ...googleScheduler, maxChars: 7500 }, pageBatchSize: 10, pageWorkerCap: 4 }).ok).toBe(true);
+    const customRuntime = { provider: 'custom', optimizationLevel: 3, batching: { characterLimit: 5000 },
+      expectedBatching: { characterLimit: 5000 }, maxConcurrent: 2, limiterCapacity: 2, configuredMaxConcurrent: 2 };
+    expect(validateProviderRuntime({ requestedProvider: 'custom', requestedOptimizationLevel: 3,
+      snapshot: customRuntime, pageWorkerCap: 4 }).ok).toBe(true);
+    expect(customRuntime.maxConcurrent).toBe(2);
+    expect(validateProviderSchedulerRuntime({ provider: 'custom', optimizationLevel: 3, providerRuntime: customRuntime,
+      scheduler: { providerRegistryId: 'custom', chunkSize: 10, maxChars: 5000, parallelExecution: true,
+        maxConcurrentFlushes: 4, pageWorkerLimit: 4 }, pageBatchSize: 10, pageWorkerCap: 4 }).ok).toBe(true);
     for (const [optimizationLevel, maxConcurrent, chunkSize] of [[1, 1, 50], [3, 2, 25], [5, 4, 10]]) {
       const runtime = { provider: 'custom', optimizationLevel, batching: { characterLimit: 5000 }, expectedBatching: { characterLimit: 5000 }, maxConcurrent, configuredMaxConcurrent: maxConcurrent };
       expect(registryIdToName('custom')).toBe('Custom');
@@ -1463,6 +1501,16 @@ describe('page translation benchmark measurements', () => {
       logical: { peakLogicalBatchConcurrency: 1 }, physical: { peakPhysicalConcurrency: 1 },
       pageWorkerLimit: 2, providerLimiterCapacity: 2,
     }).ok).toBe(false);
+    expect(validateProviderConcurrencyObservations({
+      provider: 'custom', optimizationLevel: 3, targetCount: 1000,
+      logical: { peakLogicalBatchConcurrency: 4 }, physical: { peakPhysicalConcurrency: 2 },
+      pageWorkerLimit: 4, providerLimiterCapacity: 2,
+    }).ok).toBe(true);
+    expect(validateProviderConcurrencyObservations({
+      provider: 'custom', optimizationLevel: 3, targetCount: 1000,
+      logical: { peakLogicalBatchConcurrency: 5 }, physical: { peakPhysicalConcurrency: 2 },
+      pageWorkerLimit: 4, providerLimiterCapacity: 2,
+    }).issues).toContain('observed logical batch concurrency exceeds Page worker limit: 5/4');
     for (const [optimizationLevel, peak, cap] of [[1, 1, 1], [3, 2, 3], [5, 3, 6]]) {
       const physical = summarizePhysicalProviderAttempts(Array.from({ length: peak }, (_, index) => ({
         attemptId: `gemini-${index}`, networkSessionId: 'gemini-session', networkId: `gemini-${index}`,

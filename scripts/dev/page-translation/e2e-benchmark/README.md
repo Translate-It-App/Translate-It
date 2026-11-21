@@ -30,6 +30,20 @@ BENCH_LANE=provider BENCH_PROVIDER=googlev2 BENCH_OPTIMIZATION_LEVEL=3 \
 
 The lane requires an explicit optimization level (`1`, `3`, or `5`) and forces production-default Sliced discovery. If `BENCH_MODES` is set it must be `sliced`. Google V2 and Custom runs require the scroll-through fixture and one scheduling mode. The default/discovery and Edge scroll-through remain 12 targets and preserve the original burst/settled scroll sequence. Google V2 and Custom use 1,000 unique targets in three bands (334/333/333), spaced 1px apart so each entire band is safely inside the viewport at the runner's existing native scroll offsets; they verify exact visible membership and wait for each band's exact accepted-write set before scrolling onward.
 
+### Independent Page batch-size and worker experiment
+
+Provider runs can independently override Page chunk size and Page flush workers with the paired `BENCH_PAGE_BATCH_SIZE=10|25` and `BENCH_PAGE_WORKERS=2|4` options. The harness applies these only to its benchmark-built bundles and fails if the effective runtime snapshot does not match; leaving both unset preserves existing defaults. All other provider batching and optimization settings remain unchanged. Google V2's physical limiter is set to twice the requested Page workers because its scheduler caps workers at `floor(provider capacity / 2)` (up to four). Custom's shared physical limiter remains at its normal optimization-level capacity, so four Page workers may be queued behind a physical capacity of two.
+
+For example, run case D with five measured samples and one warmup:
+
+```sh
+BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_PAGE_BATCH_SIZE=10 BENCH_PAGE_WORKERS=4 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_SAMPLES=5 BENCH_WARMUPS=1 \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
 For the six-run Google V2 matrix (optimization levels 1/3/5 × `fluid`/`on-stop`), run once per row with 3 measured trials plus 1 discarded warmup:
 
 ```sh
