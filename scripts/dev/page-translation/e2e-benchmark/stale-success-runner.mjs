@@ -898,6 +898,6 @@ export async function cleanupStaleSuccessProbe({ trial, page, helpers, cleanup }
       trial.cleanupErrors.push('Raw DOM mutation evidence could not be drained before unsafe-context disposal.');
     }
   }
-    
+
   return staleContextDisposed;
 }
