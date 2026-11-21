@@ -41,6 +41,17 @@ export function createCustomCancellationProtocol() {
     admissions: [], admissionTail: Promise.resolve(), evidence: { attempts: [], admissions: [] } };
 }
 
+export async function awaitConcreteCustomCancellationResolver({ sessionId, readResources, until }) {
+  return until(async () => {
+    const resources = await readResources();
+    const resolver = resources?.sourceResolvers?.[sessionId];
+    return resolver?.present && resolver.resolutionPending === false
+      && resolver.effectiveSourceLanguage && resolver.effectiveSourceLanguage.toLowerCase() !== 'auto'
+      && resolver.effectiveTargetLanguage && resolver.effectiveTargetLanguage.toLowerCase() !== 'auto'
+      ? resources : null;
+  });
+}
+
 export function armCustomCancellation({ protocol, sessionId, resolver, initialIds, fixtureConfig, now }) {
   if (!resolver?.present || resolver.resolutionPending !== false
       || !resolver.effectiveSourceLanguage || resolver.effectiveSourceLanguage === 'auto'

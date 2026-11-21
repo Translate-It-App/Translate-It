@@ -14,12 +14,25 @@ import { modeOrder, parseProviderLane, providerLaneFinalization, parseScenarioSe
 import { parseCancellationProbeSelection } from './cancellation-probes.mjs';
 import { parseCustomStaleSuccessScheduling, parseSuccessfulReplyProbeSelection } from './successful-reply-probes.mjs';
 import { parseResilienceProbeSelection, validateResilienceProbeIsolation } from './resilience-probes.mjs';
+import { restoreSnapshotsMatch, runOfflineSoak, SCENARIO_NAMES } from './offline-soak.mjs';
 
 const root = process.cwd();
 const providerLane = parseProviderLane(process.env);
+const soakMode = process.env.BENCH_SOAK === '1';
+if (process.env.BENCH_SOAK !== undefined && !['', '1'].includes(process.env.BENCH_SOAK)) {
+  throw new TypeError('BENCH_SOAK accepts only 1 when enabled.');
+}
+if (soakMode && (providerLane?.provider !== 'custom' || providerLane.optimizationLevel !== 3
+    || process.env.BENCH_MODES !== 'sliced' || process.env.BENCH_SCENARIOS !== 'scroll-through'
+    || process.env.BENCH_SCROLL_SCHEDULING !== 'fluid')) {
+  throw new TypeError('BENCH_SOAK=1 requires Custom optimization level 3, BENCH_MODES=sliced, BENCH_SCENARIOS=scroll-through, and BENCH_SCROLL_SCHEDULING=fluid.');
+}
 const cancellationProbes = parseCancellationProbeSelection(process.env.BENCH_CANCELLATION_PROBES);
 const staleSuccessProbes = parseSuccessfulReplyProbeSelection(process.env.BENCH_STALE_SUCCESS_PROBES);
 const resilienceProbes = parseResilienceProbeSelection(process.env.BENCH_RESILIENCE_PROBES);
+if (soakMode && (cancellationProbes.length || staleSuccessProbes.length || resilienceProbes.length)) {
+  throw new TypeError('BENCH_SOAK cannot be combined with standalone correctness probes.');
+}
 if (cancellationProbes.length && staleSuccessProbes.length) throw new TypeError('Cancellation and stale-success probes must run separately.');
 if ([cancellationProbes, staleSuccessProbes, resilienceProbes].filter(items => items.length).length > 1) throw new TypeError('Isolated correctness probes must run separately.');
 const isolatedProbes = cancellationProbes.length ? cancellationProbes : staleSuccessProbes.length ? staleSuccessProbes : resilienceProbes;
@@ -106,6 +119,8 @@ const sourcePaths = [
   'scripts/dev/page-translation/e2e-benchmark/trial-validation.mjs',
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-probes.mjs',
   'scripts/dev/page-translation/e2e-benchmark/successful-reply-gate.mjs',
+  'scripts/dev/page-translation/e2e-benchmark/offline-soak.mjs',
+  'scripts/dev/page-translation/offline-soak.test.js',
   'scripts/dev/page-translation/e2e-benchmark/README.md',
   'scripts/dev/page-translation/page-translation-e2e-runtime.test.js',
   'scripts/dev/page-translation/page-translation-e2e-benchmark.test.js',
@@ -320,7 +335,230 @@ try {
     browserVersion: null,
     fileSha256: Object.fromEntries(await Promise.all(sourcePaths.map(async path => [path, await hashFile(path)]))),
   };
-  if (resilienceProbes.length) {
+  if (soakMode) {
+    harness.command = 'BENCH_SOAK=1 BENCH_LANE=provider BENCH_PROVIDER=custom BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid GIT_OPTIONAL_LOCKS=0 pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs';
+    harness.warmups = 0;
+    harness.measuredSamples = 0;
+    harness.comparisonGate = { comparisonsAllowed: false, reason: 'Offline soak correctness run; excluded from all performance aggregates.' };
+    harness.soak = {
+      status: 'running',
+      cycleCount: 10,
+      scenarioNames: SCENARIO_NAMES,
+      workload: { provider: 'custom', optimizationLevel: 3, discovery: 'sliced', scheduling: 'fluid', targetCount: 1000 },
+      browserReuse: { launches: 0, browserVersion: null, processId: null, profilePath: null, pageTargetId: null, idleRequests: [] },
+      memory: {
+        baselineRunnerRssBytes: process.memoryUsage().rss,
+        measurements: [],
+        browserHeapBytes: { available: false, reason: 'No reliable Chrome heap/process-memory measurement API is wired into this harness.' },
+        limitation: 'Runner RSS is process-level diagnostic history/artifact overhead, not a production memory-leak signal.',
+      },
+      scenarios: [],
+    };
+    const browserLifetime = {
+      activeTrial: null,
+      requestListener: null,
+      persistentGuardSessions: true,
+      evidence: { idleRequests: [] },
+    };
+    const fixtureConfig = createFixture('scroll-through', { providerLane: true });
+    await compileMode('sliced');
+    const extensionPath = await compileMode('sliced', { successfulReplyGate: true });
+    validateSuccessfulReplyHarnessBuildParity();
+    harness.soak.buildParity = harness.buildParity;
+
+    const resultIds = run => [...new Set([
+      run.sessionId,
+      run.cancellation?.sessionA,
+      run.staleSuccess?.sessionA,
+      run.staleSuccess?.sessionB,
+    ].filter(id => typeof id === 'string' && id.length))];
+    const allExpectedIds = fixtureConfig.targets.map(target => target.id);
+    const normalizeScenario = (scenarioName, run) => {
+      const stale = run.staleSuccess ?? {};
+      const partial = run.resilience?.customCancellation
+        ?? (scenarioName === 'partial-stop-restore' ? run.resilience ?? {} : {});
+      const batches = run.soak?.logicalBatchIntervals ?? [];
+      const batchSessions = new Set(batches.map(batch => batch.sessionId));
+      const staleOwnership = stale.finalOwnership;
+      const acceptedIds = scenarioName === 'stale-success-replacement'
+        ? staleOwnership?.acceptedBIds ?? []
+        : scenarioName === 'partial-stop-restore'
+          ? partial.translation?.acceptedTargetIds ?? []
+          : run.acceptedDomOrder ?? [];
+      const duplicateIds = [
+        ...(run.duplicateAcceptedWriteIds ?? []),
+        ...(partial.duplicateAcceptedWriteIds ?? []),
+        ...(stale.rawMutationValidation?.evidence?.duplicateAcceptedIds ?? []),
+        ...(run.soak?.contentDrain?.mutationSnapshot?.duplicateAcceptedIds ?? []),
+      ];
+      const restoreExact = scenarioName === 'stale-success-replacement'
+        ? restoreSnapshotsMatch(run.rawDOM?.original, run.rawDOM?.restored)
+        : scenarioName === 'partial-stop-restore'
+          ? partial.translation?.restoreExact === true
+          : run.validation?.ok === true;
+      const metadataExact = run.soak?.metadataExact === true
+        && (scenarioName !== 'partial-stop-restore' || partial.translation?.metadataExact === true);
+      const noStaleWrites = scenarioName === 'stale-success-replacement'
+        ? stale.ownershipProof?.validation?.ok === true
+          && stale.rawMutationValidation?.ok === true
+          && (stale.finalOwnership?.acceptedAIds?.length ?? 0) === 0
+        : scenarioName === 'partial-stop-restore'
+          ? partial.postInvalidation?.ok === true && partial.translation?.acceptedSessionActivity === 0
+          : true;
+      const bOwnershipValid = scenarioName === 'stale-success-replacement'
+        && stale.finalOwnership?.validation?.ok === true
+        && stale.ownershipProof?.validation?.ok === true
+        && Array.isArray(stale.finalOwnership?.acceptedBIds)
+        && stale.finalOwnership.acceptedBIds.length === 1000;
+      const held = partial.heldRequest;
+      return {
+        passed: run.status === 'passed',
+        rawResultIndex: harness.results.length - 1,
+        sessionIds: resultIds(run),
+        observedPhysicalRequestCounts: { customFetch: run.physicalProviderAccounting?.physicalRequestCount ?? -1 },
+        logicalBatchEvidence: {
+          observed: batches.length > 0 && batches.every(batch => Number.isFinite(batch.at)
+            && Number.isFinite(batch.settledAt) && ['fulfilled', 'rejected'].includes(batch.outcome)),
+          crossSessionAcceptance: scenarioName === 'stale-success-replacement'
+            ? (stale.finalOwnership?.acceptedAIds?.length ?? 1) > 0
+              || stale.ownershipProof?.validation?.ok !== true
+              || batchSessions.size > 2
+            : [...batchSessions].some(id => id !== run.sessionId),
+          duplicateWrite: duplicateIds.length > 0,
+          intervals: batches,
+        },
+        concurrencyEvidence: {
+          peakActiveRequests: run.physicalProviderAccounting?.peakPhysicalConcurrency ?? -1,
+          peakLogicalBatches: run.soak?.peakLogicalConcurrency ?? -1,
+        },
+        targetCount: run.fixture?.targetCount,
+        restoreExact,
+        metadataExact,
+        terminalOutcome: {
+          status: scenarioName === 'partial-stop-restore'
+            ? (partial.cancellation?.stop?.response?.success === true && partial.validation?.ok === true ? 'stopped' : 'failed')
+            : (run.terminal?.receivedAt || stale.restoreTerminal ? 'completed' : 'failed'),
+          evidence: scenarioName === 'partial-stop-restore' ? partial.cancellation?.stop ?? null
+            : run.terminal ?? stale.restoreTerminal ?? null,
+        },
+        ...(scenarioName === 'partial-stop-restore' ? {
+          acceptedCount: partial.translation?.acceptedTargetCount ?? acceptedIds.length,
+          correlatedHeldFetch: typeof held?.requestId === 'string' && !!held.networkId && !!held.messageId
+            && held.pageSessionId === run.sessionId && partial.validation?.ok === true,
+          cancellationConfirmed: partial.cancellation?.stop?.response?.success === true
+            && partial.cancellation?.invalidation?.capturedSessionActive === false,
+          noStaleWrites,
+        } : {}),
+        ...(scenarioName === 'complete-restore' ? {
+          expectedTargetIds: allExpectedIds,
+          acceptedTargetIds: acceptedIds,
+        } : {}),
+        ...(scenarioName === 'stale-success-replacement' ? {
+          sessionA: stale.sessionA,
+          sessionB: stale.sessionB,
+          expectedTargetIds: allExpectedIds,
+          acceptedAIds: stale.finalOwnership?.acceptedAIds ?? null,
+          acceptedBIds: stale.finalOwnership?.acceptedBIds ?? null,
+          bOwnershipValid,
+          noStaleWrites,
+        } : {}),
+        resourceSnapshot: run.soak?.resourceSnapshot ?? null,
+      };
+    };
+
+    let soakArtifact;
+    try {
+      await writeArtifact();
+      soakArtifact = await runOfflineSoak({
+        context: browserLifetime,
+        timeoutMs: 180_000,
+        runScenario: async ({ scenarioName, cycle }) => {
+          if (browserLifetime.evidence.idleRequests.length) {
+            throw new Error(`Unexpected guarded Fetch while the shared browser was idle: ${JSON.stringify(browserLifetime.evidence.idleRequests)}`);
+          }
+          const common = {
+            mode: 'sliced',
+            scenario: 'scroll-through',
+            ordinal: cycle,
+            globalRunOrder: ++globalRunOrder,
+            phase: `offline-soak-${scenarioName}`,
+            extensionPath,
+            settings,
+            providerLane,
+            fixtureConfig,
+            schedulingMode: 'fluid',
+            browserLifetime,
+            soakScenario: true,
+          };
+          const options = scenarioName === 'partial-stop-restore'
+            ? { ...common, resilienceProbe: 'custom-cancellation' }
+            : scenarioName === 'stale-success-replacement'
+              ? { ...common, staleSuccessProbe: 'custom-stale-success', probeSchedulingMode: 'fluid' }
+              : common;
+          const run = await runTrial(options);
+          harness.results.push(run);
+          if (run.browser?.browserVersion) harness.provenance.browserVersion = run.browser.browserVersion;
+          harness.soak.browserReuse.launches = browserLifetime.chrome ? 1 : 0;
+          harness.soak.browserReuse.browserVersion = run.browser?.browserVersion ?? harness.soak.browserReuse.browserVersion;
+          harness.soak.browserReuse.processId = run.browser?.processId ?? null;
+          harness.soak.browserReuse.profilePath = run.browser?.profilePath ?? null;
+          harness.soak.browserReuse.pageTargetId = browserLifetime.pageTargetId ?? null;
+          if (run.status !== 'passed') throw new Error(`${scenarioName} failed: ${run.error?.message ?? run.cleanupErrors.join('; ')}`);
+          if (browserLifetime.evidence.idleRequests.length) {
+            throw new Error(`Unexpected guarded Fetch while the shared browser was idle: ${JSON.stringify(browserLifetime.evidence.idleRequests)}`);
+          }
+          const normalized = normalizeScenario(scenarioName, run);
+          harness.soak.memory.measurements.push({
+            cycle, scenarioName, runnerRssBytes: process.memoryUsage().rss,
+            browserHeapBytes: null,
+            browserHeapUnavailableReason: 'Chrome renderer heap measurement is unavailable; runner RSS is not a substitute.',
+          });
+          return normalized;
+        },
+        onScenario: async evidence => {
+          harness.soak.scenarios.push({
+            cycle: evidence.cycle,
+            scenarioName: evidence.scenarioName,
+            rawResultIndex: evidence.result.rawResultIndex,
+            normalized: evidence.result,
+          });
+          harness.soak.status = 'running';
+          await writeArtifact();
+        },
+        capturePartial: async ({ scenarioName, cycle, error }) => {
+          const liveTrial = browserLifetime.activeTrial ?? harness.results.at(-1) ?? null;
+          try { await browserLifetime.chrome?.close(); }
+          catch (closeError) { harness.cleanupErrors.push(`Chrome failure cleanup: ${closeError.message}`); }
+          return {
+            scenarioName, cycle, error: { name: error?.name ?? 'Error', message: error?.message ?? String(error) },
+            liveTrial: liveTrial ? JSON.parse(JSON.stringify(liveTrial)) : null,
+            idleRequests: [...browserLifetime.evidence.idleRequests],
+          };
+        },
+      });
+      harness.soak.orchestration = soakArtifact;
+      harness.soak.status = 'passed';
+      harness.soak.browserReuse.idleRequests = browserLifetime.evidence.idleRequests;
+      harness.status = 'passed';
+    } catch (error) {
+      harness.soak.orchestration = error.artifact ?? null;
+      harness.soak.status = 'failed';
+      harness.soak.error = { name: error.name, message: error.message };
+      harness.status = 'failed';
+      throw error;
+    } finally {
+      if (browserLifetime.chrome) {
+        try { await browserLifetime.chrome.close(); }
+        catch (error) {
+          harness.cleanupErrors.push(`Soak Chrome cleanup: ${error.message}`);
+          harness.soak.status = 'failed';
+          harness.status = 'failed';
+        }
+      }
+      harness.soak.browserReuse.idleRequests = browserLifetime.evidence.idleRequests;
+      harness.soak.memory.finalRunnerRssBytes = process.memoryUsage().rss;
+    }
+  } else if (resilienceProbes.length) {
     const probe = resilienceProbes[0];
     const custom429 = probe === 'custom-429' || probe === 'custom-cancellation';
     const provider = probe === 'gemini-structured-recovery' ? 'gemini' : custom429 ? 'custom' : 'googlev2';
@@ -544,7 +782,7 @@ try {
   harness.primaryError = primaryError?.message ?? null;
   if (providerLane) {
     try {
-      harness.buildParity = customStaleSuccess
+      harness.buildParity = customStaleSuccess || soakMode
         ? validateSuccessfulReplyBuildParity(harness.builds, modes)
         : validateBuildParity(harness.builds, modes);
     }

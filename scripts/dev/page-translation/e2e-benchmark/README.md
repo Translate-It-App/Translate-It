@@ -260,6 +260,28 @@ BENCH_STALE_SUCCESS_PROBES=custom-stale-success \
 
 This isolated case uses the blank-key synthetic Custom adapter, 1,000-target Early-visible fixture, and the production level-3 25-item/two-worker configuration. `BENCH_SCROLL_SCHEDULING=fluid` is recorded as requested probe configuration only; Early-visible does not enable scroll scheduler settings, and `on-stop` is rejected. The case is correctness-only and does not enter provider performance aggregates or run with other correctness probes. Custom replies use the exact request wire IDs (not DOM fixture IDs) in the OpenAI-compatible `choices[0].message.content` envelope; the harness independently maps request text to fixture targets. Concurrent B batches are permitted only when they remain attributed to B and pass the existing active-resource ownership checks. No live provider traffic or credentials are used.
 
+### Ten-cycle Custom offline soak (Phase 2.4)
+
+Run the bounded 10-cycle, 30-scenario correctness soak in one Chrome process/profile and one reused page target:
+
+```sh
+GIT_OPTIONAL_LOCKS=0 BENCH_SOAK=1 BENCH_LANE=provider BENCH_PROVIDER=custom \
+  BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through \
+  BENCH_SCROLL_SCHEDULING=fluid \
+  BENCH_OUTPUT=/tmp/opencode/custom-offline-soak.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+Each cycle runs real Complete→Restore, Partial→Stop→Restore with a correlated held Custom Fetch request, then successful stale A→B replacement with all 1,000 B translations and Restore. The shared browser is not reset between scenarios; the same page target navigates to a new fixture document only after Restore, verified resource drainage, and evidence export. The harness validates unique session ownership, exact target/metadata restoration, physical request counts and concurrency, logical batch intervals and overlap, Fetch/handler drainage, and zero active runtime resources at each boundary. Settled instrumentation references are released only after their diagnostic history has been copied to the artifact. Any scenario failure or timeout stops the sequence, closes Chrome, and preserves completed plus partial trial evidence; timeout does not rely on `Promise.race` to cancel work.
+
+This is a deterministic offline correctness soak, not a performance aggregate or live provider test. Custom credentials are blank and all provider responses are locally fulfilled; no live provider traffic is sent. Runner RSS is recorded only as process-level diagnostic context and includes artifact/history overhead. Chrome renderer heap/process memory is not available through this harness, so memory evidence cannot establish or exclude a browser memory leak. The soak makes no claim about browser-owned/component-extension traffic outside guarded targets, paint, live provider quality/latency, or physical user scrolling.
+
+**Verified result:** `/tmp/opencode/custom-offline-soak-issue-432-attempt2.json` passed all 30 scenarios (10 cycles) on Chrome 157.0.8103.78. It used one Chrome launch/process and one reused page target, with no idle network requests at the end. The run used Custom, optimization level 3, Sliced discovery, Fluid scheduling, and 1,000 targets. Its provenance records HEAD `cabc04375db06e19f2784245e782f969cd6c6f0e` on `issue-432-provider-benchmark`; build parity passed.
+
+Every scenario passed exact target-text and metadata restoration, and all sampled active-resource counts were zero. Each Partial→Stop→Restore scenario accepted 334 targets before Stop, proved the held Fetch was correlated and cancellation confirmed, and recorded no stale writes. Each stale A→B replacement accepted zero A targets and all 1,000 B targets with valid B ownership and no stale writes. Physical Custom Fetch counts were 42 / 16 / 44 per cycle for Complete / Partial / Stale replacement (1,020 total); peak physical concurrency was 2 and peak observed logical-batch concurrency was 3. No cleanup errors were reported.
+
+Runner RSS ranged from 1,078,005,760 to 1,947,185,152 bytes during the run and ended at 1,934,135,296 bytes, versus a 129,327,104-byte baseline. This is runner-process RSS and includes retained evidence/artifact overhead; the 531,619,359-byte raw artifact is diagnostic output, not a browser-memory measurement. Chrome heap/process memory is unavailable, so these measurements cannot establish or exclude a browser memory leak. The focused regression suite passed 169 tests across 6 files; syntax checks, scoped ESLint, and `git diff HEAD --check` passed. The Git index hash remained unchanged.
+
 ## Historical small-fixture Chrome result
 
 Artifacts:

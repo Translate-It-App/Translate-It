@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { canonicalProviderSourceAttempts, classifyTransportRequest, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, measureScenarioRuns, summarize, summarizeIntervals, summarizeLongTasks, validateEffectiveSettings, validateRunGate, validateTranslation, validateWindowMembership, validatedLongTaskObservation } from './e2e-benchmark/metrics.mjs';
 import { projectRateLimitQueueItems } from './e2e-benchmark/rate-limit-queue.mjs';
 import { decodeGoogleV2Request, GOOGLE_V2_DELIMITER, mapGoogleV2Response } from './e2e-benchmark/google-v2-fixture.mjs';
-import { CUSTOM_FIXTURE_ENDPOINT, CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL, decodeCustomRequest, mapCustomResponse } from './e2e-benchmark/custom-fixture.mjs';
+import { CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL, decodeCustomRequest, mapCustomResponse } from './e2e-benchmark/custom-fixture.mjs';
 import { decodeGeminiRequest, GEMINI_FIXTURE_KEY, GEMINI_FIXTURE_MODEL, GEMINI_FIXTURE_URL, isMappedGeminiResponse, mapGeminiResponse, mapMalformedGeminiResponse } from './e2e-benchmark/gemini-fixture.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
 import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
@@ -232,7 +232,7 @@ describe('page translation benchmark measurements', () => {
       classification: { userFacingType: 'OPERATION_TIMEOUT', userFacingName: 'Error',
         userFacingErrorType: 'OPERATION_TIMEOUT', internalAbortType: 'OPERATION_ABORTED', internalAbortName: null },
       queueAttemptEvidence: validateGoogleTimeoutQueueEvidence(queueEvents, { messageId: 'message-a' }),
-      retries: [], failovers: [], siblingRequests: Array.from({ length: 39 }, () => ({ status: 200, outcome: 'finished' })),
+      retries: [], failovers: [],
       attempts,
       siblingRequests: attempts.filter(item => !item.selected),
       concurrency: { peakPhysical: 2, peakLogical: 2 },
@@ -299,10 +299,10 @@ describe('page translation benchmark measurements', () => {
     expect(timeoutSource).toContain('controllerAbortSequence: settled.controllerAbort.sequence');
     expect(runSource).toContain('if (googleTimeoutProtocol) armGoogleV2Timeout(googleTimeoutProtocol);');
     expect(timeoutSource).toContain('if (googleTimeoutProtocol.armed && resolver?.resolutionPending === false');
-    expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol || customCancellationProtocol)');
-    expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || resilienceProbe)');
+    expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol || customCancellationProtocol || soakScenario)');
+    expect(runSource).toContain('if (cancellationProbe || staleSuccessProbe || resilienceProbe || soakScenario)');
     expect(runSource).toContain('else if (googleTimeoutProtocol || customCancellationProtocol) trial.resilience.workerInstrumentation = workerInstrumentation;');
-    expect(runSource).toContain('const instrumentationOwner = trial.cancellation ?? trial.staleSuccess ?? trial.resilience;');
+    expect(runSource).toContain('const instrumentationOwner = trial.cancellation ?? trial.staleSuccess ?? trial.resilience ?? trial.soak;');
     expect(timeoutSource).toContain('findGoogleTimeoutBatchError(contentOperations, sessionId, targetIds)');
     expect(timeoutSource).toContain('findGoogleTimeoutCancelMessage(contentOperations, root.messageId, sessionId)');
     expect(runSource).toContain('window.__pageTranslationBenchmark.cancellationSnapshot()');

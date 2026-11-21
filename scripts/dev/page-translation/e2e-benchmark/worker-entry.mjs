@@ -363,6 +363,35 @@ const marker = {
       })).filter(entry => sessionId === undefined || entry.sessionId === sessionId),
     };
   },
+  releaseCancellationSession(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) throw new TypeError('A worker sessionId is required to release cancellation references.');
+    const roots = providerRoots.filter(root => root.sessionId === sessionId);
+    const pendingRoots = roots.filter(root => root.operation?.status === 'pending' || !root.operation);
+    const pendingOperations = cancellationLedger.operations.filter(operation => operation.sessionId === sessionId && operation.status === 'pending');
+    if (pendingRoots.length || pendingOperations.length) {
+      throw new Error(`Cannot release cancellation references with pending roots/operations (${pendingRoots.length}/${pendingOperations.length}).`);
+    }
+    const messageIds = new Set(roots.map(root => root.messageId).filter(Boolean));
+    let controllers = 0;
+    for (const [messageId] of lifecycleControllers) {
+      const owner = providerRoots.find(root => root.messageId === messageId);
+      if (owner?.sessionId !== sessionId && !messageIds.has(messageId)) continue;
+      lifecycleControllers.delete(messageId);
+      controllerAbortObservers.delete(messageId);
+      controllers += 1;
+    }
+    const rootsReleased = roots.length;
+    for (let index = providerRoots.length - 1; index >= 0; index -= 1) {
+      if (providerRoots[index].sessionId === sessionId) providerRoots.splice(index, 1);
+    }
+    for (const operation of cancellationLedger.operations) {
+      if (operation.sessionId === sessionId) delete operation.context;
+    }
+    return {
+      history: { roots: rootsReleased, controllers, operations: cancellationLedger.operations.filter(operation => operation.sessionId === sessionId).length },
+      retained: { roots: providerRoots.length, controllers: lifecycleControllers.size, abortObservers: controllerAbortObservers.size },
+    };
+  },
   resourceSnapshot(messageIds = [], sessionIds = []) {
     const engine = unifiedTranslationService.translationEngine;
     const registry = engine?.lifecycleRegistry;

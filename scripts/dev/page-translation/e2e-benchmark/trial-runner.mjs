@@ -1,5 +1,4 @@
 import { Buffer } from 'node:buffer';
-import { resolve } from 'node:path';
 import process from 'node:process';
 import { launchChrome } from './chrome.mjs';
 import { canonicalProviderSourceAttempts, longTasksWithinInterval, mapEdgeResponse, mapProviderHTTPRequestSequence, summarizeLongTasks, validateEffectiveSettings, validatedLongTaskObservation, validateWindowMembership } from './metrics.mjs';
@@ -17,7 +16,7 @@ import { createGoogleV2_503Evidence, executeGoogleV2_503, finalizeGoogleV2_503Ev
 import { createGoogleV2TimeoutProtocol, armGoogleV2Timeout, executeGoogleV2Timeout, collectGoogleV2TimeoutEvidence, recordGoogleTimeoutFailedTargetDOM, validateGoogleV2TimeoutEvidence } from './resilience/googlev2-timeout.mjs';
 import { createCustom429Protocol, armCustom429, claimCustom429Request, executeCustom429Request, collectCustom429Evidence, validateCustom429ProbeEvidence } from './resilience/custom-429.mjs';
 import { createCustom400Protocol, armCustom400, executeCustom400, collectCustom400Evidence, recordCustom400PreRestorePreArmDrain, recordCustom400FailedTargetDOM, validateCustom400ProbeEvidence } from './resilience/custom-400.mjs';
-import { createCustomCancellationProtocol, armCustomCancellation, admitCustomCancellationRequest, executeCustomCancellation, captureCustomCancellationPreRestore, collectCustomCancellationEvidence, validateCustomCancellationProbeEvidence } from './resilience/custom-cancellation.mjs';
+import { createCustomCancellationProtocol, awaitConcreteCustomCancellationResolver, armCustomCancellation, admitCustomCancellationRequest, executeCustomCancellation, captureCustomCancellationPreRestore, collectCustomCancellationEvidence, validateCustomCancellationProbeEvidence } from './resilience/custom-cancellation.mjs';
 import { createGeminiStructuredRecoveryEvidence, executeGeminiStructuredRecovery, collectGeminiStructuredRecoveryEvidence, validateGeminiStructuredRecoveryEvidence } from './resilience/gemini-structured-recovery.mjs';
 import { runCancellationProbe } from './cancellation-runner.mjs';
 import { cleanupStaleSuccessProbe, runStaleSuccessProbe } from './stale-success-runner.mjs';
@@ -157,7 +156,7 @@ function mapCustomStaleSuccessResponse(request, owner) {
   return mapCustomFixtureStaleResponse({ ids: request.batchIds, texts: request.batchTexts }, owner);
 }
 
-export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, settings, providerLane, fixtureConfig = createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, resilienceProbe = null, schedulingMode = null, probeSchedulingMode = null }) {
+export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase, extensionPath, settings, providerLane, fixtureConfig = createFixture(scenario, { providerLane: usesBandedProviderScroll(providerLane?.provider) }), networkGuardProbe = false, cancellationProbe = null, staleSuccessProbe = null, resilienceProbe = null, schedulingMode = null, probeSchedulingMode = null, browserLifetime = null, soakScenario = false }) {
   const scenarioSettings = settingsForScenario(settings, fixtureConfig.scenario, schedulingMode);
   const trialSettings = providerLane ? providerLaneSettings(scenarioSettings, providerLane) : scenarioSettings;
   const trial = {
@@ -183,14 +182,24 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     },
     settings: trialSettings,
   };
-  let chrome;
+  if (soakScenario) trial.soak = { scenario: phase, resourceSnapshot: null, instrumentationRetention: null };
+  if (browserLifetime) {
+    browserLifetime.evidence ??= { idleRequests: [], runs: 0 };
+    if (browserLifetime.activeTrial) throw new Error('Cannot start a browser-lifetime trial before the previous trial has drained.');
+    browserLifetime.evidence.runs += 1;
+  }
+  let chrome = browserLifetime?.chrome;
   let fixture;
-  let workerSession;
+  let workerSession = browserLifetime?.workerSession;
   let pageSession;
   let contentContext;
   const measurementState = { attempted: false, started: false, stopped: false, stopAttempts: 0 };
-  const networkSessions = createNetworkSessionState();
+  const networkSessions = browserLifetime?.networkSessions ?? createNetworkSessionState();
+  if (browserLifetime) browserLifetime.networkSessions = networkSessions;
   const guardSessions = networkSessions.guardedSessions;
+  const requestGuardSessions = () => browserLifetime
+    ? new Set([...guardSessions].filter(sessionId => sessionId !== browserLifetime.workerSession))
+    : guardSessions;
   const sendBySession = networkSessions.sendBySession;
   const extensionOriginBySession = networkSessions.extensionOriginBySession;
   let requestUnsubscribe;
@@ -417,8 +426,6 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
               `(()=>({scheduler:window.__pageTranslationBenchmark.pageSessionSnapshot(),content:window.__pageTranslationBenchmark.cancellationSnapshot()}))()`, contentContext, false);
             const acceptedStart = ownerEvidence.content?.operations?.find(operation => operation.kind === 'lifecycle.delivery'
               && operation.sessionId === root.sessionId && operation.action === 'page-translate-start' && operation.accepted === true);
-            const currentOwnerMatches = ownerEvidence.scheduler?.translationSessionId === root.sessionId
-              && ownerEvidence.scheduler?.sessionContextOwned === true;
             const invalidatedA = cancellationControl.initialSessionId !== null
               && ownerEvidence.content?.operations?.some(operation => operation.kind === 'session.invalidation'
                 && operation.sessionId === cancellationControl.initialSessionId && operation.capturedSessionActive === false
@@ -666,21 +673,61 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     fixture = await startFixture(fixtureConfig);
     trial.fixture.url = fixture.url;
     trial.stage = 'chrome-launch';
-    chrome = await launchChrome({
+      if (browserLifetime) {
+        browserLifetime.activeTrial = trial;
+        browserLifetime.requestListener = requestListener;
+        browserLifetime.activeNetworkObserver = providerNetworkObserver;
+        browserLifetime.activeNetworkRouter = networkEventRouter;
+    }
+    if (browserLifetime?.chrome) chrome = browserLifetime.chrome;
+    if (!chrome) chrome = await launchChrome({
       extensionPath,
       onAttachedTarget: async ({ targetInfo, sessionId, send, onEvent }) => {
         if (targetInfo.type !== 'service_worker' || !targetInfo.url.startsWith('chrome-extension://')) return;
         const workerUrl = new URL(targetInfo.url);
         const extensionOrigin = workerUrl.protocol === 'chrome-extension:' ? `chrome-extension://${workerUrl.host}` : null;
         registerGuardedSession(networkSessions, sessionId, send, extensionOrigin);
-        if (!eventUnsubscribe) eventUnsubscribe = onEvent(event => recordEvent(event, trial));
-        if (!requestUnsubscribe) requestUnsubscribe = onEvent(requestListener);
+        if (browserLifetime) browserLifetime.workerSession = sessionId;
+        if (!eventUnsubscribe && (!browserLifetime || !browserLifetime.eventUnsubscribe)) {
+          const unsubscribe = onEvent(event => {
+            const active = browserLifetime ? browserLifetime.activeTrial : trial;
+            if (active) recordEvent(event, active);
+          });
+          if (browserLifetime) browserLifetime.eventUnsubscribe = unsubscribe;
+          else eventUnsubscribe = unsubscribe;
+        }
+        if (!requestUnsubscribe && (!browserLifetime || !browserLifetime.requestUnsubscribe)) {
+          const unsubscribe = onEvent(event => {
+            const activeListener = browserLifetime ? browserLifetime.requestListener : requestListener;
+            if (activeListener) return activeListener(event);
+            if (event.method === 'Fetch.requestPaused') {
+              browserLifetime.evidence.idleRequests.push({ at: now(), sessionId: event.sessionId, url: event.params?.request?.url ?? null });
+              return send('Fetch.failRequest', { requestId: event.params.requestId, errorReason: 'BlockedByClient' }, event.sessionId);
+            }
+          });
+          if (browserLifetime) browserLifetime.requestUnsubscribe = unsubscribe;
+          else requestUnsubscribe = unsubscribe;
+        }
         if (cancellationProbe || staleSuccessProbe) {
           if (!networkEventRouter?.register(sessionId, targetInfo)) throw new Error(`Could not register Network observer target for CDP session ${sessionId}.`);
           trial.networkObserverTargets ??= {};
           trial.networkObserverTargets[sessionId] = networkEventRouter.targetForSession(sessionId);
         }
-        if ((providerLane || cancellationProbe || staleSuccessProbe) && !networkEventUnsubscribes.has(sessionId)) {
+        if (browserLifetime && providerLane) {
+          const routeNetworkEvent = event => {
+            if (event.sessionId !== sessionId) return;
+            if (browserLifetime.activeNetworkObserver) browserLifetime.activeNetworkObserver(event);
+            if (browserLifetime.activeNetworkRouter) browserLifetime.activeNetworkRouter.observerForSession(sessionId)(event);
+          };
+          browserLifetime.workerNetworkUnsubscribes ??= new Map();
+          if (!browserLifetime.workerNetworkUnsubscribes.has(sessionId)) {
+            browserLifetime.workerNetworkUnsubscribes.set(sessionId, onEvent(routeNetworkEvent));
+          }
+          browserLifetime.workerTargetInfo = targetInfo;
+          browserLifetime.workerNetworkEnabled = enableProviderNetworkObservation(send, sessionId);
+          await browserLifetime.workerNetworkEnabled;
+        } else if ((providerLane || cancellationProbe || staleSuccessProbe) && !browserLifetime
+            && !networkEventUnsubscribes.has(sessionId)) {
           const routeNetworkEvent = event => {
             if (providerLane) providerNetworkObserver(event);
             if (cancellationProbe || staleSuccessProbe) networkEventRouter.observerForSession(sessionId)(event);
@@ -693,10 +740,25 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         trial.workerTargets.push(targetInfo);
       },
     });
+    if (!browserLifetime?.chrome) {
+      if (browserLifetime) {
+        browserLifetime.chrome = chrome;
+      }
+    }
     trial.browser = chrome.metadata;
     const testExtensionOrigin = `chrome-extension://${chrome.extensionId}`;
-    workerSession = [...extensionOriginBySession.entries()].find(([, origin]) => origin === testExtensionOrigin)?.[0];
+    workerSession = browserLifetime?.workerSession
+      ?? [...extensionOriginBySession.entries()].find(([, origin]) => origin === testExtensionOrigin)?.[0];
+    workerSession ??= browserLifetime?.workerSession;
     if (!workerSession) throw new Error('No pre-guarded test-extension service-worker session was recorded.');
+    if (browserLifetime && !browserLifetime.workerSession) browserLifetime.workerSession = workerSession;
+    if (browserLifetime) {
+      registerGuardedSession(networkSessions, workerSession, chrome.send, testExtensionOrigin);
+      if (providerLane) {
+        networkEventRouter?.register(workerSession, browserLifetime.workerTargetInfo);
+        if (!browserLifetime.workerNetworkUnsubscribes?.has(workerSession)) throw new Error('Shared worker Network observer was not retained.');
+      }
+    }
     await until(async () => (await chrome.send('Target.getTargets')).targetInfos.find(target => target.type === 'service_worker' && target.url.includes(chrome.extensionId)));
     await chrome.send('Runtime.enable', {}, workerSession);
     trial.stage = 'worker-readiness';
@@ -712,11 +774,12 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       : `browser.storage.local.set(${JSON.stringify(trialSettings)})`;
     await evaluate(chrome, workerSession,
       `Promise.all([${settingWrite},browser.storage.sync.set(${JSON.stringify(trialSettings)}).catch(()=>{})])`);
-    if (cancellationProbe || staleSuccessProbe || resilienceProbe) {
-      const workerInstrumentation = await evaluate(chrome, workerSession,
+    if (cancellationProbe || staleSuccessProbe || resilienceProbe || soakScenario) {
+       const workerInstrumentation = await evaluate(chrome, workerSession,
         'globalThis.__pageTranslationBenchmark.enableCancellationProbe()');
       if (trial.cancellation || trial.staleSuccess) (trial.cancellation ?? trial.staleSuccess).workerInstrumentation = workerInstrumentation;
        else if (googleTimeoutProtocol || customCancellationProtocol) trial.resilience.workerInstrumentation = workerInstrumentation;
+       else if (soakScenario) trial.soak.workerInstrumentation = workerInstrumentation;
       if (!workerInstrumentation?.enabled || !workerInstrumentation?.lifecycleRegistryObserved
           || workerInstrumentation.instrumentationErrors?.length) throw new Error('Worker cancellation/provider/controller instrumentation was not fully installed.');
     }
@@ -731,14 +794,20 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       if (!trial.geminiStructuredRecoveryInstrumentation?.enabled) throw new Error('Gemini structured-recovery instrumentation was not installed.');
     }
 
-    const { targetId } = await chrome.send('Target.createTarget', { url: 'about:blank' });
+    const targetId = browserLifetime?.pageTargetId ?? (await chrome.send('Target.createTarget', { url: 'about:blank' })).targetId;
+    if (browserLifetime && !browserLifetime.pageTargetId) browserLifetime.pageTargetId = targetId;
     ({ sessionId: pageSession } = await chrome.send('Target.attachToTarget', { targetId, flatten: true }));
+    if (browserLifetime?.persistentGuardSessions) guardSessions.add(pageSession);
     pageEventUnsubscribe = chrome.onEvent(event => recordEvent(event, trial));
     if (providerLane) {
       networkEventUnsubscribes.set(pageSession, chrome.onEvent(providerNetworkObserver));
       await enableProviderNetworkObservation(chrome.send, pageSession);
     }
     registerGuardedSession(networkSessions, pageSession, chrome.send, testExtensionOrigin);
+    if (browserLifetime) {
+      browserLifetime.requestListener = requestListener;
+      browserLifetime.activeTrial = trial;
+    }
     await enableFetchGuard(chrome.send, pageSession);
     await chrome.send('Emulation.setDeviceMetricsOverride', {
       width: fixtureConfig.viewport.width,
@@ -746,6 +815,8 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       deviceScaleFactor: 1,
       mobile: false,
     }, pageSession);
+    await chrome.send('Page.enable', {}, pageSession);
+    await chrome.send('Page.navigate', { url: fixture.url }, pageSession);
     const contentContextPromise = new Promise((resolveContext, rejectContext) => {
       const timeout = setTimeout(() => rejectContext(new Error('No extension content execution context appeared')), 20_000);
       const off = chrome.onEvent(event => {
@@ -760,8 +831,6 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       });
     });
     await chrome.send('Runtime.enable', {}, pageSession);
-    await chrome.send('Page.enable', {}, pageSession);
-    await chrome.send('Page.navigate', { url: fixture.url }, pageSession);
     contentContext = await contentContextPromise;
     if (networkGuardProbe) {
       trial.stage = 'negative-network-guard-probe';
@@ -781,10 +850,10 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       return state.marker && state.initialized && state.baseInitialized && state.listener
         && state.features?.active && state.features?.handlerActive;
     });
-    if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol || customCancellationProtocol) {
+    if (cancellationProbe || staleSuccessProbe || googleTimeoutProtocol || customCancellationProtocol || soakScenario) {
       const contentInstrumentation = await evaluate(chrome, pageSession,
         'window.__pageTranslationBenchmark.enableCancellationProbe()', contentContext);
-      const instrumentationOwner = trial.cancellation ?? trial.staleSuccess ?? trial.resilience;
+      const instrumentationOwner = trial.cancellation ?? trial.staleSuccess ?? trial.resilience ?? trial.soak;
       instrumentationOwner.contentInstrumentation = contentInstrumentation;
       if (!contentInstrumentation?.enabled || !contentInstrumentation?.sendMessageWrapped
           || contentInstrumentation.instrumentationErrors?.length) {
@@ -840,6 +909,11 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     if (fixtureConfig.scenario !== 'shadow-dom' && (trial.rawDOM.original.length !== fixtureConfig.targetCount
         || JSON.stringify(trial.rawDOM.original) !== JSON.stringify(originals))) {
       throw new Error(`Pre-translation fixture DOM does not exactly match ${fixtureConfig.targetCount} source targets.`);
+    }
+    if (soakScenario) {
+      trial.soak.initialDOMMetadata = await evaluate(chrome, pageSession,
+        `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,tagName:el.tagName,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`,
+        contentContext, false);
     }
     trial.longTaskCalibration = await evaluate(chrome, pageSession,
       'window.__pageTranslationBenchmark.calibrateLongTasks?.()??{supported:false,reason:"trace writer calibration unavailable"}', contentContext);
@@ -913,8 +987,16 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       targetLanguage: 'fr', lazyLoading: trialSettings.WHOLE_PAGE_LAZY_LOADING, translateAfterScrollStop: trialSettings.WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP, autoTranslateOnDOMChanges: trialSettings.WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES,
     });
     if (!trial.effectiveSettingsValidation.ok) throw new Error(trial.effectiveSettingsValidation.issues.join('; '));
-    if (fixtureConfig.scenario === 'scroll-through') {
+    if (fixtureConfig.scenario === 'scroll-through' && !staleSuccessProbe) {
       const initialIds = fixtureConfig.scrollBands[0].ids;
+      const customCancellationResources = customCancellationProtocol
+        ? await awaitConcreteCustomCancellationResolver({
+          sessionId,
+          readResources: () => evaluate(chrome, workerSession,
+            `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(sessionId)}])`, undefined, false),
+          until,
+        })
+        : null;
       trial.scrollThrough = { initialVisibleAcceptance: await until(async () => {
         const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
         return initialIds.every(id => state?.acceptedIds.includes(id)) ? state : null;
@@ -927,10 +1009,8 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         });
       }
       if (customCancellationProtocol) {
-        const resources = await evaluate(chrome, workerSession,
-          `globalThis.__pageTranslationBenchmark.resourceSnapshot([], [${JSON.stringify(sessionId)}])`, undefined, false);
         armCustomCancellation({
-          protocol: customCancellationProtocol, sessionId, resolver: resources?.sourceResolvers?.[sessionId],
+          protocol: customCancellationProtocol, sessionId, resolver: customCancellationResources?.sourceResolvers?.[sessionId],
           initialIds, fixtureConfig, now,
         });
       }
@@ -1700,7 +1780,6 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     }
 
     trial.providerRequestOrder = mapProviderBatchIds(providerAttempts.map(request => request.batchTexts ?? []), sourceToId);
-    const providerRequestIds = trial.providerRequestOrder.flat();
     const canonicalSourceIds = mapProviderBatchIds(canonicalProviderSourceAttempts(providerAttempts
       .filter(request => !request.canonicalSourceExcluded))
       .map(request => request.batchTexts ?? []), sourceToId).flat();
@@ -2064,7 +2143,7 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
     if ((custom429Protocol || googleTimeoutProtocol || customCancellationProtocol) && !cancellationControl) {
       try {
         const requestCleanup = await closeNetworkRequestLifecycle({
-          lifecycle: requestLifecycle, guardedSessions: guardSessions, chrome,
+          lifecycle: requestLifecycle, guardedSessions: requestGuardSessions(), chrome,
         });
         if (!cancellationControl) {
           try { await until(() => requestHandlerJobs.size === 0 ? true : null, 8_000); }
@@ -2137,7 +2216,7 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
     if (cancellationControl) {
       try {
         const requestCleanup = await closeNetworkRequestLifecycle({
-          lifecycle: cancellationControl.requestLifecycle, guardedSessions: guardSessions, chrome,
+          lifecycle: cancellationControl.requestLifecycle, guardedSessions: requestGuardSessions(), chrome,
         });
         const evidence = trial.cancellation ?? trial.staleSuccess;
         evidence.cleanup.requestLifecycle = requestCleanup;
@@ -2151,7 +2230,9 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
             const messageIdB = trial.staleSuccess.bActiveAtARelease?.heldRequest?.batchMessageId ?? null;
             const terminalMessageIds = [messageIdA, messageIdB].filter(Boolean);
             const sessionIds = [trial.staleSuccess.sessionA, trial.staleSuccess.sessionB].filter(Boolean);
-            if (trial.staleSuccess.rawMutationCaptureStarted && !messageIdA) throw new Error('A request ID is unavailable for final runtime resource drain.');
+            if (trial.staleSuccess.rawMutationCaptureStarted && !messageIdA) {
+              trial.cleanupErrors.push('A request ID is unavailable for final runtime resource drain.');
+            }
             const [contentDrain, workerDrain, replyProbeSnapshot, runtimeDrain] = await until(async () => {
               const [content, worker, probe, resources] = await Promise.all([
                 evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.cancellationSnapshot()', contentContext, false),
@@ -2238,10 +2319,183 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
         if (!validation.ok) trial.cleanupErrors.push(`Stale-success teardown raw DOM evidence failed: ${validation.issues.join('; ')}`);
       } catch (error) { trial.cleanupErrors.push(`Stale-success raw DOM evidence could not drain: ${error.message}`); }
     }
+    if (soakScenario && chrome && workerSession && pageSession && contentContext && trial.sessionId) {
+      try {
+        const existingFetchLifecycle = trial.resilience?.cleanup?.requestLifecycle
+          ?? trial.staleSuccess?.cleanup?.requestLifecycle
+          ?? trial.cancellation?.cleanup?.requestLifecycle
+          ?? null;
+        if (!existingFetchLifecycle) {
+          const requestCleanup = await closeNetworkRequestLifecycle({
+            lifecycle: requestLifecycle, guardedSessions: requestGuardSessions(), chrome,
+          });
+          trial.soak.fetchLifecycle = requestCleanup;
+          if (!requestCleanup.ok) trial.cleanupErrors.push(...requestCleanup.errors.map(error => `Soak Fetch cleanup: ${error}`));
+        } else trial.soak.fetchLifecycle = existingFetchLifecycle;
+        await until(() => requestHandlerJobs.size === 0 ? true : null, 8_000);
+        const sessionIds = [...new Set([
+          trial.sessionId,
+          trial.staleSuccess?.sessionA,
+          trial.staleSuccess?.sessionB,
+        ].filter(id => typeof id === 'string' && id.length))];
+        const [workerDrain, contentDrain, pageScheduler, logicalBatchIntervals, restoredDOMMetadata] = await Promise.all([
+          evaluate(chrome, workerSession,
+            'globalThis.__pageTranslationBenchmark.cancellationSnapshot()', undefined, false),
+          evaluate(chrome, pageSession,
+            'window.__pageTranslationBenchmark.cancellationSnapshot()', contentContext, false),
+          evaluate(chrome, pageSession,
+            'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+          evaluate(chrome, pageSession,
+            'structuredClone(window.__pageTranslationBenchmark.logicalBatchIntervals)', contentContext, false),
+          evaluate(chrome, pageSession,
+            `Array.from(document.querySelectorAll('[data-bench-id]')).map(el=>({id:el.dataset.benchId,tagName:el.tagName,attributes:[...el.attributes].map(attribute=>[attribute.name,attribute.value])}))`,
+            contentContext, false),
+        ]);
+        const sortMetadata = metadata => Array.isArray(metadata) ? metadata.map(item => ({
+          ...item,
+          attributes: [...(item.attributes ?? [])].sort(([a], [b]) => a.localeCompare(b)),
+        })) : null;
+        const failedBoundaryChecks = [];
+        const metadataExact = JSON.stringify(sortMetadata(trial.soak.initialDOMMetadata))
+          === JSON.stringify(sortMetadata(restoredDOMMetadata));
+        if (!metadataExact) failedBoundaryChecks.push('Restore did not recover exact target metadata.');
+        const terminalMessageIds = workerDrain.providerRoots
+          .filter(root => sessionIds.includes(root.sessionId)).map(root => root.messageId).filter(Boolean);
+        const resources = await evaluate(chrome, workerSession,
+          `globalThis.__pageTranslationBenchmark.resourceSnapshot(${JSON.stringify(terminalMessageIds)},${JSON.stringify(sessionIds)})`,
+          undefined, false);
+        const validation = validateRuntimeResources(resources, {
+          terminalMessageIds, sessionIds, final: true,
+        });
+        failedBoundaryChecks.push(...[
+          contentDrain?.pendingOperations !== 0 && 'content promises remain active',
+          workerDrain?.ledger?.pending !== 0 && 'worker ledger promises remain active',
+          workerDrain?.providerRoots?.some(root => root.status === 'pending') && 'provider roots remain active',
+          pageScheduler?.managerTranslating !== false && 'Page scheduler still reports an active translation',
+          pageScheduler?.activeFlushes !== 0 && 'Page scheduler flushes remain active',
+          pageScheduler?.queueIds?.length !== 0 && 'Page scheduler queue is not empty',
+          pageScheduler?.pendingSettlementCount !== 0 && 'Page scheduler settlements remain pending',
+          pageScheduler?.batchTimerActive !== false && 'Page scheduler batch timer remains active',
+          pageScheduler?.completionTimerActive !== false && 'Page scheduler completion timer remains active',
+          requestHandlerJobs.size !== 0 && 'Fetch handler promises remain active',
+          !validation.ok && validation.issues.join('; '),
+        ].filter(Boolean));
+        const releaseEvidence = [];
+        for (const sessionId of sessionIds) {
+          releaseEvidence.push(await evaluate(chrome, workerSession,
+            `globalThis.__pageTranslationBenchmark.releaseCancellationSession(${JSON.stringify(sessionId)})`, undefined, false));
+        }
+        const finalRetained = releaseEvidence.at(-1)?.retained;
+        const retainedReferences = (finalRetained?.roots ?? 0) + (finalRetained?.controllers ?? 0)
+          + (finalRetained?.abortObservers ?? 0);
+        if (retainedReferences) failedBoundaryChecks.push(`settled instrumentation still retains ${retainedReferences} worker references`);
+        const ownedBatches = Array.isArray(logicalBatchIntervals)
+          ? logicalBatchIntervals.filter(batch => sessionIds.includes(batch.sessionId)) : [];
+        const batchEvents = ownedBatches.flatMap(batch => [
+          { at: batch.at, delta: 1 },
+          { at: batch.settledAt, delta: -1 },
+        ]).filter(event => Number.isFinite(event.at)).sort((a, b) => a.at - b.at || a.delta - b.delta);
+        let activeBatches = 0;
+        let peakLogicalConcurrency = 0;
+        for (const event of batchEvents) {
+          activeBatches += event.delta;
+          peakLogicalConcurrency = Math.max(peakLogicalConcurrency, activeBatches);
+        }
+        if (ownedBatches.some(batch => !Number.isFinite(batch.settledAt) || !['fulfilled', 'rejected'].includes(batch.outcome))) {
+          failedBoundaryChecks.push('one or more logical scheduler batches lack terminal intervals');
+        }
+        const count = value => Array.isArray(value) ? value.length : Number.isFinite(value) ? value : null;
+        const sum = object => object && Object.values(object).every(Number.isFinite)
+          ? Object.values(object).reduce((total, value) => total + value, 0) : null;
+        const activeQueue = resources.queue
+          ? sum(resources.queue.depths) + Object.values(resources.queue.processing ?? {}).filter(Boolean).length
+            + (resources.queue.retryTimeoutCount ?? 0) : null;
+        const activeRate = resources.rateLimit
+          ? Object.values(resources.rateLimit).reduce((total, state) =>
+            total + (state.activeRequests ?? 0) + (state.queuedRequests ?? 0) + (state.isProcessingQueue ? 1 : 0), 0) : null;
+        const activeResolvers = resources.sourceResolvers
+          ? Object.values(resources.sourceResolvers).filter(state => state?.present !== false).length : null;
+        const activeScheduler = pageScheduler ? (pageScheduler.queueIds?.length ?? 0)
+          + (pageScheduler.activeFlushes ?? 0) + (pageScheduler.pendingSettlementCount ?? 0)
+          + Number(pageScheduler.managerTranslating === true)
+          + Number(pageScheduler.batchTimerActive === true)
+          + Number(pageScheduler.completionTimerActive === true) : null;
+        const fetchReservations = cancellationControl?.requestLifecycle?.reservations ?? requestLifecycle.reservations;
+        const activeFetchReservations = fetchReservations.filter(item => item.handlerSettled !== true
+          || item.releaseRequested && item.releaseOutcome === null).length;
+        const activePromises = (contentDrain?.pendingOperations ?? 0) + (workerDrain?.ledger?.pending ?? 0)
+          + workerDrain.providerRoots.filter(root => root.status === 'pending').length;
+        const activeLease = resources.lease
+          ? (resources.lease.activeOperationCount ?? 0) + Number(resources.lease.timerActive === true) : null;
+        const history = {
+          roots: workerDrain.providerRoots.length,
+          operations: workerDrain.ledger?.operations?.length ?? null,
+          fetchReservations: fetchReservations.length,
+          schedulerBatches: ownedBatches.length,
+        };
+        trial.soak = {
+          ...trial.soak,
+          sessionIds,
+          workerDrain,
+          contentDrain,
+          pageScheduler,
+          restoredDOMMetadata,
+          metadataExact,
+          runtimeResources: resources,
+          resourceValidation: validation,
+          logicalBatchIntervals: ownedBatches,
+          logicalBatchCount: ownedBatches.length,
+          peakLogicalConcurrency,
+          instrumentationRetention: releaseEvidence,
+          resourceSnapshot: {
+            'QueueManager': { active: activeQueue, history: history.operations },
+            'RateLimitManager': { active: activeRate, history: history.operations },
+            'source resolver': { active: activeResolvers, history: sessionIds.length },
+            'lifecycle registry': { active: count(resources.lifecycle?.activeIds), history: history.operations },
+            'scheduler': { active: activeScheduler, history: history.schedulerBatches },
+            'active promises': { active: activePromises, history: history.roots + history.operations },
+            'Fetch reservations': { active: activeFetchReservations, history: history.fetchReservations },
+            'handlers': { active: requestHandlerJobs.size, history: fetchReservations.length },
+            'background operation leases': { active: activeLease, history: history.operations },
+          },
+        };
+        if (failedBoundaryChecks.length) {
+          trial.soak.cleanupError = failedBoundaryChecks.join('; ');
+          trial.cleanupErrors.push(`Soak per-scenario resource drain failed: ${trial.soak.cleanupError}`);
+        }
+      } catch (error) {
+        trial.soak.cleanupError = error.message;
+        trial.cleanupErrors.push(`Soak per-scenario resource drain failed: ${error.message}`);
+      }
+    } else if (soakScenario) {
+      const error = 'Soak per-scenario drain lacked the Chrome, worker, page, content, or Page session context.';
+      trial.soak.cleanupError = error;
+      trial.cleanupErrors.push(error);
+    }
     const cleanups = [
-       ...createNetworkCleanupSteps({ requestUnsubscribe, eventUnsubscribe, pageEventUnsubscribe, subscriptionsBySession: networkEventUnsubscribes }),
-       async () => { if (chrome) { const instance = chrome; await instance.close(); trial.chromeStderr = instance.metadata.stderr ?? null; } },
-      async () => { if (fixture?.server.listening) await new Promise((resolveClose, reject) => fixture.server.close(error => error ? reject(error) : resolveClose())); },
+       ...createNetworkCleanupSteps({
+         requestUnsubscribe: browserLifetime ? null : requestUnsubscribe,
+         eventUnsubscribe: browserLifetime ? null : eventUnsubscribe,
+         pageEventUnsubscribe, subscriptionsBySession: networkEventUnsubscribes,
+       }),
+        async () => {
+          if (browserLifetime && pageSession) {
+            if (guardSessions.has(pageSession)) {
+              await chrome.send('Fetch.disable', {}, pageSession);
+              guardSessions.delete(pageSession);
+            }
+            await chrome.send('Target.detachFromTarget', { sessionId: pageSession });
+         } else if (chrome) {
+           await chrome.close();
+           trial.chromeStderr = chrome.metadata.stderr ?? null;
+         }
+       },
+      async () => {
+        if (fixture?.server.listening) await new Promise((resolveClose, reject) => {
+          fixture.server.close(error => error ? reject(error) : resolveClose());
+          fixture.server.closeAllConnections?.();
+        });
+      },
     ];
     await cleanupMeasurementBeforeResources({
       state: measurementState,
@@ -2249,6 +2503,12 @@ const resourceValidation = validateRuntimeResources(resources, { terminalMessage
       resources: cleanups,
       cleanupErrors: trial.cleanupErrors,
     });
+    if (browserLifetime && browserLifetime.activeTrial === trial) {
+      browserLifetime.requestListener = null;
+      browserLifetime.activeNetworkObserver = null;
+      browserLifetime.activeNetworkRouter = null;
+      browserLifetime.activeTrial = null;
+    }
     if (cancellationProbe) {
       const diagnostics = promoteRequestDiagnostics(trial);
       trial.cancellation.cleanup.finalDiagnosticGate = diagnostics;

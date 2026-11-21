@@ -3,7 +3,7 @@ import {
   parseResilienceProbeSelection, selectResolvedCustomCancellationBatch, validateCustomCancellationEvidence,
   validateResilienceProbeIsolation,
 } from './e2e-benchmark/resilience-probes.mjs';
-import { admitCustomCancellationRequest, armCustomCancellation, awaitCustomCancellationNetwork, classifyCustomCancellationTiming, createCustomCancellationProtocol, executeCustomCancellation } from './e2e-benchmark/resilience/custom-cancellation.mjs';
+import { admitCustomCancellationRequest, armCustomCancellation, awaitConcreteCustomCancellationResolver, awaitCustomCancellationNetwork, classifyCustomCancellationTiming, createCustomCancellationProtocol, executeCustomCancellation } from './e2e-benchmark/resilience/custom-cancellation.mjs';
 
 const targetIds = Array.from({ length: 1000 }, (_, index) => `target-${index}`);
 const retainedIds = targetIds.slice(0, 25);
@@ -132,6 +132,39 @@ const evidence = () => ({
 });
 
 describe('Custom cancellation resilience probe', () => {
+  it('waits before the first-band checkpoint until a concrete resolver snapshot is observed', async () => {
+    const sequence = [
+      {},
+      { sourceResolvers: { 'page-A': { present: true, resolutionPending: true } } },
+      { sourceResolvers: { 'page-A': { present: true, resolutionPending: false,
+        effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'auto' } } },
+      { sourceResolvers: { 'page-A': { present: true, resolutionPending: false,
+        effectiveSourceLanguage: 'en', effectiveTargetLanguage: 'fr' } } },
+    ];
+    let reads = 0;
+    let continued = false;
+    const resources = await awaitConcreteCustomCancellationResolver({
+      sessionId: 'page-A',
+      readResources: async () => sequence[reads++],
+      until: async read => {
+        while (true) {
+          const value = await read();
+          if (value) return value;
+        }
+      },
+    });
+    expect(reads).toBe(4);
+    expect(resources.sourceResolvers['page-A'].effectiveTargetLanguage).toBe('fr');
+    const protocol = createCustomCancellationProtocol();
+    expect(continued).toBe(false);
+    armCustomCancellation({ protocol, sessionId: 'page-A', resolver: resources.sourceResolvers['page-A'],
+      initialIds: retainedIds, fixtureConfig: { targets: fixtureTargetMapping }, now: () => 10 });
+    continued = true;
+    expect(protocol.armed).toBe(true);
+    expect(continued).toBe(true);
+    expect(protocol.evidence.arm.resolver).toBe(resources.sourceResolvers['page-A']);
+  });
+
   it('synchronously holds concurrent admissions and waits for delayed Network correlation', async () => {
     const protocol = createCustomCancellationProtocol();
     protocol.armed = true;

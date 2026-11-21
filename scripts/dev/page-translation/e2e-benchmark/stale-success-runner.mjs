@@ -535,10 +535,12 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
       evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
       snapshotContent(sessionIdB),
     ]);
+    const expectedDiscoveredTargets = customReplacement && fixtureConfig.scenario === 'scroll-through'
+      ? fixtureConfig.scrollBands[0].ids.length : fixtureConfig.targetCount;
     const validation = validateReplacementDiscoverySnapshot({
       snapshot: scheduler,
       sessionId: sessionIdB,
-      targetCount: fixtureConfig.targetCount,
+      targetCount: expectedDiscoveredTargets,
       firstBatchSize: bFirstBatchIds.length,
       settlementOperations: content.operations,
       allowConcurrentBatches: customReplacement,
@@ -679,6 +681,49 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
       responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
     });
     control.record.released = true;
+  }
+  const scrollThroughB = fixtureConfig.scenario === 'scroll-through'
+    && trial.probeConfiguration?.schedulingMode === 'fluid';
+  if (scrollThroughB) {
+    const bands = fixtureConfig.scrollBands ?? [];
+    const bandIds = bands.flatMap(band => band.ids);
+    if (bands.length !== 3 || expectedIds.length !== 1000
+        || bandIds.length !== expectedIds.length
+        || new Set(bandIds).size !== expectedIds.length
+        || expectedIds.some(id => !bandIds.includes(id))) {
+      throw new Error('Fluid scroll-through stale-success requires three exact, disjoint bands covering all 1,000 B targets.');
+    }
+    const evidence = trial.staleSuccess.scrollThrough = { phases: [], bandAcceptance: [] };
+    for (const band of bands) {
+      const startedAt = now();
+      const phase = await evaluate(chrome, pageSession,
+        `(()=>new Promise((resolve,reject)=>{let settled=false;const timeout=setTimeout(()=>{if(!settled){settled=true;removeEventListener('scroll',done);reject(new Error('Native scroll/RAF barrier timed out'))}},15000);const done=()=>{if(settled)return;requestAnimationFrame(()=>requestAnimationFrame(()=>{if(settled)return;settled=true;clearTimeout(timeout);const visible=[...document.querySelectorAll('[data-bench-id]')].filter(el=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth}).map(el=>el.dataset.benchId);resolve({x:scrollX,y:scrollY,visibleIds:visible,at:performance.now()})}))};addEventListener('scroll',done,{once:true});window.scrollTo(0,${band.top});if(scrollY===${band.top})done()}))()`, contentContext);
+      if (phase.y !== band.top) throw new Error(`Native scroll did not reach B band ${band.band} offset: ${phase.y}/${band.top}`);
+      const visibleIds = phase.visibleIds;
+      if (visibleIds.length !== band.ids.length || band.ids.some(id => !visibleIds.includes(id))
+          || visibleIds.some(id => !band.ids.includes(id))) {
+        throw new Error(`Native scroll did not expose exactly B band ${band.band}: visible=${visibleIds.length}, expected=${band.ids.length}.`);
+      }
+      const acceptedSnapshot = await until(async () => {
+        const content = await snapshotContent(sessionIdB);
+        const acceptedIds = content.operations.filter(operation => operation.kind === 'scheduler.settlement'
+          && operation.sessionId === sessionIdB && operation.outcome === 'accepted' && operation.changed === true)
+          .map(operation => operation.id);
+        const bandAcceptedIds = acceptedIds.filter(id => band.ids.includes(id));
+        return band.ids.every(id => bandAcceptedIds.includes(id)) ? { acceptedIds, bandAcceptedIds } : null;
+      }, 60_000);
+      const acceptedCounts = new Map();
+      for (const id of acceptedSnapshot.acceptedIds) acceptedCounts.set(id, (acceptedCounts.get(id) ?? 0) + 1);
+      if (band.ids.some(id => acceptedCounts.get(id) !== 1)
+          || acceptedSnapshot.bandAcceptedIds.length !== band.ids.length) {
+        throw new Error(`B band ${band.band} did not accept each target exactly once.`);
+      }
+      evidence.phases.push({ band: band.band, requestedY: band.top, y: phase.y, visibleIds, at: phase.at, observedAt: now() });
+      evidence.bandAcceptance.push({
+        band: band.band, targetIds: band.ids, acceptedIds: acceptedSnapshot.bandAcceptedIds,
+        startedAt, acceptedAt: now(),
+      });
+    }
   }
   await eventForSession(['page-translate-complete', 'page-translate-idle'], sessionIdB);
   const bTerminal = await until(async () => {

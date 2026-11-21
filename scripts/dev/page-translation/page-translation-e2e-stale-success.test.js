@@ -643,6 +643,14 @@ describe('successful stale Page reply probe', () => {
       translatedCount: 0, failedCount: 0,
     };
     expect(validateReplacementDiscoverySnapshot({ snapshot: ready, sessionId: 'B', targetCount: 1000, firstBatchSize: 25 }).ok).toBe(true);
+    expect(validateReplacementDiscoverySnapshot({
+      snapshot: {
+        ...ready, totalTasks: 334,
+        queueIds: Array.from({ length: 284 }, (_, i) => `queued-${i}`),
+        activeBatchIds: Array.from({ length: 50 }, (_, i) => `active-${i}`),
+      },
+      sessionId: 'B', targetCount: 334, firstBatchSize: 25, allowConcurrentBatches: true,
+    }).ok).toBe(true);
     expect(validateReplacementDiscoverySnapshot({ snapshot: { ...ready, discoveryPending: true }, sessionId: 'B', targetCount: 1000, firstBatchSize: 25 }).ok).toBe(false);
     expect(validateReplacementDiscoverySnapshot({ snapshot: { ...ready, discoveryPending: null }, sessionId: 'B', targetCount: 1000, firstBatchSize: 25 }).ok).toBe(false);
     expect(validateReplacementDiscoverySnapshot({ snapshot: { ...ready, totalTasks: 722, queueIds: ready.queueIds.slice(0, 697) }, sessionId: 'B', targetCount: 1000, firstBatchSize: 25 }).ok).toBe(false);
