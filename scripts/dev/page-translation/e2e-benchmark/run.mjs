@@ -13,7 +13,7 @@ import { createFixture } from './fixture.mjs';
 import { modeOrder, parseProviderLane, providerLaneFinalization, parseScenarioSelection, parseScrollSchedulingMode, shouldRunProviderPerformanceLane, validateSampleCount, usesBandedProviderScroll } from './scenario-plan.mjs';
 import { parseCancellationProbeSelection } from './cancellation-probes.mjs';
 import { parseCustomStaleSuccessScheduling, parseSuccessfulReplyProbeSelection } from './successful-reply-probes.mjs';
-import { parseResilienceProbeSelection, validateResilienceProbeIsolation } from './resilience-probes.mjs';
+import { parseResilienceProbeSelection, resilienceReproductionCommand, validateResilienceProbeIsolation } from './resilience-probes.mjs';
 import { restoreSnapshotsMatch, runOfflineSoak, SCENARIO_NAMES } from './offline-soak.mjs';
 
 const root = process.cwd();
@@ -560,9 +560,7 @@ try {
     }
   } else if (resilienceProbes.length) {
     const probe = resilienceProbes[0];
-    const custom429 = probe === 'custom-429' || probe === 'custom-cancellation';
-    const provider = probe === 'gemini-structured-recovery' ? 'gemini' : custom429 ? 'custom' : 'googlev2';
-    harness.command = `BENCH_RESILIENCE_PROBES=${probe} BENCH_LANE=provider BENCH_PROVIDER=${provider} BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
+    harness.command = resilienceReproductionCommand(probe);
     harness.warmups = 0;
     harness.measuredSamples = 0;
     harness.resilienceProbe = { requested: probe, scenario: 'scroll-through', schedulingMode: 'fluid', status: 'running' };

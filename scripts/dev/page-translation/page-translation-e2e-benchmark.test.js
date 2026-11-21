@@ -16,7 +16,7 @@ import { registryIdToName } from '../../../src/features/translation/providers/Pr
 import { GoogleTranslateV2Provider } from '../../../src/features/translation/providers/GoogleTranslateV2Provider.js';
 import { AIResponseParser } from '../../../src/features/translation/providers/utils/AIResponseParser.js';
 import { ResponseFormat } from '../../../src/features/translation/core/ProviderConfigurations.js';
-import { claimGoogleTimeoutRequest, commitGoogleTimeoutRequest, findGoogleTimeoutBatchError, findGoogleTimeoutCancelMessage, findSessionOwnedPendingRequest, isCustom400ProbeWindowRequest, parseResilienceProbeSelection, partitionBandAcceptance, requireGoogleTimeoutReservation, selectResolvedCustom400Batch, selectResolvedGoogleAttempt, selectResolvedGoogleTimeoutBatch, selectResolvedGeminiAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom400Evidence, validateCustom400QueueEvidence, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateGoogleTimeoutEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
+import { claimGoogleTimeoutRequest, commitGoogleTimeoutRequest, findGoogleTimeoutBatchError, findGoogleTimeoutCancelMessage, findSessionOwnedPendingRequest, isCustom400ProbeWindowRequest, parseResilienceProbeSelection, partitionBandAcceptance, requireGoogleTimeoutReservation, resilienceReproductionCommand, selectResolvedCustom400Batch, selectResolvedGoogleAttempt, selectResolvedGoogleTimeoutBatch, selectResolvedGeminiAttempt, selectResolvedCustomAttempt, shouldEnableResilienceQueueProbe, validateCustom400Evidence, validateCustom400QueueEvidence, validateCustom429Evidence, validateGeminiQueueAttemptEvidence, validateGeminiStructuredRecovery, validateGoogleTimeoutEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting, validateResilienceProbeIsolation } from './e2e-benchmark/resilience-probes.mjs';
 import { finalizeGoogleV2_503Evidence } from './e2e-benchmark/resilience/googlev2-503.mjs';
 import { collectCustom429Evidence } from './e2e-benchmark/resilience/custom-429.mjs';
 import { collectGeminiStructuredRecoveryEvidence } from './e2e-benchmark/resilience/gemini-structured-recovery.mjs';
@@ -50,6 +50,10 @@ describe('page translation benchmark measurements', () => {
     const customSource = readFileSync('scripts/dev/page-translation/e2e-benchmark/resilience/custom-400.mjs', 'utf8');
     expect(googleSource).not.toMatch(/response:\s*\{[^}]*endedAt\s*:/s);
     expect(customSource).not.toMatch(/response:\s*\{[^}]*endedAt\s*:/s);
+  });
+  it('generates the custom-400 reproduction command with the custom provider', () => {
+    expect(resilienceReproductionCommand('custom-400')).toContain('BENCH_PROVIDER=custom');
+    expect(resilienceReproductionCommand('googlev2-503')).toContain('BENCH_PROVIDER=googlev2');
   });
 
   it('records failed Fetch metadata after settlement and never records it after a rejected send', async () => {
@@ -503,11 +507,11 @@ describe('page translation benchmark measurements', () => {
     expect(claimGoogleTimeoutRequest(protocol)).toBe(false);
     expect(commitGoogleTimeoutRequest(protocol, { requestId: 'second-fetch' })).toBe(false);
   });
-  it('classifies an acknowledged held Fetch release without cancellation diagnostics', () => {
+  it('rejects an acknowledged held Fetch release without cancellation diagnostics', () => {
     expect(classifyHeldFetchRelease({
       heldRequestId: 'held-fetch', matchedRequestId: 'held-fetch',
       releaseOutcome: { ok: true, action: 'fail' },
-    })).toEqual({ ok: true, classification: 'fetch-release-command-acknowledged', issues: [] });
+    }).ok).toBe(false);
   });
   it('updates the exact timeout controller abort observer with the Page session before handleTimeout aborts', () => {
     const ledger = createCancellationLedger();

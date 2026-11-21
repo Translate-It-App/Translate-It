@@ -361,11 +361,11 @@ export function validateStaleSiblingDrain({ siblings, invalidationSequence, inva
     return { ok: false, issues: ['A sibling drain evidence or causal release ordering is unavailable'] };
   }
   for (const sibling of siblings) {
-    const explicitFail = sibling?.releaseAction === 'fail' && sibling?.releaseOutcome?.ok === true;
-    const classifiedCancellation = sibling?.releaseClassification?.ok === true
+    const classifiedCancellation = sibling?.releaseAction === 'fail'
+      && sibling?.releaseClassification?.ok === true
       && sibling.releaseClassification.classification === 'network-loadingFailed-canceled-with-provider-settlement';
     if (sibling?.role !== 'stale-A-sibling' || sibling.invalidationSequence !== invalidationSequence
-        || sibling.controllerAborted !== true || !(explicitFail || classifiedCancellation)
+        || sibling.controllerAborted !== true || !classifiedCancellation
         || sibling.handlerSettled !== true || !Number.isInteger(sibling.settledOrder)
         || sibling.settledOrder <= invalidationOrder || sibling.settledOrder >= aReplyReleaseOrder) {
       issues.push(`A sibling did not abort, fail, and drain before A reply release: ${sibling?.messageId ?? 'unknown'}`);

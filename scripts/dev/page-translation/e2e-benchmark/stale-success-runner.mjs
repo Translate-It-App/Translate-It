@@ -13,6 +13,30 @@ export async function waitForSuccessfulReplyCapture({ snapshot, until }) {
   }, 45_000);
 }
 
+export async function waitForHeldFetchCancellationEvidence({ snapshotWorker, networkEvents, until, sessionId, networkSessionId, messageId, targetId, networkId }) {
+  return until(async () => {
+    const current = await snapshotWorker(sessionId, [messageId], [sessionId]);
+    const root = current.probe.providerRoots.find(item => item.sessionId === sessionId && item.messageId === messageId);
+    const physical = current.probe.ledger.operations.find(item => item.kind === 'provider.physical'
+      && item.sessionId === sessionId && item.messageId === messageId);
+    const abort = current.probe.ledger.operations.find(item => item.kind === 'controller.abort'
+      && item.sessionId === sessionId && item.messageId === messageId);
+    const networkMatches = networkEvents().filter(item => item.sessionId === networkSessionId && item.targetId === targetId
+      && item.params?.requestId === networkId && item.method === 'Network.loadingFailed');
+    if (networkMatches.length > 1 || networkMatches.some(item => item.params?.canceled !== true
+        || item.params?.errorText !== 'net::ERR_ABORTED')) {
+      throw new Error('Custom stale-A sibling has contradictory correlated Network cancellation evidence.');
+    }
+    if (root && root.status !== 'pending' && root.status !== 'rejected'
+        || physical && physical.status !== 'pending' && physical.status !== 'rejected') {
+      throw new Error('Custom stale-A sibling provider work settled without cancellation.');
+    }
+    if (root?.status !== 'rejected' || physical?.status !== 'rejected'
+        || physical.controllerAbortedAtEnd !== true || !abort || !networkMatches.length) return null;
+    return { current, root, physical, abort, networkEvent: networkMatches[0] };
+  }, 5_000);
+}
+
 export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe, helpers }) {
   const { fixtureConfig, originals, originalById } = fixture;
   const { chrome, pageSession, contentContext, evaluate } = page;
@@ -188,15 +212,12 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
       held.record.settledOrder = ++causalOrder;
       held.record.controllerAborted = held.record.controllerAbortedAfterInvalidation?.aborted === true;
       const requestRecord = held.reservation.requestRecord;
-      const current = await snapshotWorker(sessionIdA, [held.batchMessageId], [sessionIdA]);
-      const root = current.probe.providerRoots.find(item => item.sessionId === sessionIdA && item.messageId === held.batchMessageId);
-      const physical = current.probe.ledger.operations.find(item => item.kind === 'provider.physical'
-        && item.sessionId === sessionIdA && item.messageId === held.batchMessageId);
-      const abort = current.probe.ledger.operations.find(item => item.kind === 'controller.abort'
-        && item.sessionId === sessionIdA && item.messageId === held.batchMessageId);
-      const networkEvent = (trial.staleSuccess.networkEvents ?? []).find(item => item.sessionId === held.sessionId
-        && item.targetId === held.targetId && item.params?.requestId === held.networkId
-        && item.method === 'Network.loadingFailed');
+      const { root, physical, abort, networkEvent } = await waitForHeldFetchCancellationEvidence({
+        snapshotWorker,
+        networkEvents: () => trial.staleSuccess.networkEvents ?? [],
+        until, sessionId: sessionIdA, networkSessionId: held.sessionId, messageId: held.batchMessageId,
+        targetId: held.targetId, networkId: held.networkId,
+      });
       const classification = classifyHeldFetchRelease({
         heldRequestId: held.requestId, matchedRequestId: held.reservation.requestId,
         releaseOutcome: held.releaseOutcome, networkCanceled: networkEvent?.params?.canceled === true
@@ -225,14 +246,10 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
       held.record.releaseClassification = classification;
       if (classification.ok) {
         held.reservation.classifyRelease(classification);
-        if (classification.classification !== 'fetch-release-command-acknowledged') {
-          requestRecord.lateCancelledAClassification = classification;
-          requestRecord.lateCancelledA = true;
-          requestRecord.validatedCancellationAttemptId = requestRecord.physicalAttempt?.attemptId ?? null;
-        }
-      } else if (held.releaseOutcome?.error === 'Invalid InterceptionId.') {
-        throw new Error(`Custom stale-A sibling invalid Fetch release was not positively classified: ${classification.issues.join('; ')}`);
-      }
+        requestRecord.lateCancelledAClassification = classification;
+        requestRecord.lateCancelledA = true;
+        requestRecord.validatedCancellationAttemptId = requestRecord.physicalAttempt?.attemptId ?? null;
+      } else throw new Error(`Custom stale-A sibling release was not positively classified${held.releaseOutcome?.error === 'Invalid InterceptionId.' ? ' after Invalid InterceptionId.' : ''}: ${classification.issues.join('; ')}`);
     }
     const siblings = await until(async () => {
       const state = await snapshotWorker(sessionIdA, [capturedMessage.messageId], [sessionIdA]);
@@ -247,6 +264,7 @@ export async function runStaleSuccessProbe({ trial, fixture, page, worker, probe
           invalidationSequence: held.record.invalidationSequence,
           controllerAborted: held.record.controllerAborted,
           releaseAction: held.record.releaseAction,
+          releaseOutcome: held.releaseOutcome,
           releaseClassification: held.record.releaseClassification,
           handlerSettled: held.record.handlerSettled,
           settledOrder: held.record.settledOrder,

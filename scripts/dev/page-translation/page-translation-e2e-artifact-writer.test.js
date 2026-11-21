@@ -8,6 +8,7 @@ import { serializeBenchmarkArtifact, writeBenchmarkArtifact } from './e2e-benchm
 import { validateBuildParity } from './e2e-benchmark/build-environment.mjs';
 import { createCancellationRequestLifecycle, promoteRequestDiagnostics } from './e2e-benchmark/cancellation-probes.mjs';
 import { measureScenarioRuns, summarize, validateRunGate } from './e2e-benchmark/metrics.mjs';
+import { resilienceReproductionCommand } from './e2e-benchmark/resilience-probes.mjs';
 import { providerLaneFinalization, shouldRunProviderPerformanceLane, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
 
 async function runActualFinalization({ failAt = null, cleanupFailure = false, measureFailureAfter = null, trialCleanupErrors = [], trialCleanupReport = null, trialDiagnostics = null, providerLane = null, providerSamples = 4, resilienceProbes = [], resilienceRun = null } = {}) {
@@ -34,6 +35,7 @@ async function runActualFinalization({ failAt = null, cleanupFailure = false, me
     soakMode: false,
     customStaleSuccess: false,
     shouldRunProviderPerformanceLane,
+    resilienceReproductionCommand,
     settings: Object.freeze({
       WHOLE_PAGE_LAZY_LOADING: false,
       WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: false,
@@ -211,7 +213,7 @@ describe('streamed benchmark artifact serialization', () => {
 
   it('finalizes successful resilience probes without performance summaries or comparisons', async () => {
     const resilienceRun = {
-      mode: 'sliced', scenario: 'scroll-through', phase: 'isolated-googlev2-503-resilience',
+      mode: 'sliced', scenario: 'scroll-through', phase: 'isolated-custom-400-resilience',
       status: 'passed', cleanupErrors: [],
       resilience: {
         validation: { ok: true, issues: [] },
@@ -223,10 +225,11 @@ describe('streamed benchmark artifact serialization', () => {
       },
     };
     const { artifact, writes, compiles } = await runActualFinalization({
-      resilienceProbes: ['googlev2-503'], resilienceRun,
+      resilienceProbes: ['custom-400'], resilienceRun,
     });
     expect(artifact.status).toBe('passed');
-    expect(artifact.resilienceProbe).toMatchObject({ requested: 'googlev2-503', status: 'passed' });
+    expect(artifact.command).toContain('BENCH_PROVIDER=custom');
+    expect(artifact.resilienceProbe).toMatchObject({ requested: 'custom-400', status: 'passed' });
     expect(artifact.results[0].resilience.attempts[1]).toMatchObject({
       attemptId: 'resilience-2', status: 200, retryOf: 'resilience-1',
     });

@@ -29,9 +29,10 @@ export function matchProviderPhysicalRoot({ url, body, sessionId, roots }) {
       || new TextEncoder().encode(body).byteLength > 64 * 1024 || !Array.isArray(roots)) return null;
   try {
     const endpoint = new URL(url);
-    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.port || endpoint.search || endpoint.hash) return null;
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.port || endpoint.hash) return null;
     if (endpoint.hostname === CUSTOM_FIXTURE_ENDPOINT.origin.replace(/^https:\/\//, '')
         && endpoint.pathname === CUSTOM_FIXTURE_ENDPOINT.pathname) {
+      if (endpoint.search) return null;
       const payload = JSON.parse(body);
       const users = payload?.messages?.filter(item => item?.role === 'user') ?? [];
       if (!Array.isArray(payload?.messages) || users.length !== 1 || typeof users[0].content !== 'string') return null;
@@ -476,10 +477,12 @@ export function classifyHeldFetchRelease({
   physicalControllerAborted, controllerAbortSequence, providerRootSettledSequence,
   physicalSettledSequence, requireExactCorrelation = false, correlation = null,
 }) {
-  if (releaseOutcome?.ok === true) return { ok: true, classification: 'fetch-release-command-acknowledged', issues: [] };
   const issues = [];
-  if (releaseOutcome?.error !== 'Invalid InterceptionId.') {
+  if (releaseOutcome?.ok !== true && releaseOutcome?.error !== 'Invalid InterceptionId.') {
     issues.push(`unrecognized CDP release error: ${releaseOutcome?.error ?? 'missing raw error'}`);
+  }
+  if (releaseOutcome?.ok === true && (!requireExactCorrelation || networkCanceled !== true)) {
+    issues.push('acknowledged Fetch release lacks exactly correlated canceled Network evidence');
   }
   if (!heldRequestId || matchedRequestId !== heldRequestId) issues.push('CDP release error is not correlated to the held Fetch request ID');
   if (controllerAborted !== true || cancelTargetMatched !== true) issues.push('production cancellation did not abort the matched request controller');

@@ -11,6 +11,12 @@ export function shouldEnableResilienceQueueProbe(probe) {
   return probe === 'googlev2-503' || probe === 'googlev2-timeout' || probe === 'custom-429' || probe === 'custom-400' || probe === 'custom-cancellation' || probe === 'gemini-structured-recovery';
 }
 
+export function resilienceReproductionCommand(probe) {
+  const custom = probe === 'custom-429' || probe === 'custom-400' || probe === 'custom-cancellation';
+  const provider = probe === 'gemini-structured-recovery' ? 'gemini' : custom ? 'custom' : 'googlev2';
+  return `BENCH_RESILIENCE_PROBES=${probe} BENCH_LANE=provider BENCH_PROVIDER=${provider} BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=fluid node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
+}
+
 export function validateResilienceProbeIsolation({ selected, probe, provider, optimizationLevel, modes, scenario, schedulingMode, competingProbe }) {
   if (!selected) return true;
   const custom = probe === 'custom-429' || probe === 'custom-400' || probe === 'custom-cancellation';

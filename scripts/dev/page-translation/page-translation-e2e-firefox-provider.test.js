@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { createEdgeProviderProbe } from './e2e-benchmark/provider-probe.mjs';
 import { mapEdgeResponse } from './e2e-benchmark/metrics.mjs';
 import { targetTexts } from './e2e-benchmark/fixture.mjs';
+import { CUSTOM_FIXTURE_URL } from './e2e-benchmark/custom-fixture.mjs';
 import { matchProviderPhysicalRoot } from './e2e-benchmark/cancellation-probes.mjs';
 
 const authToken = 'ab'.repeat(32);
@@ -61,6 +62,18 @@ describe('provider physical root correlation', () => {
     const result = matchProviderPhysicalRoot({ url: edgeUrl, body, sessionId: 'session-a', roots });
     expect(result).toBe('message-a');
     expect(JSON.stringify(result)).not.toContain(source);
+  });
+
+  it('accepts Edge query parameters but rejects Custom fixture endpoint query parameters', () => {
+    expect(matchProviderPhysicalRoot({ url: edgeUrl, body, sessionId: 'session-a', roots })).toBe('message-a');
+    const customUrl = `${CUSTOM_FIXTURE_URL}?unexpected=1`;
+    const customBody = JSON.stringify({
+      messages: [{ role: 'user', content: JSON.stringify({ translations: [{ id: 'wire-a', text: source }] }) }],
+    });
+    expect(matchProviderPhysicalRoot({
+      url: customUrl, body: customBody, sessionId: 'session-a',
+      roots: [{ sessionId: 'session-a', messageId: 'custom-a', ids: ['wire-a'], texts: [source] }],
+    })).toBeNull();
   });
 
   it.each([

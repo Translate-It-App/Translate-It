@@ -64,6 +64,7 @@ import { PageTranslationScheduler } from '@/features/page-translation/PageTransl
 import { CUSTOM_FIXTURE_URL, mapCustomStaleSuccessResponse } from './e2e-benchmark/custom-fixture.mjs';
 import { classifyHeldFetchRelease, matchProviderPhysicalRoot, selectCustomProviderRoot } from './e2e-benchmark/cancellation-probes.mjs';
 import { isValidatedStaleCancellation, parseCustomStaleSuccessScheduling, selectCustomPhysicalOperation, validateStaleSiblingDrain } from './e2e-benchmark/successful-reply-probes.mjs';
+import { waitForHeldFetchCancellationEvidence } from './e2e-benchmark/stale-success-runner.mjs';
 import { shouldRunProviderPerformanceLane } from './e2e-benchmark/scenario-plan.mjs';
 
 function deferred() {
@@ -774,6 +775,12 @@ describe('successful stale Page reply probe', () => {
     };
     expect(validateStaleSiblingDrain({
       siblings: [sibling], invalidationSequence: 7, invalidationOrder: 8, aReplyReleaseOrder: 10,
+    }).ok).toBe(false);
+    expect(validateStaleSiblingDrain({
+      siblings: [{ ...sibling, releaseClassification: {
+        ok: true, classification: 'network-loadingFailed-canceled-with-provider-settlement',
+      } }],
+      invalidationSequence: 7, invalidationOrder: 8, aReplyReleaseOrder: 10,
     })).toMatchObject({ ok: true, issues: [] });
     expect(validateStaleSiblingDrain({
       siblings: [{ ...sibling, releaseOutcome: { ok: false, error: 'Invalid InterceptionId.' },
@@ -816,6 +823,20 @@ describe('successful stale Page reply probe', () => {
       },
     };
     expect(classifyHeldFetchRelease(evidence).ok).toBe(true);
+    const acknowledged = classifyHeldFetchRelease({ ...evidence, releaseOutcome: { ok: true } });
+    expect(acknowledged).toMatchObject({
+      ok: true, classification: 'network-loadingFailed-canceled-with-provider-settlement', issues: [],
+    });
+    expect(classifyHeldFetchRelease({
+      ...evidence, releaseOutcome: { ok: true }, networkCanceled: false,
+      correlation: { ...evidence.correlation, networkCanceled: false },
+    }).ok).toBe(false);
+    expect(classifyHeldFetchRelease({
+      ...evidence, releaseOutcome: { ok: true }, correlation: { ...evidence.correlation, providerMessageId: 'wrong' },
+    }).ok).toBe(false);
+    expect(classifyHeldFetchRelease({
+      ...evidence, releaseOutcome: { ok: true }, providerRootStatus: 'pending',
+    }).ok).toBe(false);
     expect(classifyHeldFetchRelease({
       ...evidence,
       matchedRequestId: 'unrelated-fetch',
@@ -833,6 +854,48 @@ describe('successful stale Page reply probe', () => {
       lateCancelledA: true,
       lateCancelledAClassification: { ok: true, classification: 'network-loadingFailed-canceled-with-provider-settlement' },
     })).toBe(true);
+  });
+
+  it('waits for correlated Network cancellation and terminal provider settlement before classifying a Fetch release', async () => {
+    let reads = 0;
+    const networkEvents = [];
+    const evidence = await waitForHeldFetchCancellationEvidence({
+      sessionId: 'page-1', networkSessionId: 'cdp-1', messageId: 'message-1', targetId: 'target-1', networkId: 'network-1',
+      networkEvents: () => networkEvents,
+      snapshotWorker: async () => {
+        reads += 1;
+        const settled = reads > 1;
+        if (settled) networkEvents.push({
+          sessionId: 'cdp-1', targetId: 'target-1', method: 'Network.loadingFailed',
+          params: { requestId: 'network-1', canceled: true, errorText: 'net::ERR_ABORTED' },
+        });
+        return { probe: {
+          providerRoots: [{ sessionId: 'page-1', messageId: 'message-1', status: settled ? 'rejected' : 'pending' }],
+          ledger: { operations: [
+            { kind: 'provider.physical', sessionId: 'page-1', messageId: 'message-1',
+              status: settled ? 'rejected' : 'pending', controllerAbortedAtEnd: settled },
+            { kind: 'controller.abort', sessionId: 'page-1', messageId: 'message-1', sequence: 2 },
+          ] },
+        } };
+      },
+      until: async (read) => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const value = await read();
+          if (value) return value;
+        }
+        throw new Error('timed out');
+      },
+    });
+    expect(reads).toBe(2);
+    expect(evidence.networkEvent.params.canceled).toBe(true);
+    expect(evidence.root.status).toBe('rejected');
+    await expect(waitForHeldFetchCancellationEvidence({
+      sessionId: 'page-1', networkSessionId: 'cdp-1', messageId: 'message-1', targetId: 'target-1', networkId: 'network-1',
+      networkEvents: () => [{ sessionId: 'cdp-1', targetId: 'target-1', method: 'Network.loadingFailed',
+        params: { requestId: 'network-1', canceled: false, errorText: 'net::ERR_FAILED' } }],
+      snapshotWorker: async () => ({ probe: { providerRoots: [], ledger: { operations: [] } } }),
+      until: async read => read(),
+    })).rejects.toThrow('contradictory correlated Network cancellation');
   });
 
   it('accepts attributed B writes and explicit Restore while rejecting transient A/unowned values in one observer batch', () => {
