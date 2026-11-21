@@ -34,6 +34,14 @@ export function parseProviderLane(env = {}) {
   if (!provider || !BENCH_PROVIDERS.includes(provider)) throw new TypeError(`Provider lane requires BENCH_PROVIDER to be one of: ${BENCH_PROVIDERS.join(', ')}.`);
   if (!['edge', 'googlev2', 'custom', 'gemini'].includes(provider)) throw new TypeError(`Provider lane adapter "${provider}" is not implemented.`);
   if (!['1', '3', '5'].includes(env.BENCH_OPTIMIZATION_LEVEL)) throw new TypeError('Provider lane requires BENCH_OPTIMIZATION_LEVEL=1, 3, or 5.');
+  if (pageBatchSize !== undefined) {
+    if (!['googlev2', 'custom'].includes(provider)) throw new TypeError('Page batch overrides are supported only for Google V2 or Custom provider performance runs.');
+    if (env.BENCH_OPTIMIZATION_LEVEL !== '3') throw new TypeError('Page batch overrides require BENCH_OPTIMIZATION_LEVEL=3.');
+    if (env.BENCH_SOAK === '1' || ['BENCH_RESILIENCE_PROBES', 'BENCH_CANCELLATION_PROBES', 'BENCH_STALE_SUCCESS_PROBES']
+      .some(key => env[key])) {
+      throw new TypeError('Page batch overrides are supported only for provider performance runs, not soak or correctness probes.');
+    }
+  }
   if (env.BENCH_MODES !== undefined && env.BENCH_MODES !== '' && env.BENCH_MODES.split(',').map(value => value.trim()).some(mode => mode !== 'sliced')) {
     throw new TypeError('Provider lane requires production-default sliced discovery; use BENCH_MODES=sliced or omit BENCH_MODES.');
   }

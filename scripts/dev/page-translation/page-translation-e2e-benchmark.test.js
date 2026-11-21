@@ -1074,8 +1074,27 @@ describe('page translation benchmark measurements', () => {
     expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3' })).toMatchObject({ provider: 'googlev2', optimizationLevel: 3 });
     expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3' }))
       .not.toHaveProperty('pageBatchSize');
-    expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3',
-      BENCH_PAGE_BATCH_SIZE: '10', BENCH_PAGE_WORKERS: '4' })).toMatchObject({ pageBatchSize: 10, pageWorkerCap: 4 });
+    expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'custom', BENCH_OPTIMIZATION_LEVEL: '3',
+      BENCH_STALE_SUCCESS_PROBES: 'custom-stale-success' })).not.toHaveProperty('pageBatchSize');
+    for (const provider of ['googlev2', 'custom']) for (const [pageBatchSize, pageWorkerCap] of [['25', '2'], ['10', '2'], ['25', '4'], ['10', '4']]) {
+      expect(parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: provider, BENCH_OPTIMIZATION_LEVEL: '3',
+        BENCH_PAGE_BATCH_SIZE: pageBatchSize, BENCH_PAGE_WORKERS: pageWorkerCap })).toMatchObject({
+        provider, optimizationLevel: 3, pageBatchSize: Number(pageBatchSize), pageWorkerCap: Number(pageWorkerCap),
+      });
+    }
+    for (const provider of ['edge', 'gemini']) {
+      expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: provider, BENCH_OPTIMIZATION_LEVEL: '3',
+        BENCH_PAGE_BATCH_SIZE: '10', BENCH_PAGE_WORKERS: '2' })).toThrow('Google V2 or Custom');
+    }
+    for (const optimizationLevel of ['1', '5']) {
+      expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: optimizationLevel,
+        BENCH_PAGE_BATCH_SIZE: '10', BENCH_PAGE_WORKERS: '2' })).toThrow('BENCH_OPTIMIZATION_LEVEL=3');
+    }
+    for (const key of ['BENCH_RESILIENCE_PROBES', 'BENCH_CANCELLATION_PROBES', 'BENCH_STALE_SUCCESS_PROBES', 'BENCH_SOAK']) {
+      expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'custom', BENCH_OPTIMIZATION_LEVEL: '3',
+        BENCH_PAGE_BATCH_SIZE: '10', BENCH_PAGE_WORKERS: '2', [key]: key === 'BENCH_SOAK' ? '1' : 'custom-probe' }))
+        .toThrow('provider performance runs');
+    }
     expect(() => parseProviderLane({ BENCH_LANE: 'provider', BENCH_PROVIDER: 'googlev2', BENCH_OPTIMIZATION_LEVEL: '3',
       BENCH_PAGE_BATCH_SIZE: '10' })).toThrow('provided together');
     for (const [key, value] of [['BENCH_PAGE_BATCH_SIZE', '11'], ['BENCH_PAGE_WORKERS', '3']]) {
