@@ -153,6 +153,18 @@ describe('Sliced discovery cancellation probe evidence', () => {
     expect(classifyHeldFetchRelease({ ...evidence, releaseOutcome: { ok: false, error: 'Target closed.' } }).ok).toBe(false);
     expect(classifyHeldFetchRelease({ ...evidence, releaseOutcome: { ok: false, error: 'Invalid InterceptionId.' }, matchedRequestId: 'fetch-B' }).classification)
       .toBe('unclassified-cdp-release-error');
+    const acknowledged = { ...evidence, releaseOutcome: { ok: true }, networkCanceled: true };
+    expect(classifyHeldFetchRelease(acknowledged)).toMatchObject({
+      ok: true, classification: 'network-loadingFailed-canceled-with-provider-settlement',
+    });
+    for (const override of [
+      { networkCanceled: false }, { networkCanceled: undefined }, { heldRequestId: 'fetch-A', matchedRequestId: 'fetch-B' },
+      { controllerAborted: false }, { cancelTargetMatched: false }, { physicalControllerAborted: false },
+      { providerRootStatus: 'pending' }, { physicalStatus: 'pending' },
+      { providerRootSettledSequence: 4 }, { physicalSettledSequence: 4 },
+    ]) {
+      expect(classifyHeldFetchRelease({ ...acknowledged, ...override }).ok).toBe(false);
+    }
   });
 
   it('closes Fetch admission before sweeping and drains handlers admitted during that close barrier', async () => {

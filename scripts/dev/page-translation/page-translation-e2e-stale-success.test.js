@@ -847,8 +847,11 @@ describe('successful stale Page reply probe', () => {
       correlation: { ...evidence.correlation, networkCanceled: false },
     }).ok).toBe(false);
     expect(classifyHeldFetchRelease({
-      ...evidence, requireExactCorrelation: false, networkCanceled: false,
+      ...evidence, requireExactCorrelation: false, networkCanceled: true,
     }).ok).toBe(true);
+    expect(classifyHeldFetchRelease({
+      ...evidence, requireExactCorrelation: false, releaseOutcome: { ok: true }, networkCanceled: false,
+    }).ok).toBe(false);
     expect(isValidatedStaleCancellation({ lateCancelledA: true })).toBe(false);
     expect(isValidatedStaleCancellation({
       lateCancelledA: true,

@@ -6,7 +6,7 @@ import { decodeGoogleV2Request, GOOGLE_V2_DELIMITER, mapGoogleV2Response } from 
 import { CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL, decodeCustomRequest, mapCustomResponse } from './e2e-benchmark/custom-fixture.mjs';
 import { decodeGeminiRequest, GEMINI_FIXTURE_KEY, GEMINI_FIXTURE_MODEL, GEMINI_FIXTURE_URL, isMappedGeminiResponse, mapGeminiResponse, mapMalformedGeminiResponse } from './e2e-benchmark/gemini-fixture.mjs';
 import { createFixture, startupVoicesEndpoint, startupVoicesResponse, targetTexts } from './e2e-benchmark/fixture.mjs';
-import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
+import { deriveScrollAcceptanceLatency, deriveScrollAggregateMetrics, isProviderWorkloadTrial, observedPageWorkerLimit, pageTranslationStartMessage, parseProviderLane, parseScenarioSelection, providerLaneFinalization, providerLaneSettings, providerPerformanceCommand, settingsForScenario, shadowInitialTranslationReadiness, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, validateScrollThroughEvidence, validateScrollThroughObservations, validateScrollThroughStages, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './e2e-benchmark/scenario-plan.mjs';
 import { orderedAcceptedTargetIds, validateAcceptedMutationAccounting } from './e2e-benchmark/provider-probe-content.mjs';
 import { classifyHeldFetchRelease, createCancellationLedger, createCancellationRequestLifecycle, ensureCancellationAbortObserver, installCancellationRuntimeMessageObserver } from './e2e-benchmark/cancellation-probes.mjs';
 import { cleanupMeasurementBeforeResources, registerThenInsertCohort, trackCohortAcceptedTarget } from './e2e-benchmark/measurement-lifecycle.mjs';
@@ -1101,6 +1101,22 @@ describe('page translation benchmark measurements', () => {
       GEMINI_API_URL: GEMINI_FIXTURE_URL, GEMINI_API_KEY: GEMINI_FIXTURE_KEY,
       GEMINI_MODEL: GEMINI_FIXTURE_MODEL, GEMINI_MODEL_SOURCE: 'legacy', WHOLE_PAGE_TOKEN_WARNING_HIDDEN: true,
     });
+  });
+
+  it('generates provider reproduction commands with the selected workload and run counts', () => {
+    for (const provider of ['googlev2', 'custom', 'gemini']) {
+      expect(providerPerformanceCommand({
+        provider, optimizationLevel: 3, scenarios: ['scroll-through'],
+        scrollSchedulingMode: 'on-stop', samples: 7, warmups: 2,
+      })).toBe(`BENCH_LANE=provider BENCH_PROVIDER=${provider} BENCH_OPTIMIZATION_LEVEL=3 BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=on-stop BENCH_SAMPLES=7 BENCH_WARMUPS=2 node scripts/dev/page-translation/e2e-benchmark/run.mjs`);
+    }
+    const edge = providerPerformanceCommand({
+      provider: 'edge', optimizationLevel: 5, scenarios: ['small', 'dynamic-dom'],
+      scrollSchedulingMode: null, samples: 4, warmups: 1,
+    });
+    expect(edge).toContain('BENCH_SCENARIOS=small,dynamic-dom');
+    expect(edge).toContain('BENCH_SAMPLES=4 BENCH_WARMUPS=1');
+    expect(edge).not.toContain('BENCH_SCROLL_SCHEDULING');
   });
 
   it('strictly decodes Gemini REST requests and returns reversed ID-preserving candidate text', () => {

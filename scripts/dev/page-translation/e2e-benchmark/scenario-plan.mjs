@@ -30,6 +30,10 @@ export function shouldRunProviderPerformanceLane(providerLane, customStaleSucces
   return !!providerLane && customStaleSuccess !== true;
 }
 
+export function providerPerformanceCommand({ provider, optimizationLevel, scenarios, scrollSchedulingMode, samples, warmups }) {
+  return `BENCH_LANE=provider BENCH_PROVIDER=${provider} BENCH_OPTIMIZATION_LEVEL=${optimizationLevel} BENCH_MODES=sliced BENCH_SCENARIOS=${scenarios.join(',')}${scenarios.includes('scroll-through') && scrollSchedulingMode ? ` BENCH_SCROLL_SCHEDULING=${scrollSchedulingMode}` : ''} BENCH_SAMPLES=${samples} BENCH_WARMUPS=${warmups} node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
+}
+
 export function providerLaneSettings(settings, { provider, optimizationLevel }) {
   return Object.freeze({ ...settings, TRANSLATION_API: provider, PROVIDER_OPTIMIZATION_LEVELS: { [provider]: optimizationLevel },
       ...(provider === 'custom' ? { CUSTOM_API_URL: CUSTOM_FIXTURE_URL, CUSTOM_API_KEY: '', CUSTOM_API_MODEL: CUSTOM_FIXTURE_MODEL,

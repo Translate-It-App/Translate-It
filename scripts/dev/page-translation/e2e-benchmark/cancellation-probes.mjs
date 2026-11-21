@@ -481,8 +481,8 @@ export function classifyHeldFetchRelease({
   if (releaseOutcome?.ok !== true && releaseOutcome?.error !== 'Invalid InterceptionId.') {
     issues.push(`unrecognized CDP release error: ${releaseOutcome?.error ?? 'missing raw error'}`);
   }
-  if (releaseOutcome?.ok === true && (!requireExactCorrelation || networkCanceled !== true)) {
-    issues.push('acknowledged Fetch release lacks exactly correlated canceled Network evidence');
+  if (releaseOutcome?.ok === true && networkCanceled !== true) {
+    issues.push('acknowledged Fetch release lacks canceled Network evidence');
   }
   if (!heldRequestId || matchedRequestId !== heldRequestId) issues.push('CDP release error is not correlated to the held Fetch request ID');
   if (controllerAborted !== true || cancelTargetMatched !== true) issues.push('production cancellation did not abort the matched request controller');

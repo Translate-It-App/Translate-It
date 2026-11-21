@@ -10,7 +10,7 @@ import { validateBuildParity, validateSuccessfulReplyBuildParity } from './build
 import { writeBenchmarkArtifact } from './artifact-writer.mjs';
 import { longTasksWithinInterval, summarize, summarizeIntervals, summarizeLongTasks, validateRunGate, measureScenarioRuns } from './metrics.mjs';
 import { createFixture } from './fixture.mjs';
-import { modeOrder, parseProviderLane, providerLaneFinalization, parseScenarioSelection, parseScrollSchedulingMode, shouldRunProviderPerformanceLane, validateSampleCount, usesBandedProviderScroll } from './scenario-plan.mjs';
+import { modeOrder, parseProviderLane, providerLaneFinalization, parseScenarioSelection, parseScrollSchedulingMode, providerPerformanceCommand, shouldRunProviderPerformanceLane, validateSampleCount, usesBandedProviderScroll } from './scenario-plan.mjs';
 import { parseCancellationProbeSelection } from './cancellation-probes.mjs';
 import { parseCustomStaleSuccessScheduling, parseSuccessfulReplyProbeSelection } from './successful-reply-probes.mjs';
 import { parseResilienceProbeSelection, resilienceReproductionCommand, validateResilienceProbeIsolation } from './resilience-probes.mjs';
@@ -587,7 +587,10 @@ try {
     if (run.status !== 'passed') throw new Error(run.error?.message ?? `${probe} resilience probe failed.`);
     harness.status = 'passed';
   } else if (shouldRunProviderPerformanceLane(providerLane, customStaleSuccess)) {
-    harness.command = `BENCH_LANE=provider BENCH_PROVIDER=${providerLane.provider} BENCH_OPTIMIZATION_LEVEL=${providerLane.optimizationLevel} BENCH_MODES=sliced node scripts/dev/page-translation/e2e-benchmark/run.mjs`;
+    harness.command = providerPerformanceCommand({
+      provider: providerLane.provider, optimizationLevel: providerLane.optimizationLevel,
+      scenarios, scrollSchedulingMode, samples, warmups,
+    });
     harness.warmups = warmups;
     harness.measuredSamples = samples;
     harness.executionPlan = {
