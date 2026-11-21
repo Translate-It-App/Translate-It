@@ -3,35 +3,55 @@ import { CUSTOM_FIXTURE_ENDPOINT } from './custom-fixture.mjs';
 
 export const cancellationProbeNames = Object.freeze(['stop', 'restore', 'replacement']);
 
-export function selectCustomProviderRoot({ roots, wireIds, texts }) {
-  if (!Array.isArray(roots) || !Array.isArray(wireIds) || !wireIds.length
-      || !Array.isArray(texts) || wireIds.length !== texts.length) {
+export function selectCustomProviderRoot({ roots, operations, wireIds, texts, url, method }) {
+  if (!Array.isArray(roots) || !Array.isArray(operations) || !Array.isArray(wireIds) || !wireIds.length
+      || !Array.isArray(texts) || wireIds.length !== texts.length
+      || new Set(wireIds).size !== wireIds.length || wireIds.some(id => typeof id !== 'string' || !id)
+      || texts.some(text => typeof text !== 'string' || !text)
+      || typeof url !== 'string' || !url || typeof method !== 'string' || !method) {
     return { root: null, matches: [], issues: ['Custom provider root identity is malformed'] };
   }
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-  const sameTexts = roots.filter(root => {
-    const rootTexts = root?.texts ?? root?.operation?.texts;
-    return Array.isArray(rootTexts) && same(rootTexts, texts);
+  const exactPhysical = operations.filter(operation => {
+    if (operation?.kind !== 'provider.physical' || operation.url !== url || operation.method !== method
+        || typeof operation.requestBody !== 'string') return false;
+    try {
+      const payload = JSON.parse(operation.requestBody);
+      const users = payload?.messages?.filter(item => item?.role === 'user') ?? [];
+      if (users.length !== 1 || typeof users[0].content !== 'string') return false;
+      const request = JSON.parse(users[0].content);
+      const translations = request?.translations;
+      return Object.keys(request ?? {}).length === 1 && Array.isArray(translations)
+        && same(translations.map(item => item?.id), wireIds)
+        && same(translations.map(item => item?.text), texts);
+    } catch { return false; }
   });
-  const candidates = roots.filter(root => {
+  const pending = exactPhysical.filter(operation => operation.status === 'pending');
+  const settled = exactPhysical.filter(operation => ['fulfilled', 'rejected'].includes(operation.status));
+  const invalid = exactPhysical.some(operation => typeof operation.sessionId !== 'string' || !operation.sessionId
+    || typeof operation.messageId !== 'string' || !operation.messageId
+    || !['pending', 'fulfilled', 'rejected'].includes(operation.status));
+  const physical = !invalid && pending.length === 1 ? pending
+    : !invalid && pending.length === 0 && settled.length === 1 ? settled : [];
+  const sameOwnerTexts = physical.length === 1 ? roots.filter(root => {
     const rootTexts = root?.texts ?? root?.operation?.texts;
-    const rootIds = root?.ids ?? root?.wireIds ?? root?.operation?.ids ?? root?.operation?.wireIds;
-    return typeof root?.sessionId === 'string' && root.sessionId
-      && typeof root.messageId === 'string' && root.messageId
-      && typeof root.status === 'string'
-      && Array.isArray(rootTexts) && same(rootTexts, texts)
-      && Array.isArray(rootIds) && same(rootIds, wireIds);
-  });
+    return root?.sessionId === physical[0].sessionId && Array.isArray(rootTexts) && same(rootTexts, texts);
+  }) : [];
+  const candidates = sameOwnerTexts.filter(root => root.messageId === physical[0]?.messageId
+    && typeof root?.status === 'string');
   const selectable = candidates.filter(root => (root.status === 'pending' && root.controllerAborted === false)
     || root.controllerAborted === true || ['fulfilled', 'rejected'].includes(root.status));
-  const incompleteIdentity = sameTexts.some(root => typeof root?.sessionId !== 'string' || !root.sessionId
-    || typeof root.messageId !== 'string' || !root.messageId
-    || !Array.isArray(root?.ids ?? root?.wireIds ?? root?.operation?.ids ?? root?.operation?.wireIds));
   return {
-    root: !incompleteIdentity && candidates.length === 1 && selectable.length === 1 ? selectable[0] : null,
-    matches: candidates,
-    issues: !incompleteIdentity && candidates.length === 1 && selectable.length === 1 ? [] : [`Custom provider root match count ${candidates.length}`],
+    root: physical.length === 1 && sameOwnerTexts.length === 1 && candidates.length === 1 && selectable.length === 1 ? selectable[0] : null,
+    matches: sameOwnerTexts,
+    issues: invalid ? ['Custom physical operation identity or lifecycle status is invalid']
+      : physical.length !== 1 ? [`Custom physical operation match count ${pending.length || settled.length}`]
+      : sameOwnerTexts.length === 1 && candidates.length === 1 && selectable.length === 1 ? [] : [`Custom provider root match count ${sameOwnerTexts.length}`],
   };
+}
+
+export function resolveCustomProviderRoot(selection, fallbackRoots) {
+  return selection ? selection.root : fallbackRoots.length === 1 ? fallbackRoots[0] : null;
 }
 
 export function matchProviderPhysicalRoot({ url, body, sessionId, roots }) {
@@ -52,16 +72,12 @@ export function matchProviderPhysicalRoot({ url, body, sessionId, roots }) {
           || translations.some(item => !item || typeof item.id !== 'string' || !item.id
             || typeof item.text !== 'string' || !item.text)
           || new Set(translations.map(item => item.id)).size !== translations.length) return null;
-      const ids = translations.map(item => item.id);
       const texts = translations.map(item => item.text);
       const matches = roots.filter(root => {
         const rootTexts = root?.texts ?? root?.operation?.texts;
-        const rootIds = root?.ids ?? root?.wireIds ?? root?.operation?.ids ?? root?.operation?.wireIds;
         return root?.sessionId === sessionId && typeof root.messageId === 'string'
           && Array.isArray(rootTexts) && rootTexts.length === texts.length
-          && rootTexts.every((text, index) => text === texts[index])
-          && (rootIds === undefined || Array.isArray(rootIds) && rootIds.length === ids.length
-            && rootIds.every((id, index) => id === ids[index]));
+          && rootTexts.every((text, index) => text === texts[index]);
       });
       return matches.length === 1 ? matches[0].messageId : null;
     }

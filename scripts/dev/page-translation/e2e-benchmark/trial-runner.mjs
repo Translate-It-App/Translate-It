@@ -8,7 +8,7 @@ import { isMappedGeminiResponse, mapMalformedGeminiResponse } from './gemini-fix
 import { createFixture, startFixture, startupVoicesResponse } from './fixture.mjs';
 import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, findFinalTranslationTerminal, summarizeAcceptanceTimes } from './measurement-lifecycle.mjs';
 import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, mapProviderBatchIds, providerLaneSettings, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
-import { classifyHeldFetchRelease, promoteRequestDiagnostics, selectCustomProviderRoot } from './cancellation-probes.mjs';
+import { classifyHeldFetchRelease, promoteRequestDiagnostics, resolveCustomProviderRoot, selectCustomProviderRoot } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, selectCustomPhysicalOperation, validateRawDOMMutationEvidence, validateRuntimeResources } from './successful-reply-probes.mjs';
 import { isCustom400ProbeWindowRequest, partitionBandAcceptance, shouldEnableResilienceQueueProbe, validateCustom400QueueEvidence, validateGeminiQueueAttemptEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting } from './resilience-probes.mjs';
 import { createProviderNetworkObserver, createNetworkRequestLifecycle, createHandlerJobTracker, createFetchRequestListener, createCustomFetchSettlement, createNetworkSessionState, registerGuardedSession, closeNetworkRequestLifecycle, createNetworkCleanupSteps, enableFetchGuard, enableProviderNetworkObservation, fulfillPausedFetch, failPausedFetch, continuePausedFetch, runNetworkGuardNegativeProbe, classifyPausedRequest, decodeProviderRequest } from './network-interception.mjs';
@@ -369,8 +369,11 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
           const customRootSelection = providerLane?.provider === 'custom'
             ? selectCustomProviderRoot({
               roots: workerState?.providerRoots,
+              operations: workerState?.ledger?.operations,
               wireIds: requestRecord.batchIds,
               texts: requestRecord.batchTexts,
+              url: requestRecord.url,
+              method: requestRecord.method,
             })
             : null;
           const matchingRoots = providerLane?.provider === 'custom'
@@ -378,7 +381,9 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
             : workerState?.providerRoots?.filter(candidate => sameProviderTexts(candidate.texts, body)) ?? [];
           const activeRoots = matchingRoots.filter(candidate => candidate.status === 'pending' && candidate.controllerAborted === false);
           const roots = customRootSelection ? customRootSelection.matches : activeRoots.length ? activeRoots : matchingRoots;
-          const root = customRootSelection?.root ?? (roots.length === 1 ? roots[0] : null);
+          const root = providerLane?.provider === 'custom'
+            ? resolveCustomProviderRoot(customRootSelection, roots)
+            : roots.length === 1 ? roots[0] : null;
           if (staleSuccessProbe && !root) throw new Error(`Cannot map provider response to exactly one real Page root (matches=${roots.length}).`);
           const customPhysical = providerLane?.provider === 'custom' && root
             ? selectCustomPhysicalOperation({

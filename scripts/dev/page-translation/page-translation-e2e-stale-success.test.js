@@ -39,7 +39,10 @@ vi.mock('webextension-polyfill', () => ({
 vi.mock('@/core/extensionContext.js', () => ({
   default: { safeSendMessage: vi.fn(), isValidSync: vi.fn(() => true), isContextError: vi.fn(() => false), handleContextError: vi.fn() },
 }));
-vi.mock('@/features/translation/core/ProviderConfigurations.js', () => ({ getProviderConfiguration: vi.fn(() => ({})) }));
+vi.mock('@/features/translation/core/ProviderConfigurations.js', async importOriginal => ({
+  ...await importOriginal(),
+  getProviderConfiguration: vi.fn(() => ({})),
+}));
 vi.mock('@/features/page-translation/utils/PageTranslationQueueFilter.js', () => ({ PageTranslationQueueFilter: { process: vi.fn() } }));
 vi.mock('@/features/page-translation/utils/PageTranslationFluidFilter.js', () => ({ PageTranslationFluidFilter: { process: vi.fn() } }));
 vi.mock('@/features/page-translation/PageTranslationHelper.js', () => ({
@@ -59,10 +62,23 @@ vi.mock('@/config.js', () => ({
   getWholePageMaxCharsAsync: vi.fn(async () => 50_000),
   getWholePageAiMaxCharsAsync: vi.fn(async () => 50_000),
 }));
+vi.mock('@/shared/config/config.js', async importOriginal => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    getAIConversationHistoryEnabledAsync: vi.fn(async () => false),
+    getAIContextTranslationEnabledAsync: vi.fn(async () => false),
+    getPromptBASEAIBatchAsync: vi.fn(async () => 'Translate $_{COUNT} items. $_{TEXT}'),
+    getPromptAsync: vi.fn(async () => 'Translate from $_{SOURCE} to $_{TARGET}.'),
+  };
+});
 
 import { PageTranslationScheduler } from '@/features/page-translation/PageTranslationScheduler.js';
+import { OptimizedJsonHandler } from '@/features/translation/core/managers/OptimizedJsonHandler.js';
+import { AIConversationHelper } from '@/features/translation/providers/utils/AIConversationHelper.js';
+import { TranslationMode } from '@/shared/config/config.js';
 import { CUSTOM_FIXTURE_URL, mapCustomStaleSuccessResponse } from './e2e-benchmark/custom-fixture.mjs';
-import { classifyHeldFetchRelease, matchProviderPhysicalRoot, selectCustomProviderRoot } from './e2e-benchmark/cancellation-probes.mjs';
+import { classifyHeldFetchRelease, matchProviderPhysicalRoot, resolveCustomProviderRoot, selectCustomProviderRoot } from './e2e-benchmark/cancellation-probes.mjs';
 import { isValidatedStaleCancellation, parseCustomStaleSuccessScheduling, selectCustomPhysicalOperation, validateStaleSiblingDrain } from './e2e-benchmark/successful-reply-probes.mjs';
 import { waitForHeldFetchCancellationEvidence } from './e2e-benchmark/stale-success-runner.mjs';
 import { shouldRunProviderPerformanceLane } from './e2e-benchmark/scenario-plan.mjs';
@@ -76,6 +92,57 @@ function deferred() {
 }
 
 describe('successful stale Page reply probe', () => {
+  it('correlates the real Page batch conversion to AI-generated positional Custom wire IDs', async () => {
+    const pageItems = [{ id: 'page-item-41', t: 'first source' }, { id: 'page-item-92', t: 'second source' }];
+    let texts;
+    let options;
+    const provider = {
+      constructor: { batchStrategy: 'json', isAI: true },
+      async translate(input, _source, _target, passedOptions) {
+        texts = input;
+        options = passedOptions;
+        return input;
+      },
+    };
+    await OptimizedJsonHandler.prototype._performBatchCall.call(
+      {}, provider, pageItems, 'en', 'fr', TranslationMode.Page, undefined,
+      'page-message-1', 'page-session-1', {}, null, null, null, null, false, null, null, false,
+    );
+
+    expect(texts).toEqual(['first source', 'second source']);
+    expect(options).toMatchObject({ messageId: 'page-message-1', sessionId: 'page-session-1' });
+    const prepared = await AIConversationHelper.preparePromptAndText(
+      texts, 'en', 'fr', TranslationMode.Page, 'ai', options.sessionId,
+    );
+    const conversation = await AIConversationHelper.getConversationMessages(
+      options.sessionId, 'Custom', prepared.userText, prepared.systemPrompt, TranslationMode.Page,
+      { conversationParticipates: false },
+    );
+    const emittedBody = JSON.stringify({ messages: conversation.messages });
+    const request = JSON.parse(conversation.messages.find(message => message.role === 'user').content);
+    expect(request.translations).toEqual([
+      { id: '0', text: 'first source' },
+      { id: '1', text: 'second source' },
+    ]);
+    const root = {
+      sessionId: options.sessionId, messageId: options.messageId,
+      ids: pageItems.map(item => item.id), texts,
+      status: 'pending', controllerAborted: false,
+    };
+    const physical = {
+      kind: 'provider.physical', sessionId: options.sessionId, messageId: options.messageId,
+      url: CUSTOM_FIXTURE_URL, method: 'POST', status: 'pending', requestBody: emittedBody,
+    };
+    expect(selectCustomProviderRoot({
+      roots: [root], operations: [physical], wireIds: ['0', '1'], texts,
+      url: CUSTOM_FIXTURE_URL, method: 'POST',
+    }).root).toBe(root);
+    expect(selectCustomPhysicalOperation({
+      operations: [physical], sessionId: options.sessionId, messageId: options.messageId,
+      wireIds: ['0', '1'], texts,
+    }).ok).toBe(true);
+  });
+
   it('parses only explicit isolated stale-success cases', () => {
     expect(parseSuccessfulReplyProbeSelection()).toEqual([]);
     expect(parseSuccessfulReplyProbeSelection('replacement,stop,restore,custom-stale-success')).toEqual(['replacement', 'stop', 'restore', 'custom-stale-success']);
@@ -721,8 +788,8 @@ describe('successful stale Page reply probe', () => {
       messages: [{ role: 'user', content: JSON.stringify({ translations: [{ id, text: 'same source' }] }) }],
     });
     const operations = [
-      { kind: 'provider.physical', sessionId: 'A', messageId: 'm-A', requestBody: requestBody('wire-A') },
-      { kind: 'provider.physical', sessionId: 'B', messageId: 'm-B', requestBody: requestBody('wire-B') },
+      { kind: 'provider.physical', sessionId: 'A', messageId: 'm-A', status: 'pending', requestBody: requestBody('wire-A') },
+      { kind: 'provider.physical', sessionId: 'B', messageId: 'm-B', status: 'pending', requestBody: requestBody('wire-B') },
     ];
     const selectedA = selectCustomPhysicalOperation({
       operations, sessionId: 'A', messageId: 'm-A', wireIds: ['wire-A'], texts: ['same source'],
@@ -752,20 +819,25 @@ describe('successful stale Page reply probe', () => {
       sessionId: pageOwnerId, messageId: 'batch-A', ids: ['wire-A'], texts: ['source'],
       status: 'pending', controllerAborted: false,
     };
-    const selected = selectCustomProviderRoot({ roots: [root], wireIds: ['wire-A'], texts: ['source'] });
+    const operations = [{ kind: 'provider.physical', sessionId: pageOwnerId, messageId: 'batch-A',
+      url: CUSTOM_FIXTURE_URL, method: 'POST', status: 'pending',
+      requestBody: JSON.stringify({ messages: [{ role: 'user', content: '{"translations":[{"id":"wire-A","text":"source"}]}' }] }) }];
+    const selected = selectCustomProviderRoot({
+      roots: [root], operations, wireIds: ['wire-A'], texts: ['source'], url: CUSTOM_FIXTURE_URL, method: 'POST',
+    });
     expect(cdpSessionId).not.toBe(selected.root.sessionId);
     expect(selected.root).toBe(root);
     const operation = selectCustomPhysicalOperation({
-      operations: [{ kind: 'provider.physical', sessionId: pageOwnerId, messageId: 'batch-A',
-        requestBody: JSON.stringify({ messages: [{ role: 'user', content: '{"translations":[{"id":"wire-A","text":"source"}]}' }] }) }],
+       operations,
       sessionId: selected.root.sessionId, messageId: selected.root.messageId,
       wireIds: ['wire-A'], texts: ['source'],
     });
     expect(operation.ok).toBe(true);
     expect(selectCustomProviderRoot({
       roots: [root, { ...root, sessionId: 'page-owner-B', messageId: 'batch-B' }],
+      operations, url: CUSTOM_FIXTURE_URL, method: 'POST',
       wireIds: ['wire-A'], texts: ['source'],
-    }).root).toBeNull();
+    }).root).toBe(root);
   });
 
   it('selects only uniquely owned exact Custom roots, including already-aborted or settled siblings', () => {
@@ -773,40 +845,77 @@ describe('successful stale Page reply probe', () => {
       sessionId: 'page-owner-A', messageId: 'batch-A', ids: ['wire-A'], texts: ['source'],
       status: 'pending', controllerAborted: true,
     };
-    expect(selectCustomProviderRoot({ roots: [root], wireIds: ['wire-A'], texts: ['source'] })).toMatchObject({
+    const operations = [{ kind: 'provider.physical', sessionId: root.sessionId, messageId: root.messageId,
+      url: CUSTOM_FIXTURE_URL, method: 'POST', status: 'pending',
+      requestBody: JSON.stringify({ messages: [{ role: 'user', content: '{"translations":[{"id":"wire-A","text":"source"}]}' }] }) }];
+    const select = (roots, ops = operations, url = CUSTOM_FIXTURE_URL, method = 'POST') =>
+      selectCustomProviderRoot({ roots, operations: ops, wireIds: ['wire-A'], texts: ['source'], url, method });
+    expect(select([root])).toMatchObject({
       root, matches: [root], issues: [],
     });
     const settled = { ...root, status: 'rejected', controllerAborted: false };
-    expect(selectCustomProviderRoot({ roots: [settled], wireIds: ['wire-A'], texts: ['source'] }).root).toBe(settled);
+    expect(select([settled]).root).toBe(settled);
     for (const cancelledRoot of [root, settled]) {
-      const selected = selectCustomProviderRoot({
-        roots: [cancelledRoot], wireIds: ['wire-A'], texts: ['source'],
-      }).root;
+      const selected = select([cancelledRoot]).root;
       expect(classifyStaleSuccessProviderOwner({
         sessionId: selected.sessionId, initialSessionId: 'page-owner-A', replacementSessionId: 'page-owner-B',
         trustedStartAccepted: false, currentOwnerSessionId: 'page-owner-B', currentOwnerContextOwned: true,
         initialSessionInvalidated: true,
       })).toMatchObject({ ok: true, role: 'cancelled-A-sibling', waitForControllerAbort: true });
     }
+    expect(select([{ ...settled, controllerAborted: null }]).root).toMatchObject({ status: 'rejected' });
+    expect(select([{ ...settled, status: 'unknown' }]).root).toBeNull();
+    expect(select([{ ...root, ids: undefined }]).root).toMatchObject({ sessionId: root.sessionId });
+    expect(select([{ ...root, ids: ['page-item-id-not-wire-id'] }]).root).toMatchObject({ sessionId: root.sessionId });
+    expect(select([root, { ...root, sessionId: 'page-owner-B', messageId: 'batch-B' }]).root).toBe(root);
+    expect(select([root, { ...root, messageId: 'duplicate-same-session' }]).root).toBeNull();
+    expect(select([{ ...root, sessionId: '' }]).root).toBeNull();
+    expect(select([root], [...operations, { ...operations[0], sessionId: 'page-owner-B', messageId: 'batch-B' }]).root).toBeNull();
+    expect(select([root], [{ ...operations[0], messageId: null }]).root).toBeNull();
+    expect(select([root], [{ ...operations[0], requestBody: '{"translations":[]}' }]).root).toBeNull();
+    expect(select([root], [{ ...operations[0], method: 'GET' }]).root).toBeNull();
+    expect(select([root], operations, 'https://other.invalid/chat', 'POST').root).toBeNull();
     expect(selectCustomProviderRoot({
-      roots: [{ ...settled, controllerAborted: null }], wireIds: ['wire-A'], texts: ['source'],
-    }).root).toMatchObject({ status: 'rejected' });
-    expect(selectCustomProviderRoot({
-      roots: [{ ...settled, status: 'unknown' }], wireIds: ['wire-A'], texts: ['source'],
+      roots: [root], operations, wireIds: ['wire-A', 'wire-A'], texts: ['source', 'source'],
+      url: CUSTOM_FIXTURE_URL, method: 'POST',
     }).root).toBeNull();
-    expect(selectCustomProviderRoot({
-      roots: [{ ...root, ids: undefined }], wireIds: ['wire-A'], texts: ['source'],
-    }).root).toBeNull();
-    expect(selectCustomProviderRoot({
-      roots: [{ ...root, ids: ['wire-other'] }], wireIds: ['wire-A'], texts: ['source'],
-    }).root).toBeNull();
-    expect(selectCustomProviderRoot({
-      roots: [root, { ...root, sessionId: 'page-owner-B', messageId: 'batch-B' }],
-      wireIds: ['wire-A'], texts: ['source'],
-    })).toMatchObject({ root: null, matches: [root, expect.any(Object)] });
-    expect(selectCustomProviderRoot({
-      roots: [{ ...root, sessionId: '' }], wireIds: ['wire-A'], texts: ['source'],
-    }).root).toBeNull();
+  });
+
+  it('selects the unique pending exact Custom operation and fails closed on ambiguity', () => {
+    const rootA = {
+      sessionId: 'owner-A', messageId: 'batch-A', texts: ['same source'],
+      status: 'rejected', controllerAborted: true,
+    };
+    const rootB = {
+      sessionId: 'owner-B', messageId: 'batch-B', texts: ['same source'],
+      status: 'pending', controllerAborted: false,
+    };
+    const operation = (sessionId, messageId, status) => ({
+      kind: 'provider.physical', sessionId, messageId, status,
+      url: CUSTOM_FIXTURE_URL, method: 'POST',
+      requestBody: JSON.stringify({ messages: [{ role: 'user', content: '{"translations":[{"id":"wire-1","text":"same source"}]}' }] }),
+    });
+    const select = (roots, operations) => selectCustomProviderRoot({
+      roots, operations, wireIds: ['wire-1'], texts: ['same source'], url: CUSTOM_FIXTURE_URL, method: 'POST',
+    });
+    const historicalA = operation(rootA.sessionId, rootA.messageId, 'rejected');
+    const pendingB = operation(rootB.sessionId, rootB.messageId, 'pending');
+    expect(select([rootA, rootB], [historicalA, pendingB]).root).toBe(rootB);
+    expect(select([rootA], [historicalA]).root).toBe(rootA);
+    const cancelledSibling = { ...rootA, status: 'pending' };
+    expect(select([cancelledSibling], [operation(cancelledSibling.sessionId, cancelledSibling.messageId, 'pending')]).root)
+      .toBe(cancelledSibling);
+    expect(select([rootA, rootB], [pendingB, operation('owner-C', 'batch-C', 'pending')]).root).toBeNull();
+    expect(select([rootA], [historicalA, operation('owner-C', 'batch-C', 'fulfilled')]).root).toBeNull();
+    expect(select([rootA], [pendingB, { ...historicalA, messageId: null }]).root).toBeNull();
+    expect(select([rootA], [{ ...historicalA, status: 'unknown' }]).root).toBeNull();
+  });
+
+  it('does not rescue a rejected Custom selector with a generic text-only root candidate', () => {
+    const textOnlyRoot = { sessionId: 'owner', messageId: 'batch', texts: ['same source'], status: 'pending' };
+    const selection = { root: null, matches: [], issues: ['ambiguous'] };
+    expect(resolveCustomProviderRoot(selection, [textOnlyRoot])).toBeNull();
+    expect(resolveCustomProviderRoot(null, [textOnlyRoot])).toBe(textOnlyRoot);
   });
 
   it('preserves provider timing beneath the successful-reply wrapper and restores that wrapper', async () => {
