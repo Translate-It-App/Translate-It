@@ -860,6 +860,10 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         throw new Error(`Content cancellation instrumentation incomplete: ${JSON.stringify(contentInstrumentation)}`);
       }
     }
+    if (providerLane) {
+      const enabled = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.enableProviderRuntimeProbe()', contentContext);
+      if (enabled !== true) throw new Error('Provider runtime instrumentation could not be installed.');
+    }
     if (staleSuccessProbe) {
       trial.staleSuccess.contentInstrumentation = await evaluate(chrome, pageSession,
         'window.__pageTranslationBenchmark.enableSuccessfulReplyProbe(60000)', contentContext);
@@ -961,10 +965,6 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
     if (fixtureConfig.scenario === 'dynamic-dom' || fixtureConfig.scenario === 'shadow-dom') {
       const enabled = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.enableDynamicDOMTracking()', contentContext);
       if (enabled !== true) throw new Error('Dynamic DOM settlement instrumentation could not be installed.');
-    }
-    if (providerLane) {
-      const enabled = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.enableProviderRuntimeProbe()', contentContext);
-      if (enabled !== true) throw new Error('Provider runtime instrumentation could not be installed.');
     }
     const started = await evaluate(chrome, pageSession,
       `chrome.runtime.sendMessage(${JSON.stringify(pageTranslationStartMessage(providerLane?.provider ?? 'edge'))})`, contentContext);

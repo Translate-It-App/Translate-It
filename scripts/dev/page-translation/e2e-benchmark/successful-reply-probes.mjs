@@ -631,10 +631,26 @@ export function installSuccessfulReplyProbe({ runtime, scheduler, gateFactory = 
 
   const restoreWrappers = () => {
     if (wrappersRestored) return;
-    if (runtime) restoreProperty(runtime, 'sendMessage', sendMessage, originalSendDescriptor);
-    restoreProperty(scheduler, '_executeBatchRequest', executeBatch, originalExecuteDescriptor);
-    for (const [instance, guard] of instanceGuardRecords) restoreProperty(instance, '_ownsFlushSession', guard.wrapper, guard.descriptor);
-    wrappersRestored = true;
+    const restorations = [];
+    const restore = (target, key, wrapper, descriptor, expected) => {
+      try { restoreProperty(target, key, wrapper, descriptor); }
+      catch (error) {
+        instrumentationErrors.push(`Failed to restore ${key}: ${error?.message ?? String(error)}`);
+      }
+      const retained = target?.[key] === expected;
+      if (!retained) instrumentationErrors.push(`Could not restore owned ${key} wrapper; a later owner remains installed`);
+      restorations.push(retained);
+    };
+    if (runtime) restore(runtime, 'sendMessage', sendMessage, originalSendDescriptor, originalSendMessage);
+    restore(scheduler, '_executeBatchRequest', executeBatch, originalExecuteDescriptor, originalExecuteBatch);
+    for (const [instance, guard] of instanceGuardRecords) {
+      restore(instance, '_ownsFlushSession', guard.wrapper, guard.descriptor, guard.original);
+    }
+    wrappersRestored = restorations.every(Boolean);
+    if (!wrappersRestored) {
+      record('probe-wrapper-restore-failed', { errors: [...instrumentationErrors] });
+      return;
+    }
     instanceGuardRecords.clear();
     byContext.clear();
     inFlightExecutions.clear();
@@ -719,6 +735,7 @@ export function installSuccessfulReplyProbe({ runtime, scheduler, gateFactory = 
     instanceGuardRecords.set(instance, {
       wrapper: wrapped,
       descriptor,
+      original,
       execution,
       originalMethodName: original.name ?? null,
       originalMethodSource: Function.prototype.toString.call(original).slice(0, 500),

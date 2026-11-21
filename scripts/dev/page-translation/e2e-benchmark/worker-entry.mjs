@@ -197,13 +197,15 @@ const marker = {
       cancellationInstrumentationReady = true;
       const originalTranslate = BaseProvider.prototype.translate;
       BaseProvider.prototype.translate = function (text, sourceLanguage, targetLanguage, options = {}) {
-        const texts = Array.isArray(text) ? text.map(item => typeof item === 'string' ? item : item?.text) : [text];
+        const texts = Array.isArray(text) ? text.map(item => typeof item === 'string' ? item : item?.text ?? item?.t) : [text];
+        const ids = Array.isArray(text) ? text.map(item => item && typeof item === 'object' ? item.id : undefined) : null;
         const operation = cancellationLedger.begin('provider.root', options?.sessionId ?? null, {
           messageId: options?.messageId ?? null,
           texts,
+          ids,
           controllerAbortedAtStart: options?.abortController?.signal?.aborted ?? null,
         });
-        const root = { operation, messageId: options?.messageId ?? null, sessionId: options?.sessionId ?? null, texts, controller: options?.abortController ?? null };
+        const root = { operation, messageId: options?.messageId ?? null, sessionId: options?.sessionId ?? null, texts, ids, controller: options?.abortController ?? null };
         providerRoots.push(root);
         let result;
         try { result = originalTranslate.call(this, text, sourceLanguage, targetLanguage, options); }
@@ -353,7 +355,7 @@ const marker = {
       ledger: cancellationLedger.snapshot(sessionId),
       instrumentationErrors: [...cancellationInstrumentationErrors],
       providerRoots: roots.map(root => ({ messageId: root.messageId, sessionId: root.sessionId,
-        texts: root.operation?.texts ?? root.texts, status: root.operation?.status ?? root.status,
+        ids: root.operation?.ids ?? root.ids ?? null, texts: root.operation?.texts ?? root.texts, status: root.operation?.status ?? root.status,
         controllerAborted: root.controller?.signal?.aborted ?? null,
         errorName: root.operation?.errorName ?? null, error: root.operation?.error ?? null,
         settledSequence: root.operation?.settledSequence ?? null })),

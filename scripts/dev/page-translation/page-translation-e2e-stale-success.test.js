@@ -66,6 +66,7 @@ import { classifyHeldFetchRelease, matchProviderPhysicalRoot, selectCustomProvid
 import { isValidatedStaleCancellation, parseCustomStaleSuccessScheduling, selectCustomPhysicalOperation, validateStaleSiblingDrain } from './e2e-benchmark/successful-reply-probes.mjs';
 import { waitForHeldFetchCancellationEvidence } from './e2e-benchmark/stale-success-runner.mjs';
 import { shouldRunProviderPerformanceLane } from './e2e-benchmark/scenario-plan.mjs';
+import { installTimedCallThrough } from './e2e-benchmark/trace.mjs';
 
 function deferred() {
   let resolve;
@@ -767,6 +768,65 @@ describe('successful stale Page reply probe', () => {
     }).root).toBeNull();
   });
 
+  it('selects only uniquely owned exact Custom roots, including already-aborted or settled siblings', () => {
+    const root = {
+      sessionId: 'page-owner-A', messageId: 'batch-A', ids: ['wire-A'], texts: ['source'],
+      status: 'pending', controllerAborted: true,
+    };
+    expect(selectCustomProviderRoot({ roots: [root], wireIds: ['wire-A'], texts: ['source'] })).toMatchObject({
+      root, matches: [root], issues: [],
+    });
+    const settled = { ...root, status: 'rejected', controllerAborted: false };
+    expect(selectCustomProviderRoot({ roots: [settled], wireIds: ['wire-A'], texts: ['source'] }).root).toBe(settled);
+    for (const cancelledRoot of [root, settled]) {
+      const selected = selectCustomProviderRoot({
+        roots: [cancelledRoot], wireIds: ['wire-A'], texts: ['source'],
+      }).root;
+      expect(classifyStaleSuccessProviderOwner({
+        sessionId: selected.sessionId, initialSessionId: 'page-owner-A', replacementSessionId: 'page-owner-B',
+        trustedStartAccepted: false, currentOwnerSessionId: 'page-owner-B', currentOwnerContextOwned: true,
+        initialSessionInvalidated: true,
+      })).toMatchObject({ ok: true, role: 'cancelled-A-sibling', waitForControllerAbort: true });
+    }
+    expect(selectCustomProviderRoot({
+      roots: [{ ...settled, controllerAborted: null }], wireIds: ['wire-A'], texts: ['source'],
+    }).root).toMatchObject({ status: 'rejected' });
+    expect(selectCustomProviderRoot({
+      roots: [{ ...settled, status: 'unknown' }], wireIds: ['wire-A'], texts: ['source'],
+    }).root).toBeNull();
+    expect(selectCustomProviderRoot({
+      roots: [{ ...root, ids: undefined }], wireIds: ['wire-A'], texts: ['source'],
+    }).root).toBeNull();
+    expect(selectCustomProviderRoot({
+      roots: [{ ...root, ids: ['wire-other'] }], wireIds: ['wire-A'], texts: ['source'],
+    }).root).toBeNull();
+    expect(selectCustomProviderRoot({
+      roots: [root, { ...root, sessionId: 'page-owner-B', messageId: 'batch-B' }],
+      wireIds: ['wire-A'], texts: ['source'],
+    })).toMatchObject({ root: null, matches: [root, expect.any(Object)] });
+    expect(selectCustomProviderRoot({
+      roots: [{ ...root, sessionId: '' }], wireIds: ['wire-A'], texts: ['source'],
+    }).root).toBeNull();
+  });
+
+  it('preserves provider timing beneath the successful-reply wrapper and restores that wrapper', async () => {
+    const timings = [];
+    const runtime = { sendMessage() { return Promise.resolve({ success: true }); } };
+    const scheduler = {
+      _executeBatchRequest() { return Promise.resolve('result'); },
+      _ownsFlushSession() { return false; },
+    };
+    expect(installTimedCallThrough(scheduler, '_executeBatchRequest', () => 'start', token => timings.push(token))).toBe(true);
+    const timingWrapper = scheduler._executeBatchRequest;
+    const probe = installSuccessfulReplyProbe({ runtime, scheduler });
+    expect(scheduler._executeBatchRequest).not.toBe(timingWrapper);
+    await expect(scheduler._executeBatchRequest()).resolves.toBe('result');
+    probe.close('test-cleanup');
+    expect(timings).toEqual(['start']);
+    expect(scheduler._executeBatchRequest).toBe(timingWrapper);
+    expect(probe.snapshot().wrappersRestored).toBe(true);
+  });
+
   it('requires A Custom siblings to abort, fail and drain before releasing the selected reply', () => {
     const sibling = {
       role: 'stale-A-sibling', messageId: 'sibling-A', invalidationSequence: 7,
@@ -1068,6 +1128,10 @@ describe('successful stale Page reply probe', () => {
     runtime.sendMessage = function laterOwner() {};
     probe.close('test-cleanup');
     expect(runtime.sendMessage.name).toBe('laterOwner');
+    expect(probe.snapshot().wrappersRestored).toBe(false);
+    expect(probe.snapshot().instrumentationErrors).toContain(
+      'Could not restore owned sendMessage wrapper; a later owner remains installed',
+    );
     expect(scheduler._executeBatchRequest).toBe(originalExecute);
     expect(originalSend).not.toBe(runtime.sendMessage);
   });

@@ -9,18 +9,28 @@ export function selectCustomProviderRoot({ roots, wireIds, texts }) {
     return { root: null, matches: [], issues: ['Custom provider root identity is malformed'] };
   }
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const sameTexts = roots.filter(root => {
+    const rootTexts = root?.texts ?? root?.operation?.texts;
+    return Array.isArray(rootTexts) && same(rootTexts, texts);
+  });
   const candidates = roots.filter(root => {
     const rootTexts = root?.texts ?? root?.operation?.texts;
     const rootIds = root?.ids ?? root?.wireIds ?? root?.operation?.ids ?? root?.operation?.wireIds;
-    return typeof root?.sessionId === 'string' && typeof root.messageId === 'string'
+    return typeof root?.sessionId === 'string' && root.sessionId
+      && typeof root.messageId === 'string' && root.messageId
+      && typeof root.status === 'string'
       && Array.isArray(rootTexts) && same(rootTexts, texts)
-      && (rootIds === undefined || Array.isArray(rootIds) && same(rootIds, wireIds));
+      && Array.isArray(rootIds) && same(rootIds, wireIds);
   });
-  const active = candidates.filter(root => root.status === 'pending' && root.controllerAborted === false);
+  const selectable = candidates.filter(root => (root.status === 'pending' && root.controllerAborted === false)
+    || root.controllerAborted === true || ['fulfilled', 'rejected'].includes(root.status));
+  const incompleteIdentity = sameTexts.some(root => typeof root?.sessionId !== 'string' || !root.sessionId
+    || typeof root.messageId !== 'string' || !root.messageId
+    || !Array.isArray(root?.ids ?? root?.wireIds ?? root?.operation?.ids ?? root?.operation?.wireIds));
   return {
-    root: active.length === 1 ? active[0] : null,
-    matches: active,
-    issues: active.length === 1 ? [] : [`Custom active provider root match count ${active.length}`],
+    root: !incompleteIdentity && candidates.length === 1 && selectable.length === 1 ? selectable[0] : null,
+    matches: candidates,
+    issues: !incompleteIdentity && candidates.length === 1 && selectable.length === 1 ? [] : [`Custom provider root match count ${candidates.length}`],
   };
 }
 
