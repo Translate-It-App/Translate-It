@@ -69,22 +69,68 @@
       rect.left < innerWidth
     );
   }
-  function updateLatest(text, status) {
+  function updateLatest(label, status, record = null) {
     const el = document.getElementById("ti-ab-latest");
-    el.textContent = text;
+    el.querySelector("[data-latest-status]").textContent = label;
     el.dataset.status = status || "";
+    const metrics = {
+      firstAccepted: record?.timings?.firstAcceptedMs,
+      firstVisible: record?.timings?.firstVisibleMs,
+      allTargets: record?.timings?.allTargetsMs,
+      complete: record?.timings?.completeMs,
+    };
+    for (const [key, value] of Object.entries(metrics)) {
+      el.querySelector(`[data-latest="${key}"]`).textContent = fmt(value);
+    }
+    el.querySelector("[data-latest-build]").textContent = record
+      ? (record.variant ?? "not set")
+      : "—";
+    el.querySelector("[data-latest-level]").textContent = record
+      ? (record.level ?? "not set")
+      : "—";
+    el.querySelector("[data-latest-reason]").textContent =
+      latestFailureReason(record);
+  }
+  function latestFailureReason(record) {
+    if (!record) return "";
+    if (record.cancellation === "cancelled") return "Cancelled";
+    if (record.interruption?.reason === "superseded_by_new_start")
+      return "Interrupted (new translation started)";
+    if (record.interruption?.reason === "page unloaded before a terminal event")
+      return "Interrupted (page unloaded)";
+    if (record.correctness?.initialPageClean === false)
+      return "Initial page DOM is not clean";
+    if (
+      record.errors?.some(
+        (error) =>
+          error &&
+          ["page-translate-error", "page-translation-internal-error"].includes(
+            error.type,
+          ),
+      )
+    )
+      return "Translation error";
+    if (record.errors?.length) return "Translation failures reported";
+    return record.status === "failed" ? "Translation incomplete" : "";
   }
   function render() {
-    document.getElementById("ti-ab-label").textContent =
-      `Selected Build: ${variant || "not set"} · Optimization Level: ${level ?? "not set"} (URL labels only; does not configure the extension)`;
+    const labels = document.getElementById("ti-ab-label");
+    labels.querySelector('[data-value="build"]').textContent =
+      variant || "not set";
+    labels.querySelector('[data-value="level"]').textContent =
+      level ?? "not set";
     const passed = records.filter((r) => r.status === "passed").length;
-    document.getElementById("ti-ab-counts").textContent =
-      `Trials: ${records.length} · Passed: ${passed} · Failed: ${records.length - passed}`;
+    const counts = document.getElementById("ti-ab-counts");
+    counts.querySelector('[data-count="trials"]').textContent = records.length;
+    counts.querySelector('[data-count="passed"]').textContent = passed;
+    counts.querySelector('[data-count="failed"]').textContent =
+      records.length - passed;
     const latest = records.at(-1);
     if (latest)
       updateLatest(
-        `${latest.status} · ${latest.variant ?? "?"} L${latest.level ?? "?"} · first ${fmt(latest.timings.firstAcceptedMs)} · visible ${fmt(latest.timings.firstVisibleMs)} · all 120 ${fmt(latest.timings.allTargetsMs)} · complete ${fmt(latest.timings.completeMs)}`,
+        latest.status === "passed" ? "Passed" : "Failed",
         latest.status,
+        latest,
       );
   }
   function fmt(value) {
@@ -185,7 +231,7 @@
         reason: "superseded_by_new_start",
         atMs: elapsed(),
       };
-      finish("failed", "superseded by a new Page Translation START");
+      finish("failed");
     }
     const initialTranslatedCount = translatedParagraphs().length;
     const initialPageClean =
@@ -226,13 +272,10 @@
       },
     };
     if (!initialPageClean) {
-      finish("failed", "initial page DOM is not clean");
+      finish("failed");
       return;
     }
-    updateLatest(
-      `Running · ${variant || "?"} L${level ?? "?"} · START observed`,
-      "running",
-    );
+    updateLatest("Running", "running", active.record);
   }
   function matchesActive(event) {
     return Boolean(active && event.detail?.sessionId === active.sessionId);
@@ -246,7 +289,7 @@
         : null,
     });
   }
-  function finish(status, reason) {
+  function finish(status) {
     if (!active) return;
     if (active.record.correctness.initialPageClean) countTranslated();
     active.record.timings = {
@@ -268,10 +311,6 @@
     active.record.endTimestamp = new Date().toISOString();
     records.push(active.record);
     save();
-    updateLatest(
-      `${active.record.status} · ${variant || "?"} L${level ?? "?"} · first ${fmt(active.timings.firstAcceptedMs)} · visible ${fmt(active.timings.firstVisibleMs)} · all 120 ${fmt(active.timings.allTargetsMs)} · complete ${fmt(active.record.timings.completeMs)}${reason ? ` · ${reason}` : ""}`,
-      active.record.status,
-    );
     active = null;
     render();
   }
@@ -301,7 +340,7 @@
   window.addEventListener("page-translate-error", (event) => {
     if (!matchesActive(event)) return;
     addError("page-translate-error", event.detail);
-    finish("failed", "translation error");
+    finish("failed");
   });
   window.addEventListener("page-translation-internal-error", (event) => {
     if (!matchesActive(event)) return;
@@ -310,7 +349,7 @@
   window.addEventListener("page-translate-cancelled", (event) => {
     if (!matchesActive(event)) return;
     active.record.cancellation = "cancelled";
-    finish("failed", "cancelled");
+    finish("failed");
   });
   function persistInterruptedTrial() {
     if (!active) return;
@@ -385,7 +424,7 @@
     if (!confirm("Clear all saved Page Translation A/B results?")) return;
     records = [];
     save();
-    updateLatest("Latest: waiting for Page Translation START", "");
+    updateLatest("Waiting for Page Translation START", "");
     render();
   });
   render();

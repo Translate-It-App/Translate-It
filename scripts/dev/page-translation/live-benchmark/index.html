@@ -26,39 +26,158 @@
         z-index: 2147483647;
         right: 12px;
         top: 12px;
-        width: 270px;
+        width: min(320px, calc(100vw - 24px));
         max-height: calc(100vh - 24px);
         overflow: auto;
         box-sizing: border-box;
-        padding: 12px;
+        padding: 14px;
         background: #fff;
         color: #18212b;
-        border: 1px solid #77818c;
-        border-radius: 8px;
-        box-shadow: 0 3px 16px #0003;
+        border: 1px solid #cbd3dc;
+        border-radius: 12px;
+        box-shadow:
+          0 8px 28px #15202b26,
+          0 2px 6px #15202b12;
         font:
-          13px/1.4 system-ui,
+          12px/1.45 system-ui,
           sans-serif;
       }
       #ti-ab-panel h2 {
-        margin: 0 0 8px;
+        margin: 0 0 10px;
+        color: #172b3d;
         font-size: 15px;
+        line-height: 1.25;
+        letter-spacing: -0.02em;
       }
       #ti-ab-panel p {
-        margin: 5px 0;
+        margin: 0;
         padding: 0;
         border: 0;
       }
+      #ti-ab-label {
+        overflow-wrap: anywhere;
+        color: #34495e;
+      }
+      #ti-ab-panel .ti-ab-fields {
+        display: grid;
+        gap: 5px;
+      }
+      #ti-ab-panel .ti-ab-fields p {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #ti-ab-panel .ti-ab-fields span {
+        color: #596b7b;
+      }
+      #ti-ab-panel .ti-ab-fields strong,
+      #ti-ab-panel .ti-ab-counts strong,
+      #ti-ab-panel .ti-ab-latest-metrics strong {
+        overflow-wrap: anywhere;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+      #ti-ab-panel .ti-ab-counts {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 4px;
+        margin-top: 8px !important;
+        padding: 7px 4px !important;
+        border-radius: 7px;
+        background: #f1f5f8;
+        color: #25394b;
+        font-variant-numeric: tabular-nums;
+        text-align: center;
+      }
+      #ti-ab-panel .ti-ab-counts p {
+        display: grid;
+        gap: 2px;
+      }
+      #ti-ab-panel .ti-ab-counts span {
+        color: #596b7b;
+        font-size: 10px;
+      }
+      #ti-ab-panel .ti-ab-note {
+        margin-top: 6px;
+        color: #596b7b;
+        font-size: 11px;
+      }
+      #ti-ab-panel .ti-ab-latest-section {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid #dce3e9;
+      }
+      #ti-ab-panel .ti-ab-section-label {
+        margin-bottom: 4px;
+        color: #596b7b;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      #ti-ab-latest {
+        min-height: 2.9em;
+        overflow-wrap: anywhere;
+        color: #25394b;
+        font-variant-numeric: tabular-nums;
+      }
+      #ti-ab-panel .ti-ab-latest-labels,
+      #ti-ab-panel .ti-ab-latest-reason {
+        display: block;
+        margin-top: 3px;
+        color: #596b7b;
+        font-size: 10px;
+      }
+      #ti-ab-panel .ti-ab-latest-reason:empty {
+        display: none;
+      }
+      #ti-ab-panel .ti-ab-latest-labels strong {
+        color: #34495e;
+        font-weight: 600;
+      }
+      #ti-ab-panel .ti-ab-latest-metrics {
+        display: block;
+        margin-top: 5px;
+        color: #596b7b;
+        font-size: 11px;
+      }
+      #ti-ab-panel .ti-ab-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin-top: 12px;
+      }
       #ti-ab-panel button {
-        margin: 8px 6px 0 0;
-        padding: 5px 8px;
+        min-width: 0;
+        min-height: 34px;
+        margin: 0;
+        padding: 6px 8px;
         font: inherit;
+        color: #24384a;
+        background: #f5f7f9;
+        border: 1px solid #c7d1da;
+        border-radius: 7px;
+        cursor: pointer;
+      }
+      #ti-ab-panel #ti-ab-export,
+      #ti-ab-panel #ti-ab-clear {
+        flex: 1 1 76px;
+        white-space: nowrap;
+      }
+      #ti-ab-panel button:hover {
+        background: #eaf0f4;
+        border-color: #9eacb9;
+      }
+      #ti-ab-panel button:focus-visible {
+        outline: 3px solid #2563a6;
+        outline-offset: 2px;
       }
       #ti-ab-panel #ti-ab-copy {
-        width: 30px;
-        height: 30px;
-        padding: 5px;
-        vertical-align: middle;
+        flex: 0 0 34px;
+        width: 34px;
+        height: 34px;
+        padding: 7px;
       }
       #ti-ab-copy svg {
         display: block;
@@ -72,6 +191,12 @@
       }
       #ti-ab-copy-feedback[data-status="error"] {
         color: #b42318;
+      }
+      #ti-ab-copy-feedback {
+        min-height: 1.45em;
+        margin-top: 5px !important;
+        color: #087a36;
+        font-size: 11px;
       }
       #ti-ab-panel [data-status="passed"] {
         color: #087a36;
@@ -600,26 +725,59 @@
         aria-label="Page Translation test results"
       >
         <h2>Page Translation A/B</h2>
-        <p id="ti-ab-label"></p>
-        <p id="ti-ab-counts"></p>
-        <p id="ti-ab-latest" aria-live="polite">
-          Latest: waiting for Page Translation START
+        <div id="ti-ab-label" class="ti-ab-fields">
+          <p><span>Build</span><strong data-value="build">—</strong></p>
+          <p>
+            <span>Optimization level</span><strong data-value="level">—</strong>
+          </p>
+        </div>
+        <p class="ti-ab-note">
+          Build and level are URL labels only; they do not configure the
+          extension.
         </p>
-        <button id="ti-ab-export" type="button">Export JSON</button>
-        <button
-          id="ti-ab-copy"
-          type="button"
-          aria-label="Copy results to clipboard"
-          title="Copy results to clipboard"
-        >
-          <svg aria-hidden="true" viewBox="0 0 24 24">
-            <rect x="8" y="8" width="12" height="13" rx="2"></rect>
-            <path
-              d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"
-            ></path>
-          </svg>
-        </button>
-        <button id="ti-ab-clear" type="button">Clear Results</button>
+        <div id="ti-ab-counts" class="ti-ab-counts">
+          <p><span>Trials</span><strong data-count="trials">0</strong></p>
+          <p><span>Passed</span><strong data-count="passed">0</strong></p>
+          <p><span>Failed</span><strong data-count="failed">0</strong></p>
+        </div>
+        <section class="ti-ab-latest-section" aria-label="Latest result">
+          <p class="ti-ab-section-label">Latest</p>
+          <p id="ti-ab-latest" aria-live="polite">
+            <span data-latest-status>Waiting for Page Translation START</span>
+            <span class="ti-ab-latest-labels">
+              Build <strong data-latest-build>—</strong>
+              <span aria-hidden="true">·</span>
+              Level <strong data-latest-level>—</strong>
+            </span>
+            <span class="ti-ab-latest-reason" data-latest-reason></span>
+            <span class="ti-ab-latest-metrics">
+              First <strong data-latest="firstAccepted">—</strong>
+              <span aria-hidden="true">·</span> Visible
+              <strong data-latest="firstVisible">—</strong>
+              <span aria-hidden="true">·</span> All 120
+              <strong data-latest="allTargets">—</strong>
+              <span aria-hidden="true">·</span> Complete
+              <strong data-latest="complete">—</strong>
+            </span>
+          </p>
+        </section>
+        <div class="ti-ab-actions">
+          <button id="ti-ab-export" type="button">Export JSON</button>
+          <button
+            id="ti-ab-copy"
+            type="button"
+            aria-label="Copy results to clipboard"
+            title="Copy results to clipboard"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <rect x="8" y="8" width="12" height="13" rx="2"></rect>
+              <path
+                d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"
+              ></path>
+            </svg>
+          </button>
+          <button id="ti-ab-clear" type="button">Clear Results</button>
+        </div>
         <p id="ti-ab-copy-feedback" role="status" aria-live="polite"></p>
       </aside>
     </main>

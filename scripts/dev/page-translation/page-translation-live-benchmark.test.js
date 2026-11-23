@@ -13,12 +13,15 @@ const pageHtml = html.replace(
   `<script>${script}</script>`,
 );
 
-function createPage(url = "http://127.0.0.1/?variant=A&level=1") {
+function createPage(
+  url = "http://127.0.0.1/?variant=A&level=1",
+  initialRecords = [],
+) {
   return new JSDOM(pageHtml, {
     url,
     runScripts: "dangerously",
     beforeParse(window) {
-      window.localStorage.setItem(storageKey, "[]");
+      window.localStorage.setItem(storageKey, JSON.stringify(initialRecords));
       window.confirm = () => true;
       window.HTMLElement.prototype.getBoundingClientRect = () => ({
         width: 100,
@@ -107,9 +110,9 @@ describe("manual live Page Translation benchmark", () => {
       translatedCount: 120,
     });
     expect(results(window)).toHaveLength(0);
-    expect(window.document.querySelector("#ti-ab-latest").textContent).toMatch(
-      /^Running/,
-    );
+    expect(
+      window.document.querySelector("[data-latest-status]").textContent,
+    ).toBe("Running");
 
     emit(window, "page-translate-complete", {
       sessionId: "current",
@@ -138,6 +141,32 @@ describe("manual live Page Translation benchmark", () => {
       errors: [],
     });
     expect(results(window)[0]).not.toHaveProperty("sessionId");
+    expect(
+      window.document.querySelector('[data-value="build"]').textContent,
+    ).toBe("A");
+    expect(
+      window.document.querySelector('[data-value="level"]').textContent,
+    ).toBe("1");
+    expect(
+      window.document.querySelector('[data-count="trials"]').textContent,
+    ).toBe("1");
+    expect(
+      window.document.querySelector('[data-count="passed"]').textContent,
+    ).toBe("1");
+    expect(
+      window.document.querySelector('[data-count="failed"]').textContent,
+    ).toBe("0");
+    expect(
+      window.document.querySelector("[data-latest-status]").textContent,
+    ).toBe("Passed");
+    expect(
+      window.document.querySelector('[data-latest="complete"]').textContent,
+    ).toMatch(/^\d+ ms$/);
+    expect(
+      [...window.document.querySelector(".ti-ab-actions").children].map(
+        (button) => button.id,
+      ),
+    ).toEqual(["ti-ab-export", "ti-ab-copy", "ti-ab-clear"]);
     const copyButton = window.document.getElementById("ti-ab-copy");
     expect(copyButton.getAttribute("aria-label")).toBe(
       "Copy results to clipboard",
@@ -178,6 +207,10 @@ describe("manual live Page Translation benchmark", () => {
       status: "failed",
       cancellation: "cancelled",
     });
+    expect(
+      cancelledPage.window.document.querySelector("[data-latest-reason]")
+        .textContent,
+    ).toBe("Cancelled");
     expect(saved).not.toContain("secret-token");
     expect(saved).not.toContain("local library reviews historical records");
     dom.window.close();
@@ -203,6 +236,9 @@ describe("manual live Page Translation benchmark", () => {
       interruption: { reason: "page unloaded before a terminal event" },
       errors: [{ type: "page-translation-internal-error" }],
     });
+    expect(
+      window.document.querySelector("[data-latest-reason]").textContent,
+    ).toBe("Interrupted (page unloaded)");
 
     const copiedText = await copyResults(window);
     expect(copiedText).not.toContain("private-credential");
@@ -227,9 +263,9 @@ describe("manual live Page Translation benchmark", () => {
       isTranslating: false,
     });
     expect(results(window)).toHaveLength(0);
-    expect(window.document.querySelector("#ti-ab-latest").textContent).toMatch(
-      /^Running/,
-    );
+    expect(
+      window.document.querySelector("[data-latest-status]").textContent,
+    ).toBe("Running");
 
     window.document.querySelectorAll("p[data-item]").forEach((p) => {
       p.textContent = `translated ${p.dataset.item}`;
@@ -278,6 +314,27 @@ describe("manual live Page Translation benchmark", () => {
       expect.any(Number),
     );
     expect(results(window)[0].timings.firstVisibleMs).toBeNull();
+    dom.window.close();
+  });
+
+  it("retains the translation-error reason after finish renders the latest trial", () => {
+    const dom = createPage();
+    const { window } = dom;
+    emit(window, "page-translate-start", { sessionId: "error" });
+    emit(window, "page-translate-error", {
+      sessionId: "error",
+      message: "sensitive provider response",
+    });
+
+    expect(
+      window.document.querySelector("[data-latest-status]").textContent,
+    ).toBe("Failed");
+    expect(
+      window.document.querySelector("[data-latest-reason]").textContent,
+    ).toBe("Translation error");
+    expect(JSON.stringify(results(window))).not.toContain(
+      "sensitive provider response",
+    );
     dom.window.close();
   });
 
@@ -335,6 +392,58 @@ describe("manual live Page Translation benchmark", () => {
       status: "failed",
       correctness: { initialPageClean: false, completionObserved: false },
     });
+    expect(
+      window.document.querySelector("[data-latest-reason]").textContent,
+    ).toBe("Initial page DOM is not clean");
+    dom.window.close();
+  });
+
+  it("shows the latest trial's Build/Level and failure reason, not current URL labels", () => {
+    const latestTrial = {
+      variant: "B",
+      level: 2,
+      timestamp: "2026-11-23T12:00:00.000Z",
+      endTimestamp: "2026-11-23T12:00:01.000Z",
+      status: "failed",
+      timings: {
+        startMs: 0,
+        firstAcceptedMs: 12,
+        firstVisibleMs: null,
+        allTargetsMs: null,
+        completeMs: 1000,
+      },
+      correctness: {
+        targetCount: 120,
+        translatedCount: 70,
+        allTargetsTranslated: false,
+        completionObserved: false,
+        initialPageClean: true,
+      },
+      errors: [{ type: "page-translate-error", atMs: 900, failedCount: null }],
+      cancellation: null,
+      interruption: null,
+    };
+    const dom = createPage(undefined, [latestTrial]);
+    const { window } = dom;
+
+    expect(
+      window.document.querySelector('[data-value="build"]').textContent,
+    ).toBe("A");
+    expect(
+      window.document.querySelector('[data-value="level"]').textContent,
+    ).toBe("1");
+    expect(
+      window.document.querySelector("[data-latest-build]").textContent,
+    ).toBe("B");
+    expect(
+      window.document.querySelector("[data-latest-level]").textContent,
+    ).toBe("2");
+    expect(
+      window.document.querySelector("[data-latest-status]").textContent,
+    ).toBe("Failed");
+    expect(
+      window.document.querySelector("[data-latest-reason]").textContent,
+    ).toBe("Translation error");
     dom.window.close();
   });
 });
