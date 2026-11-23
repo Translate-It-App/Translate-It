@@ -47,12 +47,14 @@ import { CustomProvider, clearCustomResponseFormatSupportCache } from '@/feature
 import { GoogleTranslateProvider } from '@/features/translation/providers/GoogleTranslate.js';
 import { GoogleTranslateV2Provider } from '@/features/translation/providers/GoogleTranslateV2Provider.js';
 import { MicrosoftEdgeProvider } from '@/features/translation/providers/MicrosoftEdgeProvider.js';
+import { YandexTranslateProvider } from '@/features/translation/providers/YandexTranslate.js';
 import { queueManager } from '@/features/translation/core/QueueManager.js';
 import { rateLimitManager } from '@/features/translation/core/RateLimitManager.js';
 import { TranslationMode } from '@/shared/config/config.js';
 import { proxyManager } from '@/shared/proxy/ProxyManager.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import { LanguageDetectionService } from '@/shared/services/LanguageDetectionService.js';
+import { TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS } from '@/shared/constants/translation.js';
 
 describe('Page → CustomProvider physical concurrency', () => {
   let coordinator, engine, state, active, maximum, attempts, completions, controllers;
@@ -793,6 +795,343 @@ describe('Page → Google Classic bounded physical concurrency', () => {
     expect((await second).success).toBe(true);
     expect(providerState.activeRequests).toBe(0);
     expect(active).toBe(0);
+  });
+});
+
+describe('Page → YandexTranslateProvider bounded physical concurrency', () => {
+  let coordinator, engine, providerState, requests, active, maximum, controllers;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    queueManager.cleanup();
+    rateLimitManager.providerStates.forEach(state => clearTimeout(state.nextProcessTimer));
+    rateLimitManager.providerStates.clear();
+    settings.level = 5;
+    settings.keys = [];
+    settings.bilingual = false;
+    settings.bilingualModes = { [TranslationMode.Page]: false };
+    settings.detectionResult = null;
+    LanguageDetectionService.clearSessionCache();
+    await rateLimitManager.reloadConfigurations();
+    coordinator = new UnifiedModeCoordinator();
+    const provider = new YandexTranslateProvider();
+    controllers = new Map();
+    engine = {
+      getProvider: async () => provider,
+      lifecycleRegistry: {
+        registerRequest: messageId => {
+          const controller = new AbortController();
+          controllers.set(messageId, controller);
+          return controller;
+        },
+        unregisterRequest: vi.fn(),
+      },
+    };
+    providerState = rateLimitManager.providerStates.get('YandexTranslate');
+    providerState.isManualConfig = true;
+    providerState.config.maxConcurrent = 2;
+    requests = [];
+    active = 0;
+    maximum = 0;
+    vi.useFakeTimers();
+    proxyManager.fetch.mockImplementation(async (_url, options) => {
+      const body = new URLSearchParams(options.body);
+      const texts = body.getAll('text');
+      const request = { lang: body.get('lang'), texts, signal: options.signal, released: false, startedAt: Date.now() };
+      requests.push(request);
+      active++;
+      maximum = Math.max(maximum, active);
+      const response = await new Promise(resolve => {
+        request.release = (data = {}) => {
+          request.released = true;
+          active--;
+          resolve(data);
+        };
+      });
+      return {
+        ok: response.status !== 429,
+        status: response.status || 200,
+        statusText: response.status === 429 ? 'Too Many Requests' : 'OK',
+        headers: new Map([['content-type', 'application/json'], ...(response.retryAfter ? [['Retry-After', response.retryAfter]] : [])]),
+        json: async () => response.body || {
+          code: 200,
+          lang: 'en-fa',
+          text: texts.map(text => `translated:${text}`),
+        },
+        clone() { return this; },
+      };
+    });
+  });
+
+  afterEach(() => {
+    requests.filter(request => !request.released).forEach(request => request.release());
+    queueManager.cleanup();
+    rateLimitManager.providerStates.forEach(state => clearTimeout(state.nextProcessTimer));
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const pageRequest = (index, sourceLanguage = 'en') => coordinator.processRequest({
+    mode: TranslationMode.Page,
+    messageId: `yandex-page-${index}`,
+    data: {
+      provider: 'yandex',
+      sourceLanguage,
+      targetLanguage: 'fa',
+      sessionId: 'yandex-page-session',
+      text: JSON.stringify([{ id: `page-${index}`, text: `page source ${index}` }]),
+    },
+  }, { translationEngine: engine });
+
+  const subtitleRequest = () => coordinator.processRequest({
+    mode: TranslationMode.Subtitle,
+    messageId: 'yandex-subtitle-0',
+    data: {
+      provider: 'yandex',
+      sourceLanguage: 'en',
+      targetLanguage: 'fa',
+      items: [{ id: 'cue-0', text: 'subtitle source' }],
+    },
+  }, { translationEngine: engine });
+
+  const pumpUntil = async predicate => {
+    for (let turn = 0; turn < 60 && !predicate(); turn++) {
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(predicate()).toBe(true);
+  };
+
+  it('shares Page and Subtitle capacity and maps out-of-order Page completion by IDs', async () => {
+    const pages = [pageRequest(0), pageRequest(1), pageRequest(2)];
+    const subtitle = subtitleRequest();
+    await pumpUntil(() => requests.length === 2);
+    expect(active).toBe(2);
+    expect(maximum).toBe(2);
+
+    requests[1].release();
+    await pumpUntil(() => requests.length === 3);
+    requests[2].release();
+    await pumpUntil(() => requests.length === 4);
+    requests[3].release();
+    requests[0].release();
+
+    const results = await Promise.all(pages);
+    expect(results.map(result => JSON.parse(result.translatedText))).toEqual(
+      [0, 1, 2].map(index => [{ id: `page-${index}`, text: `translated:page source ${index}` }])
+    );
+    expect((await subtitle).results).toEqual([{ id: 'cue-0', text: 'translated:subtitle source' }]);
+    expect(maximum).toBe(2);
+    expect(providerState.activeRequests).toBe(0);
+    expect(queueManager.getQueueStatus('YandexTranslate::parallel').total).toBe(0);
+  });
+
+  it('serializes unresolved AUTO batches behind the owner and settles waiter after resolution', async () => {
+    settings.detectionResult = { isReliable: false, languages: [{ language: 'en', percentage: 50 }] };
+    const provider = await engine.getProvider();
+    const translate = vi.spyOn(provider, 'translate');
+    const pages = [pageRequest(0, 'auto'), pageRequest(1, 'auto')];
+    await pumpUntil(() => requests.length === 1);
+    expect(translate).toHaveBeenCalledTimes(1);
+    expect(translate.mock.calls[0][1]).toBe('auto');
+    requests[0].release();
+    await pumpUntil(() => requests.length === 2);
+    expect(translate.mock.calls[1][1]).toBe('auto');
+    requests[1].release();
+    expect((await Promise.all(pages)).every(result => result.success)).toBe(true);
+    expect(providerState.activeRequests).toBe(0);
+  });
+
+  it('uses a local AUTO source resolution for parallel Page batches', async () => {
+    const sample = 'متن فارسی برای تشخیص زبان و ترجمه صفحه. '.repeat(8);
+    const resolvedPages = [0, 1].map(index => coordinator.processRequest({
+      mode: TranslationMode.Page,
+      messageId: `yandex-auto-local-${index}`,
+      data: {
+        provider: 'yandex', sourceLanguage: 'auto', targetLanguage: 'en', sessionId: 'yandex-auto-session',
+        text: JSON.stringify([{ id: `auto-${index}`, text: sample }]),
+      },
+    }, { translationEngine: engine }));
+    await pumpUntil(() => requests.length === 2);
+    expect(requests.map(request => request.lang)).toEqual(['fa-en', 'fa-en']);
+    expect(requests.map(request => request.texts)).toEqual([[sample], [sample]]);
+    requests.forEach(request => request.release());
+    expect((await Promise.all(resolvedPages)).every(result => result.success)).toBe(true);
+  });
+
+  it('does not retry an HTTP-200 JSON API error code as a rate limit', async () => {
+    const pending = pageRequest(0);
+    await pumpUntil(() => requests.length === 1);
+    requests[0].release({ body: { code: 401, text: ['not translated'], lang: 'en-fa' } });
+    const result = await pending;
+    expect(result.success).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(providerState.activeRequests).toBe(0);
+  });
+
+  it('characterizes HTTP-200 JSON code 429 separately from physical HTTP 429', async () => {
+    const invalidBody = pageRequest(0);
+    await pumpUntil(() => requests.length === 1);
+    const startedAt = requests[0].startedAt;
+    const retryAtBefore = providerState.retryAt;
+    requests[0].release({ retryAfter: '10', body: { code: 429, text: [], lang: 'en-fa' } });
+    expect(providerState.retryAt).toBe(retryAtBefore);
+    await vi.advanceTimersByTimeAsync(30000);
+    await pumpUntil(() => requests.length === 2);
+    expect(requests[1].startedAt).toBeLessThan(startedAt + 10000);
+    requests[1].release({ body: { code: 429, text: [], lang: 'en-fa' } });
+    await vi.advanceTimersByTimeAsync(30000);
+    const result = await invalidBody;
+    expect(result.success).toBe(false);
+    expect(requests).toHaveLength(2);
+    expect(providerState.activeRequests).toBe(0);
+  });
+
+  it('keeps cancelled active transport capacity until settlement, then dispatches queued work', async () => {
+    providerState.config.maxConcurrent = 1;
+    const first = pageRequest(0);
+    const second = pageRequest(1);
+    let settled = false;
+    first.then(() => { settled = true; });
+    await pumpUntil(() => requests.length === 1);
+    controllers.get('yandex-page-0').abort('user-cancelled');
+    await pumpUntil(() => settled);
+    expect(requests).toHaveLength(1);
+    expect(active).toBe(1);
+    requests[0].release();
+    await pumpUntil(() => requests.length === 2);
+    requests[1].release();
+    expect((await first).success).toBe(false);
+    expect((await second).success).toBe(true);
+    expect(providerState.activeRequests).toBe(0);
+    expect(active).toBe(0);
+  });
+
+  it('cancels a queued Page operation without sending HTTP or leaking its queue slot', async () => {
+    providerState.config.maxConcurrent = 1;
+    const first = pageRequest(0);
+    const second = pageRequest(1);
+    await pumpUntil(() => requests.length === 1);
+    controllers.get('yandex-page-1').abort('user-cancelled');
+    expect((await second).success).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(providerState.activeRequests).toBe(1);
+    expect(queueManager.getQueueStatus('YandexTranslate::parallel').total).toBe(1);
+    requests[0].release();
+    expect((await first).success).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(providerState.activeRequests).toBe(0);
+    await pumpUntil(() => queueManager.getQueueStatus('YandexTranslate::parallel').total === 0);
+    expect(active).toBe(0);
+  });
+
+  it('retains the physical slot until transport settlement, then releases it', async () => {
+    providerState.config.maxConcurrent = 1;
+    const first = pageRequest(0);
+    await pumpUntil(() => requests.length === 1);
+    await vi.advanceTimersByTimeAsync(TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS);
+    const timedOut = await first;
+    expect(timedOut.success).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(active).toBe(1);
+    expect(providerState.activeRequests).toBe(1);
+
+    requests[0].release();
+    await pumpUntil(() => providerState.activeRequests === 0);
+    expect((await first).success).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(active).toBe(0);
+    expect(queueManager.getQueueStatus('YandexTranslate::parallel').total).toBe(0);
+  });
+
+  it('cancels an unresolved AUTO waiter while the owner is awaiting transport', async () => {
+    settings.detectionResult = { isReliable: false, languages: [{ language: 'en', percentage: 50 }] };
+    const owner = pageRequest(0, 'auto');
+    const waiter = pageRequest(1, 'auto');
+    await pumpUntil(() => requests.length === 1);
+    controllers.get('yandex-page-1').abort('user-cancelled');
+    expect((await waiter).success).toBe(false);
+    expect(requests).toHaveLength(1);
+    requests[0].release();
+    expect((await owner).success).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(providerState.activeRequests).toBe(0);
+    await pumpUntil(() => queueManager.getQueueStatus('YandexTranslate::parallel').total === 0);
+  });
+
+  it('keeps separate Subtitle operations on the ordinary serial provider queue', async () => {
+    const subtitles = [subtitleRequest(), coordinator.processRequest({
+      mode: TranslationMode.Subtitle,
+      messageId: 'yandex-subtitle-1',
+      data: {
+        provider: 'yandex', sourceLanguage: 'en', targetLanguage: 'fa',
+        items: [{ id: 'cue-1', text: 'second subtitle source' }],
+      },
+    }, { translationEngine: engine })];
+    await pumpUntil(() => requests.length === 1);
+    expect(requests[0].texts).toEqual(['subtitle source']);
+    requests[0].release();
+    await pumpUntil(() => requests.length === 2);
+    expect(requests[1].texts).toEqual(['second subtitle source']);
+    requests[1].release();
+    expect((await Promise.all(subtitles)).every(result => result.success)).toBe(true);
+    expect(maximum).toBe(1);
+    expect(providerState.activeRequests).toBe(0);
+    expect(queueManager.getQueueStatus('YandexTranslate').total).toBe(0);
+  });
+
+  it.each([['with Retry-After', '1'], ['without Retry-After', undefined]])(
+    'retries a physical HTTP 429 %s within the configured retry bound',
+    async (_label, retryAfter) => {
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      const pending = pageRequest(0);
+      await pumpUntil(() => requests.length === 1);
+      const limitedAt = Date.now();
+      requests[0].release({ status: 429, retryAfter, body: { code: 429, text: [] } });
+      await vi.advanceTimersByTimeAsync(15000);
+      await pumpUntil(() => requests.length === 2);
+      if (retryAfter) expect(requests[1].startedAt).toBeGreaterThanOrEqual(limitedAt + 1000);
+      requests[1].release();
+      expect((await pending).success).toBe(true);
+      expect(requests).toHaveLength(2);
+      expect(providerState.activeRequests).toBe(0);
+    }
+  );
+
+  it('shares a Retry-After cooldown across Page and Subtitle work', async () => {
+    const limited = pageRequest(0);
+    const subtitle = subtitleRequest();
+    const queued = pageRequest(2);
+    await pumpUntil(() => requests.length === 2);
+    const firstRequest = requests.find(request => request.texts[0] === 'page source 0');
+    const cooldownStart = Date.now();
+    firstRequest.release({ status: 429, retryAfter: '1', body: { code: 429, text: [] } });
+    requests.find(request => request.texts[0] === 'subtitle source').release();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(requests).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(10000);
+    await pumpUntil(() => requests.length === 4);
+    expect(requests.slice(2).every(request => request.startedAt >= cooldownStart + 1000)).toBe(true);
+    requests.slice(2).forEach(request => request.release());
+    expect((await Promise.all([limited, subtitle, queued])).every(result => result.success)).toBe(true);
+    expect(providerState.activeRequests).toBe(0);
+    expect(active).toBe(0);
+  });
+
+  it('stops physical RATE_LIMIT_REACHED retries at the configured maxExecutions count', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const pending = pageRequest(0);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await pumpUntil(() => requests.length === attempt + 1);
+      requests[attempt].release({ status: 429, body: { code: 429, text: [] } });
+      await vi.advanceTimersByTimeAsync(30000);
+    }
+    const result = await pending;
+    expect(result.success).toBe(false);
+    expect(requests).toHaveLength(3);
+    expect(active).toBe(0);
+    expect(providerState.activeRequests).toBe(0);
+    await pumpUntil(() => queueManager.getQueueStatus('YandexTranslate::parallel').total === 0);
   });
 });
 

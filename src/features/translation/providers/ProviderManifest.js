@@ -71,6 +71,7 @@ const getRawManifest = () => [
     icon: "yandex.png",
     importFunction: () => import("./YandexTranslate.js").then(m => ({ default: m.YandexTranslateProvider })),
     features: ["translation", "subtitle", "text", "autoDetect", "bulk", "bilingual"],
+    supportsPageParallelExecution: true,
     needsApiKey: false,
     supported: true,
   },
