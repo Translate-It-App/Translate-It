@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { URL as NodeURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { JSDOM } from "jsdom";
@@ -64,6 +65,25 @@ async function copyResults(window, writeText = vi.fn().mockResolvedValue()) {
 }
 
 describe("manual live Page Translation benchmark", () => {
+  it("preserves the exact 120 original target paragraphs", () => {
+    const dom = new JSDOM(html);
+    const targets = [...dom.window.document.querySelectorAll("p[data-item]")];
+    const text = targets.map((target) => target.textContent).join("");
+
+    expect(targets).toHaveLength(120);
+    expect(targets.map((target) => target.dataset.item)).toEqual(
+      Array.from({ length: 120 }, (_, index) => String(index + 1)),
+    );
+    expect(targets.every((target) => !/[\r\n]/.test(target.textContent))).toBe(
+      true,
+    );
+    expect(text).toHaveLength(15998);
+    expect(createHash("sha256").update(text).digest("hex")).toBe(
+      "5ba0ff3774bd66b70d81d63a6a0fccaaa44e1d0efa0fb597cd83a3343a81b97a",
+    );
+    dom.window.close();
+  });
+
   it("serves the fixture on loopback using an available port and closes cleanly", async () => {
     const fixture = await startServer();
     try {
