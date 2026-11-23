@@ -1865,14 +1865,15 @@ describe('PageTranslationScheduler', () => {
   });
 
   describe('bounded independent Page batches', () => {
-    it.each(['yandex', 'google', 'googlev2', 'edge'].flatMap(provider => [1, 2, 3, 4, 5].flatMap(level => [false, true].map(translateAfterScrollStop => [provider, level, translateAfterScrollStop]))))('uses the effective %s worker cap at level %i in %s mode', async (provider, level, translateAfterScrollStop) => {
+    it.each(['deepl', 'yandex', 'google', 'googlev2', 'edge'].flatMap(provider => [1, 2, 3, 4, 5].flatMap(level => [false, true].map(translateAfterScrollStop => [provider, level, translateAfterScrollStop]))))('uses the effective %s worker cap at level %i in %s mode', async (provider, level, translateAfterScrollStop) => {
       const config = await import('@/shared/config/config.js');
       const providerConfigurations = await import('@/features/translation/core/ProviderConfigurations.js');
       const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(level);
       scheduler.setSettings({ translationApi: provider, targetLanguage: 'ja', translateAfterScrollStop });
       try {
         const batchConfig = await scheduler._getBatchConfig();
-        const providerName = provider === 'yandex' ? 'YandexTranslate'
+        const providerName = provider === 'deepl' ? 'DeepLTranslate'
+          : provider === 'yandex' ? 'YandexTranslate'
           : provider === 'google' ? 'GoogleTranslate'
             : provider === 'googlev2' ? 'GoogleTranslateV2' : 'MicrosoftEdge';
         const effectiveProviderLimit = providerConfigurations.getProviderConfiguration(providerName, level).rateLimit.maxConcurrent;
@@ -1881,13 +1882,14 @@ describe('PageTranslationScheduler', () => {
         expect(scheduler.settings.maxConcurrentFlushes).toBe(expectedWorkerCap);
         if (provider === 'google') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 2, 3, 4][level - 1]);
         if (provider === 'yandex') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 2, 3, 4][level - 1]);
+        if (provider === 'deepl') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 2, 4, 4][level - 1]);
         if (provider === 'edge') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 2, 4, 4][level - 1]);
       } finally {
         optimization.mockRestore();
       }
     });
 
-    it('dispatches up to the Yandex, Google Classic, Google V2, and Edge worker caps in Fluid and On-Stop', async () => {
+    it('dispatches up to the DeepL, Yandex, Google Classic, Google V2, and Edge worker caps in Fluid and On-Stop', async () => {
       vi.useFakeTimers();
       const config = await import('@/shared/config/config.js');
       const providerConfigurations = await import('@/features/translation/core/ProviderConfigurations.js');
@@ -1981,6 +1983,12 @@ describe('PageTranslationScheduler', () => {
           const workerCap = Math.max(1, Math.min(4, Math.floor(maxConcurrent / 2)));
           await exerciseDispatch('googlev2', false, workerCap);
           await exerciseDispatch('googlev2', true, workerCap);
+          const deeplMaxConcurrent = providerConfigurations.getProviderConfiguration('DeepLTranslate', level).rateLimit.maxConcurrent;
+          const deeplWorkerCap = Math.max(1, Math.min(4, Math.floor(deeplMaxConcurrent / 2)));
+          expect(deeplMaxConcurrent).toBe([2, 3, 5, 8, 10][level - 1]);
+          expect(deeplWorkerCap).toBe([1, 1, 2, 4, 4][level - 1]);
+          await exerciseDispatch('deepl', false, deeplWorkerCap);
+          await exerciseDispatch('deepl', true, deeplWorkerCap);
           const googleMaxConcurrent = providerConfigurations.getProviderConfiguration('GoogleTranslate', level).rateLimit.maxConcurrent;
           const googleWorkerCap = Math.max(1, Math.min(4, Math.floor(googleMaxConcurrent / 2)));
           await exerciseDispatch('google', false, googleWorkerCap);

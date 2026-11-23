@@ -131,7 +131,7 @@ describe('UnifiedModeCoordinator', () => {
 
   describe('processPageTranslation', () => {
     it.each([
-      ['custom', true], ['openai', true], ['deepl', false],
+      ['custom', true], ['openai', true], ['bing', false],
     ])('opts independent Page batches into the parallel lane only for AI (%s)', async (provider, isAI) => {
       const providerInstance = {
         constructor: { isAI },
@@ -149,7 +149,7 @@ describe('UnifiedModeCoordinator', () => {
       expect(JSON.parse(result.translatedText)).toEqual([{ id: 'original-unit', text: 'translated' }]);
     });
 
-    it.each(['yandex', 'google', 'googlev2', 'edge'])('passes manifest Page parallel capability to %s only in Page mode', async provider => {
+    it.each(['deepl', 'yandex', 'google', 'googlev2', 'edge'])('passes manifest Page parallel capability to %s only in Page mode', async provider => {
       const providerInstance = {
         constructor: { isAI: false },
         translate: vi.fn().mockResolvedValue({ translatedText: ['translated'], sourceLanguage: 'en', targetLanguage: 'ja' }),

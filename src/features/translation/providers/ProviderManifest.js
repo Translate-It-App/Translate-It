@@ -57,6 +57,7 @@ const getRawManifest = () => [
     icon: "deepl.png",
     importFunction: () => import("./DeepLTranslate.js").then(m => ({ default: m.DeepLTranslateProvider })),
     features: ["translation", "subtitle", "text", "autoDetect", "formality", "bulk", "bilingual"],
+    supportsPageParallelExecution: true,
     needsApiKey: true,
     requiredSettings: ['DEEPL_API_KEY'],
     consumesTokens: true,
