@@ -360,9 +360,7 @@ export const ProviderRequestEngine = {
       // Capture proxy configuration for this physical attempt.
       const proxyConfig = await provider._initializeProxy();
 
-      if (provider.constructor.isAI) {
-        await rateLimitManager.waitForCooldown(provider.providerName, abortController?.signal);
-      }
+      await rateLimitManager.waitForCooldown(provider.providerName, abortController?.signal);
       if (abortController?.signal?.aborted) throw createOperationAbortError(abortController.signal);
 
       const { globalCallId, sessionCallId } = statsManager.recordRequest(provider.providerName, finalSessionId, finalCharCount, finalOriginalCharCount, normalizedCallPurpose);

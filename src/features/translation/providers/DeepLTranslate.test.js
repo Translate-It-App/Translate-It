@@ -984,6 +984,164 @@ describe('DeepLTranslateProvider response contract', () => {
     }
   });
 
+  it('waits for a concurrent DeepL Retry-After before recursive request-size recovery fetches', async () => {
+    vi.useFakeTimers();
+    const limiter = RateLimitManager.getInstance();
+    const providerName = provider.providerName;
+    const priorState = limiter.providerStates.get(providerName);
+    limiter.providerStates.delete(providerName);
+    const state = limiter._initializeProvider(providerName, { maxConcurrent: 2, delayBetweenRequests: 0 });
+    state.config = { ...state.config, maxConcurrent: 2, delayBetweenRequests: 0 };
+    state.isManualConfig = true;
+    let releaseFirstRecovery;
+    const firstRecoveryResponse = new Promise(resolve => { releaseFirstRecovery = resolve; });
+    let resolveFirstRecoveryStarted;
+    const firstRecoveryStarted = new Promise(resolve => { resolveFirstRecoveryStarted = resolve; });
+    const physicalCalls = [];
+
+    try {
+      await runWithRuntime(['key'], 'free', async () => {
+        proxyFetch.mockImplementation(async (_url, options) => {
+          const texts = options.body.getAll('text');
+          physicalCalls.push(texts);
+          if (texts.length > 1) {
+            return createJsonResponse(400, { message: 'HTTP request is too long' }, 'Bad Request');
+          }
+          if (texts[0] === 'rate-limit-batch') {
+            return {
+              ...createJsonResponse(429, { message: 'Too Many Requests' }, 'Too Many Requests'),
+              headers: { get: name => name.toLowerCase() === 'retry-after' ? '10' : null },
+            };
+          }
+          if (texts[0] === 'recovery-one') {
+            resolveFirstRecoveryStarted();
+            return firstRecoveryResponse;
+          }
+          return createJsonResponse(200, { translations: [{ text: `translated ${texts[0]}` }] }, 'OK');
+        });
+
+        const recovery = provider._executeWithRateLimit(
+          () => provider._translateChunk(['recovery-one', 'recovery-two'], 'en', 'fa', 'page', null, 0, 2, 0, 1, {}),
+          'deepl-page-recovery',
+        );
+        await firstRecoveryStarted;
+        const rateLimited = provider._executeWithRateLimit(
+          () => provider._translateChunk(['rate-limit-batch'], 'en', 'fa', 'page', null, 0, 1, 0, 1, {}),
+          'deepl-page-rate-limit',
+        );
+
+        await expect(rateLimited).rejects.toMatchObject({ type: ErrorTypes.RATE_LIMIT_REACHED, retryAt: expect.any(Number) });
+        expect(state.retryAt).toBe(Date.now() + 10000);
+        releaseFirstRecovery(createJsonResponse(200, { translations: [{ text: 'translated recovery-one' }] }, 'OK'));
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(physicalCalls).toEqual([
+          ['recovery-one', 'recovery-two'],
+          ['recovery-one'],
+          ['rate-limit-batch'],
+        ]);
+        await vi.advanceTimersByTimeAsync(9999);
+        expect(physicalCalls).toHaveLength(3);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(recovery).resolves.toEqual(['translated recovery-one', 'translated recovery-two']);
+        expect(physicalCalls).toHaveLength(4);
+        expect(state.activeRequests).toBe(0);
+      });
+    } finally {
+      releaseFirstRecovery(createJsonResponse(200, { translations: [{ text: 'cleanup' }] }, 'OK'));
+      if (state.nextProcessTimer) clearTimeout(state.nextProcessTimer);
+      for (const queue of Object.values(state.queues)) {
+        for (const request of queue) {
+          request.cleanupAbort?.();
+          request.reject(new Error('DeepL cooldown test cleanup'));
+        }
+        queue.length = 0;
+      }
+      if (priorState) limiter.providerStates.set(providerName, priorState);
+      else limiter.providerStates.delete(providerName);
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels DeepL recovery waiting on shared cooldown and releases its physical slot', async () => {
+    vi.useFakeTimers();
+    const limiter = RateLimitManager.getInstance();
+    const providerName = provider.providerName;
+    const priorState = limiter.providerStates.get(providerName);
+    limiter.providerStates.delete(providerName);
+    const state = limiter._initializeProvider(providerName, { maxConcurrent: 2, delayBetweenRequests: 0 });
+    state.config = { ...state.config, maxConcurrent: 2, delayBetweenRequests: 0 };
+    state.isManualConfig = true;
+    let releaseFirstRecovery;
+    const firstRecoveryResponse = new Promise(resolve => { releaseFirstRecovery = resolve; });
+    let resolveFirstRecoveryStarted;
+    const firstRecoveryStarted = new Promise(resolve => { resolveFirstRecoveryStarted = resolve; });
+    let resolveRecoveryOneFinished;
+    const recoveryOneFinished = new Promise(resolve => { resolveRecoveryOneFinished = resolve; });
+    const controller = new AbortController();
+    const physicalCalls = [];
+
+    try {
+      await runWithRuntime(['key'], 'free', async () => {
+        proxyFetch.mockImplementation(async (_url, options) => {
+          const texts = options.body.getAll('text');
+          physicalCalls.push(texts);
+          if (texts.length > 1) return createJsonResponse(400, { message: 'HTTP request is too long' }, 'Bad Request');
+          if (texts[0] === 'rate-limit-batch') {
+            return {
+              ...createJsonResponse(429, { message: 'Too Many Requests' }, 'Too Many Requests'),
+              headers: { get: name => name.toLowerCase() === 'retry-after' ? '10' : null },
+            };
+          }
+          if (texts[0] === 'recovery-one') {
+            resolveFirstRecoveryStarted();
+            const response = await firstRecoveryResponse;
+            resolveRecoveryOneFinished();
+            return response;
+          }
+          return createJsonResponse(200, { translations: [{ text: `translated ${texts[0]}` }] }, 'OK');
+        });
+
+        const recovery = provider._executeWithRateLimit(
+          () => provider._translateChunk(['recovery-one', 'recovery-two'], 'en', 'fa', 'page', controller, 0, 2, 0, 1, {}),
+          'deepl-page-cancelled-recovery',
+          null,
+          { abortController: controller },
+        );
+        await firstRecoveryStarted;
+        const rateLimited = provider._executeWithRateLimit(
+          () => provider._translateChunk(['rate-limit-batch'], 'en', 'fa', 'page', null, 0, 1, 0, 1, {}),
+          'deepl-page-cancel-rate-limit',
+        );
+
+        await expect(rateLimited).rejects.toMatchObject({ type: ErrorTypes.RATE_LIMIT_REACHED });
+        releaseFirstRecovery(createJsonResponse(200, { translations: [{ text: 'translated recovery-one' }] }, 'OK'));
+        await recoveryOneFinished;
+        await vi.advanceTimersByTimeAsync(0);
+        expect(physicalCalls).toHaveLength(3);
+
+        controller.abort('user-cancelled');
+        await expect(recovery).rejects.toMatchObject({ type: ErrorTypes.USER_CANCELLED });
+        expect(physicalCalls).toHaveLength(3);
+        expect(state.activeRequests).toBe(0);
+      });
+    } finally {
+      releaseFirstRecovery(createJsonResponse(200, { translations: [{ text: 'cleanup' }] }, 'OK'));
+      controller.abort('user-cancelled');
+      if (state.nextProcessTimer) clearTimeout(state.nextProcessTimer);
+      for (const queue of Object.values(state.queues)) {
+        for (const request of queue) {
+          request.cleanupAbort?.();
+          request.reject(new Error('DeepL cooldown cancellation test cleanup'));
+        }
+        queue.length = 0;
+      }
+      if (priorState) limiter.providerStates.set(providerName, priorState);
+      else limiter.providerStates.delete(providerName);
+      vi.useRealTimers();
+    }
+  });
+
   it('releases limiter capacity after DeepL recovery succeeds, fails, or is cancelled', async () => {
     const limiter = RateLimitManager.getInstance();
     const providerName = provider.providerName;
