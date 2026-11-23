@@ -151,7 +151,11 @@ TEXT_TOO_LONG
 
 ## 8. Provider Health Contract
 
-`RateLimitManager` per-provider state drives health: `consecutiveFailures`, `isCircuitOpen`, `circuitOpenTime`, `currentBackoffMultiplier`, `performanceStats`. Its `activeRequests` capacity is shared across AI page batches and structured recovery. A physical AI 429 extends the shared `retryAt` deadline, including when API-key failover consumes that error; queued siblings and subsequent calls inside an existing slot wait for the deadline. Successful siblings do not clear it. Queue clearing and configuration reload retain live request accounting until the task settles.
+`RateLimitManager` per-provider state drives health: `consecutiveFailures`, `isCircuitOpen`, `circuitOpenTime`, `currentBackoffMultiplier`, `performanceStats`. Its `activeRequests` capacity is shared across all requests for a provider, including opted-in Page workers and (for AI providers) structured recovery. A physical 429 with `Retry-After` extends the shared `retryAt` deadline, including when API-key failover consumes that error; queued siblings and subsequent calls wait for the deadline. Without `Retry-After`, Yandex and Edge 429s remain subject to the existing bounded QueueManager retry policy without establishing a shared server cooldown. Successful siblings do not clear a shared deadline. Queue clearing and configuration reload retain live request accounting until the task settles.
+
+DeepL's Page opt-in changes only Page dispatch parallelism; its physical requests, API-key failover, and request-size recovery continue to use the existing provider-shared limiter and retain their existing tier/key/error policies. Page workers do not multiply the configured DeepL HTTP capacity.
+
+Yandex translation also requires JSON `code === 200`; a non-200 code in an otherwise HTTP-successful JSON response is classified as `API_RESPONSE_INVALID` with the body code copied to `statusCode`. This is distinct from a non-2xx HTTP response, which is classified by the shared request engine's HTTP error handling. In particular, a JSON body code of `429` remains `API_RESPONSE_INVALID`: it receives the generic two-execution QueueManager retry, does not establish the shared `Retry-After` cooldown, and does not honor a `Retry-After` header on the HTTP-200 response. A transport-level HTTP 429 remains `RATE_LIMIT_REACHED` and follows Yandex's configured three-execution policy and shared cooldown when `Retry-After` is present.
 
 - **Network/provider failures affect health.** `_recordFailure` increments failure counters and may open the circuit.
 - **Cancellation does not.** Excluded from `_recordFailure`.
@@ -334,7 +338,7 @@ Numeric response IDs are valid only in a proven positional-wire context; they ar
 | --- | --- |
 | Local validation (TEXT_TOO_LONG: no network, no retry, no health) | `src/features/translation/core/QueueManager.test.js`, `src/features/translation/core/RateLimitManager.test.js`, `RateLimitManager.real-policy.test.js`, `src/shared/error-management/ValidationPolicy.test.js`, `src/features/translation/core/CrossLayerRetryBound.test.js`, `src/features/translation/providers/LingvaProvider.test.js` |
 | Rate limit / circuit breaker | `src/features/translation/core/RateLimitManager.test.js`, `RateLimitManager.real-policy.test.js`, `src/shared/error-management/ErrorMatcher.test.js` |
-| Page AI physical concurrency, shared 429, repair and cancellation | `src/core/services/translation/UnifiedModeCoordinator.integration.test.js` (real Custom provider, parser, queue and limiter; fixture settings/browser APIs and mocked physical fetch) |
+| Page physical concurrency and shared 429/cancellation | `src/core/services/translation/UnifiedModeCoordinator.integration.test.js` (real providers, coordinator, queue and limiter; fixture settings/browser APIs and mocked physical fetch) |
 | Page AUTO success without a pair, bounded handoff and waiting cancellation/deadline | `src/core/services/translation/UnifiedModeCoordinator.test.js`, `UnifiedModeCoordinator.integration.test.js` |
 | Queue retry | `src/features/translation/core/QueueManager.test.js`, `src/features/translation/core/CrossLayerRetryBound.test.js` |
 | API-key failover | `src/features/translation/providers/ApiKeyManager.test.js`, `src/features/translation/providers/utils/ProviderRequestEngine.test.js` |

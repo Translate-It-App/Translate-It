@@ -203,17 +203,19 @@ describe('RateLimitManager', () => {
       expect(state.activeRequests).toBe(0);
     });
 
-    it('shares Retry-After with siblings and retries even when an in-flight sibling succeeds', async () => {
+    it('shares Microsoft Edge Retry-After with siblings even when an in-flight sibling succeeds', async () => {
       vi.useFakeTimers();
       try {
-        const state = manager._initializeProvider('Shared429', { maxConcurrent: 2, delayBetweenRequests: 0 });
+        const state = manager._initializeProvider('MicrosoftEdge', { maxConcurrent: 2, delayBetweenRequests: 0 });
         const live = deferred();
         const rateLimitError = Object.assign(new Error('429'), { type: ErrorTypes.RATE_LIMIT_REACHED, statusCode: 429, retryAt: Date.now() + 10000 });
-        const failed = manager.executeWithRateLimit('Shared429', () => Promise.reject(rateLimitError));
-        const sibling = manager.executeWithRateLimit('Shared429', () => live.promise);
+        const failed = manager.executeWithRateLimit('MicrosoftEdge', () => Promise.reject(rateLimitError), 'page-batch');
+        const sibling = manager.executeWithRateLimit('MicrosoftEdge', () => live.promise, 'selection');
         await expect(failed).rejects.toBe(rateLimitError);
         const tasks = [vi.fn(() => 'queued sibling'), vi.fn(() => 'retry')];
-        const queued = tasks.map(task => manager.executeWithRateLimit('Shared429', task));
+        const queued = tasks.map((task, index) => manager.executeWithRateLimit(
+          'MicrosoftEdge', task, index === 0 ? 'page-batch' : 'selection'
+        ));
         live.resolve('success'); await sibling;
         expect(state.currentBackoffMultiplier).toBe(1);
         await vi.advanceTimersByTimeAsync(9999);
@@ -222,6 +224,22 @@ describe('RateLimitManager', () => {
         await expect(Promise.all(queued)).resolves.toEqual(['queued sibling', 'retry']);
         expect(state.activeRequests).toBe(0);
       } finally { vi.useRealTimers(); }
+    });
+
+    it('does not establish a shared server cooldown for Microsoft Edge 429 without Retry-After', async () => {
+      const state = manager._initializeProvider('MicrosoftEdge', {
+        maxConcurrent: 2,
+        delayBetweenRequests: 0,
+        adaptiveBackoff: { enabled: true, baseMultiplier: 1.5, maxDelay: 20000 },
+      });
+      const error = Object.assign(new Error('429'), { type: ErrorTypes.RATE_LIMIT_REACHED, statusCode: 429 });
+
+      await expect(manager.executeWithRateLimit('MicrosoftEdge', () => Promise.reject(error))).rejects.toBe(error);
+      expect(state.retryAt).toBeLessThanOrEqual(Date.now());
+      const sibling = vi.fn(() => 'sibling continues');
+      await expect(manager.executeWithRateLimit('MicrosoftEdge', sibling)).resolves.toBe('sibling continues');
+      expect(sibling).toHaveBeenCalledOnce();
+      expect(state.activeRequests).toBe(0);
     });
 
     it('uses bounded client backoff for zero-delay providers without Retry-After', async () => {

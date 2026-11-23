@@ -360,9 +360,7 @@ export const ProviderRequestEngine = {
       // Capture proxy configuration for this physical attempt.
       const proxyConfig = await provider._initializeProxy();
 
-      if (provider.constructor.isAI) {
-        await rateLimitManager.waitForCooldown(provider.providerName, abortController?.signal);
-      }
+      await rateLimitManager.waitForCooldown(provider.providerName, abortController?.signal);
       if (abortController?.signal?.aborted) throw createOperationAbortError(abortController.signal);
 
       const { globalCallId, sessionCallId } = statsManager.recordRequest(provider.providerName, finalSessionId, finalCharCount, finalOriginalCharCount, normalizedCallPurpose);
@@ -595,11 +593,13 @@ export const ProviderRequestEngine = {
         throw abortErr;
       }
       
-      if (err instanceof TypeError && /NetworkError/.test(err.message)) {
-        const networkErr = new Error(err.message);
-        networkErr.type = ErrorTypes.NETWORK_ERROR;
-        networkErr.context = context;
-        throw networkErr;
+      const isNativeFetchNetworkFailure = err instanceof TypeError
+        && /^(?:Failed to fetch|NetworkError:\s*Failed to fetch|NetworkError when attempting to fetch resource)\.?$/i
+          .test(err.message.trim());
+      if (!hasAuthoritativeType && isNativeFetchNetworkFailure) {
+        // Annotate the original error so native and transport-specific metadata survive normalization.
+        err.type = ErrorTypes.NETWORK_ERROR;
+        err.context ??= context;
       }
       throw err;
     }

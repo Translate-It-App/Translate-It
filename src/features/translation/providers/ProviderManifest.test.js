@@ -7,10 +7,12 @@ import { ProviderCategories, findProviderById } from './ProviderManifest.js';
 import { ProviderRegistryIds } from './ProviderConstants.js';
 
 describe('provider manifest categories', () => {
-  it('declares Page parallel execution only for Google V2 among traditional providers', () => {
+  it('declares Page parallel execution for DeepL, Yandex, Google Classic, Google V2, and Edge', () => {
+    expect(findProviderById(ProviderRegistryIds.DEEPL).supportsPageParallelExecution).toBe(true);
+    expect(findProviderById(ProviderRegistryIds.YANDEX).supportsPageParallelExecution).toBe(true);
     expect(findProviderById(ProviderRegistryIds.GOOGLE_V2).supportsPageParallelExecution).toBe(true);
-    expect(findProviderById(ProviderRegistryIds.GOOGLE).supportsPageParallelExecution).not.toBe(true);
-    expect(findProviderById(ProviderRegistryIds.EDGE).supportsPageParallelExecution).not.toBe(true);
+    expect(findProviderById(ProviderRegistryIds.GOOGLE).supportsPageParallelExecution).toBe(true);
+    expect(findProviderById(ProviderRegistryIds.EDGE).supportsPageParallelExecution).toBe(true);
   });
 
   it('keeps the local category for local providers and categorizes WebAI as AI', () => {

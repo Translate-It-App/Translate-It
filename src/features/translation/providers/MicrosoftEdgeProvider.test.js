@@ -9,11 +9,13 @@ vi.mock('webextension-polyfill', () => ({
 }));
 
 import { MicrosoftEdgeProvider } from './MicrosoftEdgeProvider.js';
+import { proxyManager } from '@/shared/proxy/ProxyManager.js';
 
 // Mock dependencies
 vi.mock('@/shared/logging/logger.js', () => ({
   getScopedLogger: () => ({
     debug: vi.fn(),
+    debugLazy: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
@@ -208,10 +210,23 @@ describe('MicrosoftEdgeProvider', () => {
         .rejects.toMatchObject({ type: 'API_RESPONSE_INVALID' });
     });
 
+    it('rejects an Edge response with the wrong logical item cardinality', async () => {
+      vi.spyOn(provider, '_createChunks').mockResolvedValue([{ texts: ['Hello', 'World'] }]);
+      vi.spyOn(provider, '_executeWithRateLimit').mockImplementation(task => task({}));
+      vi.spyOn(provider, '_translateChunk').mockResolvedValue(['سلام']);
+
+      await expect(provider._traditionalBatchTranslate(
+        ['Hello', 'World'], 'en', 'fa', 'page'
+      )).rejects.toMatchObject({ type: 'API_RESPONSE_INVALID' });
+    });
+
     it('should retry without from when source language is rejected', async () => {
       const executeMock = vi.spyOn(provider, '_executeRequest');
       executeMock
-        .mockRejectedValueOnce(new Error('The source language is not valid'))
+        .mockRejectedValueOnce(Object.assign(new Error('The source language is not valid'), {
+          type: 'HTTP_ERROR',
+          statusCode: 400,
+        }))
         .mockImplementationOnce(async (options) => options.extractResponse([
           { translations: [{ text: 'سلام' }] }
         ]));
@@ -222,6 +237,32 @@ describe('MicrosoftEdgeProvider', () => {
       expect(executeMock).toHaveBeenCalledTimes(2);
       expect(new URL(executeMock.mock.calls[0][0].url).searchParams.get('from')).toBe('invalid-lang');
       expect(new URL(executeMock.mock.calls[1][0].url).searchParams.has('from')).toBe(false);
+    });
+
+    it('does not send the auto-detect fallback after cancellation of the rejected-source request', async () => {
+      const abortController = new AbortController();
+      const fetchMock = vi.spyOn(proxyManager, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        headers: new Map([['content-type', 'application/json']]),
+        json: async () => {
+          abortController.abort('user-cancelled');
+          return { error: { message: 'The source language is not valid' } };
+        },
+        clone() { return this; },
+      });
+
+      try {
+        await expect(provider._translateChunk(
+          ['Hello'], 'invalid-lang', 'fa', 'page', abortController
+        )).rejects.toMatchObject({ name: 'AbortError', type: 'USER_CANCELLED' });
+
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(fetchMock.mock.calls[0][1].signal).toBe(abortController.signal);
+      } finally {
+        fetchMock.mockRestore();
+      }
     });
   });
 });

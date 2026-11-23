@@ -68,6 +68,52 @@ describe('YandexTranslateProvider output contract', () => {
       .rejects.toMatchObject({ type: 'API_RESPONSE_INVALID' });
   });
 
+  it('rejects extra response entries', async () => {
+    await expect(runResponse(['A', 'B'], ['A2', 'B2', 'unexpected']))
+      .rejects.toMatchObject({ type: 'API_RESPONSE_INVALID' });
+  });
+
+  it.each([null, {}, { text: ['A2'] }, { code: 200, text: 'A2' }])(
+    'rejects malformed response payloads: %j',
+    async payload => {
+      vi.spyOn(provider, '_executeRequest').mockImplementation(async options => options.extractResponse(payload));
+      await expect(provider._translateChunk(['A'], 'en', 'fa', 'selection', null, 0, 1, 0, 1))
+        .rejects.toMatchObject({ type: 'API_RESPONSE_INVALID' });
+    }
+  );
+
+  it('rejects a JSON API error code as an invalid response and preserves that body code', async () => {
+    vi.spyOn(provider, '_executeRequest').mockImplementation(async options => options.extractResponse({
+      code: 401,
+      text: ['A2'],
+      lang: 'en-fa',
+    }));
+
+    await expect(provider._translateChunk(['A'], 'en', 'fa', 'selection', null, 0, 1, 0, 1))
+      .rejects.toMatchObject({ type: 'API_RESPONSE_INVALID', statusCode: 401 });
+  });
+
+  it('sends Yandex translation as URL-encoded lang and repeated text fields with the required query parameters', async () => {
+    vi.spyOn(provider, '_executeRequest').mockImplementation(async options => options.extractResponse({
+      code: 200,
+      text: ['A2', 'B2'],
+      lang: 'en-fa',
+    }));
+    const sources = ['A', 'B'];
+
+    await provider._translateChunk(sources, 'en', 'fa', 'selection', null, 0, 2, 0, 1);
+
+    const request = provider._executeRequest.mock.calls[0][0];
+    const url = new URL(request.url);
+    expect(request.fetchOptions.method).toBe('POST');
+    expect(request.fetchOptions.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
+    expect(request.fetchOptions.body).toBeInstanceOf(URLSearchParams);
+    expect(request.fetchOptions.body.get('lang')).toBe('en-fa');
+    expect(request.fetchOptions.body.getAll('text')).toEqual(sources);
+    expect(url.searchParams.get('id')).toMatch(/^[a-f0-9]{32}-0-0$/);
+    expect(url.searchParams.get('srv')).toBe('android');
+  });
+
   it.each(['', '   '])('preserves blank source slots: %j', async (blankSource) => {
     const sources = [blankSource, 'A'];
     await expect(runResponse(sources, [sources[0], 'A2'])).resolves.toEqual([sources[0], 'A2']);
