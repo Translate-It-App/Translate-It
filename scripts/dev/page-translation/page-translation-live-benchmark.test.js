@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { URL as NodeURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { JSDOM } from "jsdom";
 import { startServer } from "./live-benchmark/serve.mjs";
 
@@ -49,6 +49,15 @@ async function exportResults(window) {
     reader.onerror = reject;
     reader.readAsText(blob);
   });
+}
+async function copyResults(window, writeText = vi.fn().mockResolvedValue()) {
+  Object.defineProperty(window.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  window.document.getElementById("ti-ab-copy").click();
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+  return writeText.mock.calls[0]?.[0];
 }
 
 describe("manual live Page Translation benchmark", () => {
@@ -129,7 +138,16 @@ describe("manual live Page Translation benchmark", () => {
       errors: [],
     });
     expect(results(window)[0]).not.toHaveProperty("sessionId");
-    expect(await exportResults(window)).toMatchObject({
+    const copyButton = window.document.getElementById("ti-ab-copy");
+    expect(copyButton.getAttribute("aria-label")).toBe(
+      "Copy results to clipboard",
+    );
+    expect(copyButton.getAttribute("title")).toBe("Copy results to clipboard");
+    expect(copyButton.textContent.trim()).toBe("");
+
+    const copiedText = await copyResults(window);
+    const copied = JSON.parse(copiedText);
+    expect(copied).toMatchObject({
       metadataOnly: true,
       trials: [
         {
@@ -138,6 +156,16 @@ describe("manual live Page Translation benchmark", () => {
         },
       ],
     });
+    expect(
+      window.document.getElementById("ti-ab-copy-feedback").textContent,
+    ).toBe("Copied results to clipboard.");
+    const exported = await exportResults(window);
+    const withoutExportTime = (payload) => {
+      const copy = { ...payload };
+      delete copy.exportedAt;
+      return copy;
+    };
+    expect(withoutExportTime(copied)).toEqual(withoutExportTime(exported));
 
     const cancelledPage = createPage();
     emit(cancelledPage.window, "page-translate-start", { sessionId: "next" });
@@ -176,6 +204,9 @@ describe("manual live Page Translation benchmark", () => {
       errors: [{ type: "page-translation-internal-error" }],
     });
 
+    const copiedText = await copyResults(window);
+    expect(copiedText).not.toContain("private-credential");
+    expect(copiedText).not.toContain("source text payload");
     const exportJson = await exportResults(window);
     const exportText = JSON.stringify(exportJson);
     expect(exportJson).toMatchObject({
@@ -247,6 +278,45 @@ describe("manual live Page Translation benchmark", () => {
       expect.any(Number),
     );
     expect(results(window)[0].timings.firstVisibleMs).toBeNull();
+    dom.window.close();
+  });
+
+  it("shows failure feedback when clipboard access is unavailable", async () => {
+    const dom = createPage();
+    const { window } = dom;
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+
+    window.document.getElementById("ti-ab-copy").click();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    const feedback = window.document.getElementById("ti-ab-copy-feedback");
+    expect(feedback.textContent).toBe(
+      "Copy failed: clipboard unavailable or permission denied.",
+    );
+    expect(feedback.dataset.status).toBe("error");
+    dom.window.close();
+  });
+
+  it("shows failure feedback when clipboard permission is rejected", async () => {
+    const dom = createPage();
+    const { window } = dom;
+    const writeText = vi.fn().mockRejectedValue(new Error("Permission denied"));
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    window.document.getElementById("ti-ab-copy").click();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    const feedback = window.document.getElementById("ti-ab-copy-feedback");
+    expect(writeText).toHaveBeenCalledOnce();
+    expect(feedback.textContent).toBe(
+      "Copy failed: clipboard unavailable or permission denied.",
+    );
+    expect(feedback.textContent).not.toContain("Copied results");
+    expect(feedback.dataset.status).toBe("error");
     dom.window.close();
   });
 

@@ -54,6 +54,25 @@
         padding: 5px 8px;
         font: inherit;
       }
+      #ti-ab-panel #ti-ab-copy {
+        width: 30px;
+        height: 30px;
+        padding: 5px;
+        vertical-align: middle;
+      }
+      #ti-ab-copy svg {
+        display: block;
+        width: 18px;
+        height: 18px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      #ti-ab-copy-feedback[data-status="error"] {
+        color: #b42318;
+      }
       #ti-ab-panel [data-status="passed"] {
         color: #087a36;
       }
@@ -586,8 +605,22 @@
         <p id="ti-ab-latest" aria-live="polite">
           Latest: waiting for Page Translation START
         </p>
-        <button id="ti-ab-export" type="button">Export JSON</button
-        ><button id="ti-ab-clear" type="button">Clear Results</button>
+        <button id="ti-ab-export" type="button">Export JSON</button>
+        <button
+          id="ti-ab-copy"
+          type="button"
+          aria-label="Copy results to clipboard"
+          title="Copy results to clipboard"
+        >
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <rect x="8" y="8" width="12" height="13" rx="2"></rect>
+            <path
+              d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"
+            ></path>
+          </svg>
+        </button>
+        <button id="ti-ab-clear" type="button">Clear Results</button>
+        <p id="ti-ab-copy-feedback" role="status" aria-live="polite"></p>
       </aside>
     </main>
     <script src="./benchmark.js" defer></script>

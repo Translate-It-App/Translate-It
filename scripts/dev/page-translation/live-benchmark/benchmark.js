@@ -151,6 +151,29 @@
         : null,
     };
   }
+  function serializeResults() {
+    return JSON.stringify(
+      {
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        metadataOnly: true,
+        trials: records.map(exportRecord),
+      },
+      null,
+      2,
+    );
+  }
+  let copyFeedbackTimer;
+  function showCopyFeedback(message, isError = false) {
+    const feedback = document.getElementById("ti-ab-copy-feedback");
+    feedback.textContent = message;
+    feedback.dataset.status = isError ? "error" : "success";
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = setTimeout(() => {
+      feedback.textContent = "";
+      feedback.dataset.status = "";
+    }, 1800);
+  }
   function start(event) {
     const detail = event.detail || {};
     const id = detail.sessionId;
@@ -335,13 +358,7 @@
     characterData: true,
   });
   document.getElementById("ti-ab-export").addEventListener("click", () => {
-    const payload = {
-      schemaVersion: 1,
-      exportedAt: new Date().toISOString(),
-      metadataOnly: true,
-      trials: records.map(exportRecord),
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    const blob = new Blob([serializeResults()], {
       type: "application/json",
     });
     const url = URL.createObjectURL(blob);
@@ -350,6 +367,19 @@
     link.download = "page-translation-ab-results.json";
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 0);
+  });
+  document.getElementById("ti-ab-copy").addEventListener("click", async () => {
+    try {
+      if (typeof navigator.clipboard?.writeText !== "function")
+        throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(serializeResults());
+      showCopyFeedback("Copied results to clipboard.");
+    } catch {
+      showCopyFeedback(
+        "Copy failed: clipboard unavailable or permission denied.",
+        true,
+      );
+    }
   });
   document.getElementById("ti-ab-clear").addEventListener("click", () => {
     if (!confirm("Clear all saved Page Translation A/B results?")) return;
