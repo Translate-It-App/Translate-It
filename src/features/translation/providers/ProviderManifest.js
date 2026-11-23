@@ -83,6 +83,7 @@ const getRawManifest = () => [
     icon: "google.png",
     importFunction: () => import("./GoogleTranslate.js").then(m => ({ default: m.GoogleTranslateProvider })),
     features: ["translation", "subtitle", "text", "autoDetect", "bulk", "dictionary", "bilingual"],
+    supportsPageParallelExecution: true,
     needsApiKey: false,
     supported: true,
   },

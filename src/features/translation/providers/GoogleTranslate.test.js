@@ -286,6 +286,30 @@ describe('GoogleTranslateProvider newline chunk isolation', () => {
       await expect(provider._translateChunk(['URL'], 'en', 'fa', 'page', null, 0, 1, 0, 1, {})).resolves.toBe('URL');
     });
 
+    it('keeps Classic gtx request parameters and maps delimiter-separated segments', async () => {
+      const execute = vi.spyOn(provider, '_executeRequest').mockImplementation(async options =>
+        options.extractResponse([
+          [['ترجمه اول', 'first source'], ['[[---]]', '[[---]]'], ['ترجمه دوم', 'second source']],
+          null,
+          'en',
+        ])
+      );
+
+      await expect(provider._translateChunk(
+        ['first source', 'second source'], 'en', 'fa', 'page', null, 0, 2, 0, 1, {}
+      )).resolves.toEqual(['ترجمه اول', 'ترجمه دوم']);
+
+      const request = execute.mock.calls[0][0];
+      const url = new URL(request.url);
+      expect(url.searchParams.get('client')).toBe('gtx');
+      expect(url.searchParams.get('sl')).toBe('en');
+      expect(url.searchParams.get('tl')).toBe('fa');
+      expect(url.searchParams.getAll('dt')).toEqual(['at', 'bd', 'ex', 'ld', 'md', 'qca', 'rw', 'rm', 'ss', 't']);
+      expect(request.fetchOptions.method).toBe('POST');
+      expect(request.fetchOptions.headers['Content-Type']).toBe('application/x-www-form-urlencoded;charset=UTF-8');
+      expect(request.fetchOptions.body).toContain(encodeURIComponent('first source'));
+    });
+
     it('rejects a missing required segment in a multi-item legacy response', async () => {
       vi.spyOn(provider, '_executeRequest').mockImplementation(async (opts) => opts.extractResponse([[['only first', 'first']]]));
 

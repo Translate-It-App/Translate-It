@@ -32,6 +32,7 @@ vi.mock('@/shared/config/config.js', async importOriginal => ({
   getCustomApiUrlAsync: vi.fn(async () => 'https://fixture.invalid/v1/chat/completions'),
   getCustomApiModelAsync: vi.fn(async () => 'fixture-model'),
   getProviderOptimizationLevelAsync: vi.fn(async () => settings.level),
+  getGoogleTranslateUrlAsync: vi.fn(async () => 'https://translate.google.com/translate_a/single'),
   getGoogleTranslateV2UrlAsync: vi.fn(async () => 'https://translate.google.com/translate_a/single'),
   getBilingualTranslationEnabledAsync: vi.fn(async () => settings.bilingual),
   getBilingualTranslationModesAsync: vi.fn(async () => settings.bilingualModes),
@@ -43,6 +44,7 @@ vi.mock('@/shared/proxy/ProxyManager.js', () => ({
 
 import { UnifiedModeCoordinator } from './UnifiedModeCoordinator.js';
 import { CustomProvider, clearCustomResponseFormatSupportCache } from '@/features/translation/providers/CustomProvider.js';
+import { GoogleTranslateProvider } from '@/features/translation/providers/GoogleTranslate.js';
 import { GoogleTranslateV2Provider } from '@/features/translation/providers/GoogleTranslateV2Provider.js';
 import { MicrosoftEdgeProvider } from '@/features/translation/providers/MicrosoftEdgeProvider.js';
 import { queueManager } from '@/features/translation/core/QueueManager.js';
@@ -531,6 +533,266 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
     expect(Object.values(providerState.queues).every(queue => queue.length === 0)).toBe(true);
     expect(queueManager.getQueueStatus('MicrosoftEdge::parallel').total).toBe(0);
     expect(queueManager.getQueueStatus('MicrosoftEdge').total).toBe(0);
+  });
+});
+
+describe('Page → Google Classic bounded physical concurrency', () => {
+  let coordinator, engine, providerState, active, maximum, requests, controllers;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    queueManager.cleanup();
+    rateLimitManager.providerStates.forEach(state => clearTimeout(state.nextProcessTimer));
+    rateLimitManager.providerStates.clear();
+    settings.level = 5;
+    settings.keys = [];
+    settings.bilingual = false;
+    settings.bilingualModes = { [TranslationMode.Page]: false };
+    settings.detectionResult = null;
+    LanguageDetectionService.clearSessionCache();
+    await rateLimitManager.reloadConfigurations();
+    coordinator = new UnifiedModeCoordinator();
+    const provider = new GoogleTranslateProvider();
+    controllers = new Map();
+    engine = {
+      getProvider: async () => provider,
+      lifecycleRegistry: {
+        registerRequest: messageId => {
+          const controller = new AbortController();
+          controllers.set(messageId, controller);
+          return controller;
+        },
+        unregisterRequest: vi.fn(),
+      },
+    };
+    providerState = rateLimitManager.providerStates.get('GoogleTranslate');
+    providerState.isManualConfig = true;
+    providerState.config.maxConcurrent = 2;
+    active = 0;
+    maximum = 0;
+    requests = [];
+    vi.useFakeTimers();
+    proxyManager.fetch.mockImplementation(async (_url, options) => {
+      const query = new URLSearchParams(options.body).get('q');
+      const request = { query, signal: options.signal, released: false, startedAt: Date.now() };
+      requests.push(request);
+      active++;
+      maximum = Math.max(maximum, active);
+      const { status = 200, retryAfter, response = { sentences: [{ trans: `translated:${query}` }], src: 'en' } } = await new Promise(resolve => {
+        request.release = fixture => {
+          request.released = true;
+          active--;
+          resolve(fixture || {});
+        };
+      });
+      return {
+        ok: status === 200,
+        status,
+        statusText: status === 200 ? 'OK' : 'Too Many Requests',
+        headers: new Map([['content-type', 'application/json'], ...(retryAfter ? [['Retry-After', retryAfter]] : [])]),
+        json: async () => response,
+        clone() { return this; },
+      };
+    });
+  });
+
+  afterEach(() => {
+    requests.filter(request => !request.released).forEach(request => request.release());
+    queueManager.cleanup();
+    rateLimitManager.providerStates.forEach(state => clearTimeout(state.nextProcessTimer));
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const pageRequest = (index, text, sourceLanguage = 'en', targetLanguage = 'fa') => coordinator.processRequest({
+    mode: TranslationMode.Page,
+    messageId: `classic-page-${index}`,
+    data: {
+      provider: 'google',
+      sessionId: 'classic-page-session',
+      sourceLanguage,
+      targetLanguage,
+      text: JSON.stringify([{ id: `page-${index}`, text }]),
+    },
+  }, { translationEngine: engine });
+
+  const subtitleRequest = (index = 0, text = 'subtitle source') => coordinator.processRequest({
+    mode: TranslationMode.Subtitle,
+    messageId: `classic-subtitle-${index}`,
+    data: {
+      provider: 'google',
+      sourceLanguage: 'en',
+      targetLanguage: 'fa',
+      items: [{ id: `cue-${index}`, text }],
+    },
+  }, { translationEngine: engine });
+
+  const pumpUntil = async (predicate, message) => {
+    for (let turn = 0; turn < 60 && !predicate(); turn++) {
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(predicate(), `${message}; active=${providerState.activeRequests}; queues=${JSON.stringify(providerState.queues)}`).toBe(true);
+  };
+
+  it('shares physical capacity with Subtitle and maps out-of-order Page completions by item identity', async () => {
+    const pages = [
+      pageRequest(0, 'page source zero'),
+      pageRequest(1, 'page source one'),
+      pageRequest(2, 'page source two'),
+    ];
+    const subtitle = subtitleRequest();
+    await pumpUntil(() => requests.length === 2, 'two requests should occupy the shared Google Classic limit');
+    expect(active).toBe(2);
+    expect(maximum).toBe(2);
+
+    requests[1].release();
+    await pumpUntil(() => requests.length === 3, 'a queued request should start when a provider slot is released');
+    requests[2].release();
+    await pumpUntil(() => requests.length === 4, 'the final request should start after the next slot release');
+    requests[3].release();
+    requests[0].release();
+
+    const results = await Promise.all(pages);
+    const subtitleResult = await subtitle;
+    results.forEach((result, index) => {
+      expect(result.success).toBe(true);
+      expect(JSON.parse(result.translatedText)).toEqual([
+        { id: `page-${index}`, text: `translated:page source ${['zero', 'one', 'two'][index]}` },
+      ]);
+    });
+    expect(subtitleResult.results).toEqual([{ id: 'cue-0', text: 'translated:subtitle source' }]);
+    expect(requests.some(request => request.query === 'subtitle source')).toBe(true);
+    expect(maximum).toBe(2);
+    expect(active).toBe(0);
+    expect(providerState.activeRequests).toBe(0);
+    expect(queueManager.getQueueStatus('GoogleTranslate::parallel').total).toBe(0);
+    expect(queueManager.getQueueStatus('GoogleTranslate').total).toBe(0);
+  });
+
+  it('keeps separate Subtitle operations on the existing serial provider queue', async () => {
+    const subtitles = [
+      subtitleRequest(0, 'first subtitle'),
+      subtitleRequest(1, 'second subtitle'),
+    ];
+    await pumpUntil(() => requests.length === 1, 'the ordinary Google queue should start one Subtitle operation');
+    expect(active).toBe(1);
+    requests[0].release();
+    await pumpUntil(() => requests.length === 2, 'the second Subtitle should start after the first settles');
+    requests[1].release();
+    expect((await Promise.all(subtitles)).every(result => result.success)).toBe(true);
+    expect(maximum).toBe(1);
+    expect(providerState.activeRequests).toBe(0);
+    expect(queueManager.getQueueStatus('GoogleTranslate').total).toBe(0);
+  });
+
+  it('keeps one AUTO owner and serially hands off an unresolved language pair', async () => {
+    settings.detectionResult = {
+      isReliable: false,
+      languages: [{ language: 'en', percentage: 50 }],
+    };
+    const provider = await engine.getProvider();
+    const translate = vi.spyOn(provider, 'translate');
+    const pages = [
+      pageRequest(0, 'An ambiguous sample.', 'auto'),
+      pageRequest(1, 'Another ambiguous sample.', 'auto'),
+    ];
+    await pumpUntil(() => requests.length === 1, 'only the AUTO owner should call the provider while the pair is unresolved');
+    expect(translate).toHaveBeenCalledTimes(1);
+    expect(translate.mock.calls[0][1]).toBe('auto');
+    requests[0].release();
+    await pumpUntil(() => requests.length === 2, 'a waiter should dispatch after the owner response resolves the pair');
+    expect(translate.mock.calls[1][1]).toBe('auto');
+    requests[1].release();
+    expect((await Promise.all(pages)).every(result => result.success)).toBe(true);
+    expect(maximum).toBe(1);
+    expect(providerState.activeRequests).toBe(0);
+  });
+
+  it('locally resolves a concrete AUTO pair before dispatching Page siblings', async () => {
+    const provider = await engine.getProvider();
+    const translate = vi.spyOn(provider, 'translate');
+    const sample = 'متن فارسی برای تشخیص زبان و ترجمه صفحه. '.repeat(8);
+    const pages = [
+      pageRequest(0, sample, 'auto', 'en'),
+      pageRequest(1, sample, 'auto', 'en'),
+    ];
+    await pumpUntil(() => requests.length === 2, 'both Page batches should dispatch with a locally resolved pair');
+    expect(translate.mock.calls.slice(0, 2).map(call => call.slice(1, 3))).toEqual([
+      ['fa', 'en'],
+      ['fa', 'en'],
+    ]);
+    requests.forEach(request => request.release());
+    expect((await Promise.all(pages)).every(result => result.success)).toBe(true);
+    expect(providerState.activeRequests).toBe(0);
+  });
+
+  it.each([['with Retry-After', '1'], ['without Retry-After', undefined]])(
+    'retries Google Classic HTTP 429 %s within QueueManager bounds',
+    async (_label, retryAfter) => {
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      const pending = pageRequest(0, 'rate limited source');
+      await pumpUntil(() => requests.length === 1, 'the initial request should reach mocked HTTP');
+      const rateLimitedAt = Date.now();
+      requests[0].release({
+        status: 429,
+        retryAfter,
+        response: { error: { message: 'Too many requests' } },
+      });
+      await vi.advanceTimersByTimeAsync(15000);
+      await pumpUntil(() => requests.length === 2, 'the bounded QueueManager retry should be sent');
+      if (retryAfter) expect(requests[1].startedAt).toBeGreaterThanOrEqual(rateLimitedAt + 1000);
+      requests[1].release();
+      expect((await pending).success).toBe(true);
+      expect(requests).toHaveLength(2);
+      expect(providerState.activeRequests).toBe(0);
+    }
+  );
+
+  it('shares Google Classic Retry-After cooldown with queued Page and Subtitle requests', async () => {
+    const limited = pageRequest(0, 'limited source');
+    const subtitle = subtitleRequest();
+    const queued = pageRequest(2, 'queued source');
+    await pumpUntil(() => requests.length === 2, 'Page and Subtitle should fill the provider-global physical limit');
+    const limitedRequest = requests.find(request => request.query === 'limited source');
+    const cooldownStart = Date.now();
+    limitedRequest.release({
+      status: 429,
+      retryAfter: '1',
+      response: { error: { message: 'Too many requests' } },
+    });
+    requests.find(request => request.query === 'subtitle source').release();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(requests).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(10000);
+    await pumpUntil(() => requests.length === 4, 'both the bounded retry and queued Page request should resume after the shared deadline');
+    expect(requests.slice(2).every(request => request.startedAt >= cooldownStart + 1000)).toBe(true);
+    requests.slice(2).forEach(request => request.release());
+    expect((await Promise.all([limited, subtitle, queued])).every(result => result.success)).toBe(true);
+    expect(providerState.activeRequests).toBe(0);
+    expect(active).toBe(0);
+  });
+
+  it('holds a cancelled HTTP slot until the transport settles, then releases queued capacity', async () => {
+    providerState.config.maxConcurrent = 1;
+    const first = pageRequest(0, 'cancelled source');
+    const second = pageRequest(1, 'queued source');
+    let firstSettled = false;
+    first.then(() => { firstSettled = true; });
+    await pumpUntil(() => requests.length === 1, 'the first request should acquire the only available slot');
+    controllers.get('classic-page-0').abort('user-cancelled');
+    await pumpUntil(() => firstSettled, 'the coordinator should settle the cancelled operation');
+    expect(requests).toHaveLength(1);
+    expect(active).toBe(1);
+
+    requests[0].release();
+    await pumpUntil(() => requests.length === 2, 'the queued request should start after transport settlement');
+    requests[1].release();
+    expect((await first).success).toBe(false);
+    expect((await second).success).toBe(true);
+    expect(providerState.activeRequests).toBe(0);
+    expect(active).toBe(0);
   });
 });
 
