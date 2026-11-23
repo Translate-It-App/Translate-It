@@ -151,7 +151,7 @@ TEXT_TOO_LONG
 
 ## 8. Provider Health Contract
 
-`RateLimitManager` per-provider state drives health: `consecutiveFailures`, `isCircuitOpen`, `circuitOpenTime`, `currentBackoffMultiplier`, `performanceStats`. Its `activeRequests` capacity is shared across AI page batches and structured recovery. A physical AI 429 extends the shared `retryAt` deadline, including when API-key failover consumes that error; queued siblings and subsequent calls inside an existing slot wait for the deadline. Successful siblings do not clear it. Queue clearing and configuration reload retain live request accounting until the task settles.
+`RateLimitManager` per-provider state drives health: `consecutiveFailures`, `isCircuitOpen`, `circuitOpenTime`, `currentBackoffMultiplier`, `performanceStats`. Its `activeRequests` capacity is shared across all requests for a provider, including opted-in Page workers and (for AI providers) structured recovery. A physical 429 with `Retry-After` extends the shared `retryAt` deadline, including when API-key failover consumes that error; queued siblings and subsequent calls wait for the deadline. Without `Retry-After`, an Edge 429 remains subject to the existing bounded QueueManager retry policy without establishing a shared server cooldown. Successful siblings do not clear a shared deadline. Queue clearing and configuration reload retain live request accounting until the task settles.
 
 - **Network/provider failures affect health.** `_recordFailure` increments failure counters and may open the circuit.
 - **Cancellation does not.** Excluded from `_recordFailure`.

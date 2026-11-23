@@ -247,6 +247,7 @@ describe('ProviderCoordinator', () => {
     it.each([
       ['GoogleTranslate', 3],
       ['GoogleTranslateV2', 3],
+      ['MicrosoftEdge', 3],
     ])('passes configured RATE_LIMIT_REACHED budget for %s', async (providerName, maxExecutions) => {
       mockProvider.providerName = providerName;
 

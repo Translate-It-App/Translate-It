@@ -1864,24 +1864,26 @@ describe('PageTranslationScheduler', () => {
     });
   });
 
-  describe('bounded independent AI batches', () => {
-    it.each([1, 2, 3, 4, 5].flatMap(level => [false, true].map(translateAfterScrollStop => [level, translateAfterScrollStop])))('uses the effective Google V2 worker cap at level %i in %s mode', async (level, translateAfterScrollStop) => {
+  describe('bounded independent Page batches', () => {
+    it.each(['googlev2', 'edge'].flatMap(provider => [1, 2, 3, 4, 5].flatMap(level => [false, true].map(translateAfterScrollStop => [provider, level, translateAfterScrollStop]))))('uses the effective %s worker cap at level %i in %s mode', async (provider, level, translateAfterScrollStop) => {
       const config = await import('@/shared/config/config.js');
       const providerConfigurations = await import('@/features/translation/core/ProviderConfigurations.js');
       const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(level);
-      scheduler.setSettings({ translationApi: 'googlev2', targetLanguage: 'ja', translateAfterScrollStop });
+      scheduler.setSettings({ translationApi: provider, targetLanguage: 'ja', translateAfterScrollStop });
       try {
         const batchConfig = await scheduler._getBatchConfig();
-        const effectiveProviderLimit = providerConfigurations.getProviderConfiguration('GoogleTranslateV2', level).rateLimit.maxConcurrent;
+        const providerName = provider === 'edge' ? 'MicrosoftEdge' : 'GoogleTranslateV2';
+        const effectiveProviderLimit = providerConfigurations.getProviderConfiguration(providerName, level).rateLimit.maxConcurrent;
         const expectedWorkerCap = Math.max(1, Math.min(4, Math.floor(effectiveProviderLimit / 2)));
         expect(batchConfig.parallelExecution).toBe(expectedWorkerCap > 1);
         expect(scheduler.settings.maxConcurrentFlushes).toBe(expectedWorkerCap);
+        if (provider === 'edge') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 2, 4, 4][level - 1]);
       } finally {
         optimization.mockRestore();
       }
     });
 
-    it('dispatches up to the Google V2 worker cap in Fluid and On-Stop, while traditional Google stays serial', async () => {
+    it('dispatches up to the Google V2 and Edge worker caps in Fluid and On-Stop, while traditional Google stays serial', async () => {
       vi.useFakeTimers();
       const config = await import('@/shared/config/config.js');
       const providerConfigurations = await import('@/features/translation/core/ProviderConfigurations.js');
@@ -1975,6 +1977,10 @@ describe('PageTranslationScheduler', () => {
           const workerCap = Math.max(1, Math.min(4, Math.floor(maxConcurrent / 2)));
           await exerciseDispatch('googlev2', false, workerCap);
           await exerciseDispatch('googlev2', true, workerCap);
+          const edgeMaxConcurrent = providerConfigurations.getProviderConfiguration('MicrosoftEdge', level).rateLimit.maxConcurrent;
+          const edgeWorkerCap = Math.max(1, Math.min(4, Math.floor(edgeMaxConcurrent / 2)));
+          await exerciseDispatch('edge', false, edgeWorkerCap);
+          await exerciseDispatch('edge', true, edgeWorkerCap);
         }
         await exerciseDispatch('google', false, 1);
       } finally {
@@ -2130,6 +2136,36 @@ describe('PageTranslationScheduler', () => {
       expectSettlement(batch[2].resolve, 'translated C');
       expect(getSettlement(batch[1].resolve).state).toBe('failed');
       expect(safeSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('maps independent Page batches by stable item IDs when they complete out of order', async () => {
+      const pending = new Map();
+      safeSendMessage.mockImplementation(message => new Promise(resolve => {
+        const items = JSON.parse(message.data.text);
+        pending.set(items[0].id, () => resolve({
+          success: true,
+          translatedText: JSON.stringify(items.map(item => ({ ...item, text: `translated:${item.text}` }))),
+        }));
+      }));
+      const first = { id: 'first', text: 'First', resolve: vi.fn() };
+      const second = { id: 'second', text: 'Second', resolve: vi.fn() };
+      const firstRequest = scheduler._executeBatchRequest(
+        [first], { providerRegistryId: 'edge' }, scheduler.sessionContext, scheduler.translationSessionId
+      );
+      const secondRequest = scheduler._executeBatchRequest(
+        [second], { providerRegistryId: 'edge' }, scheduler.sessionContext, scheduler.translationSessionId
+      );
+
+      pending.get('second')();
+      await secondRequest;
+      pending.get('first')();
+      await firstRequest;
+
+      expectSettlement(first.resolve, 'translated:First');
+      expectSettlement(second.resolve, 'translated:Second');
+      expect(getSettlement(first.resolve).state).toBe('pending');
+      expect(getSettlement(second.resolve).state).toBe('pending');
+      expect(safeSendMessage).toHaveBeenCalledTimes(2);
     });
 
     it.each([

@@ -44,6 +44,7 @@ vi.mock('@/shared/proxy/ProxyManager.js', () => ({
 import { UnifiedModeCoordinator } from './UnifiedModeCoordinator.js';
 import { CustomProvider, clearCustomResponseFormatSupportCache } from '@/features/translation/providers/CustomProvider.js';
 import { GoogleTranslateV2Provider } from '@/features/translation/providers/GoogleTranslateV2Provider.js';
+import { MicrosoftEdgeProvider } from '@/features/translation/providers/MicrosoftEdgeProvider.js';
 import { queueManager } from '@/features/translation/core/QueueManager.js';
 import { rateLimitManager } from '@/features/translation/core/RateLimitManager.js';
 import { TranslationMode } from '@/shared/config/config.js';
@@ -376,6 +377,160 @@ describe('Page → CustomProvider physical concurrency', () => {
     });
     expect(attempts).toHaveLength(8);
     expect(maximum).toBe(4);
+  });
+});
+
+describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrency', () => {
+  let coordinator, engine, providerState, active, maximum, requests;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    queueManager.cleanup();
+    rateLimitManager.providerStates.forEach(state => clearTimeout(state.nextProcessTimer));
+    rateLimitManager.providerStates.clear();
+    settings.level = 1;
+    settings.keys = [];
+    settings.bilingual = false;
+    settings.bilingualModes = { [TranslationMode.Page]: false };
+    settings.detectionResult = null;
+    LanguageDetectionService.clearSessionCache();
+    await rateLimitManager.reloadConfigurations();
+    coordinator = new UnifiedModeCoordinator();
+    const provider = new MicrosoftEdgeProvider();
+    const controllers = new Map();
+    engine = {
+      getProvider: async () => provider,
+      lifecycleRegistry: {
+        registerRequest: messageId => {
+          const controller = new AbortController();
+          controllers.set(messageId, controller);
+          return controller;
+        },
+        unregisterRequest: vi.fn(),
+      },
+    };
+    providerState = rateLimitManager.providerStates.get('MicrosoftEdge');
+    active = 0;
+    maximum = 0;
+    requests = [];
+    vi.useFakeTimers();
+    proxyManager.fetch.mockImplementation(async (_url, options) => {
+      const texts = JSON.parse(options.body);
+      const request = { texts, released: false };
+      requests.push(request);
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise(resolve => {
+        request.release = () => {
+          request.released = true;
+          active--;
+          resolve();
+        };
+      });
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Map([['content-type', 'application/json']]),
+        json: async () => texts.map(text => ({ translations: [{ text: `translated:${text}` }] })),
+        clone() { return this; },
+      };
+    });
+  });
+
+  afterEach(() => {
+    requests.filter(request => !request.released).forEach(request => request.release());
+    queueManager.cleanup();
+    rateLimitManager.providerStates.forEach(state => clearTimeout(state.nextProcessTimer));
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const pageRequest = index => coordinator.processRequest({
+    mode: TranslationMode.Page,
+    messageId: `edge-page-${index}`,
+    data: {
+      provider: 'edge',
+      sessionId: 'edge-page-session',
+      sourceLanguage: 'en',
+      targetLanguage: 'fa',
+      text: JSON.stringify([{ id: `page-${index}`, text: `Page ${index} source` }]),
+    },
+  }, { translationEngine: engine });
+
+  const subtitleRequest = () => coordinator.processRequest({
+    mode: TranslationMode.Subtitle,
+    messageId: 'edge-subtitle',
+    data: {
+      provider: 'edge',
+      sourceLanguage: 'en',
+      targetLanguage: 'fa',
+      items: [{ id: 'cue-1', text: 'Subtitle source' }],
+    },
+  }, { translationEngine: engine });
+
+  const pumpUntil = async (predicate, message) => {
+    for (let turn = 0; turn < 60 && !predicate(); turn++) {
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(predicate(), message).toBe(true);
+  };
+
+  const release = async texts => {
+    const request = requests.find(candidate => candidate.texts[0] === texts);
+    expect(request, `missing pending request for ${texts}`).toBeDefined();
+    request.release();
+    await vi.dynamicImportSettled();
+    await vi.advanceTimersByTimeAsync(0);
+  };
+
+  it('shares Edge capacity across concurrent Page and Subtitle work and maps out-of-order completions', async () => {
+    const providerLimit = providerState.config.maxConcurrent;
+    expect(providerLimit).toBe(2);
+    const pages = [0, 1, 2, 3].map(pageRequest);
+    await pumpUntil(() => requests.length === 2, 'the first two Page HTTP requests should occupy Edge capacity');
+
+    const subtitle = subtitleRequest();
+    await pumpUntil(
+      () => Object.values(providerState.queues).reduce((count, queue) => count + queue.length, 0) >= 3,
+      'remaining Page and Subtitle physical requests should queue behind the shared Edge limit'
+    );
+    expect(requests).toHaveLength(2);
+    expect(active).toBe(providerLimit);
+    expect(maximum).toBe(providerLimit);
+
+    await release('Page 1 source');
+    await pumpUntil(() => requests.length === 3, 'a queued request should start after one Edge slot is released');
+    expect(requests[2].texts).toEqual(['Subtitle source']);
+
+    await release('Subtitle source');
+    await pumpUntil(() => requests.length === 4, 'a queued Page request should start after Subtitle releases its slot');
+    await release('Page 2 source');
+    await pumpUntil(() => requests.length === 5, 'the final Page request should start after capacity is released');
+    await release('Page 3 source');
+    await release('Page 0 source');
+
+    const results = await Promise.all(pages);
+    const subtitleResult = await subtitle;
+    results.forEach((result, index) => {
+      expect(result.success).toBe(true);
+      expect(JSON.parse(result.translatedText)).toEqual([
+        { id: `page-${index}`, text: `translated:Page ${index} source` },
+      ]);
+    });
+    expect(subtitleResult.results).toEqual([
+      { id: 'cue-1', text: 'translated:Subtitle source' },
+    ]);
+    expect(requests.map(request => request.texts[0])).toEqual([
+      'Page 0 source', 'Page 1 source', 'Subtitle source', 'Page 2 source', 'Page 3 source',
+    ]);
+    expect(maximum).toBeLessThanOrEqual(providerLimit);
+    expect(active).toBe(0);
+    expect(providerState.activeRequests).toBe(0);
+    expect(Object.values(providerState.queues).every(queue => queue.length === 0)).toBe(true);
+    expect(queueManager.getQueueStatus('MicrosoftEdge::parallel').total).toBe(0);
+    expect(queueManager.getQueueStatus('MicrosoftEdge').total).toBe(0);
   });
 });
 

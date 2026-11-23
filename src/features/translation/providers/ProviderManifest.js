@@ -44,6 +44,7 @@ const getRawManifest = () => [
     icon: "edge.png",
     importFunction: () => import("./MicrosoftEdgeProvider.js").then(m => ({ default: m.MicrosoftEdgeProvider })),
     features: ["translation", "subtitle", "text", "autoDetect", "bulk", "bilingual"],
+    supportsPageParallelExecution: true,
     needsApiKey: false,
     supported: true,
   },
