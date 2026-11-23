@@ -1207,17 +1207,50 @@ describe('ProviderRequestEngine', () => {
       );
     });
 
-    it('should record exactly one error for a non-cancellation transport failure and rethrow', async () => {
-      proxyManager.fetch.mockRejectedValue(new TypeError('NetworkError: Failed to fetch'));
+    it.each([
+      'Failed to fetch',
+      'NetworkError: Failed to fetch',
+      'NetworkError when attempting to fetch resource.',
+    ])('normalizes native fetch failure %s and records one error', async (message) => {
+      const transportError = Object.assign(new TypeError(message), {
+        transportFailure: 'native-fetch',
+        marker: 'preserve-me',
+      });
+      proxyManager.fetch.mockRejectedValue(transportError);
       const { statsManager } = await import('../../core/TranslationStatsManager.js');
 
-      await expect(ProviderRequestEngine.executeApiCall(mockProvider, baseParams()))
-        .rejects.toThrow('NetworkError');
+      const error = await ProviderRequestEngine.executeApiCall(mockProvider, baseParams()).catch(value => value);
 
+      expect(error).toBe(transportError);
+      expect(error).toMatchObject({
+        type: ErrorTypes.NETWORK_ERROR,
+        context: 'test',
+        transportFailure: 'native-fetch',
+        marker: 'preserve-me',
+      });
       expect(statsManager.recordRequest).toHaveBeenCalledTimes(1);
       expect(statsManager.recordError).toHaveBeenCalledTimes(1);
       expect(statsManager.recordRequest).toHaveBeenCalledWith('TestProvider', 's1', 10, 5, TranslationCallPurpose.PRIMARY_TRANSLATION);
       expect(statsManager.recordError).toHaveBeenCalledWith('TestProvider', 's1', TranslationCallPurpose.PRIMARY_TRANSLATION);
+    });
+
+    it('preserves authoritative TypeError types and unrelated TypeError classification', async () => {
+      const typedError = Object.assign(new TypeError('Failed to fetch'), {
+        type: ErrorTypes.API_KEY_INVALID,
+        statusCode: 401,
+      });
+      proxyManager.fetch.mockRejectedValueOnce(typedError);
+      const preserved = await ProviderRequestEngine.executeApiCall(mockProvider, baseParams()).catch(value => value);
+      expect(preserved).toBe(typedError);
+      expect(preserved).toMatchObject({ type: ErrorTypes.API_KEY_INVALID, statusCode: 401 });
+
+      const unrelatedError = new TypeError('Cannot read properties of undefined');
+      proxyManager.fetch.mockRejectedValueOnce(unrelatedError);
+      const unrelated = await ProviderRequestEngine.executeApiCall(mockProvider, baseParams()).catch(value => value);
+      expect(unrelated).toBe(unrelatedError);
+      expect(unrelated).not.toHaveProperty('type');
+      const { matchErrorToType } = await import('@/shared/error-management/ErrorMatcher.js');
+      expect(matchErrorToType(unrelated)).toBe(ErrorTypes.TRANSLATION_ERROR);
     });
 
     it('preserves typed SOCKS timeout provenance through request classification', async () => {
