@@ -197,6 +197,7 @@ describe("manual live Page Translation benchmark", () => {
     });
     emit(window, "page-translate-error", {
       sessionId: "stale",
+      isFatal: true,
       message: "stale failure",
     });
     emit(window, "page-translate-complete", {
@@ -372,6 +373,81 @@ describe("manual live Page Translation benchmark", () => {
     });
     expect(results(window)).toHaveLength(1);
     expect(results(window)[0].status).toBe("passed");
+    dom.window.close();
+  });
+
+  it("keeps nonfatal errors active through DOM translation and matching COMPLETE while recording failure", async () => {
+    const dom = createPage();
+    const { window } = dom;
+    emit(window, "page-translate-start", { sessionId: "nonfatal" });
+    emit(window, "page-translate-error", {
+      sessionId: "nonfatal",
+      isFatal: false,
+      message: "private provider error",
+    });
+
+    expect(results(window)).toHaveLength(0);
+    expect(
+      window.document.querySelector("[data-latest-status]").textContent,
+    ).toBe("Running");
+
+    window.document.querySelectorAll("p[data-item]").forEach((p) => {
+      p.textContent = `translated ${p.dataset.item}`;
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(results(window)).toHaveLength(0);
+
+    emit(window, "page-translate-complete", {
+      sessionId: "nonfatal",
+      translatedCount: 120,
+      failedCount: 0,
+    });
+    const [record] = results(window);
+    expect(record).toMatchObject({
+      status: "failed",
+      timings: {
+        firstAcceptedMs: expect.any(Number),
+        firstVisibleMs: expect.any(Number),
+        allTargetsMs: expect.any(Number),
+        completeMs: expect.any(Number),
+      },
+      correctness: {
+        targetCount: 120,
+        translatedCount: 120,
+        allTargetsTranslated: true,
+        completionObserved: true,
+      },
+      errors: [{ type: "page-translate-error", failedCount: null }],
+    });
+    expect(record.timings.firstAcceptedMs).toBeLessThanOrEqual(
+      record.timings.allTargetsMs,
+    );
+    expect(record.timings.allTargetsMs).toBeLessThanOrEqual(
+      record.timings.completeMs,
+    );
+    expect(JSON.stringify(record)).not.toContain("private provider error");
+    dom.window.close();
+  });
+
+  it("finishes immediately on fatal page-translate-error events", () => {
+    const dom = createPage();
+    const { window } = dom;
+    emit(window, "page-translate-start", { sessionId: "fatal" });
+    emit(window, "page-translate-error", {
+      sessionId: "fatal",
+      isFatal: true,
+      message: "private fatal detail",
+    });
+
+    expect(results(window)).toHaveLength(1);
+    expect(results(window)[0]).toMatchObject({
+      status: "failed",
+      correctness: { completionObserved: false },
+      errors: [{ type: "page-translate-error" }],
+    });
+    expect(JSON.stringify(results(window))).not.toContain(
+      "private fatal detail",
+    );
     dom.window.close();
   });
 

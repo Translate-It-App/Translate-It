@@ -345,8 +345,9 @@
   });
   window.addEventListener("page-translate-error", (event) => {
     if (!matchesActive(event)) return;
-    addError("page-translate-error", event.detail);
-    finish("failed");
+    const detail = event.detail || {};
+    addError("page-translate-error", detail);
+    if (detail.isFatal !== false) finish("failed");
   });
   window.addEventListener("page-translation-internal-error", (event) => {
     if (!matchesActive(event)) return;
