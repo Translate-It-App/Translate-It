@@ -43,12 +43,14 @@ Base-2 AI providers use this concurrency curve:
 | Provider family | L1 | L2 | L3 | L4 | L5 |
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | Base-2 AI providers | 1 | 2 | 2 | 3 | 4 |
+| Custom | 1 | 2 | 3 | 3 | 4 |
 | Gemini | 1 | 2 | 3 | 5 | 6 |
 
-Level 2 and Level 3 intentionally share concurrency `2` for base-2
-providers. Level 2 must step above Level 1, while Level 3 remains the
-established Balanced baseline. Raising Level 3 would increase default provider
-pressure; lowering Level 2 would only move collision to Levels 1 and 2.
+Other base-2 AI providers intentionally share concurrency `2` at Levels 2
+and 3. Custom uses a benchmark-selected curve: isolated Page Translation
+medians were 12.60s, 9.07s, and 8.34s at concurrency 2, 3, and 4 respectively;
+Level 3 therefore uses 3 as the measured balance between completion time and
+provider load.
 
 #### AI Select Element
 

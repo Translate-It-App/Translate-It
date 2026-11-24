@@ -761,7 +761,7 @@ export const PROVIDER_CONFIGURATIONS = {
   // Custom Provider - Flexible/configurable settings
   Custom: {
     rateLimit: {
-      maxConcurrent: 2, // Safe default
+      maxConcurrent: 3, // Balanced default
       delayBetweenRequests: 0, // No delay for first request
       adaptiveBackoff: {
         enabled: true,
@@ -939,6 +939,12 @@ function applyOptimizationLevel(config, level) {
   // optimization modes are not concurrency-identical. Larger base values keep
   // the standard multiplier curve.
   const scaleConcurrentLimit = (baseConcurrent, levelValue) => {
+    if (config === PROVIDER_CONFIGURATIONS.Custom && baseConcurrent === 3) {
+      // Custom uses its benchmark-selected discrete concurrency curve.
+      const customCurve = { 1: 1, 2: 2, 3: 3, 4: 3, 5: 4 };
+      return customCurve[levelValue];
+    }
+
     if (baseConcurrent === 2) {
       const baseTwoCurve = { 1: 1, 2: 2, 3: 2, 4: 3, 5: 4 };
       return baseTwoCurve[levelValue];

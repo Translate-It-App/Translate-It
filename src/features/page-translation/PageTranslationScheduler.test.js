@@ -2009,7 +2009,7 @@ describe('PageTranslationScheduler', () => {
       }
     });
 
-    it.each([[3, 25, 2], [5, 10, 4]])('enables Custom workers at level %i without changing its existing batch size', async (level, chunkSize, limit) => {
+    it.each([[3, 25, 3], [5, 10, 4]])('enables Custom workers at level %i without changing its existing batch size', async (level, chunkSize, limit) => {
       const config = await import('@/shared/config/config.js');
       const optimization = vi.spyOn(config, 'getProviderOptimizationLevelAsync').mockResolvedValue(level);
       scheduler.setSettings({ translationApi: 'custom', targetLanguage: 'ja' });

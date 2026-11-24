@@ -72,10 +72,29 @@ describe('ProviderConfigurations optimization scaling', () => {
     const levels = [1, 2, 3, 4, 5];
     const expected = [1, 2, 2, 3, 4];
 
-    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Requesty', 'Custom']) {
+    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Requesty']) {
       const actual = levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent);
       expect(actual).toEqual(expected);
     }
+  });
+
+  it('uses the Custom concurrency curve while preserving unrelated provider configuration', () => {
+    const customLevel3 = getProviderConfiguration('Custom', 3);
+
+    expect([1, 2, 3, 4, 5].map(level => getProviderRateLimit('Custom', level).maxConcurrent))
+      .toEqual([1, 2, 3, 3, 4]);
+    expect(customLevel3.rateLimit.modeOverrides.select_element.maxConcurrent).toBe(2);
+    expect(customLevel3.rateLimit.delayBetweenRequests)
+      .toBe(PROVIDER_CONFIGURATIONS.Custom.rateLimit.delayBetweenRequests);
+    expect(customLevel3.rateLimit.adaptiveBackoff)
+      .toEqual(PROVIDER_CONFIGURATIONS.Custom.rateLimit.adaptiveBackoff);
+    expect(customLevel3.batching).toEqual(PROVIDER_CONFIGURATIONS.Custom.batching);
+    expect([1, 2, 3, 4, 5].map(level => getProviderBatching('Custom', null, level).optimalSize))
+      .toEqual([50, 30, 20, 12, 6]);
+    expect([1, 2, 3, 4, 5].map(level => getProviderBatching('Custom', 'select_element', level).optimalSize))
+      .toEqual([25, 25, 25, 25, 25]);
+    expect(customLevel3.errorHandling).toEqual(PROVIDER_CONFIGURATIONS.Custom.errorHandling);
+    expect(getProviderRateLimit('OpenAI', 3).maxConcurrent).toBe(2);
   });
 
   it('should keep representative AI concurrency monotonic while allowing collisions', () => {

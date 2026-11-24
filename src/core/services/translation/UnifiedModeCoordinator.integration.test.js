@@ -116,6 +116,17 @@ describe('Page → CustomProvider physical concurrency', () => {
     },
   }, { translationEngine: engine });
 
+  const runSubtitle = index => coordinator.processRequest({
+    mode: TranslationMode.Subtitle,
+    messageId: `subtitle-${index}`,
+    data: {
+      provider: 'custom',
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      items: [{ id: `cue-${index}`, text: `Subtitle ${index} source` }],
+    },
+  }, { translationEngine: engine });
+
   const installHttp = responseForAttempt => {
     proxyManager.fetch.mockImplementation(async (_url, options) => {
       const body = JSON.parse(options.body);
@@ -127,7 +138,10 @@ describe('Page → CustomProvider physical concurrency', () => {
       active++;
       maximum = Math.max(maximum, active);
       const attemptIndex = attempts.length - 1;
-      await new Promise(resolve => setTimeout(resolve, settings.responseDelay ?? (100 + (4 - attemptIndex % 5) * 10)));
+      const responseDelay = typeof settings.responseDelay === 'function'
+        ? settings.responseDelay(record, attemptIndex)
+        : settings.responseDelay ?? (100 + (4 - attemptIndex % 5) * 10);
+      await new Promise(resolve => setTimeout(resolve, responseDelay));
       active--;
       record.end = Date.now();
       completions.push(attemptIndex);
@@ -156,7 +170,7 @@ describe('Page → CustomProvider physical concurrency', () => {
     await vi.advanceTimersByTimeAsync(milliseconds);
   };
 
-  it.each([[3, 2], [5, 4]])('achieves level %s concurrency %s and maps reversed HTTP/items correctly', async (level, cap) => {
+  it.each([[3, 3], [5, 4]])('achieves level %s concurrency %s and maps reversed HTTP/items correctly', async (level, cap) => {
     settings.level = level;
     installHttp();
     const pending = Array.from({ length: 8 }, (_, index) => runBatch(index));
@@ -168,6 +182,39 @@ describe('Page → CustomProvider physical concurrency', () => {
     assertMapped(results);
     expect(queueManager.getQueueStatus('Custom::parallel').total).toBe(0);
     expect(state.activeRequests).toBe(0);
+  });
+
+  it('shares the Level 3 physical limit between Page and Subtitle requests', async () => {
+    settings.level = 3;
+    settings.responseDelay = (_record, index) => index === 0 ? 100 : 1000;
+    installHttp();
+    const pages = [runBatch(0), runBatch(1), runBatch(2)];
+    const subtitles = [runSubtitle(0), runSubtitle(1)];
+
+    await advance(0);
+    expect(state.config.maxConcurrent).toBe(3);
+    expect(attempts).toHaveLength(3);
+    expect(state.activeRequests).toBe(3);
+    await advance(100);
+
+    const subtitleAttempt = attempts.find(attempt => attempt.units.some(unit => unit.text === 'Subtitle 0 source'));
+    expect(subtitleAttempt).toBeDefined();
+    expect(attempts.slice(0, 3).some(attempt =>
+      attempt.units.some(unit => unit.text.startsWith('Source '))
+      && attempt.start < subtitleAttempt.start
+      && attempt.end === null
+    )).toBe(true);
+
+    await advance(5000);
+    assertMapped(await Promise.all(pages));
+    expect((await Promise.all(subtitles)).map(result => result.results[0])).toEqual([
+      { id: 'cue-0', text: '訳 Subtitle 0 source' },
+      { id: 'cue-1', text: '訳 Subtitle 1 source' },
+    ]);
+    expect(maximum).toBe(3);
+    expect(state.activeRequests).toBe(0);
+    expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
+    expect(queueManager.getQueueStatus('Custom::parallel').total).toBe(0);
   });
 
   it('respects an explicit concurrency limit of one', async () => {
@@ -315,12 +362,13 @@ describe('Page → CustomProvider physical concurrency', () => {
     expect(state.activeRequests).toBe(0);
   });
 
-  it('shares physical 429 cooldown with queued batches and the bounded queue retry', async () => {
+  it.each([[3, 3], [5, 4]])('shares physical 429 cooldown with queued batches and the bounded queue retry at level %s', async (level, cap) => {
+    settings.level = level;
     installHttp((_record, index) => index === 0 ? { status: 429, retryAfter: '5' } : {});
     const pending = Array.from({ length: 8 }, (_, index) => runBatch(index));
     await advance(20000);
     assertMapped(await Promise.all(pending));
-    expect(maximum).toBe(4);
+    expect(maximum).toBe(cap);
     expect(attempts).toHaveLength(9);
     const deadline = attempts[0].end + 5000;
     attempts.filter(attempt => attempt.start >= attempts[0].end).forEach(attempt => expect(attempt.start).toBeGreaterThanOrEqual(deadline));
@@ -362,12 +410,13 @@ describe('Page → CustomProvider physical concurrency', () => {
     expect(state.activeRequests).toBe(0);
   });
 
-  it('repairs malformed JSON under the same physical cap without resending successful siblings', async () => {
+  it.each([[3, 3], [5, 4]])('repairs malformed JSON under the level %s physical cap without resending successful siblings', async (level, cap) => {
+    settings.level = level;
     installHttp((_record, index) => index === 0 ? { content: 'unparseable output' } : {});
     const pending = Array.from({ length: 8 }, (_, index) => runBatch(index));
     await advance(10000);
     assertMapped(await Promise.all(pending));
-    expect(maximum).toBe(4);
+    expect(maximum).toBe(cap);
     expect(attempts.length).toBeGreaterThan(8);
     expect(attempts.length).toBeLessThanOrEqual(10);
     for (let index = 1; index < 8; index++) {
