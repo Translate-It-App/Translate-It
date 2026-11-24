@@ -14,4 +14,6 @@ Recorded benchmark reports and their original artifacts. Historical reports rema
 - [SPA follow-up (2026-10-09)](whole-page-spa-followup-2026-10-09.md)
 - [Concurrency (2026-10-09)](whole-page-concurrency-2026-10-09.md)
 
+The [manual live Page Translation benchmark](../../../scripts/dev/page-translation/live-benchmark/README.md) is opt-in and uses real providers configured in the extension. It measures Page Translation lifecycle and DOM-change timings on a fixed 120-paragraph fixture, unlike the automated E2E benchmark, which uses controlled test scenarios.
+
 The Chrome E2E runner, reproduction instructions, and its historical small-fixture result are in [`scripts/dev/page-translation/e2e-benchmark/README.md`](../../../scripts/dev/page-translation/e2e-benchmark/README.md). Raw Issue #406 artifacts are retained outside the repository under `/tmp/opencode` and are not copied into tracked documentation.

@@ -156,6 +156,7 @@ The system is fully integrated with `ResourceTracker`. All queues, observers, an
 - [Translation Provider System](./providers/PROVIDERS.md)
 - [Messaging System](./MessagingSystem.md)
 - [UI Host System](./UI_HOST_SYSTEM.md)
+- [Manual live Page Translation benchmark](../../scripts/dev/page-translation/live-benchmark/README.md)
 
 ---
 
