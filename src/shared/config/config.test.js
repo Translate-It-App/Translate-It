@@ -64,6 +64,21 @@ describe('Config Module', () => {
   });
 
   describe('Constants', () => {
+    it('keeps batch prompts free of redundant source-text references', async () => {
+      const normalBatch = await getPromptBASEAIBatchAsync();
+      const autoBatch = await getPromptBASEAIBatchAutoAsync();
+      const normalFollowup = await getPromptBASEAIFollowupAsync();
+      const autoFollowup = await getPromptBASEAIFollowupAutoAsync();
+
+      for (const prompt of [normalBatch, autoBatch, normalFollowup, autoFollowup]) {
+        expect(prompt).not.toContain('the following JSON data');
+      }
+      expect(normalBatch).toContain('from $_{SOURCE} to $_{TARGET}');
+      expect(normalFollowup).toContain('from $_{SOURCE} to $_{TARGET}');
+      expect(autoBatch).toContain('into $_{TARGET}');
+      expect(autoFollowup).toContain('into $_{TARGET}');
+    });
+
     it('should have correct TranslationMode values', () => {
       expect(TranslationMode.Select_Element).toBe('select-element');
       expect(TranslationMode.Page).toBe('page-translation-batch');

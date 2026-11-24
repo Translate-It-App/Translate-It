@@ -563,6 +563,37 @@ describe('AIConversationHelper', () => {
     expect(userText).toContain('"translations"');
   });
 
+  it('normalizes canonical and legacy language placeholders without prefixing dollar signs', async () => {
+    const { getPromptAsync, getPromptBASEAIBatchAsync } = await import('@/shared/config/config.js');
+    getPromptAsync.mockResolvedValue('INSTRUCTIONS');
+    getPromptBASEAIBatchAsync.mockResolvedValue('BATCH $_{SOURCE}$_{TARGET} _{SOURCE}_{TARGET} $_{TEXT}');
+
+    const { systemPrompt } = await AIConversationHelper.preparePromptAndText(
+      ['Hello'], 'en', 'fa', 'page', 'ai'
+    );
+
+    expect(systemPrompt).toContain('BATCH EnglishPersian EnglishPersian');
+    expect(systemPrompt).not.toContain('$English');
+    expect(systemPrompt).not.toContain('$Persian');
+  });
+
+  it('omits fallback-only DOM context but retains meaningful context', async () => {
+    const { getPromptAsync, getPromptBASEAIBatchAsync, getAIContextTranslationEnabledAsync } = await import('@/shared/config/config.js');
+    getPromptAsync.mockResolvedValue('INSTRUCTIONS');
+    getPromptBASEAIBatchAsync.mockResolvedValue('BATCH $_{PROMPT_INSTRUCTIONS} $_{TEXT}');
+    getAIContextTranslationEnabledAsync.mockResolvedValue(true);
+
+    const fallback = await AIConversationHelper.preparePromptAndText(
+      ['Hello'], 'en', 'fa', 'page', 'ai', null, {}
+    );
+    const meaningful = await AIConversationHelper.preparePromptAndText(
+      ['Hello'], 'en', 'fa', 'page', 'ai', null, { pageTitle: 'Example' }
+    );
+
+    expect(fallback.systemPrompt).not.toContain('Context:');
+    expect(meaningful.systemPrompt).toContain('Context: Page: "Example", Section: "Main", Role: "Content".');
+  });
+
   it('uses the segment-marker rule for primary and one-item recovery preparation', async () => {
     const { getPromptAsync, getPromptBASEAIBatchAsync } = await import('@/shared/config/config.js');
     const markerRule = 'Preserve every segment marker that begins with @@TI_SEG_ and ends with @@ exactly as it appears. Example: @@TI_SEG_xxx_session_n5@@.';

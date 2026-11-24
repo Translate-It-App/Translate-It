@@ -503,7 +503,7 @@ $_{TEXT}
 /*--- End PROMPT_BASE_BATCH ---*/
 
 /*--- Start PROMPT_BASE_AI_BATCH ---*/
-  PROMPT_BASE_AI_BATCH: `You are an expert translation service. Translate the following JSON data from $_{SOURCE} to $_{TARGET}.
+  PROMPT_BASE_AI_BATCH: `You are an expert translation service. Translate from $_{SOURCE} to $_{TARGET}.
 
 Strictly follow these instructions:
 $_{PROMPT_INSTRUCTIONS}
@@ -522,7 +522,7 @@ $_{TEXT}
 /*--- End PROMPT_BASE_AI_BATCH ---*/
 
 /*--- Start PROMPT_BASE_AI_BATCH_AUTO ---*/
-  PROMPT_BASE_AI_BATCH_AUTO: `You are an expert translation service. Translate the following JSON data into $_{TARGET}.
+  PROMPT_BASE_AI_BATCH_AUTO: `You are an expert translation service. Translate into $_{TARGET}.
 
 Strictly follow these instructions:
 $_{PROMPT_INSTRUCTIONS}
@@ -541,7 +541,7 @@ $_{TEXT}
 /*--- End PROMPT_BASE_AI_BATCH_AUTO ---*/
 
 /*--- Start PROMPT_BASE_AI_FOLLOWUP ---*/
-  PROMPT_BASE_AI_FOLLOWUP: `Continue translating the following JSON data from $_{SOURCE} to $_{TARGET}.
+  PROMPT_BASE_AI_FOLLOWUP: `Continue translating from $_{SOURCE} to $_{TARGET}.
 
 Strictly follow these instructions:
 $_{PROMPT_INSTRUCTIONS}
@@ -559,7 +559,7 @@ $_{TEXT}
 /*--- End PROMPT_BASE_AI_FOLLOWUP ---*/
 
 /*--- Start PROMPT_BASE_AI_FOLLOWUP_AUTO ---*/
-  PROMPT_BASE_AI_FOLLOWUP_AUTO: `Continue translating the following JSON data into $_{TARGET}.
+  PROMPT_BASE_AI_FOLLOWUP_AUTO: `Continue translating into $_{TARGET}.
 
 Strictly follow these instructions:
 $_{PROMPT_INSTRUCTIONS}
