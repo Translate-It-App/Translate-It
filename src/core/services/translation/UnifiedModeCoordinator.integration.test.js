@@ -611,14 +611,14 @@ describe('Page → Custom and DeepSeek provider physical concurrency', () => {
 });
 
 describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrency', () => {
-  let coordinator, engine, providerState, active, maximum, requests;
+  let coordinator, engine, providerState, active, maximum, peakTexts, requests;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     queueManager.cleanup();
     rateLimitManager.providerStates.forEach(state => clearTimeout(state.nextProcessTimer));
     rateLimitManager.providerStates.clear();
-    settings.level = 1;
+    settings.level = 3;
     settings.keys = [];
     settings.bilingual = false;
     settings.bilingualModes = { [TranslationMode.Page]: false };
@@ -642,6 +642,7 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
     providerState = rateLimitManager.providerStates.get('MicrosoftEdge');
     active = 0;
     maximum = 0;
+    peakTexts = [];
     requests = [];
     vi.useFakeTimers();
     proxyManager.fetch.mockImplementation(async (_url, options) => {
@@ -649,7 +650,10 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
       const request = { texts, released: false };
       requests.push(request);
       active++;
-      maximum = Math.max(maximum, active);
+      if (active > maximum) {
+        maximum = active;
+        peakTexts = requests.filter(candidate => !candidate.released).map(candidate => candidate.texts[0]);
+      }
       await new Promise(resolve => {
         request.release = () => {
           request.released = true;
@@ -688,14 +692,14 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
     },
   }, { translationEngine: engine });
 
-  const subtitleRequest = () => coordinator.processRequest({
+  const subtitleRequest = index => coordinator.processRequest({
     mode: TranslationMode.Subtitle,
-    messageId: 'edge-subtitle',
+    messageId: `edge-subtitle-${index}`,
     data: {
       provider: 'edge',
       sourceLanguage: 'en',
       targetLanguage: 'fa',
-      items: [{ id: 'cue-1', text: 'Subtitle source' }],
+      items: [{ id: `cue-${index}`, text: `Subtitle ${index} source` }],
     },
   }, { translationEngine: engine });
 
@@ -704,7 +708,7 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
       await vi.dynamicImportSettled();
       await vi.advanceTimersByTimeAsync(0);
     }
-    expect(predicate(), message).toBe(true);
+    expect(predicate(), `${message}; requests=${requests.length}, active=${active}`).toBe(true);
   };
 
   const release = async texts => {
@@ -715,13 +719,15 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
     await vi.advanceTimersByTimeAsync(0);
   };
 
-  it('shares Edge capacity across concurrent Page and Subtitle work and maps out-of-order completions', async () => {
+  it('gives queued Subtitle work the next Level 1 slot before queued Page work', async () => {
+    settings.level = 1;
+    await rateLimitManager.reloadConfigurations();
     const providerLimit = providerState.config.maxConcurrent;
     expect(providerLimit).toBe(2);
     const pages = [0, 1, 2, 3].map(pageRequest);
     await pumpUntil(() => requests.length === 2, 'the first two Page HTTP requests should occupy Edge capacity');
 
-    const subtitle = subtitleRequest();
+    const subtitle = subtitleRequest(0);
     await pumpUntil(
       () => Object.values(providerState.queues).reduce((count, queue) => count + queue.length, 0) >= 3,
       'remaining Page and Subtitle physical requests should queue behind the shared Edge limit'
@@ -732,10 +738,11 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
 
     await release('Page 1 source');
     await pumpUntil(() => requests.length === 3, 'a queued request should start after one Edge slot is released');
-    expect(requests[2].texts).toEqual(['Subtitle source']);
+    expect(requests[2].texts).toEqual(['Subtitle 0 source']);
 
-    await release('Subtitle source');
+    await release('Subtitle 0 source');
     await pumpUntil(() => requests.length === 4, 'a queued Page request should start after Subtitle releases its slot');
+    expect(requests[3].texts).toEqual(['Page 2 source']);
     await release('Page 2 source');
     await pumpUntil(() => requests.length === 5, 'the final Page request should start after capacity is released');
     await release('Page 3 source');
@@ -750,12 +757,60 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
       ]);
     });
     expect(subtitleResult.results).toEqual([
-      { id: 'cue-1', text: 'translated:Subtitle source' },
+      { id: 'cue-0', text: 'translated:Subtitle 0 source' },
     ]);
-    expect(requests.map(request => request.texts[0])).toEqual([
-      'Page 0 source', 'Page 1 source', 'Subtitle source', 'Page 2 source', 'Page 3 source',
-    ]);
+    expect(maximum).toBe(providerLimit);
+    expect(active).toBe(0);
+    expect(providerState.activeRequests).toBe(0);
+    expect(Object.values(providerState.queues).every(queue => queue.length === 0)).toBe(true);
+  });
+
+  it('shares Edge capacity across queued Page and Subtitle work and maps out-of-order completions', async () => {
+    const providerLimit = providerState.config.maxConcurrent;
+    expect(providerLimit).toBe(6);
+    const pages = [0, 1, 2].map(pageRequest);
+    await pumpUntil(() => requests.length === 3, 'three Page HTTP requests should occupy Page worker capacity');
+
+    const subtitles = [subtitleRequest(0), subtitleRequest(1), subtitleRequest(2)];
+    await pumpUntil(
+      () => requests.some(request => request.texts[0].startsWith('Subtitle ')),
+      'Subtitle HTTP requests should share Edge capacity with Page work'
+    );
+    pages.push(...[3, 4, 5, 6, 7].map(pageRequest));
+    subtitles.push(subtitleRequest(3));
+    expect(requests.length).toBeGreaterThan(3);
+    expect(requests.length).toBeLessThan(pages.length + subtitles.length);
+    expect(active).toBe(requests.length);
     expect(maximum).toBeLessThanOrEqual(providerLimit);
+    expect(peakTexts.some(text => text.startsWith('Page '))).toBe(true);
+    expect(peakTexts.some(text => text.startsWith('Subtitle '))).toBe(true);
+
+    requests.slice().reverse().forEach(request => request.release());
+    while (requests.length < 12) {
+      const previousCount = requests.length;
+      await pumpUntil(
+        () => requests.length > previousCount,
+        'queued Page and Subtitle requests should use released capacity'
+      );
+      requests.filter(request => !request.released).reverse().forEach(request => request.release());
+    }
+
+    const results = await Promise.all(pages);
+    const subtitleResults = await Promise.all(subtitles);
+    results.forEach((result, index) => {
+      expect(result.success).toBe(true);
+      expect(JSON.parse(result.translatedText)).toEqual([
+        { id: `page-${index}`, text: `translated:Page ${index} source` },
+      ]);
+    });
+    expect(subtitleResults.map(result => result.results)).toEqual([
+      [{ id: 'cue-0', text: 'translated:Subtitle 0 source' }],
+      [{ id: 'cue-1', text: 'translated:Subtitle 1 source' }],
+      [{ id: 'cue-2', text: 'translated:Subtitle 2 source' }],
+      [{ id: 'cue-3', text: 'translated:Subtitle 3 source' }],
+    ]);
+    expect(requests).toHaveLength(12);
+    expect(maximum).toBe(providerLimit);
     expect(active).toBe(0);
     expect(providerState.activeRequests).toBe(0);
     expect(Object.values(providerState.queues).every(queue => queue.length === 0)).toBe(true);

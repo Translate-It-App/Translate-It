@@ -157,6 +157,21 @@ describe('PageTranslationScheduler', () => {
     }
   });
 
+  it('uses three Edge Level 3 workers while retaining its page batch and character limits', async () => {
+    const configModule = await import('@/shared/config/config.js');
+    const optimization = vi.spyOn(configModule, 'getProviderOptimizationLevelAsync').mockResolvedValue(3);
+    scheduler.setSettings({ translationApi: 'edge', targetLanguage: 'en' });
+
+    try {
+      const config = await scheduler._getBatchConfig();
+
+      expect(config).toMatchObject({ chunkSize: 25, maxChars: 5000 });
+      expect(scheduler.settings.maxConcurrentFlushes).toBe(3);
+    } finally {
+      optimization.mockRestore();
+    }
+  });
+
   it.each([['webai', 4], ['openrouter', 3], ['requesty', 3]])('uses %s Level 3 concurrency while retaining the AI page batch size', async (translationApi, expectedConcurrency) => {
     const configModule = await import('@/shared/config/config.js');
     const optimization = vi.spyOn(configModule, 'getProviderOptimizationLevelAsync').mockResolvedValue(3);
@@ -1929,7 +1944,7 @@ describe('PageTranslationScheduler', () => {
         if (provider === 'google') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 2, 3, 4][level - 1]);
         if (provider === 'yandex') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 2, 3, 4][level - 1]);
         if (provider === 'deepl') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 2, 4, 4][level - 1]);
-        if (provider === 'edge') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 2, 4, 4][level - 1]);
+        if (provider === 'edge') expect(scheduler.settings.maxConcurrentFlushes).toBe([1, 1, 3, 4, 4][level - 1]);
       } finally {
         optimization.mockRestore();
       }

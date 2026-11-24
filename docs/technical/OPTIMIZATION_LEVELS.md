@@ -69,6 +69,17 @@ first-visible medians, HAR verification, and limitations. WebAI Levels 4 and
 5 use concurrency 5 and 6 as policy choices; they were not tested and are not
 benchmark-validated.
 
+#### Microsoft Edge
+
+Microsoft Edge uses the concurrency curve `[2, 3, 6, 8, 10]` at Levels 1–5.
+At Level 3, Page uses three workers under the existing provider-shared physical
+capacity; Page and Subtitle requests share the same six-request limiter. The
+600-designated-target benchmark selected C6 as the balance: median first
+visible was 0.465s and completion was 3.028s, 27.7% faster to completion than
+C5. C8 completed sooner (2.660s) but had slower first-visible time (0.671s)
+and one additional worker. See the [Edge benchmark record](benchmarks/microsoft-edge-concurrency-2026-11-24.md)
+for workload details, HAR evidence, and sample-size limitations.
+
 OpenAI's Level 3 curve is informed by the reported `gpt-4o-2024-11-20`
 concurrency comparison; see the [benchmark record](benchmarks/openai-concurrency-gpt-4o-2024-11-20.md)
 for the verified endpoint, Level 3 and batch-size conditions, trial/request

@@ -609,7 +609,7 @@ export const PROVIDER_CONFIGURATIONS = {
       },
     },
     rateLimit: {
-      maxConcurrent: 5, // Increased from 4
+      maxConcurrent: 6,
       delayBetweenRequests: 0,
       adaptiveBackoff: {
         enabled: true,
@@ -939,6 +939,10 @@ function applyOptimizationLevel(config, level) {
   // optimization modes are not concurrency-identical. Larger base values keep
   // the standard multiplier curve.
   const scaleConcurrentLimit = (baseConcurrent, levelValue, isModeOverride = false) => {
+    if (config === PROVIDER_CONFIGURATIONS.MicrosoftEdge && !isModeOverride) {
+      return { 1: 2, 2: 3, 3: 6, 4: 8, 5: 10 }[levelValue];
+    }
+
     if ((config === PROVIDER_CONFIGURATIONS.Custom
       || config === PROVIDER_CONFIGURATIONS.DeepSeek
       || config === PROVIDER_CONFIGURATIONS.OpenAI

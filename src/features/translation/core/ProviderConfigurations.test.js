@@ -68,6 +68,21 @@ describe('ProviderConfigurations optimization scaling', () => {
     expect(PROVIDER_CONFIGURATIONS.BingTranslate.errorHandling.circuitBreakThreshold).toBe(3);
   });
 
+  it('uses the Edge concurrency curve without changing its batching or retry policy', () => {
+    const levels = [1, 2, 3, 4, 5];
+    const edgeConfigs = levels.map(level => getProviderConfiguration('MicrosoftEdge', level));
+
+    expect(edgeConfigs.map(config => config.rateLimit.maxConcurrent)).toEqual([2, 3, 6, 8, 10]);
+    expect(edgeConfigs[2]).toMatchObject({
+      batching: { strategy: 'character_limit', optimalSize: 40, characterLimit: 5000 },
+      queueRetryPolicy: { maxExecutions: { RATE_LIMIT_REACHED: 3 } },
+    });
+    expect(edgeConfigs[2].rateLimit.adaptiveBackoff)
+      .toEqual(PROVIDER_CONFIGURATIONS.MicrosoftEdge.rateLimit.adaptiveBackoff);
+    expect(edgeConfigs[2].errorHandling).toBe(PROVIDER_CONFIGURATIONS.MicrosoftEdge.errorHandling);
+    expect(getProviderRateLimit('GoogleTranslate', 3).maxConcurrent).toBe(4);
+  });
+
   it('uses the WebAI concurrency curve while preserving its Select Element override', () => {
     const levels = [1, 2, 3, 4, 5];
     expect(levels.map(level => getProviderRateLimit('WebAI', level).maxConcurrent))
