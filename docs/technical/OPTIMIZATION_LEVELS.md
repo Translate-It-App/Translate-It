@@ -80,6 +80,18 @@ C5. C8 completed sooner (2.660s) but had slower first-visible time (0.671s)
 and one additional worker. See the [Edge benchmark record](benchmarks/microsoft-edge-concurrency-2026-11-24.md)
 for workload details, HAR evidence, and sample-size limitations.
 
+#### Google Translate
+
+Google Classic (`GoogleTranslate`) and Google Translate V2
+(`GoogleTranslateV2`) share the concurrency curve `[1, 2, 6, 7, 8]`. At Level
+3, the Page worker cap is three under each provider's own shared physical
+limiter. The C6 Level 3 choice is benchmark-selected for Google V2: the
+600-target comparison reduced median completion time by 19.1% versus C4. See
+the [Google V2 benchmark record](benchmarks/google-translate-v2-concurrency-2026-11-24.md)
+for conditions and HAR verification. Google Classic uses the same curve for
+consistency; this benchmark is not evidence of its performance. Level 4 C7
+remains an unvalidated policy choice.
+
 OpenAI's Level 3 curve is informed by the reported `gpt-4o-2024-11-20`
 concurrency comparison; see the [benchmark record](benchmarks/openai-concurrency-gpt-4o-2024-11-20.md)
 for the verified endpoint, Level 3 and batch-size conditions, trial/request

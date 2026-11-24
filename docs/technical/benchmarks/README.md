@@ -4,6 +4,7 @@ Recorded benchmark reports and their original artifacts. Historical reports rema
 
 ## Whole-page translation
 
+- [Google Translate V2 concurrency (2026-11-24)](google-translate-v2-concurrency-2026-11-24.md) — Level 3 C4/C6/C8 comparison, 600 designated targets / 603 translated segments, with HAR verification and sample-size limitations.
 - [Microsoft Edge concurrency (2026-11-24)](microsoft-edge-concurrency-2026-11-24.md) — 600 designated targets / 603 translated segments, Level 3 C5/C6/C8 comparison, and HAR validation.
 - [WebAI concurrency — gemini-auto](webai-concurrency-gemini-auto.md) — Level 3 C2/C3/C4 comparison on the 120-target fixture, with HAR verification and sample-size limitations.
 - [Issue #432 final report (2026-11-21)](whole-page-issue-432-final-2026-11-21.md) — provider performance matrix, resilience, cancellation/stale-result probes, and the ten-cycle offline soak, with provenance boundaries and evidence gaps.

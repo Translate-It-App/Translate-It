@@ -155,6 +155,8 @@ TEXT_TOO_LONG
 
 Microsoft Edge Page and Subtitle requests use this same provider-global physical capacity; neither mode receives an independent limiter. At Level 3 the configured limit is six physical requests. Page's worker cap is three, while Subtitle requests continue through their existing path and share the six-request budget. Existing retry, timeout, and cancellation ownership is unchanged.
 
+Google Classic and Google Translate V2 each use their own provider-global physical capacity. Both are configured to six requests at Level 3; opted-in Page workers share that provider's limiter rather than multiplying it. The common concurrency curve does not combine traffic across the two providers.
+
 DeepL's Page opt-in changes only Page dispatch parallelism; its physical requests, API-key failover, and request-size recovery continue to use the existing provider-shared limiter and retain their existing tier/key/error policies. Page workers do not multiply the configured DeepL HTTP capacity.
 
 Yandex translation also requires JSON `code === 200`; a non-200 code in an otherwise HTTP-successful JSON response is classified as `API_RESPONSE_INVALID` with the body code copied to `statusCode`. This is distinct from a non-2xx HTTP response, which is classified by the shared request engine's HTTP error handling. In particular, a JSON body code of `429` remains `API_RESPONSE_INVALID`: it receives the generic two-execution QueueManager retry, does not establish the shared `Retry-After` cooldown, and does not honor a `Retry-After` header on the HTTP-200 response. A transport-level HTTP 429 remains `RATE_LIMIT_REACHED` and follows Yandex's configured three-execution policy and shared cooldown when `Retry-After` is present.

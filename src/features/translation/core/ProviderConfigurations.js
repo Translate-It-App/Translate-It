@@ -369,7 +369,7 @@ export const PROVIDER_CONFIGURATIONS = {
       },
     },
     rateLimit: {
-      maxConcurrent: 4, // Moderate concurrent requests
+      maxConcurrent: 6, // Balanced concurrent requests
       delayBetweenRequests: 0, // No delay for first request
       adaptiveBackoff: {
         enabled: true,
@@ -415,7 +415,7 @@ export const PROVIDER_CONFIGURATIONS = {
       },
     },
     rateLimit: {
-      maxConcurrent: 4,
+      maxConcurrent: 6,
       delayBetweenRequests: 0,
       adaptiveBackoff: {
         enabled: true,
@@ -939,6 +939,12 @@ function applyOptimizationLevel(config, level) {
   // optimization modes are not concurrency-identical. Larger base values keep
   // the standard multiplier curve.
   const scaleConcurrentLimit = (baseConcurrent, levelValue, isModeOverride = false) => {
+    if ((config === PROVIDER_CONFIGURATIONS.GoogleTranslate
+      || config === PROVIDER_CONFIGURATIONS.GoogleTranslateV2)
+      && !isModeOverride) {
+      return { 1: 1, 2: 2, 3: 6, 4: 7, 5: 8 }[levelValue];
+    }
+
     if (config === PROVIDER_CONFIGURATIONS.MicrosoftEdge && !isModeOverride) {
       return { 1: 2, 2: 3, 3: 6, 4: 8, 5: 10 }[levelValue];
     }

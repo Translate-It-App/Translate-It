@@ -63,6 +63,22 @@ describe('ProviderConfigurations optimization scaling', () => {
     expect(getProviderConfiguration('OpenAI').queueRetryPolicy).toBeUndefined();
   });
 
+  it('uses the shared Google concurrency curve without changing batching or request policy', () => {
+    const levels = [1, 2, 3, 4, 5];
+    for (const providerName of ['GoogleTranslate', 'GoogleTranslateV2']) {
+      const configs = levels.map(level => getProviderConfiguration(providerName, level));
+
+      expect(configs.map(config => config.rateLimit.maxConcurrent)).toEqual([1, 2, 6, 7, 8]);
+      expect(configs[2]).toMatchObject({
+        batching: { strategy: 'character_limit', optimalSize: 40, characterLimit: 5000 },
+        queueRetryPolicy: { maxExecutions: { RATE_LIMIT_REACHED: 3 } },
+      });
+      expect(configs[2].rateLimit.adaptiveBackoff)
+        .toEqual(PROVIDER_CONFIGURATIONS[providerName].rateLimit.adaptiveBackoff);
+      expect(configs[2].errorHandling).toBe(PROVIDER_CONFIGURATIONS[providerName].errorHandling);
+    }
+  });
+
   it('preserves Bing internal retry and circuit settings', () => {
     expect(PROVIDER_CONFIGURATIONS.BingTranslate.batching.maxRetries).toBe(3);
     expect(PROVIDER_CONFIGURATIONS.BingTranslate.errorHandling.circuitBreakThreshold).toBe(3);
@@ -80,7 +96,7 @@ describe('ProviderConfigurations optimization scaling', () => {
     expect(edgeConfigs[2].rateLimit.adaptiveBackoff)
       .toEqual(PROVIDER_CONFIGURATIONS.MicrosoftEdge.rateLimit.adaptiveBackoff);
     expect(edgeConfigs[2].errorHandling).toBe(PROVIDER_CONFIGURATIONS.MicrosoftEdge.errorHandling);
-    expect(getProviderRateLimit('GoogleTranslate', 3).maxConcurrent).toBe(4);
+    expect(getProviderRateLimit('GoogleTranslate', 3).maxConcurrent).toBe(6);
   });
 
   it('uses the WebAI concurrency curve while preserving its Select Element override', () => {
@@ -148,9 +164,6 @@ describe('ProviderConfigurations optimization scaling', () => {
   it('should keep higher-base providers on sensible growth curves', () => {
     expect([1, 2, 3, 4, 5].map(level => getProviderRateLimit('Gemini', level).maxConcurrent))
       .toEqual([1, 2, 3, 5, 6]);
-
-    expect([1, 2, 3, 4, 5].map(level => getProviderRateLimit('GoogleTranslate', level).maxConcurrent))
-      .toEqual([1, 2, 4, 6, 8]);
 
     expect([1, 2, 3, 4, 5].map(level => getProviderRateLimit('DeepLTranslate', level).maxConcurrent))
       .toEqual([2, 3, 5, 8, 10]);

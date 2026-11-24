@@ -953,6 +953,28 @@ describe('Page → Google Classic bounded physical concurrency', () => {
     expect(queueManager.getQueueStatus('GoogleTranslate').total).toBe(0);
   });
 
+  it('shares a six-slot Google Classic limit across Page and Subtitle work', async () => {
+    settings.level = 3;
+    providerState.isManualConfig = false;
+    await rateLimitManager.reloadConfigurations();
+    expect(providerState.optimizationLevel).toBe(3);
+    expect(providerState.config.maxConcurrent).toBe(6);
+
+    const pages = Array.from({ length: 5 }, (_, index) => pageRequest(index, `page source ${index}`));
+    const subtitle = subtitleRequest(5, 'shared subtitle source');
+
+    await pumpUntil(() => requests.length === 6, 'Page and Subtitle should share all six Level 3 provider slots');
+    expect(providerState.config.maxConcurrent).toBe(6);
+    expect(providerState.activeRequests).toBe(6);
+    expect(active).toBe(6);
+    expect(maximum).toBe(6);
+
+    requests.forEach(request => request.release());
+    expect((await Promise.all(pages)).every(result => result.success)).toBe(true);
+    expect((await subtitle).success).toBe(true);
+    expect(providerState.activeRequests).toBe(0);
+  });
+
   it('keeps separate Subtitle operations on the existing serial provider queue', async () => {
     const subtitles = [
       subtitleRequest(0, 'first subtitle'),
@@ -1516,6 +1538,7 @@ describe('Page → GoogleTranslateV2Provider physical concurrency', () => {
   };
 
   it('overlaps Page batches across sessions, shares provider capacity, and maps reverse completions', async () => {
+    providerState.config.maxConcurrent = 4;
     const batchRows = [
       ['session-a', 'a-1', 'source-a-1'],
       ['session-a', 'a-2', 'source-a-2'],
@@ -1634,6 +1657,7 @@ describe('Page → GoogleTranslateV2Provider physical concurrency', () => {
   });
 
   it('cancels queued Google V2 parallel work without taking or leaking a physical slot', async () => {
+    providerState.config.maxConcurrent = 4;
     const requests = Array.from({ length: 5 }, (_, index) => pageRequest(`cancel-${index}`, {
       sessionId: 'cancel-session', text: `cancel-source-${index}`,
     }));
@@ -1659,6 +1683,28 @@ describe('Page → GoogleTranslateV2Provider physical concurrency', () => {
     expect(completed.every(result => result.success)).toBe(true);
     expect(providerState.activeRequests).toBe(0);
     expect(queueManager.getQueueStatus('GoogleTranslateV2::parallel').total).toBe(0);
+  });
+
+  it('uses the Level 3 Google V2 provider limit across Page batches', async () => {
+    const limit = providerState.config.maxConcurrent;
+    expect(limit).toBe(6);
+    const requests = Array.from({ length: limit + 1 }, (_, index) => pageRequest(`capacity-${index}`, {
+      sessionId: `capacity-session-${index}`,
+      text: `capacity-source-${index}`,
+    }));
+
+    await pumpUntil(() => attempts.length === limit);
+    expect(active).toBe(limit);
+    expect(maximum).toBe(limit);
+    expect(providerState.activeRequests).toBe(limit);
+    releases[0]();
+    await pumpUntil(() => attempts.length === limit + 1);
+    expect(active).toBe(limit);
+    expect(maximum).toBe(limit);
+
+    releases.slice(1).forEach(release => release());
+    await pumpUntil(() => providerState.activeRequests === 0);
+    expect((await Promise.all(requests)).every(result => result.success)).toBe(true);
   });
 
   it('keeps a Google V2 HTTP failure typed without corrupting successful siblings or limiter cleanup', async () => {
