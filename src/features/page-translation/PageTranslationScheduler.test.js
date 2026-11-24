@@ -157,7 +157,7 @@ describe('PageTranslationScheduler', () => {
     }
   });
 
-  it.each(['openrouter', 'requesty'])('uses %s Level 3 concurrency while retaining the AI page batch size', async translationApi => {
+  it.each([['webai', 4], ['openrouter', 3], ['requesty', 3]])('uses %s Level 3 concurrency while retaining the AI page batch size', async (translationApi, expectedConcurrency) => {
     const configModule = await import('@/shared/config/config.js');
     const optimization = vi.spyOn(configModule, 'getProviderOptimizationLevelAsync').mockResolvedValue(3);
     scheduler.setSettings({ translationApi, targetLanguage: 'en' });
@@ -166,7 +166,7 @@ describe('PageTranslationScheduler', () => {
       const config = await scheduler._getBatchConfig();
 
       expect(config.chunkSize).toBe(30);
-      expect(scheduler.settings.maxConcurrentFlushes).toBe(3);
+      expect(scheduler.settings.maxConcurrentFlushes).toBe(expectedConcurrency);
     } finally {
       optimization.mockRestore();
     }

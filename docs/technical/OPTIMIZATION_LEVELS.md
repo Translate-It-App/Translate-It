@@ -20,7 +20,7 @@ The system operates on an **Inverted Scaling** principle:
 2.  **Level 3 (Balanced)**:
     *   **Goal**: The standard reliable experience (Default).
 3.  **Level 5 (Turbo)**:
-    *   **Goal**: Highest tested aggressiveness and fastest possible UI response.
+    *   **Goal**: Highest configured aggressiveness and fastest possible UI response.
     *   **Strategy**: "Many requests, tiny payloads, high concurrency."
     *   **Benefit**: Can enable streaming-like UI updates where text appears in chunks faster, subject to provider/backend capacity.
 
@@ -34,7 +34,7 @@ unique execution states.
 - Such collisions are valid and are not configuration errors.
 - Higher levels must remain monotonic: they must never be less aggressive than lower levels.
 - Level 3 is the Balanced/default provider baseline.
-- Level 5 represents the highest tested aggressiveness, not a latency guarantee for every provider or backend.
+- Level 5 represents the highest configured aggressiveness; provider-specific performance is not necessarily benchmark-validated.
 
 #### Base-2 Provider Collision
 
@@ -43,6 +43,7 @@ Base-2 AI providers use this concurrency curve:
 | Provider family | L1 | L2 | L3 | L4 | L5 |
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | Base-2 AI providers | 1 | 2 | 2 | 3 | 4 |
+| WebAI | 1 | 2 | 4 | 5 | 6 |
 | OpenAI | 1 | 2 | 3 | 3 | 4 |
 | OpenRouter | 1 | 2 | 3 | 3 | 4 |
 | Requesty | 1 | 2 | 3 | 3 | 4 |
@@ -59,6 +60,14 @@ medians were 12.60s, 9.07s, and 8.34s at concurrency 2, 3, and 4 respectively;
 Level 3 therefore uses 3 as the measured balance between completion time and
 provider load. DeepSeek's 600-target Level 3 comparison is documented with the
 manual benchmark fixture; its result is directional, not a latency guarantee.
+
+WebAI's Level 3 concurrency of 4 is benchmark-selected. On the 120-target
+`gemini-auto` comparison, C4's median completion was 16.11s versus 26.41s at
+C2 and 23.65s at C3 (about 39% and 32% faster respectively). See the
+[benchmark record](benchmarks/webai-concurrency-gemini-auto.md) for conditions,
+first-visible medians, HAR verification, and limitations. WebAI Levels 4 and
+5 use concurrency 5 and 6 as policy choices; they were not tested and are not
+benchmark-validated.
 
 OpenAI's Level 3 curve is informed by the reported `gpt-4o-2024-11-20`
 concurrency comparison; see the [benchmark record](benchmarks/openai-concurrency-gpt-4o-2024-11-20.md)

@@ -323,7 +323,7 @@ export const PROVIDER_CONFIGURATIONS = {
   // WebAI - External API service (similar to other providers)
   WebAI: {
     rateLimit: {
-      maxConcurrent: 2, // Standard concurrent requests
+      maxConcurrent: 4, // Benchmark-selected balanced concurrency
       delayBetweenRequests: 0, // No delay for first request
       adaptiveBackoff: {
         enabled: true,
@@ -949,6 +949,11 @@ function applyOptimizationLevel(config, level) {
       // OpenAI, Custom, and DeepSeek use benchmark-selected curves; OpenRouter and Requesty match it for consistency.
       const selectedCurve = { 1: 1, 2: 2, 3: 3, 4: 3, 5: 4 };
       return selectedCurve[levelValue];
+    }
+
+    if (config === PROVIDER_CONFIGURATIONS.WebAI && !isModeOverride) {
+      // Level 3 is benchmark-selected; Levels 4–5 are policy choices.
+      return { 1: 1, 2: 2, 3: 4, 4: 5, 5: 6 }[levelValue];
     }
 
     if (baseConcurrent === 2) {

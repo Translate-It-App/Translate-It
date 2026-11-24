@@ -68,14 +68,12 @@ describe('ProviderConfigurations optimization scaling', () => {
     expect(PROVIDER_CONFIGURATIONS.BingTranslate.errorHandling.circuitBreakThreshold).toBe(3);
   });
 
-  it('should give base-2 providers a distinct Level 2 concurrency step', () => {
+  it('uses the WebAI concurrency curve while preserving its Select Element override', () => {
     const levels = [1, 2, 3, 4, 5];
-    const expected = [1, 2, 2, 3, 4];
-
-    for (const providerName of ['WebAI']) {
-      const actual = levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent);
-      expect(actual).toEqual(expected);
-    }
+    expect(levels.map(level => getProviderRateLimit('WebAI', level).maxConcurrent))
+      .toEqual([1, 2, 4, 5, 6]);
+    expect(levels.map(level => getProviderRateLimit('WebAI', level).modeOverrides.select_element.maxConcurrent))
+      .toEqual([1, 2, 2, 3, 4]);
     for (const providerName of ['OpenRouter', 'Requesty']) {
       expect(levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent))
         .toEqual([1, 2, 3, 3, 4]);
@@ -143,10 +141,10 @@ describe('ProviderConfigurations optimization scaling', () => {
       .toEqual([2, 3, 5, 8, 10]);
   });
 
-  it('should keep WebAI aligned with the desired base-2 curve', () => {
+  it('keeps WebAI delay behavior while using the requested concurrency curve', () => {
     expect(getProviderRateLimit('WebAI', 2).maxConcurrent).toBe(2);
     expect(getProviderRateLimit('WebAI', 3).delayBetweenRequests).toBe(0);
-    expect(getProviderRateLimit('WebAI', 5).maxConcurrent).toBe(4);
+    expect(getProviderRateLimit('WebAI', 5).maxConcurrent).toBe(6);
     expect(getProviderRateLimit('WebAI', 5).delayBetweenRequests).toBe(0);
   });
 
@@ -167,8 +165,8 @@ describe('ProviderConfigurations optimization scaling', () => {
     expect(batching[4]).toMatchObject({
       maxComplexity: 150,
     });
-    expect(getProviderRateLimit('WebAI', 3).maxConcurrent).toBe(2);
-    expect(getProviderRateLimit('WebAI', 5).maxConcurrent).toBe(4);
+    expect(getProviderRateLimit('WebAI', 3).maxConcurrent).toBe(4);
+    expect(getProviderRateLimit('WebAI', 5).maxConcurrent).toBe(6);
   });
 
   it('keeps generic AI batching scaling for non-Select Element modes', () => {

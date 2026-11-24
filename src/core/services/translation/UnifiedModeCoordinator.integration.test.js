@@ -41,6 +41,8 @@ vi.mock('@/shared/config/config.js', async importOriginal => ({
   getOpenRouterApiModelAsync: vi.fn(async () => 'fixture-openrouter-model'),
   getRequestyApiKeysAsync: vi.fn(async () => ['fixture-requesty-key']),
   getRequestyApiModelAsync: vi.fn(async () => 'fixture-requesty-model'),
+  getWebAIApiUrlAsync: vi.fn(async () => 'https://webai.invalid/translate'),
+  getWebAIApiModelAsync: vi.fn(async () => 'fixture-webai-model'),
   getDeeplApiKeysAsync: vi.fn(async () => settings.deeplKeys),
   getDeeplApiTierAsync: vi.fn(async () => settings.deeplTier),
   getDeeplFormalityAsync: vi.fn(async () => settings.deeplFormality),
@@ -63,6 +65,7 @@ import { DeepSeekProvider } from '@/features/translation/providers/DeepSeek.js';
 import { OpenAIProvider } from '@/features/translation/providers/OpenAI.js';
 import { OpenRouterProvider } from '@/features/translation/providers/OpenRouter.js';
 import { RequestyProvider } from '@/features/translation/providers/Requesty.js';
+import { WebAIProvider } from '@/features/translation/providers/WebAI.js';
 import { GoogleTranslateProvider } from '@/features/translation/providers/GoogleTranslate.js';
 import { GoogleTranslateV2Provider } from '@/features/translation/providers/GoogleTranslateV2Provider.js';
 import { MicrosoftEdgeProvider } from '@/features/translation/providers/MicrosoftEdgeProvider.js';
@@ -284,6 +287,75 @@ describe('Page → Custom and DeepSeek provider physical concurrency', () => {
     expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
     expect(queueManager.getQueueStatus('OpenAI::parallel').total).toBe(0);
     expect(engine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledTimes(4);
+  });
+
+  it('loads WebAI Level 3 concurrency into the real shared rate limiter', async () => {
+    settings.level = 3;
+    await rateLimitManager.reloadConfigurations();
+
+    state = rateLimitManager.providerStates.get('WebAI');
+    expect(state.config.maxConcurrent).toBe(4);
+  });
+
+  it('shares WebAI Level 3 physical capacity across Page and Subtitle requests', async () => {
+    settings.level = 3;
+    await rateLimitManager.reloadConfigurations();
+    const provider = new WebAIProvider();
+    engine.getProvider = async () => provider;
+    state = rateLimitManager.providerStates.get('WebAI');
+    const webaiAttempts = [];
+    proxyManager.fetch.mockImplementation(async (_url, options) => {
+      const body = JSON.parse(options.body);
+      const userText = body.message.split('Text to translate:\n').at(-1);
+      const payload = JSON.parse(userText);
+      const units = payload.translations;
+      const record = { units, start: Date.now(), end: null };
+      webaiAttempts.push(record);
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      active--;
+      record.end = Date.now();
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Map([['content-type', 'application/json']]),
+        json: async () => ({
+          response: JSON.stringify({
+            translations: units.map(({ id, text }) => ({ id, text: `訳 ${text}` })),
+          }),
+        }),
+        clone() { return this; },
+      };
+    });
+
+    const pages = [];
+    const subtitles = [];
+    for (let index = 0; index < 2; index++) {
+      pages.push(runBatch(index, { providerId: 'webai' }));
+      subtitles.push(runSubtitle(index, 'webai'));
+    }
+    for (let index = 2; index < 6; index++) {
+      pages.push(runBatch(index, { providerId: 'webai' }));
+    }
+    await advance(5000);
+
+    expect(state.config.maxConcurrent).toBe(4);
+    expect(webaiAttempts).toHaveLength(8);
+    expect(maximum).toBe(4);
+    const pageAttempts = webaiAttempts.filter(({ units }) => units.some(({ text }) => text.startsWith('Source ')));
+    const subtitleAttempts = webaiAttempts.filter(({ units }) => units.some(({ text }) => text.startsWith('Subtitle ')));
+    expect(pageAttempts.some(page => subtitleAttempts.some(subtitle =>
+      page.start < subtitle.end && subtitle.start < page.end
+    ))).toBe(true);
+    assertMapped(await Promise.all(pages));
+    expect((await Promise.all(subtitles)).map(result => result.results[0])).toEqual([
+      { id: 'cue-0', text: '訳 Subtitle 0 source' },
+      { id: 'cue-1', text: '訳 Subtitle 1 source' },
+    ]);
+    expect(state.activeRequests).toBe(0);
+    expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
   });
 
   it.each([
