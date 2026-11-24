@@ -20,7 +20,7 @@ The system operates on an **Inverted Scaling** principle:
 2.  **Level 3 (Balanced)**:
     *   **Goal**: The standard reliable experience (Default).
 3.  **Level 5 (Turbo)**:
-    *   **Goal**: Highest tested aggressiveness and fastest possible UI response.
+    *   **Goal**: Highest configured aggressiveness and fastest possible UI response.
     *   **Strategy**: "Many requests, tiny payloads, high concurrency."
     *   **Benefit**: Can enable streaming-like UI updates where text appears in chunks faster, subject to provider/backend capacity.
 
@@ -34,7 +34,7 @@ unique execution states.
 - Such collisions are valid and are not configuration errors.
 - Higher levels must remain monotonic: they must never be less aggressive than lower levels.
 - Level 3 is the Balanced/default provider baseline.
-- Level 5 represents the highest tested aggressiveness, not a latency guarantee for every provider or backend.
+- Level 5 represents the highest configured aggressiveness; provider-specific performance is not necessarily benchmark-validated.
 
 #### Base-2 Provider Collision
 
@@ -43,12 +43,71 @@ Base-2 AI providers use this concurrency curve:
 | Provider family | L1 | L2 | L3 | L4 | L5 |
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | Base-2 AI providers | 1 | 2 | 2 | 3 | 4 |
+| WebAI | 1 | 2 | 4 | 5 | 6 |
+| OpenAI | 1 | 2 | 3 | 3 | 4 |
+| OpenRouter | 1 | 2 | 3 | 3 | 4 |
+| Requesty | 1 | 2 | 3 | 3 | 4 |
+| Custom | 1 | 2 | 3 | 3 | 4 |
+| DeepSeek | 1 | 2 | 3 | 3 | 4 |
 | Gemini | 1 | 2 | 3 | 5 | 6 |
 
-Level 2 and Level 3 intentionally share concurrency `2` for base-2
-providers. Level 2 must step above Level 1, while Level 3 remains the
-established Balanced baseline. Raising Level 3 would increase default provider
-pressure; lowering Level 2 would only move collision to Levels 1 and 2.
+Other base-2 AI providers intentionally share concurrency `2` at Levels 2
+and 3. OpenAI, Custom, and DeepSeek use benchmark-selected curves. OpenRouter
+and Requesty use the same curve for consistency, not as a benchmark-validated
+performance optimization; no direct live benchmark is available for either
+provider. Custom's isolated Page Translation
+medians were 12.60s, 9.07s, and 8.34s at concurrency 2, 3, and 4 respectively;
+Level 3 therefore uses 3 as the measured balance between completion time and
+provider load. DeepSeek's 600-target Level 3 comparison is documented with the
+manual benchmark fixture; its result is directional, not a latency guarantee.
+
+WebAI's Level 3 concurrency of 4 is benchmark-selected. On the 120-target
+`gemini-auto` comparison, C4's median completion was 16.11s versus 26.41s at
+C2 and 23.65s at C3 (about 39% and 32% faster respectively). See the
+[benchmark record](benchmarks/webai-concurrency-gemini-auto.md) for conditions,
+first-visible medians, HAR verification, and limitations. WebAI Levels 4 and
+5 use concurrency 5 and 6 as policy choices; they were not tested and are not
+benchmark-validated.
+
+#### Microsoft Edge
+
+Microsoft Edge uses the concurrency curve `[2, 3, 6, 8, 10]` at Levels 1–5.
+At Level 3, Page uses three workers under the existing provider-shared physical
+capacity; Page and Subtitle requests share the same six-request limiter. The
+600-designated-target benchmark selected C6 as the balance: median first
+visible was 0.465s and completion was 3.028s, 27.7% faster to completion than
+C5. C8 completed sooner (2.660s) but had slower first-visible time (0.671s)
+and one additional worker. See the [Edge benchmark record](benchmarks/microsoft-edge-concurrency-2026-11-24.md)
+for workload details, HAR evidence, and sample-size limitations.
+
+#### Yandex Translate
+
+Yandex uses the shared `[1, 2, 6, 7, 8]` concurrency curve. At Level 3, its
+Page worker cap is three and Page and Subtitle share the same provider-global
+six-request physical limiter. The Yandex benchmark selected C6: median
+completion improved 42.9% over C4, while C8's 2.451s median completion was
+effectively unchanged from C6's 2.452s. See the
+[Yandex benchmark record](benchmarks/yandex-translate-concurrency-2026-11-24.md)
+for conditions, HAR verification, the mislabeled C4 export, backend variability,
+and sample-size limitations. Level 4 C7 remains an unvalidated policy choice.
+
+#### Google Translate
+
+Google Classic (`GoogleTranslate`) and Google Translate V2
+(`GoogleTranslateV2`) share the concurrency curve `[1, 2, 6, 7, 8]`. At Level
+3, the Page worker cap is three under each provider's own shared physical
+limiter. The C6 Level 3 choice is benchmark-selected for Google V2: the
+600-target comparison reduced median completion time by 19.1% versus C4. See
+the [Google V2 benchmark record](benchmarks/google-translate-v2-concurrency-2026-11-24.md)
+for conditions and HAR verification. Google Classic uses the same curve for
+consistency; this benchmark is not evidence of its performance. Level 4 C7
+remains an unvalidated policy choice.
+
+OpenAI's Level 3 curve is informed by the reported `gpt-4o-2024-11-20`
+concurrency comparison; see the [benchmark record](benchmarks/openai-concurrency-gpt-4o-2024-11-20.md)
+for the verified endpoint, Level 3 and batch-size conditions, trial/request
+counts, medians, limitations, and separately recorded credit-exhaustion
+failure.
 
 #### AI Select Element
 

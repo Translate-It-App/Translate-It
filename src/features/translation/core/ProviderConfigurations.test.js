@@ -63,23 +63,98 @@ describe('ProviderConfigurations optimization scaling', () => {
     expect(getProviderConfiguration('OpenAI').queueRetryPolicy).toBeUndefined();
   });
 
+  it('uses the shared Google concurrency curve without changing batching or request policy', () => {
+    const levels = [1, 2, 3, 4, 5];
+    for (const providerName of ['GoogleTranslate', 'GoogleTranslateV2']) {
+      const configs = levels.map(level => getProviderConfiguration(providerName, level));
+
+      expect(configs.map(config => config.rateLimit.maxConcurrent)).toEqual([1, 2, 6, 7, 8]);
+      expect(configs[2]).toMatchObject({
+        batching: { strategy: 'character_limit', optimalSize: 40, characterLimit: 5000 },
+        queueRetryPolicy: { maxExecutions: { RATE_LIMIT_REACHED: 3 } },
+      });
+      expect(configs[2].rateLimit.adaptiveBackoff)
+        .toEqual(PROVIDER_CONFIGURATIONS[providerName].rateLimit.adaptiveBackoff);
+      expect(configs[2].errorHandling).toBe(PROVIDER_CONFIGURATIONS[providerName].errorHandling);
+    }
+  });
+
+  it('uses the shared Google concurrency curve while preserving Yandex batching and request policy', () => {
+    const levels = [1, 2, 3, 4, 5];
+    const configs = levels.map(level => getProviderConfiguration('YandexTranslate', level));
+
+    expect(configs.map(config => config.rateLimit.maxConcurrent)).toEqual([1, 2, 6, 7, 8]);
+    expect(configs[2]).toMatchObject({
+      batching: { strategy: 'character_limit', optimalSize: 40, maxChunksPerBatch: 100, characterLimit: 10000 },
+      queueRetryPolicy: { maxExecutions: { RATE_LIMIT_REACHED: 3 } },
+    });
+    expect(configs[2].rateLimit.adaptiveBackoff)
+      .toEqual(PROVIDER_CONFIGURATIONS.YandexTranslate.rateLimit.adaptiveBackoff);
+    expect(configs[2].errorHandling).toBe(PROVIDER_CONFIGURATIONS.YandexTranslate.errorHandling);
+  });
+
   it('preserves Bing internal retry and circuit settings', () => {
     expect(PROVIDER_CONFIGURATIONS.BingTranslate.batching.maxRetries).toBe(3);
     expect(PROVIDER_CONFIGURATIONS.BingTranslate.errorHandling.circuitBreakThreshold).toBe(3);
   });
 
-  it('should give base-2 providers a distinct Level 2 concurrency step', () => {
+  it('uses the Edge concurrency curve without changing its batching or retry policy', () => {
     const levels = [1, 2, 3, 4, 5];
-    const expected = [1, 2, 2, 3, 4];
+    const edgeConfigs = levels.map(level => getProviderConfiguration('MicrosoftEdge', level));
 
-    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Requesty', 'Custom']) {
-      const actual = levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent);
-      expect(actual).toEqual(expected);
+    expect(edgeConfigs.map(config => config.rateLimit.maxConcurrent)).toEqual([2, 3, 6, 8, 10]);
+    expect(edgeConfigs[2]).toMatchObject({
+      batching: { strategy: 'character_limit', optimalSize: 40, characterLimit: 5000 },
+      queueRetryPolicy: { maxExecutions: { RATE_LIMIT_REACHED: 3 } },
+    });
+    expect(edgeConfigs[2].rateLimit.adaptiveBackoff)
+      .toEqual(PROVIDER_CONFIGURATIONS.MicrosoftEdge.rateLimit.adaptiveBackoff);
+    expect(edgeConfigs[2].errorHandling).toBe(PROVIDER_CONFIGURATIONS.MicrosoftEdge.errorHandling);
+    expect(getProviderRateLimit('GoogleTranslate', 3).maxConcurrent).toBe(6);
+  });
+
+  it('uses the WebAI concurrency curve while preserving its Select Element override', () => {
+    const levels = [1, 2, 3, 4, 5];
+    expect(levels.map(level => getProviderRateLimit('WebAI', level).maxConcurrent))
+      .toEqual([1, 2, 4, 5, 6]);
+    expect(levels.map(level => getProviderRateLimit('WebAI', level).modeOverrides.select_element.maxConcurrent))
+      .toEqual([1, 2, 2, 3, 4]);
+    for (const providerName of ['OpenRouter', 'Requesty']) {
+      expect(levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent))
+        .toEqual([1, 2, 3, 3, 4]);
+      expect(levels.map(level => getProviderRateLimit(providerName, level).modeOverrides.select_element.maxConcurrent))
+        .toEqual([1, 2, 3, 5, 6]);
+      expect(getProviderRateLimit(providerName, 3).modeOverrides.select_element.maxConcurrent).toBe(3);
     }
+    expect(levels.map(level => getProviderRateLimit('OpenAI', level).maxConcurrent))
+      .toEqual([1, 2, 3, 3, 4]);
+    expect(levels.map(level => getProviderRateLimit('DeepSeek', level).maxConcurrent))
+      .toEqual([1, 2, 3, 3, 4]);
+    expect(getProviderConfiguration('DeepSeek', 3).batching)
+      .toEqual(PROVIDER_CONFIGURATIONS.DeepSeek.batching);
+  });
+
+  it('uses the Custom concurrency curve while preserving unrelated provider configuration', () => {
+    const customLevel3 = getProviderConfiguration('Custom', 3);
+
+    expect([1, 2, 3, 4, 5].map(level => getProviderRateLimit('Custom', level).maxConcurrent))
+      .toEqual([1, 2, 3, 3, 4]);
+    expect(customLevel3.rateLimit.modeOverrides.select_element.maxConcurrent).toBe(2);
+    expect(customLevel3.rateLimit.delayBetweenRequests)
+      .toBe(PROVIDER_CONFIGURATIONS.Custom.rateLimit.delayBetweenRequests);
+    expect(customLevel3.rateLimit.adaptiveBackoff)
+      .toEqual(PROVIDER_CONFIGURATIONS.Custom.rateLimit.adaptiveBackoff);
+    expect(customLevel3.batching).toEqual(PROVIDER_CONFIGURATIONS.Custom.batching);
+    expect([1, 2, 3, 4, 5].map(level => getProviderBatching('Custom', null, level).optimalSize))
+      .toEqual([50, 30, 20, 12, 6]);
+    expect([1, 2, 3, 4, 5].map(level => getProviderBatching('Custom', 'select_element', level).optimalSize))
+      .toEqual([25, 25, 25, 25, 25]);
+    expect(customLevel3.errorHandling).toEqual(PROVIDER_CONFIGURATIONS.Custom.errorHandling);
+    expect(getProviderRateLimit('OpenAI', 3).maxConcurrent).toBe(3);
   });
 
   it('should keep representative AI concurrency monotonic while allowing collisions', () => {
-    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Custom', 'Gemini']) {
+    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Requesty', 'Custom', 'Gemini']) {
       const concurrency = [1, 2, 3, 4, 5].map(level => getProviderRateLimit(providerName, level).maxConcurrent);
       expect(concurrency.slice(1).every((value, index) => value >= concurrency[index])).toBe(true);
     }
@@ -104,17 +179,14 @@ describe('ProviderConfigurations optimization scaling', () => {
     expect([1, 2, 3, 4, 5].map(level => getProviderRateLimit('Gemini', level).maxConcurrent))
       .toEqual([1, 2, 3, 5, 6]);
 
-    expect([1, 2, 3, 4, 5].map(level => getProviderRateLimit('GoogleTranslate', level).maxConcurrent))
-      .toEqual([1, 2, 4, 6, 8]);
-
     expect([1, 2, 3, 4, 5].map(level => getProviderRateLimit('DeepLTranslate', level).maxConcurrent))
       .toEqual([2, 3, 5, 8, 10]);
   });
 
-  it('should keep WebAI aligned with the desired base-2 curve', () => {
+  it('keeps WebAI delay behavior while using the requested concurrency curve', () => {
     expect(getProviderRateLimit('WebAI', 2).maxConcurrent).toBe(2);
     expect(getProviderRateLimit('WebAI', 3).delayBetweenRequests).toBe(0);
-    expect(getProviderRateLimit('WebAI', 5).maxConcurrent).toBe(4);
+    expect(getProviderRateLimit('WebAI', 5).maxConcurrent).toBe(6);
     expect(getProviderRateLimit('WebAI', 5).delayBetweenRequests).toBe(0);
   });
 
@@ -135,8 +207,8 @@ describe('ProviderConfigurations optimization scaling', () => {
     expect(batching[4]).toMatchObject({
       maxComplexity: 150,
     });
-    expect(getProviderRateLimit('WebAI', 3).maxConcurrent).toBe(2);
-    expect(getProviderRateLimit('WebAI', 5).maxConcurrent).toBe(4);
+    expect(getProviderRateLimit('WebAI', 3).maxConcurrent).toBe(4);
+    expect(getProviderRateLimit('WebAI', 5).maxConcurrent).toBe(6);
   });
 
   it('keeps generic AI batching scaling for non-Select Element modes', () => {
@@ -149,7 +221,7 @@ describe('ProviderConfigurations optimization scaling', () => {
     const rateLimit = getProviderRateLimit('OpenRouter', 3);
 
     expect(batching).toMatchObject({ optimalSize: 25, characterLimit: 3500 });
-    expect(rateLimit.maxConcurrent).toBe(2);
+    expect(rateLimit.maxConcurrent).toBe(3);
     expect(rateLimit.delayBetweenRequests).toBe(0);
     expect(rateLimit.modeOverrides.select_element.maxConcurrent).toBe(3);
   });

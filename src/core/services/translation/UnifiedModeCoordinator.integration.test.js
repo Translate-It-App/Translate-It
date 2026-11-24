@@ -25,12 +25,24 @@ vi.mock('@/shared/storage/core/StorageCore.js', () => ({
     set: vi.fn(),
   },
 }));
-const settings = vi.hoisted(() => ({ level: 5, keys: ['fixture-key'], deeplKeys: ['fixture-deepl-key'], deeplTier: 'free', deeplFormality: 'default', bilingual: false, bilingualModes: {}, detectionResult: null, responseDelay: null }));
+const settings = vi.hoisted(() => ({ level: 5, keys: ['fixture-key'], deepseekKeys: ['fixture-deepseek-key'], deeplKeys: ['fixture-deepl-key'], deeplTier: 'free', deeplFormality: 'default', bilingual: false, bilingualModes: {}, detectionResult: null, responseDelay: null }));
 vi.mock('@/shared/config/config.js', async importOriginal => ({
   ...await importOriginal(),
   getCustomApiKeysAsync: vi.fn(async () => settings.keys),
   getCustomApiUrlAsync: vi.fn(async () => 'https://fixture.invalid/v1/chat/completions'),
   getCustomApiModelAsync: vi.fn(async () => 'fixture-model'),
+  getDeepSeekApiKeysAsync: vi.fn(async () => settings.deepseekKeys),
+  getDeepSeekApiUrlAsync: vi.fn(async () => 'https://api.deepseek.com/chat/completions'),
+  getDeepSeekApiModelAsync: vi.fn(async () => 'deepseek-flash'),
+  getDeepSeekThinkingModeAsync: vi.fn(async () => 'disabled'),
+  getOpenAIApiKeysAsync: vi.fn(async () => ['fixture-openai-key']),
+  getOpenAIModelAsync: vi.fn(async () => 'gpt-4o-2024-11-20'),
+  getOpenRouterApiKeysAsync: vi.fn(async () => ['fixture-openrouter-key']),
+  getOpenRouterApiModelAsync: vi.fn(async () => 'fixture-openrouter-model'),
+  getRequestyApiKeysAsync: vi.fn(async () => ['fixture-requesty-key']),
+  getRequestyApiModelAsync: vi.fn(async () => 'fixture-requesty-model'),
+  getWebAIApiUrlAsync: vi.fn(async () => 'https://webai.invalid/translate'),
+  getWebAIApiModelAsync: vi.fn(async () => 'fixture-webai-model'),
   getDeeplApiKeysAsync: vi.fn(async () => settings.deeplKeys),
   getDeeplApiTierAsync: vi.fn(async () => settings.deeplTier),
   getDeeplFormalityAsync: vi.fn(async () => settings.deeplFormality),
@@ -49,6 +61,11 @@ vi.mock('@/shared/proxy/ProxyManager.js', () => ({
 
 import { UnifiedModeCoordinator } from './UnifiedModeCoordinator.js';
 import { CustomProvider, clearCustomResponseFormatSupportCache } from '@/features/translation/providers/CustomProvider.js';
+import { DeepSeekProvider } from '@/features/translation/providers/DeepSeek.js';
+import { OpenAIProvider } from '@/features/translation/providers/OpenAI.js';
+import { OpenRouterProvider } from '@/features/translation/providers/OpenRouter.js';
+import { RequestyProvider } from '@/features/translation/providers/Requesty.js';
+import { WebAIProvider } from '@/features/translation/providers/WebAI.js';
 import { GoogleTranslateProvider } from '@/features/translation/providers/GoogleTranslate.js';
 import { GoogleTranslateV2Provider } from '@/features/translation/providers/GoogleTranslateV2Provider.js';
 import { MicrosoftEdgeProvider } from '@/features/translation/providers/MicrosoftEdgeProvider.js';
@@ -62,7 +79,7 @@ import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import { LanguageDetectionService } from '@/shared/services/LanguageDetectionService.js';
 import { TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS } from '@/shared/constants/translation.js';
 
-describe('Page → CustomProvider physical concurrency', () => {
+describe('Page → Custom and DeepSeek provider physical concurrency', () => {
   let coordinator, engine, state, active, maximum, attempts, completions, controllers;
 
   beforeEach(async () => {
@@ -106,13 +123,24 @@ describe('Page → CustomProvider physical concurrency', () => {
     vi.useRealTimers();
   });
 
-  const runBatch = (index, { sourceLanguage = 'en', targetLanguage = 'ja', alreadyTranslated = false, text, texts } = {}) => coordinator.processRequest({
+  const runBatch = (index, { sourceLanguage = 'en', targetLanguage = 'ja', alreadyTranslated = false, text, texts, providerId = 'custom' } = {}) => coordinator.processRequest({
     mode: TranslationMode.Page,
     messageId: `request-${index}`,
     data: {
-      provider: 'custom', sourceLanguage, targetLanguage, sessionId: 'page-session',
+      provider: providerId, sourceLanguage, targetLanguage, sessionId: 'page-session',
       text: JSON.stringify([0, 1].map(unit => ({ id: `unit-${index}-${unit}`, text: alreadyTranslated
         ? `すでに翻訳されたナビゲーション項目 ${index}/${unit}` : texts?.[unit] ?? text ?? `Source ${index}/${unit}` }))),
+    },
+  }, { translationEngine: engine });
+
+  const runSubtitle = (index, providerId = 'custom') => coordinator.processRequest({
+    mode: TranslationMode.Subtitle,
+    messageId: `subtitle-${index}`,
+    data: {
+      provider: providerId,
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      items: [{ id: `cue-${index}`, text: `Subtitle ${index} source` }],
     },
   }, { translationEngine: engine });
 
@@ -127,7 +155,10 @@ describe('Page → CustomProvider physical concurrency', () => {
       active++;
       maximum = Math.max(maximum, active);
       const attemptIndex = attempts.length - 1;
-      await new Promise(resolve => setTimeout(resolve, settings.responseDelay ?? (100 + (4 - attemptIndex % 5) * 10)));
+      const responseDelay = typeof settings.responseDelay === 'function'
+        ? settings.responseDelay(record, attemptIndex)
+        : settings.responseDelay ?? (100 + (4 - attemptIndex % 5) * 10);
+      await new Promise(resolve => setTimeout(resolve, responseDelay));
       active--;
       record.end = Date.now();
       completions.push(attemptIndex);
@@ -156,7 +187,7 @@ describe('Page → CustomProvider physical concurrency', () => {
     await vi.advanceTimersByTimeAsync(milliseconds);
   };
 
-  it.each([[3, 2], [5, 4]])('achieves level %s concurrency %s and maps reversed HTTP/items correctly', async (level, cap) => {
+  it.each([[3, 3], [5, 4]])('achieves level %s concurrency %s and maps reversed HTTP/items correctly', async (level, cap) => {
     settings.level = level;
     installHttp();
     const pending = Array.from({ length: 8 }, (_, index) => runBatch(index));
@@ -168,6 +199,193 @@ describe('Page → CustomProvider physical concurrency', () => {
     assertMapped(results);
     expect(queueManager.getQueueStatus('Custom::parallel').total).toBe(0);
     expect(state.activeRequests).toBe(0);
+  });
+
+  it('shares the Level 3 physical limit between Page and Subtitle requests', async () => {
+    settings.level = 3;
+    settings.responseDelay = (_record, index) => index === 0 ? 100 : 1000;
+    installHttp();
+    const pages = [runBatch(0), runBatch(1), runBatch(2)];
+    const subtitles = [runSubtitle(0), runSubtitle(1)];
+
+    await advance(0);
+    expect(state.config.maxConcurrent).toBe(3);
+    expect(attempts).toHaveLength(3);
+    expect(state.activeRequests).toBe(3);
+    await advance(100);
+
+    const subtitleAttempt = attempts.find(attempt => attempt.units.some(unit => unit.text === 'Subtitle 0 source'));
+    expect(subtitleAttempt).toBeDefined();
+    expect(attempts.slice(0, 3).some(attempt =>
+      attempt.units.some(unit => unit.text.startsWith('Source '))
+      && attempt.start < subtitleAttempt.start
+      && attempt.end === null
+    )).toBe(true);
+
+    await advance(5000);
+    assertMapped(await Promise.all(pages));
+    expect((await Promise.all(subtitles)).map(result => result.results[0])).toEqual([
+      { id: 'cue-0', text: '訳 Subtitle 0 source' },
+      { id: 'cue-1', text: '訳 Subtitle 1 source' },
+    ]);
+    expect(maximum).toBe(3);
+    expect(state.activeRequests).toBe(0);
+    expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
+    expect(queueManager.getQueueStatus('Custom::parallel').total).toBe(0);
+  });
+
+  it('shares DeepSeek Level 3 physical capacity across Page and Subtitle requests', async () => {
+    settings.level = 3;
+    settings.deepseekKeys = ['fixture-deepseek-key'];
+    const provider = new DeepSeekProvider();
+    engine.getProvider = async () => provider;
+    state = rateLimitManager.providerStates.get('DeepSeek');
+    installHttp();
+
+    const pages = [runBatch(0, { providerId: 'deepseek' }), runBatch(1, { providerId: 'deepseek' })];
+    const subtitles = [runSubtitle(0, 'deepseek'), runSubtitle(1, 'deepseek')];
+    await advance(5000);
+
+    expect(state.config.maxConcurrent).toBe(3);
+    expect(maximum).toBe(3);
+    expect(attempts).toHaveLength(4);
+    expect(attempts.every(attempt => attempt.end !== null)).toBe(true);
+    expect(attempts.every(attempt => attempt.aborted === false)).toBe(true);
+    assertMapped(await Promise.all(pages));
+    expect((await Promise.all(subtitles)).map(result => result.results[0])).toEqual([
+      { id: 'cue-0', text: '訳 Subtitle 0 source' },
+      { id: 'cue-1', text: '訳 Subtitle 1 source' },
+    ]);
+    expect(state.activeRequests).toBe(0);
+    expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
+    expect(queueManager.getQueueStatus('DeepSeek::parallel').total).toBe(0);
+    expect(engine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledTimes(4);
+  });
+
+  it('shares OpenAI Level 3 physical capacity across Page and Subtitle requests', async () => {
+    settings.level = 3;
+    const provider = new OpenAIProvider();
+    engine.getProvider = async () => provider;
+    state = rateLimitManager.providerStates.get('OpenAI');
+    installHttp();
+
+    const pages = [runBatch(0, { providerId: 'openai' }), runBatch(1, { providerId: 'openai' })];
+    const subtitles = [runSubtitle(0, 'openai'), runSubtitle(1, 'openai')];
+    await advance(5000);
+
+    expect(state.config.maxConcurrent).toBe(3);
+    expect(maximum).toBe(3);
+    expect(attempts).toHaveLength(4);
+    expect(attempts.every(attempt => attempt.end !== null)).toBe(true);
+    expect(attempts.every(attempt => attempt.aborted === false)).toBe(true);
+    assertMapped(await Promise.all(pages));
+    expect((await Promise.all(subtitles)).map(result => result.results[0])).toEqual([
+      { id: 'cue-0', text: '訳 Subtitle 0 source' },
+      { id: 'cue-1', text: '訳 Subtitle 1 source' },
+    ]);
+    expect(state.activeRequests).toBe(0);
+    expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
+    expect(queueManager.getQueueStatus('OpenAI::parallel').total).toBe(0);
+    expect(engine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledTimes(4);
+  });
+
+  it('loads WebAI Level 3 concurrency into the real shared rate limiter', async () => {
+    settings.level = 3;
+    await rateLimitManager.reloadConfigurations();
+
+    state = rateLimitManager.providerStates.get('WebAI');
+    expect(state.config.maxConcurrent).toBe(4);
+  });
+
+  it('shares WebAI Level 3 physical capacity across Page and Subtitle requests', async () => {
+    settings.level = 3;
+    await rateLimitManager.reloadConfigurations();
+    const provider = new WebAIProvider();
+    engine.getProvider = async () => provider;
+    state = rateLimitManager.providerStates.get('WebAI');
+    const webaiAttempts = [];
+    proxyManager.fetch.mockImplementation(async (_url, options) => {
+      const body = JSON.parse(options.body);
+      const userText = body.message.split('Text to translate:\n').at(-1);
+      const payload = JSON.parse(userText);
+      const units = payload.translations;
+      const record = { units, start: Date.now(), end: null };
+      webaiAttempts.push(record);
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      active--;
+      record.end = Date.now();
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Map([['content-type', 'application/json']]),
+        json: async () => ({
+          response: JSON.stringify({
+            translations: units.map(({ id, text }) => ({ id, text: `訳 ${text}` })),
+          }),
+        }),
+        clone() { return this; },
+      };
+    });
+
+    const pages = [];
+    const subtitles = [];
+    for (let index = 0; index < 2; index++) {
+      pages.push(runBatch(index, { providerId: 'webai' }));
+      subtitles.push(runSubtitle(index, 'webai'));
+    }
+    for (let index = 2; index < 6; index++) {
+      pages.push(runBatch(index, { providerId: 'webai' }));
+    }
+    await advance(5000);
+
+    expect(state.config.maxConcurrent).toBe(4);
+    expect(webaiAttempts).toHaveLength(8);
+    expect(maximum).toBe(4);
+    const pageAttempts = webaiAttempts.filter(({ units }) => units.some(({ text }) => text.startsWith('Source ')));
+    const subtitleAttempts = webaiAttempts.filter(({ units }) => units.some(({ text }) => text.startsWith('Subtitle ')));
+    expect(pageAttempts.some(page => subtitleAttempts.some(subtitle =>
+      page.start < subtitle.end && subtitle.start < page.end
+    ))).toBe(true);
+    assertMapped(await Promise.all(pages));
+    expect((await Promise.all(subtitles)).map(result => result.results[0])).toEqual([
+      { id: 'cue-0', text: '訳 Subtitle 0 source' },
+      { id: 'cue-1', text: '訳 Subtitle 1 source' },
+    ]);
+    expect(state.activeRequests).toBe(0);
+    expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
+  });
+
+  it.each([
+    ['OpenRouter', OpenRouterProvider, 'openrouter'],
+    ['Requesty', RequestyProvider, 'requesty'],
+  ])('shares %s Level 3 physical capacity across Page and Subtitle requests', async (providerName, Provider, providerId) => {
+    settings.level = 3;
+    const provider = new Provider();
+    engine.getProvider = async () => provider;
+    state = rateLimitManager.providerStates.get(providerName);
+    installHttp();
+
+    const pages = [runBatch(0, { providerId }), runBatch(1, { providerId })];
+    const subtitles = [runSubtitle(0, providerId), runSubtitle(1, providerId)];
+    await advance(5000);
+
+    expect(state.config.maxConcurrent).toBe(3);
+    expect(maximum).toBe(3);
+    expect(attempts).toHaveLength(4);
+    expect(attempts.every(attempt => attempt.end !== null)).toBe(true);
+    expect(attempts.every(attempt => attempt.aborted === false)).toBe(true);
+    assertMapped(await Promise.all(pages));
+    expect((await Promise.all(subtitles)).map(result => result.results[0])).toEqual([
+      { id: 'cue-0', text: '訳 Subtitle 0 source' },
+      { id: 'cue-1', text: '訳 Subtitle 1 source' },
+    ]);
+    expect(state.activeRequests).toBe(0);
+    expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
+    expect(queueManager.getQueueStatus(`${providerName}::parallel`).total).toBe(0);
+    expect(engine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledTimes(4);
   });
 
   it('respects an explicit concurrency limit of one', async () => {
@@ -315,12 +533,13 @@ describe('Page → CustomProvider physical concurrency', () => {
     expect(state.activeRequests).toBe(0);
   });
 
-  it('shares physical 429 cooldown with queued batches and the bounded queue retry', async () => {
+  it.each([[3, 3], [5, 4]])('shares physical 429 cooldown with queued batches and the bounded queue retry at level %s', async (level, cap) => {
+    settings.level = level;
     installHttp((_record, index) => index === 0 ? { status: 429, retryAfter: '5' } : {});
     const pending = Array.from({ length: 8 }, (_, index) => runBatch(index));
     await advance(20000);
     assertMapped(await Promise.all(pending));
-    expect(maximum).toBe(4);
+    expect(maximum).toBe(cap);
     expect(attempts).toHaveLength(9);
     const deadline = attempts[0].end + 5000;
     attempts.filter(attempt => attempt.start >= attempts[0].end).forEach(attempt => expect(attempt.start).toBeGreaterThanOrEqual(deadline));
@@ -362,12 +581,13 @@ describe('Page → CustomProvider physical concurrency', () => {
     expect(state.activeRequests).toBe(0);
   });
 
-  it('repairs malformed JSON under the same physical cap without resending successful siblings', async () => {
+  it.each([[3, 3], [5, 4]])('repairs malformed JSON under the level %s physical cap without resending successful siblings', async (level, cap) => {
+    settings.level = level;
     installHttp((_record, index) => index === 0 ? { content: 'unparseable output' } : {});
     const pending = Array.from({ length: 8 }, (_, index) => runBatch(index));
     await advance(10000);
     assertMapped(await Promise.all(pending));
-    expect(maximum).toBe(4);
+    expect(maximum).toBe(cap);
     expect(attempts.length).toBeGreaterThan(8);
     expect(attempts.length).toBeLessThanOrEqual(10);
     for (let index = 1; index < 8; index++) {
@@ -391,14 +611,14 @@ describe('Page → CustomProvider physical concurrency', () => {
 });
 
 describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrency', () => {
-  let coordinator, engine, providerState, active, maximum, requests;
+  let coordinator, engine, providerState, active, maximum, peakTexts, requests;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     queueManager.cleanup();
     rateLimitManager.providerStates.forEach(state => clearTimeout(state.nextProcessTimer));
     rateLimitManager.providerStates.clear();
-    settings.level = 1;
+    settings.level = 3;
     settings.keys = [];
     settings.bilingual = false;
     settings.bilingualModes = { [TranslationMode.Page]: false };
@@ -422,6 +642,7 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
     providerState = rateLimitManager.providerStates.get('MicrosoftEdge');
     active = 0;
     maximum = 0;
+    peakTexts = [];
     requests = [];
     vi.useFakeTimers();
     proxyManager.fetch.mockImplementation(async (_url, options) => {
@@ -429,7 +650,10 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
       const request = { texts, released: false };
       requests.push(request);
       active++;
-      maximum = Math.max(maximum, active);
+      if (active > maximum) {
+        maximum = active;
+        peakTexts = requests.filter(candidate => !candidate.released).map(candidate => candidate.texts[0]);
+      }
       await new Promise(resolve => {
         request.release = () => {
           request.released = true;
@@ -468,14 +692,14 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
     },
   }, { translationEngine: engine });
 
-  const subtitleRequest = () => coordinator.processRequest({
+  const subtitleRequest = index => coordinator.processRequest({
     mode: TranslationMode.Subtitle,
-    messageId: 'edge-subtitle',
+    messageId: `edge-subtitle-${index}`,
     data: {
       provider: 'edge',
       sourceLanguage: 'en',
       targetLanguage: 'fa',
-      items: [{ id: 'cue-1', text: 'Subtitle source' }],
+      items: [{ id: `cue-${index}`, text: `Subtitle ${index} source` }],
     },
   }, { translationEngine: engine });
 
@@ -484,7 +708,7 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
       await vi.dynamicImportSettled();
       await vi.advanceTimersByTimeAsync(0);
     }
-    expect(predicate(), message).toBe(true);
+    expect(predicate(), `${message}; requests=${requests.length}, active=${active}`).toBe(true);
   };
 
   const release = async texts => {
@@ -495,13 +719,15 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
     await vi.advanceTimersByTimeAsync(0);
   };
 
-  it('shares Edge capacity across concurrent Page and Subtitle work and maps out-of-order completions', async () => {
+  it('gives queued Subtitle work the next Level 1 slot before queued Page work', async () => {
+    settings.level = 1;
+    await rateLimitManager.reloadConfigurations();
     const providerLimit = providerState.config.maxConcurrent;
     expect(providerLimit).toBe(2);
     const pages = [0, 1, 2, 3].map(pageRequest);
     await pumpUntil(() => requests.length === 2, 'the first two Page HTTP requests should occupy Edge capacity');
 
-    const subtitle = subtitleRequest();
+    const subtitle = subtitleRequest(0);
     await pumpUntil(
       () => Object.values(providerState.queues).reduce((count, queue) => count + queue.length, 0) >= 3,
       'remaining Page and Subtitle physical requests should queue behind the shared Edge limit'
@@ -512,10 +738,11 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
 
     await release('Page 1 source');
     await pumpUntil(() => requests.length === 3, 'a queued request should start after one Edge slot is released');
-    expect(requests[2].texts).toEqual(['Subtitle source']);
+    expect(requests[2].texts).toEqual(['Subtitle 0 source']);
 
-    await release('Subtitle source');
+    await release('Subtitle 0 source');
     await pumpUntil(() => requests.length === 4, 'a queued Page request should start after Subtitle releases its slot');
+    expect(requests[3].texts).toEqual(['Page 2 source']);
     await release('Page 2 source');
     await pumpUntil(() => requests.length === 5, 'the final Page request should start after capacity is released');
     await release('Page 3 source');
@@ -530,12 +757,60 @@ describe('Page and Subtitle → MicrosoftEdgeProvider shared physical concurrenc
       ]);
     });
     expect(subtitleResult.results).toEqual([
-      { id: 'cue-1', text: 'translated:Subtitle source' },
+      { id: 'cue-0', text: 'translated:Subtitle 0 source' },
     ]);
-    expect(requests.map(request => request.texts[0])).toEqual([
-      'Page 0 source', 'Page 1 source', 'Subtitle source', 'Page 2 source', 'Page 3 source',
-    ]);
+    expect(maximum).toBe(providerLimit);
+    expect(active).toBe(0);
+    expect(providerState.activeRequests).toBe(0);
+    expect(Object.values(providerState.queues).every(queue => queue.length === 0)).toBe(true);
+  });
+
+  it('shares Edge capacity across queued Page and Subtitle work and maps out-of-order completions', async () => {
+    const providerLimit = providerState.config.maxConcurrent;
+    expect(providerLimit).toBe(6);
+    const pages = [0, 1, 2].map(pageRequest);
+    await pumpUntil(() => requests.length === 3, 'three Page HTTP requests should occupy Page worker capacity');
+
+    const subtitles = [subtitleRequest(0), subtitleRequest(1), subtitleRequest(2)];
+    await pumpUntil(
+      () => requests.some(request => request.texts[0].startsWith('Subtitle ')),
+      'Subtitle HTTP requests should share Edge capacity with Page work'
+    );
+    pages.push(...[3, 4, 5, 6, 7].map(pageRequest));
+    subtitles.push(subtitleRequest(3));
+    expect(requests.length).toBeGreaterThan(3);
+    expect(requests.length).toBeLessThan(pages.length + subtitles.length);
+    expect(active).toBe(requests.length);
     expect(maximum).toBeLessThanOrEqual(providerLimit);
+    expect(peakTexts.some(text => text.startsWith('Page '))).toBe(true);
+    expect(peakTexts.some(text => text.startsWith('Subtitle '))).toBe(true);
+
+    requests.slice().reverse().forEach(request => request.release());
+    while (requests.length < 12) {
+      const previousCount = requests.length;
+      await pumpUntil(
+        () => requests.length > previousCount,
+        'queued Page and Subtitle requests should use released capacity'
+      );
+      requests.filter(request => !request.released).reverse().forEach(request => request.release());
+    }
+
+    const results = await Promise.all(pages);
+    const subtitleResults = await Promise.all(subtitles);
+    results.forEach((result, index) => {
+      expect(result.success).toBe(true);
+      expect(JSON.parse(result.translatedText)).toEqual([
+        { id: `page-${index}`, text: `translated:Page ${index} source` },
+      ]);
+    });
+    expect(subtitleResults.map(result => result.results)).toEqual([
+      [{ id: 'cue-0', text: 'translated:Subtitle 0 source' }],
+      [{ id: 'cue-1', text: 'translated:Subtitle 1 source' }],
+      [{ id: 'cue-2', text: 'translated:Subtitle 2 source' }],
+      [{ id: 'cue-3', text: 'translated:Subtitle 3 source' }],
+    ]);
+    expect(requests).toHaveLength(12);
+    expect(maximum).toBe(providerLimit);
     expect(active).toBe(0);
     expect(providerState.activeRequests).toBe(0);
     expect(Object.values(providerState.queues).every(queue => queue.length === 0)).toBe(true);
@@ -676,6 +951,28 @@ describe('Page → Google Classic bounded physical concurrency', () => {
     expect(providerState.activeRequests).toBe(0);
     expect(queueManager.getQueueStatus('GoogleTranslate::parallel').total).toBe(0);
     expect(queueManager.getQueueStatus('GoogleTranslate').total).toBe(0);
+  });
+
+  it('shares a six-slot Google Classic limit across Page and Subtitle work', async () => {
+    settings.level = 3;
+    providerState.isManualConfig = false;
+    await rateLimitManager.reloadConfigurations();
+    expect(providerState.optimizationLevel).toBe(3);
+    expect(providerState.config.maxConcurrent).toBe(6);
+
+    const pages = Array.from({ length: 5 }, (_, index) => pageRequest(index, `page source ${index}`));
+    const subtitle = subtitleRequest(5, 'shared subtitle source');
+
+    await pumpUntil(() => requests.length === 6, 'Page and Subtitle should share all six Level 3 provider slots');
+    expect(providerState.config.maxConcurrent).toBe(6);
+    expect(providerState.activeRequests).toBe(6);
+    expect(active).toBe(6);
+    expect(maximum).toBe(6);
+
+    requests.forEach(request => request.release());
+    expect((await Promise.all(pages)).every(result => result.success)).toBe(true);
+    expect((await subtitle).success).toBe(true);
+    expect(providerState.activeRequests).toBe(0);
   });
 
   it('keeps separate Subtitle operations on the existing serial provider queue', async () => {
@@ -889,14 +1186,14 @@ describe('Page → YandexTranslateProvider bounded physical concurrency', () => 
     },
   }, { translationEngine: engine });
 
-  const subtitleRequest = () => coordinator.processRequest({
+  const subtitleRequest = (index = 0, text = 'subtitle source') => coordinator.processRequest({
     mode: TranslationMode.Subtitle,
-    messageId: 'yandex-subtitle-0',
+    messageId: `yandex-subtitle-${index}`,
     data: {
       provider: 'yandex',
       sourceLanguage: 'en',
       targetLanguage: 'fa',
-      items: [{ id: 'cue-0', text: 'subtitle source' }],
+      items: [{ id: `cue-${index}`, text }],
     },
   }, { translationEngine: engine });
 
@@ -928,6 +1225,35 @@ describe('Page → YandexTranslateProvider bounded physical concurrency', () => 
     );
     expect((await subtitle).results).toEqual([{ id: 'cue-0', text: 'translated:subtitle source' }]);
     expect(maximum).toBe(2);
+    expect(providerState.activeRequests).toBe(0);
+    expect(queueManager.getQueueStatus('YandexTranslate::parallel').total).toBe(0);
+  });
+
+  it('shares six Level 3 physical request slots across Page and Subtitle', async () => {
+    settings.level = 3;
+    providerState.isManualConfig = false;
+    await rateLimitManager.reloadConfigurations();
+    providerState = rateLimitManager.providerStates.get('YandexTranslate');
+    expect(providerState.config.maxConcurrent).toBe(6);
+
+    const pages = Array.from({ length: 7 }, (_, index) => pageRequest(index));
+    const subtitles = [subtitleRequest(), subtitleRequest(1, 'subtitle source 1')];
+    const allRequests = [...pages, ...subtitles];
+    await pumpUntil(() => requests.length === 6, 'Level 3 Page and Subtitle requests should fill the shared provider limit');
+    expect(requests).toHaveLength(6);
+    expect(active).toBe(6);
+    expect(maximum).toBe(6);
+    expect(providerState.activeRequests).toBe(6);
+
+    requests[0].release();
+    await pumpUntil(() => requests.length === 7, 'queued Page or Subtitle work should start after a shared slot is released');
+    expect(active).toBe(6);
+    expect(maximum).toBe(6);
+
+    requests.filter(request => !request.released).forEach(request => request.release());
+    await pumpUntil(() => requests.length === allRequests.length, 'all queued Page and Subtitle work should eventually start');
+    requests.filter(request => !request.released).forEach(request => request.release());
+    expect((await Promise.all(allRequests)).every(result => result.success)).toBe(true);
     expect(providerState.activeRequests).toBe(0);
     expect(queueManager.getQueueStatus('YandexTranslate::parallel').total).toBe(0);
   });
@@ -1241,6 +1567,7 @@ describe('Page → GoogleTranslateV2Provider physical concurrency', () => {
   };
 
   it('overlaps Page batches across sessions, shares provider capacity, and maps reverse completions', async () => {
+    providerState.config.maxConcurrent = 4;
     const batchRows = [
       ['session-a', 'a-1', 'source-a-1'],
       ['session-a', 'a-2', 'source-a-2'],
@@ -1359,6 +1686,7 @@ describe('Page → GoogleTranslateV2Provider physical concurrency', () => {
   });
 
   it('cancels queued Google V2 parallel work without taking or leaking a physical slot', async () => {
+    providerState.config.maxConcurrent = 4;
     const requests = Array.from({ length: 5 }, (_, index) => pageRequest(`cancel-${index}`, {
       sessionId: 'cancel-session', text: `cancel-source-${index}`,
     }));
@@ -1384,6 +1712,28 @@ describe('Page → GoogleTranslateV2Provider physical concurrency', () => {
     expect(completed.every(result => result.success)).toBe(true);
     expect(providerState.activeRequests).toBe(0);
     expect(queueManager.getQueueStatus('GoogleTranslateV2::parallel').total).toBe(0);
+  });
+
+  it('uses the Level 3 Google V2 provider limit across Page batches', async () => {
+    const limit = providerState.config.maxConcurrent;
+    expect(limit).toBe(6);
+    const requests = Array.from({ length: limit + 1 }, (_, index) => pageRequest(`capacity-${index}`, {
+      sessionId: `capacity-session-${index}`,
+      text: `capacity-source-${index}`,
+    }));
+
+    await pumpUntil(() => attempts.length === limit);
+    expect(active).toBe(limit);
+    expect(maximum).toBe(limit);
+    expect(providerState.activeRequests).toBe(limit);
+    releases[0]();
+    await pumpUntil(() => attempts.length === limit + 1);
+    expect(active).toBe(limit);
+    expect(maximum).toBe(limit);
+
+    releases.slice(1).forEach(release => release());
+    await pumpUntil(() => providerState.activeRequests === 0);
+    expect((await Promise.all(requests)).every(result => result.success)).toBe(true);
   });
 
   it('keeps a Google V2 HTTP failure typed without corrupting successful siblings or limiter cleanup', async () => {

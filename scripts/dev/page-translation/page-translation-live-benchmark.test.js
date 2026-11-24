@@ -312,6 +312,59 @@ describe("manual live Page Translation benchmark", () => {
     cancelledPage.window.close();
   });
 
+  it("generates deterministic distinct 600-target fixtures and validates dynamic counts", async () => {
+    const url = "http://127.0.0.1/?targets=600";
+    const dom = createPage(url);
+    const { window } = dom;
+    const targets = [...window.document.querySelectorAll("p[data-item]")];
+    const generatedTexts = targets.slice(120).map((target) => target.textContent);
+
+    expect(targets).toHaveLength(600);
+    expect(generatedTexts).toHaveLength(480);
+    expect(new Set(targets.map((target) => target.textContent)).size).toBe(600);
+    expect(
+      [...window.document.querySelectorAll("[data-target-count]")].map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["600", "600"]);
+
+    const repeat = createPage(url);
+    expect(
+      [...repeat.window.document.querySelectorAll("p[data-item]")]
+        .slice(120)
+        .map((target) => target.textContent),
+    ).toEqual(generatedTexts);
+
+    emit(window, "page-translate-start", { sessionId: "high-load" });
+    expect(
+      window.document.querySelector("[data-latest-target-count]").textContent,
+    ).toBe("600");
+    targets.forEach((target) => {
+      target.textContent = `translated ${target.dataset.item}`;
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    emit(window, "page-translate-complete", {
+      sessionId: "high-load",
+      translatedCount: 600,
+      failedCount: 0,
+    });
+
+    expect(results(window)[0]).toMatchObject({
+      status: "passed",
+      correctness: {
+        targetCount: 600,
+        translatedCount: 600,
+        allTargetsTranslated: true,
+        completionObserved: true,
+      },
+    });
+    expect(
+      window.document.querySelector('[data-latest="allTargets"]').textContent,
+    ).toMatch(/^\d+ ms$/);
+    dom.window.close();
+    repeat.window.close();
+  });
+
   it("persists interrupted trials and never includes sensitive error payloads in saved/exported metadata", async () => {
     const dom = createPage();
     const { window } = dom;
@@ -616,4 +669,28 @@ describe("manual live Page Translation benchmark", () => {
     ).toBe("Translation error");
     dom.window.close();
   });
+
+  it.each([
+    [120, 600],
+    [600, 120],
+  ])(
+    "keeps the latest result's %i-target count when the current fixture has %i targets",
+    (savedTargetCount, currentTargetCount) => {
+      const dom = createPage(
+        `http://127.0.0.1/?targets=${currentTargetCount}`,
+        [{ status: "passed", correctness: { targetCount: savedTargetCount } }],
+      );
+      const { window } = dom;
+
+      expect(
+        [...window.document.querySelectorAll("[data-target-count]")].map(
+          (element) => element.textContent,
+        ),
+      ).toEqual([String(currentTargetCount), String(currentTargetCount)]);
+      expect(
+        window.document.querySelector("[data-latest-target-count]").textContent,
+      ).toBe(String(savedTargetCount));
+      dom.window.close();
+    },
+  );
 });
