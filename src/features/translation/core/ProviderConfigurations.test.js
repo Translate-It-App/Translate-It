@@ -72,9 +72,16 @@ describe('ProviderConfigurations optimization scaling', () => {
     const levels = [1, 2, 3, 4, 5];
     const expected = [1, 2, 2, 3, 4];
 
-    for (const providerName of ['WebAI', 'OpenRouter', 'Requesty']) {
+    for (const providerName of ['WebAI']) {
       const actual = levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent);
       expect(actual).toEqual(expected);
+    }
+    for (const providerName of ['OpenRouter', 'Requesty']) {
+      expect(levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent))
+        .toEqual([1, 2, 3, 3, 4]);
+      expect(levels.map(level => getProviderRateLimit(providerName, level).modeOverrides.select_element.maxConcurrent))
+        .toEqual([1, 2, 3, 5, 6]);
+      expect(getProviderRateLimit(providerName, 3).modeOverrides.select_element.maxConcurrent).toBe(3);
     }
     expect(levels.map(level => getProviderRateLimit('OpenAI', level).maxConcurrent))
       .toEqual([1, 2, 3, 3, 4]);
@@ -104,7 +111,7 @@ describe('ProviderConfigurations optimization scaling', () => {
   });
 
   it('should keep representative AI concurrency monotonic while allowing collisions', () => {
-    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Custom', 'Gemini']) {
+    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Requesty', 'Custom', 'Gemini']) {
       const concurrency = [1, 2, 3, 4, 5].map(level => getProviderRateLimit(providerName, level).maxConcurrent);
       expect(concurrency.slice(1).every((value, index) => value >= concurrency[index])).toBe(true);
     }
@@ -174,7 +181,7 @@ describe('ProviderConfigurations optimization scaling', () => {
     const rateLimit = getProviderRateLimit('OpenRouter', 3);
 
     expect(batching).toMatchObject({ optimalSize: 25, characterLimit: 3500 });
-    expect(rateLimit.maxConcurrent).toBe(2);
+    expect(rateLimit.maxConcurrent).toBe(3);
     expect(rateLimit.delayBetweenRequests).toBe(0);
     expect(rateLimit.modeOverrides.select_element.maxConcurrent).toBe(3);
   });

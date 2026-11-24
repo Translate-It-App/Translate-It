@@ -37,6 +37,10 @@ vi.mock('@/shared/config/config.js', async importOriginal => ({
   getDeepSeekThinkingModeAsync: vi.fn(async () => 'disabled'),
   getOpenAIApiKeysAsync: vi.fn(async () => ['fixture-openai-key']),
   getOpenAIModelAsync: vi.fn(async () => 'gpt-4o-2024-11-20'),
+  getOpenRouterApiKeysAsync: vi.fn(async () => ['fixture-openrouter-key']),
+  getOpenRouterApiModelAsync: vi.fn(async () => 'fixture-openrouter-model'),
+  getRequestyApiKeysAsync: vi.fn(async () => ['fixture-requesty-key']),
+  getRequestyApiModelAsync: vi.fn(async () => 'fixture-requesty-model'),
   getDeeplApiKeysAsync: vi.fn(async () => settings.deeplKeys),
   getDeeplApiTierAsync: vi.fn(async () => settings.deeplTier),
   getDeeplFormalityAsync: vi.fn(async () => settings.deeplFormality),
@@ -57,6 +61,8 @@ import { UnifiedModeCoordinator } from './UnifiedModeCoordinator.js';
 import { CustomProvider, clearCustomResponseFormatSupportCache } from '@/features/translation/providers/CustomProvider.js';
 import { DeepSeekProvider } from '@/features/translation/providers/DeepSeek.js';
 import { OpenAIProvider } from '@/features/translation/providers/OpenAI.js';
+import { OpenRouterProvider } from '@/features/translation/providers/OpenRouter.js';
+import { RequestyProvider } from '@/features/translation/providers/Requesty.js';
 import { GoogleTranslateProvider } from '@/features/translation/providers/GoogleTranslate.js';
 import { GoogleTranslateV2Provider } from '@/features/translation/providers/GoogleTranslateV2Provider.js';
 import { MicrosoftEdgeProvider } from '@/features/translation/providers/MicrosoftEdgeProvider.js';
@@ -277,6 +283,36 @@ describe('Page → Custom and DeepSeek provider physical concurrency', () => {
     expect(state.activeRequests).toBe(0);
     expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
     expect(queueManager.getQueueStatus('OpenAI::parallel').total).toBe(0);
+    expect(engine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([
+    ['OpenRouter', OpenRouterProvider, 'openrouter'],
+    ['Requesty', RequestyProvider, 'requesty'],
+  ])('shares %s Level 3 physical capacity across Page and Subtitle requests', async (providerName, Provider, providerId) => {
+    settings.level = 3;
+    const provider = new Provider();
+    engine.getProvider = async () => provider;
+    state = rateLimitManager.providerStates.get(providerName);
+    installHttp();
+
+    const pages = [runBatch(0, { providerId }), runBatch(1, { providerId })];
+    const subtitles = [runSubtitle(0, providerId), runSubtitle(1, providerId)];
+    await advance(5000);
+
+    expect(state.config.maxConcurrent).toBe(3);
+    expect(maximum).toBe(3);
+    expect(attempts).toHaveLength(4);
+    expect(attempts.every(attempt => attempt.end !== null)).toBe(true);
+    expect(attempts.every(attempt => attempt.aborted === false)).toBe(true);
+    assertMapped(await Promise.all(pages));
+    expect((await Promise.all(subtitles)).map(result => result.results[0])).toEqual([
+      { id: 'cue-0', text: '訳 Subtitle 0 source' },
+      { id: 'cue-1', text: '訳 Subtitle 1 source' },
+    ]);
+    expect(state.activeRequests).toBe(0);
+    expect(Object.values(state.queues).every(queue => queue.length === 0)).toBe(true);
+    expect(queueManager.getQueueStatus(`${providerName}::parallel`).total).toBe(0);
     expect(engine.lifecycleRegistry.unregisterRequest).toHaveBeenCalledTimes(4);
   });
 

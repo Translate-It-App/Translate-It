@@ -157,6 +157,21 @@ describe('PageTranslationScheduler', () => {
     }
   });
 
+  it.each(['openrouter', 'requesty'])('uses %s Level 3 concurrency while retaining the AI page batch size', async translationApi => {
+    const configModule = await import('@/shared/config/config.js');
+    const optimization = vi.spyOn(configModule, 'getProviderOptimizationLevelAsync').mockResolvedValue(3);
+    scheduler.setSettings({ translationApi, targetLanguage: 'en' });
+
+    try {
+      const config = await scheduler._getBatchConfig();
+
+      expect(config.chunkSize).toBe(30);
+      expect(scheduler.settings.maxConcurrentFlushes).toBe(3);
+    } finally {
+      optimization.mockRestore();
+    }
+  });
+
   it.each([false, true])('uses filter visibility eligibility (%s) without rechecking item geometry', async hasVisibleEligibleItems => {
     const item = { id: 'visibility-item', text: 'item', resolve: vi.fn() };
     scheduler.queue = [item];

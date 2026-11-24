@@ -241,7 +241,7 @@ export const PROVIDER_CONFIGURATIONS = {
   // OpenRouter - Optimized settings for multi-model support
   OpenRouter: {
     rateLimit: {
-      maxConcurrent: 2,
+      maxConcurrent: 3,
       delayBetweenRequests: 0, // No delay for first request
       adaptiveBackoff: {
         enabled: true,
@@ -282,7 +282,7 @@ export const PROVIDER_CONFIGURATIONS = {
   // Requesty - Optimized settings for multi-model support
   Requesty: {
     rateLimit: {
-      maxConcurrent: 2,
+      maxConcurrent: 3,
       delayBetweenRequests: 0, // No delay for first request
       adaptiveBackoff: {
         enabled: true,
@@ -938,12 +938,15 @@ function applyOptimizationLevel(config, level) {
   // Base-2 providers need a visible step-up at Level 2 so low and medium
   // optimization modes are not concurrency-identical. Larger base values keep
   // the standard multiplier curve.
-  const scaleConcurrentLimit = (baseConcurrent, levelValue) => {
+  const scaleConcurrentLimit = (baseConcurrent, levelValue, isModeOverride = false) => {
     if ((config === PROVIDER_CONFIGURATIONS.Custom
       || config === PROVIDER_CONFIGURATIONS.DeepSeek
-      || config === PROVIDER_CONFIGURATIONS.OpenAI)
+      || config === PROVIDER_CONFIGURATIONS.OpenAI
+      || config === PROVIDER_CONFIGURATIONS.OpenRouter
+      || config === PROVIDER_CONFIGURATIONS.Requesty)
+      && !isModeOverride
       && baseConcurrent === 3) {
-      // OpenAI, Custom, and DeepSeek use their benchmark-selected discrete concurrency curve.
+      // OpenAI, Custom, and DeepSeek use benchmark-selected curves; OpenRouter and Requesty match it for consistency.
       const selectedCurve = { 1: 1, 2: 2, 3: 3, 4: 3, 5: 4 };
       return selectedCurve[levelValue];
     }
@@ -1024,7 +1027,7 @@ function applyOptimizationLevel(config, level) {
       const modeConfig = { ...config.rateLimit.modeOverrides[mode] };
       
       if (modeConfig.maxConcurrent) {
-        modeConfig.maxConcurrent = Math.min(scaleConcurrentLimit(modeConfig.maxConcurrent, safeLevel), 12);
+        modeConfig.maxConcurrent = Math.min(scaleConcurrentLimit(modeConfig.maxConcurrent, safeLevel, true), 12);
       }
       
       result.rateLimit.modeOverrides[mode] = modeConfig;
