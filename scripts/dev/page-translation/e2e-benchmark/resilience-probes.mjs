@@ -1,3 +1,9 @@
+import { TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS } from '../../../../src/shared/constants/translation.js';
+
+export const GOOGLE_TIMEOUT_TRANSPORT_WATCHDOG_MS = 30_000;
+export const GOOGLE_TIMEOUT_OBSERVATION_TIMEOUT_MS =
+  TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS + GOOGLE_TIMEOUT_TRANSPORT_WATCHDOG_MS;
+
 export function parseResilienceProbeSelection(value) {
   if (!value) return [];
   const selections = value.split(',').map(item => item.trim()).filter(Boolean);
@@ -858,12 +864,19 @@ export function findGoogleTimeoutCancelMessage(operations, messageId, sessionId)
     && item.status === 'fulfilled' && item.response?.success === true) ?? null;
 }
 
+export function findGoogleTimeoutControllerAbort(operations, messageId, sessionId) {
+  const matches = (operations ?? []).filter(item => item.kind === 'controller.abort'
+    && item.messageId === messageId && item.sessionId === sessionId
+    && item.abortedBefore === false && item.abortedAfter === true);
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function findGoogleTimeoutBatchError(operations, sessionId, targetIds) {
   const matchesTargets = item => JSON.stringify(item?.targetIds) === JSON.stringify(targetIds);
   const batches = (operations ?? []).filter(item => item.kind === 'scheduler.batch'
     && item.sessionId === sessionId && matchesTargets(item));
   const errors = (operations ?? []).filter(item => item.kind === 'scheduler.batch.error'
-    && item.sessionId === sessionId && matchesTargets(item) && item.errorType === 'OPERATION_TIMEOUT');
+    && item.sessionId === sessionId && matchesTargets(item) && item.errorType === 'TRANSLATION_TIMEOUT');
   if (batches.length !== 1 || errors.length !== 1) return null;
   const [batch] = batches;
   const [error] = errors;
@@ -881,8 +894,7 @@ export function validateGoogleTimeoutEvidence(evidence) {
   const issues = [];
   const held = evidence.heldRequest;
   const timedOut = evidence.timeout;
-  const cancel = evidence.cancel;
-  const serviceTimeout = evidence.serviceTimeout;
+  const controllerAbort = evidence.controllerAbort;
   const queue = evidence.queueAttemptEvidence;
   const attempts = evidence.attempts ?? [];
   const translation = evidence.translation ?? {};
@@ -893,27 +905,27 @@ export function validateGoogleTimeoutEvidence(evidence) {
       || held?.targetIds?.length !== 25 || new Set(held?.targetIds ?? []).size !== 25) {
     issues.push('held Google request lacks one session-owned 25-target provider message');
   }
-  if (timedOut?.errorType !== 'OPERATION_TIMEOUT' || timedOut?.sessionId !== evidence.sessionId
+  if (timedOut?.errorType !== 'TRANSLATION_TIMEOUT'
+      || timedOut?.error !== `Batch translation timed out after ${TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS}ms`
+      || timedOut?.sessionId !== evidence.sessionId
       || JSON.stringify(timedOut?.targetIds) !== JSON.stringify(held?.targetIds)
       || timedOut?.schedulerBatchStatus !== 'fulfilled'
       || !Number.isFinite(timedOut?.schedulerBatchSettledAt)
       || timedOut.schedulerBatchSettledAt < timedOut.settledAt
-      || !Number.isFinite(elapsed) || elapsed < 59_000 || elapsed > 65_000
-      || !Number.isFinite(held?.startedAt) || timedOut.startedAt > held.startedAt) {
-    issues.push('affected batch did not surface production OPERATION_TIMEOUT after approximately 60 seconds');
+       || !Number.isFinite(elapsed)
+       || elapsed < TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS - 5_000
+       || elapsed >= GOOGLE_TIMEOUT_OBSERVATION_TIMEOUT_MS
+       || !Number.isFinite(held?.startedAt) || timedOut.startedAt > held.startedAt) {
+    issues.push('affected batch did not surface the background TRANSLATION_TIMEOUT before the transport watchdog');
   }
-  if (cancel?.action !== 'CANCEL_TRANSLATION' || cancel?.messageId !== held?.messageId
-      || cancel?.targetSessionId && cancel.targetSessionId !== evidence.sessionId
-      || cancel?.status !== 'fulfilled' || cancel?.response?.success !== true
-      || serviceTimeout?.messageId !== held?.messageId || serviceTimeout?.sessionId !== evidence.sessionId
-      || serviceTimeout?.status !== 'fulfilled' || serviceTimeout?.controllerMatched !== true
-      || serviceTimeout?.controllerAbortedBefore !== false || serviceTimeout?.controllerAbortedAfter !== true
-      || serviceTimeout?.response?.handled !== true || serviceTimeout?.response?.success !== true) {
-    issues.push('real cancellation did not acknowledge the exact affected message and Page session');
+  if (!controllerAbort || controllerAbort.messageId !== held?.messageId
+      || controllerAbort.sessionId !== evidence.sessionId
+      || evidence.transportCancelMessages?.length !== 0) {
+    issues.push('background deadline did not abort the exact provider controller without transport-watchdog cancellation');
   }
   if (evidence.controller?.messageId !== held?.messageId || evidence.controller?.sessionId !== evidence.sessionId
-      || evidence.controller?.sequence <= serviceTimeout?.sequence || evidence.controller?.aborted !== true) {
-    issues.push('matching provider request controller abort was not observed after timeout');
+      || evidence.controller?.sequence !== controllerAbort?.sequence || evidence.controller?.aborted !== true) {
+    issues.push('matching provider request controller abort was not observed for the background timeout');
   }
   if (evidence.providerRoot?.messageId !== held?.messageId || evidence.providerRoot?.status !== 'rejected'
       || evidence.providerRoot?.operationAborted !== true
@@ -929,9 +941,9 @@ export function validateGoogleTimeoutEvidence(evidence) {
         || evidence.physical.errorType === 'OPERATION_TIMEOUT') {
     issues.push('provider root and physical request did not settle after the matching abort');
   }
-  if (evidence.classification?.userFacingType !== 'OPERATION_TIMEOUT'
+  if (evidence.classification?.userFacingType !== 'TRANSLATION_TIMEOUT'
       || evidence.classification?.userFacingName !== timedOut?.errorName
-      || evidence.classification?.userFacingErrorType !== 'OPERATION_TIMEOUT'
+      || evidence.classification?.userFacingErrorType !== 'TRANSLATION_TIMEOUT'
       || evidence.classification?.internalAbortType !== 'OPERATION_ABORTED'
       || evidence.classification?.internalAbortName !== (evidence.physical?.errorName ?? null)) {
     issues.push('user-facing timeout and internal provider abort are not distinctly classified');

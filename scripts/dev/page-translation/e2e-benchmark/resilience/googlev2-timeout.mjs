@@ -1,4 +1,4 @@
-import { claimGoogleTimeoutRequest, commitGoogleTimeoutRequest, findGoogleTimeoutBatchError, findGoogleTimeoutCancelMessage, requireGoogleTimeoutReservation, selectResolvedGoogleTimeoutBatch, validateGoogleTimeoutEvidence } from '../resilience-probes.mjs';
+import { claimGoogleTimeoutRequest, commitGoogleTimeoutRequest, findGoogleTimeoutBatchError, findGoogleTimeoutCancelMessage, findGoogleTimeoutControllerAbort, GOOGLE_TIMEOUT_OBSERVATION_TIMEOUT_MS, requireGoogleTimeoutReservation, selectResolvedGoogleTimeoutBatch, validateGoogleTimeoutEvidence } from '../resilience-probes.mjs';
 export function createGoogleV2TimeoutProtocol() {
   return { armed: false, claimed: false, held: null, selectionFailures: [], releaseRequested: false };
 }
@@ -79,14 +79,15 @@ if (googleTimeoutProtocol && classification.provider === 'googlev2') {
         cancellationDiagnostics.lastObservedAt = now();
         cancellationDiagnostics.samples++;
         const contentOperations = content?.operations ?? [];
-        const serviceTimeout = operations.find(item => item.kind === 'service.handleTimeout' && item.messageId === root.messageId);
-        const controllerAbort = operations.find(item => item.kind === 'controller.abort' && item.messageId === root.messageId);
+        const controllerAbort = findGoogleTimeoutControllerAbort(operations, root.messageId, sessionId);
         const controllerState = snapshot?.controllers?.find(item => item.messageId === root.messageId);
         const timedOut = findGoogleTimeoutBatchError(contentOperations, sessionId, targetIds);
         const cancelMessage = findGoogleTimeoutCancelMessage(contentOperations, root.messageId, sessionId);
-        if (!serviceTimeout || !controllerAbort || controllerState?.aborted !== true || !timedOut || !cancelMessage) return null;
-        return { snapshot, content, serviceTimeout, controllerAbort, controllerState, timedOut, cancelMessage };
-      }, 70_000);
+        const transportCancelMessages = contentOperations.filter(item => item.kind === 'runtime.cancel.send'
+          && item.action === 'CANCEL_TRANSLATION' && item.messageId === root.messageId);
+        if (!controllerAbort || controllerState?.aborted !== true || !timedOut || cancelMessage || transportCancelMessages.length) return null;
+        return { snapshot, content, controllerAbort, controllerState, timedOut, transportCancelMessages };
+      }, GOOGLE_TIMEOUT_OBSERVATION_TIMEOUT_MS);
     } catch (error) {
       cancellationDiagnostics.error = { name: error?.name ?? 'Error', message: error?.message ?? String(error) };
       cancellationDiagnostics.elapsedMs = now() - cancellationDiagnostics.startedAt;
@@ -94,13 +95,12 @@ if (googleTimeoutProtocol && classification.provider === 'googlev2') {
     }
     if (cancellation.teardown) return true;
     timeoutHold.cancellation = {
-      serviceTimeout: cancellation.serviceTimeout,
       controllerAbort: cancellation.controllerAbort,
       controllerState: cancellation.controllerState,
       timedOut: cancellation.timedOut,
-      cancelMessage: cancellation.cancelMessage,
+      transportCancelMessages: cancellation.transportCancelMessages,
     };
-    timeoutHold.fetchRelease = await reservation.release('fail', { errorReason: 'Aborted', reason: 'production-timeout-cancel' });
+    timeoutHold.fetchRelease = await reservation.release('fail', { errorReason: 'Aborted', reason: 'background-timeout' });
     const settled = await until(async () => {
       const snapshot = await evaluate(chrome, workerSession,
         `globalThis.__pageTranslationBenchmark.cancellationSnapshot(${JSON.stringify(sessionId)})`, undefined, false);
@@ -111,16 +111,16 @@ if (googleTimeoutProtocol && classification.provider === 'googlev2') {
         && item.url === requestRecord.url && item.method === requestRecord.method
         && item.requestBody === requestRecord.postData);
       const physical = physicalMatches.length === 1 ? physicalMatches[0] : null;
-      const serviceTimeout = ledger.find(item => item.kind === 'service.handleTimeout' && item.messageId === root.messageId);
-      const controllerAbort = ledger.find(item => item.kind === 'controller.abort' && item.messageId === root.messageId);
+      const controllerAbort = findGoogleTimeoutControllerAbort(ledger, root.messageId, sessionId);
       return providerRoot?.status === 'rejected' && physical?.status === 'rejected'
-        && serviceTimeout?.status === 'fulfilled' && serviceTimeout.controllerAbortedAfter === true
-        && serviceTimeout.response?.handled === true && serviceTimeout.response?.success === true && controllerAbort
-        ? { providerRoot, physical, physicalMatchCount: physicalMatches.length, serviceTimeout, controllerAbort } : null;
+        && providerRoot?.operationAborted === true
+        && physical?.controllerAbortedAtEnd === true
+        && (physical?.operationAborted === true || physical?.abortReasonMatched === true)
+        && controllerAbort && !ledger.some(item => item.kind === 'service.handleTimeout' && item.messageId === root.messageId)
+        ? { providerRoot, physical, physicalMatchCount: physicalMatches.length, controllerAbort } : null;
     }, 10_000);
     timeoutHold.cancellation.providerRoot = settled.providerRoot;
     timeoutHold.cancellation.physical = settled.physical;
-    timeoutHold.cancellation.serviceTimeout = settled.serviceTimeout;
     timeoutHold.cancellation.controllerAbort = settled.controllerAbort;
     timeoutHold.cancellation.physicalMatchCount = settled.physicalMatchCount;
     const networkOutcome = providerNetworkEvents.get(`${event.sessionId}:${networkId}`);
@@ -128,8 +128,8 @@ if (googleTimeoutProtocol && classification.provider === 'googlev2') {
       heldRequestId: requestId, matchedRequestId: requestId,
       releaseOutcome: timeoutHold.fetchRelease,
       networkCanceled: networkOutcome?.outcome === 'failed' && /abort|cancel/i.test(networkOutcome?.error ?? ''),
-      controllerAborted: settled.controllerAbort.sequence > settled.serviceTimeout.sequence,
-      cancelTargetMatched: settled.serviceTimeout.messageId === root.messageId,
+      controllerAborted: settled.controllerAbort.abortedAfter === true && settled.controllerAbort.abortedBefore === false,
+      cancelTargetMatched: settled.controllerAbort.messageId === root.messageId,
       providerRootStatus: settled.providerRoot.status, physicalStatus: settled.physical.status,
       physicalControllerAborted: settled.physical.controllerAbortedAtEnd,
       controllerAbortSequence: settled.controllerAbort.sequence,
@@ -155,7 +155,7 @@ export async function collectGoogleV2TimeoutEvidence({ protocol, evidence, evalu
   const resilienceEvidence = evidence;
 if (googleTimeoutProtocol) {
      const hold = googleTimeoutProtocol.held;
-     if (!hold?.messageId || !hold.cancellation) throw new Error('Google timeout did not observe its production timeout and matching cancellation.');
+      if (!hold?.messageId || !hold.cancellation) throw new Error('Google timeout did not observe its typed background deadline and matching controller abort.');
      const terminalMessageIds = [hold.messageId];
      resilienceEvidence.terminalMessageIds = terminalMessageIds;
      const [resources, pageScheduler, contentDrain, workerDrain] = await Promise.all([
@@ -171,9 +171,7 @@ if (googleTimeoutProtocol) {
      const queueAttemptEvidence = validateGoogleTimeoutQueueEvidence(workerEvents, { messageId: hold.messageId });
      const queueEvents = queueAttemptEvidence.observed.starts.concat(queueAttemptEvidence.observed.ends);
      const timeout = hold.cancellation.timedOut;
-     const cancel = hold.cancellation.cancelMessage;
-     const serviceTimeout = hold.cancellation.serviceTimeout;
-     const controller = { ...hold.cancellation.controllerAbort, ...hold.cancellation.controllerState };
+      const controller = { ...hold.cancellation.controllerAbort, ...hold.cancellation.controllerState };
      const physical = hold.cancellation.physical;
      const providerRoot = hold.cancellation.providerRoot;
      const failedTargetDOM = {
@@ -217,12 +215,13 @@ if (googleTimeoutProtocol) {
          url: hold.requestRecord.url, method: hold.requestRecord.method, requestBody: hold.requestRecord.postData,
          startedAt: hold.startedAt,
        },
-       timeout, cancel, serviceTimeout, controller, providerRoot, physical,
+        timeout, controllerAbort: hold.cancellation.controllerAbort, transportCancelMessages: hold.cancellation.transportCancelMessages,
+        controller, providerRoot, physical,
        physicalMatchCount: hold.cancellation.physicalMatchCount,
        classification: {
          userFacingType: timeout.errorType, userFacingName: timeout.errorName,
-         internalAbortType: providerRoot?.operationAborted === true
-           ? 'OPERATION_ABORTED' : physical?.errorType ?? physical?.errorName ?? null,
+          internalAbortType: providerRoot?.operationAborted === true
+            ? 'OPERATION_ABORTED' : physical?.errorType ?? physical?.errorName ?? null,
          internalAbortName: physical?.errorName ?? null,
          userFacingErrorType: timeout.errorType,
        },

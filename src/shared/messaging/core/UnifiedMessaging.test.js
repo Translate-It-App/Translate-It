@@ -4,6 +4,7 @@ import browser from 'webextension-polyfill';
 import ExtensionContextManager from '@/core/extensionContext.js';
 import * as contextCore from '@/core/contextCore.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
+import { TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS } from '@/shared/constants/translation.js';
 
 // Mock dependencies
 vi.mock('webextension-polyfill', () => ({
@@ -192,6 +193,62 @@ describe('UnifiedMessaging', () => {
         { timeout: 100 }
       )).resolves.toEqual({ success: true });
       expect(browser.runtime.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows a page batch to complete after the former 60-second transport timeout', async () => {
+      const message = { action: 'page-translate-batch', messageId: 'page-over-60s' };
+      browser.runtime.sendMessage.mockReturnValue(new Promise((resolve) => {
+        setTimeout(() => resolve({ success: true }), 60001);
+      }));
+
+      const promise = sendRegularMessage(message);
+      await vi.advanceTimersByTimeAsync(60001);
+
+      await expect(promise).resolves.toEqual({ success: true });
+      expect(browser.runtime.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('times out an unresponsive Page background after the execution budget and allowance', async () => {
+      browser.runtime.sendMessage.mockImplementation((message) => (
+        message.action === 'CANCEL_TRANSLATION'
+          ? Promise.resolve({ success: true })
+          : new Promise(() => {})
+      ));
+
+      const promise = sendRegularMessage({
+        action: 'page-translate-batch',
+        messageId: 'page-background-unresponsive'
+      });
+      let settled = false;
+      promise.then(
+        () => { settled = true; },
+        () => { settled = true; }
+      );
+      const timeoutExpectation = expect(promise).rejects.toMatchObject({
+        type: ErrorTypes.OPERATION_TIMEOUT
+      });
+
+      await vi.advanceTimersByTimeAsync(TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS + 29999);
+      expect(settled).toBe(false);
+      expect(browser.runtime.sendMessage.mock.calls.filter(([message]) => message.action === 'CANCEL_TRANSLATION'))
+        .toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await timeoutExpectation;
+      expect(settled).toBe(true);
+
+      const cancellationCalls = browser.runtime.sendMessage.mock.calls.filter(
+        ([message]) => message.action === 'CANCEL_TRANSLATION'
+      );
+      expect(cancellationCalls).toHaveLength(1);
+      expect(cancellationCalls[0][0]).toEqual({
+        action: 'CANCEL_TRANSLATION',
+        data: {
+          messageId: 'page-background-unresponsive',
+          reason: 'Translation timed out',
+          timeout: true
+        }
+      });
     });
 
     it('does not cancel a page batch for other errors or explicit user cancellation', async () => {

@@ -10,7 +10,7 @@ import { cleanupMeasurementBeforeResources, completeTranslationMeasurement, find
 import { deriveScrollAggregateMetrics, isProviderWorkloadTrial, mapProviderBatchIds, providerLaneSettings, pageTranslationStartMessage, summarizeLogicalProviderBatches, summarizeSpaLogicalProviderBatches, summarizePhysicalProviderAttempts, validateProviderConcurrencyObservations, validateProviderNetworkCorrelation, validateProviderRuntime, validateProviderSchedulerRuntime, observedPageWorkerLimit, settingsForScenario, shadowInitialTranslationReadiness, validateDiscoveryFlags, validateExactTargetIds, validateFixtureGeometry, validateScrollThroughEvidence, validateShadowInitialObservations, validateSpaNavigation, validateSpaObserverRestoreOrder, validateSpaProviderRoute, validateSpaSessions, validateSpaTerminal, scrollThroughPhases, usesBandedProviderScroll } from './scenario-plan.mjs';
 import { classifyHeldFetchRelease, promoteRequestDiagnostics, resolveCustomProviderRoot, selectCustomProviderRoot } from './cancellation-probes.mjs';
 import { classifyStaleSuccessProviderOwner, createWorkerNetworkEventRouter, selectCustomPhysicalOperation, validateRawDOMMutationEvidence, validateRuntimeResources } from './successful-reply-probes.mjs';
-import { isCustom400ProbeWindowRequest, partitionBandAcceptance, shouldEnableResilienceQueueProbe, validateCustom400QueueEvidence, validateGeminiQueueAttemptEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting } from './resilience-probes.mjs';
+import { GOOGLE_TIMEOUT_OBSERVATION_TIMEOUT_MS, isCustom400ProbeWindowRequest, partitionBandAcceptance, shouldEnableResilienceQueueProbe, validateCustom400QueueEvidence, validateGeminiQueueAttemptEvidence, validateGoogleTimeoutQueueEvidence, validateQueueRetryEvidence, validateResilienceAccounting } from './resilience-probes.mjs';
 import { createProviderNetworkObserver, createNetworkRequestLifecycle, createHandlerJobTracker, createFetchRequestListener, createCustomFetchSettlement, createNetworkSessionState, registerGuardedSession, closeNetworkRequestLifecycle, createNetworkCleanupSteps, enableFetchGuard, enableProviderNetworkObservation, fulfillPausedFetch, failPausedFetch, continuePausedFetch, runNetworkGuardNegativeProbe, classifyPausedRequest, decodeProviderRequest } from './network-interception.mjs';
 import { createGoogleV2_503Evidence, executeGoogleV2_503, finalizeGoogleV2_503Evidence, validateGoogleV2_503Evidence } from './resilience/googlev2-503.mjs';
 import { createGoogleV2TimeoutProtocol, armGoogleV2Timeout, executeGoogleV2Timeout, collectGoogleV2TimeoutEvidence, recordGoogleTimeoutFailedTargetDOM, validateGoogleV2TimeoutEvidence } from './resilience/googlev2-timeout.mjs';
@@ -1051,7 +1051,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
             const failedIds = new Set([...(custom400Protocol?.evidence.injected400?.[0]?.targetIds ?? []),
               ...(customCancellationProtocol?.held?.targetIds ?? []), ...timeoutIds]);
             return band.ids.every(id => failedIds.has(id) || state?.acceptedIds.includes(id)) ? state : null;
-          }, googleTimeoutProtocol ? 75_000 : 30_000);
+          }, googleTimeoutProtocol ? GOOGLE_TIMEOUT_OBSERVATION_TIMEOUT_MS : 30_000);
           if (accepted.cancellationHeld) {
             const state = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.measurementSnapshot()', contentContext, false);
             trial.scrollThrough.bandAcceptance.push({ band: band.band, targetCount: band.ids.length,

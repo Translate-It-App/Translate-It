@@ -103,7 +103,7 @@ Discovery-pending state prevents premature empty, complete, or idle settlement; 
 ## Stability & Resiliency
 
 ### 1. Background Timeout
-Page translation batches are protected by a **5-minute timeout** in the background services. This ensures that even if a page has thousands of nodes and the translation provider becomes unresponsive, the background script won't hang indefinitely.
+Page translation batches have an authoritative **5-minute execution deadline** in Background. The Content messaging watchdog adds a **30-second transport safety margin** for result delivery and handling. This margin is not an absolute guarantee against premature timeout: if Background remains unresponsive beyond the watchdog, Content times out and cancels only that batch's request ID.
 
 ### 2. Smart Abort
 When the user clicks "Stop" or "Restore" in the page translation UI, a cancellation signal is sent to the background to immediately abort any pending batches, saving API costs and local resources.
