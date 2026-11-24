@@ -21,12 +21,14 @@ import {
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import { isRestrictedUrl } from '@/core/tabPermissions.js';
 import { reconstructTranslationError, isStructuredTranslationError } from './MessagingCore.js';
+import { TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS } from '@/shared/constants/translation.js';
 import {
   LIVE_DUBBING_ACTION_TIMEOUTS,
   LIVE_DUBBING_ACTIONS,
 } from '@/features/live-dubbing/constants.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.MESSAGING, 'UnifiedMessaging');
+const PAGE_TRANSLATION_TRANSPORT_ALLOWANCE_MS = 30000;
 
 // Operation timeout mapping
 const OPERATION_TIMEOUTS = {
@@ -52,7 +54,7 @@ const OPERATION_TIMEOUTS = {
   'TRANSLATE_SELECTION': 45000,
   'TRANSLATE_PAGE': 60000,
   'TRANSLATE_TEXT': 45000,
-  'page-translate-batch': 60000,
+  'page-translate-batch': TRANSLATION_BATCH_EXECUTION_TIMEOUT_MS + PAGE_TRANSLATION_TRANSPORT_ALLOWANCE_MS,
   'FETCH_TRANSLATION': 10000,
   'PROCESS_SELECTED_ELEMENT': 8000,
   'TEST_PROVIDER': 8000,
