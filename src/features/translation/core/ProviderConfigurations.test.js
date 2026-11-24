@@ -79,6 +79,20 @@ describe('ProviderConfigurations optimization scaling', () => {
     }
   });
 
+  it('uses the shared Google concurrency curve while preserving Yandex batching and request policy', () => {
+    const levels = [1, 2, 3, 4, 5];
+    const configs = levels.map(level => getProviderConfiguration('YandexTranslate', level));
+
+    expect(configs.map(config => config.rateLimit.maxConcurrent)).toEqual([1, 2, 6, 7, 8]);
+    expect(configs[2]).toMatchObject({
+      batching: { strategy: 'character_limit', optimalSize: 40, maxChunksPerBatch: 100, characterLimit: 10000 },
+      queueRetryPolicy: { maxExecutions: { RATE_LIMIT_REACHED: 3 } },
+    });
+    expect(configs[2].rateLimit.adaptiveBackoff)
+      .toEqual(PROVIDER_CONFIGURATIONS.YandexTranslate.rateLimit.adaptiveBackoff);
+    expect(configs[2].errorHandling).toBe(PROVIDER_CONFIGURATIONS.YandexTranslate.errorHandling);
+  });
+
   it('preserves Bing internal retry and circuit settings', () => {
     expect(PROVIDER_CONFIGURATIONS.BingTranslate.batching.maxRetries).toBe(3);
     expect(PROVIDER_CONFIGURATIONS.BingTranslate.errorHandling.circuitBreakThreshold).toBe(3);

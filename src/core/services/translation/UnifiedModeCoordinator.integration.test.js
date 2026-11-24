@@ -1186,14 +1186,14 @@ describe('Page → YandexTranslateProvider bounded physical concurrency', () => 
     },
   }, { translationEngine: engine });
 
-  const subtitleRequest = () => coordinator.processRequest({
+  const subtitleRequest = (index = 0, text = 'subtitle source') => coordinator.processRequest({
     mode: TranslationMode.Subtitle,
-    messageId: 'yandex-subtitle-0',
+    messageId: `yandex-subtitle-${index}`,
     data: {
       provider: 'yandex',
       sourceLanguage: 'en',
       targetLanguage: 'fa',
-      items: [{ id: 'cue-0', text: 'subtitle source' }],
+      items: [{ id: `cue-${index}`, text }],
     },
   }, { translationEngine: engine });
 
@@ -1225,6 +1225,35 @@ describe('Page → YandexTranslateProvider bounded physical concurrency', () => 
     );
     expect((await subtitle).results).toEqual([{ id: 'cue-0', text: 'translated:subtitle source' }]);
     expect(maximum).toBe(2);
+    expect(providerState.activeRequests).toBe(0);
+    expect(queueManager.getQueueStatus('YandexTranslate::parallel').total).toBe(0);
+  });
+
+  it('shares six Level 3 physical request slots across Page and Subtitle', async () => {
+    settings.level = 3;
+    providerState.isManualConfig = false;
+    await rateLimitManager.reloadConfigurations();
+    providerState = rateLimitManager.providerStates.get('YandexTranslate');
+    expect(providerState.config.maxConcurrent).toBe(6);
+
+    const pages = Array.from({ length: 7 }, (_, index) => pageRequest(index));
+    const subtitles = [subtitleRequest(), subtitleRequest(1, 'subtitle source 1')];
+    const allRequests = [...pages, ...subtitles];
+    await pumpUntil(() => requests.length === 6, 'Level 3 Page and Subtitle requests should fill the shared provider limit');
+    expect(requests).toHaveLength(6);
+    expect(active).toBe(6);
+    expect(maximum).toBe(6);
+    expect(providerState.activeRequests).toBe(6);
+
+    requests[0].release();
+    await pumpUntil(() => requests.length === 7, 'queued Page or Subtitle work should start after a shared slot is released');
+    expect(active).toBe(6);
+    expect(maximum).toBe(6);
+
+    requests.filter(request => !request.released).forEach(request => request.release());
+    await pumpUntil(() => requests.length === allRequests.length, 'all queued Page and Subtitle work should eventually start');
+    requests.filter(request => !request.released).forEach(request => request.release());
+    expect((await Promise.all(allRequests)).every(result => result.success)).toBe(true);
     expect(providerState.activeRequests).toBe(0);
     expect(queueManager.getQueueStatus('YandexTranslate::parallel').total).toBe(0);
   });

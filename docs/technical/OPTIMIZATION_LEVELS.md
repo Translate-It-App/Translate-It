@@ -80,6 +80,17 @@ C5. C8 completed sooner (2.660s) but had slower first-visible time (0.671s)
 and one additional worker. See the [Edge benchmark record](benchmarks/microsoft-edge-concurrency-2026-11-24.md)
 for workload details, HAR evidence, and sample-size limitations.
 
+#### Yandex Translate
+
+Yandex uses the shared `[1, 2, 6, 7, 8]` concurrency curve. At Level 3, its
+Page worker cap is three and Page and Subtitle share the same provider-global
+six-request physical limiter. The Yandex benchmark selected C6: median
+completion improved 42.9% over C4, while C8's 2.451s median completion was
+effectively unchanged from C6's 2.452s. See the
+[Yandex benchmark record](benchmarks/yandex-translate-concurrency-2026-11-24.md)
+for conditions, HAR verification, the mislabeled C4 export, backend variability,
+and sample-size limitations. Level 4 C7 remains an unvalidated policy choice.
+
 #### Google Translate
 
 Google Classic (`GoogleTranslate`) and Google Translate V2
