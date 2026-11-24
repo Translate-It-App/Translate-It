@@ -442,17 +442,17 @@ describe('Options save integration (store + tabs + Global Save)', () => {
     }
     expect(nodes[1].querySelector('input').checked).toBe(true);
 
-    // Hide the active/default config provider ('googlev2'); staging is local.
+    // Hide the active/default config provider ('edge'); staging is local.
     await tab.get('#HIDDEN_PROVIDERS_CHECKBOX input').setValue(false);
-    expect(store.settings.TRANSLATION_API).toBe('googlev2');
+    expect(store.settings.TRANSLATION_API).toBe('edge');
     expect(fakeBrowserStorage.writeCalls).toHaveLength(0);
 
     await clickGlobalSave(nav);
     expect(saveStatusClass(nav)).toContain('status-success');
-    expect(fakeBrowserStorage.data.HIDDEN_PROVIDERS).toEqual(['googlev2']);
+    expect(fakeBrowserStorage.data.HIDDEN_PROVIDERS).toEqual(['edge']);
 
     const reloadedStore = await reloadStore();
-    expect(reloadedStore.settings.HIDDEN_PROVIDERS).toEqual(['googlev2']);
+    expect(reloadedStore.settings.HIDDEN_PROVIDERS).toEqual(['edge']);
     const reloadedTab = mountTab(ProvidersTab);
     expect(reloadedTab.get('#HIDDEN_PROVIDERS_CHECKBOX input').element.checked).toBe(false);
   });

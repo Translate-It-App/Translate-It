@@ -526,7 +526,7 @@ import { getScopedLogger } from "@/shared/logging/logger.js";
 import { LOG_COMPONENTS } from "@/shared/logging/logConstants.js";
 import { useResourceTracker } from "@/composables/core/useResourceTracker.js";
 
-import { TranslationMode } from "@/shared/config/config.js";
+import { CONFIG, TranslationMode } from "@/shared/config/config.js";
 
 const logger = getScopedLogger(LOG_COMPONENTS.UI, "ProviderSelector");
 
@@ -1110,7 +1110,7 @@ const availableProviders = computed(() => {
 
   if (props.allowDefault && !props.selectionOnly) {
     const defaultProviderId =
-      settingsStore.settings?.TRANSLATION_API || "googlev2";
+      settingsStore.settings?.TRANSLATION_API || CONFIG.TRANSLATION_API;
     const defaultProvider = getProviderById(defaultProviderId);
 
     // Default provider logic:
@@ -1595,7 +1595,7 @@ const isDefaultInvalid = computed(() => {
   if (currentProvider.value !== "default" && props.modelValue !== "default")
     return false;
 
-  const globalId = settingsStore.settings?.TRANSLATION_API || "googlev2";
+  const globalId = settingsStore.settings?.TRANSLATION_API || CONFIG.TRANSLATION_API;
   const globalProvider = getProviderById(globalId);
 
   return (
@@ -1645,7 +1645,7 @@ const canSyncToBulk = computed(() => {
 
   // Resolve 'default' to actual provider
   if (providerId === "default") {
-    providerId = settingsStore.settings?.TRANSLATION_API || "googlev2";
+    providerId = settingsStore.settings?.TRANSLATION_API || CONFIG.TRANSLATION_API;
   }
 
   const provider = getProviderById(providerId);
@@ -1660,7 +1660,7 @@ const isProviderInverted = (providerId) => {
 
   // If it's 'default', resolve to the actual global provider ID
   if (providerId === "default") {
-    effectiveId = settingsStore.settings?.TRANSLATION_API || "googlev2";
+    effectiveId = settingsStore.settings?.TRANSLATION_API || CONFIG.TRANSLATION_API;
   }
 
   const blackIcons = ["deepl", "openai", "openrouter", "requesty", "webai"];

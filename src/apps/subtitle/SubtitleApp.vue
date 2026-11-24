@@ -243,6 +243,7 @@ import { SubtitleParserFactory } from '@/features/subtitle-translation/parsers/S
 import LanguageSelector from '@/components/shared/LanguageSelector.vue';
 import ProviderSelector from '@/components/shared/ProviderSelector.vue';
 import { useSubtitleTranslation } from '@/features/subtitle-translation/composables/useSubtitleTranslation.js';
+import { CONFIG } from '@/shared/config/config.js';
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js';
 import { useSettingsStore } from '@/features/settings/stores/settings.js';
 import ThemeSelector from '@/apps/options/components/ThemeSelector.vue';
@@ -310,7 +311,7 @@ const handleDownload = (filename) => {
 const config = reactive({
   sourceLanguage: '',
   targetLanguage: settingsStore.settings?.TARGET_LANGUAGE || 'en',
-  providerId: settingsStore.settings.TRANSLATION_API || 'googlev2',
+  providerId: settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API,
   options: { useContext: true }
 });
 
@@ -328,7 +329,7 @@ onMounted(async () => {
     }
 
     // Sync provider with settings - Ensure it supports subtitles and is configured
-    const defaultProviderId = settingsStore.settings.TRANSLATION_API || 'googlev2';
+    const defaultProviderId = settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API;
     const provider = findProviderById(defaultProviderId);
     
     const isSubtitleCapable = provider && provider.features?.includes('subtitle');

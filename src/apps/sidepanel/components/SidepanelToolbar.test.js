@@ -69,6 +69,7 @@ vi.mock('@/features/settings/stores/settings.js', () => ({
 }))
 
 vi.mock('@/shared/config/config.js', () => ({
+  CONFIG: { TRANSLATION_API: 'edge' },
   TranslationMode: {
     Field: 'field', Select_Element: 'select-element', Selection: 'selection',
     Page: 'page', MouseHover: 'mouse-hover'

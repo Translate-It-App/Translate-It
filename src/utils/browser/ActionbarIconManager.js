@@ -1,7 +1,7 @@
 import browser from 'webextension-polyfill';
 import { storageManager } from '@/shared/storage/core/StorageCore.js';
 import ExtensionContextManager from '@/core/extensionContext.js';
-import { ProviderRegistryIds } from '@/features/translation/providers/ProviderConstants.js';
+import { CONFIG } from '@/shared/config/config.js';
 import { findProviderById } from '@/features/translation/providers/ProviderManifest.js';
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
@@ -36,7 +36,7 @@ export class ActionbarIconManager {
     try {
       // Get current provider
       const storedProvider = await storageManager.get('TRANSLATION_API');
-      this.currentProvider = storedProvider.TRANSLATION_API || ProviderRegistryIds.GOOGLE_V2;
+      this.currentProvider = storedProvider.TRANSLATION_API || CONFIG.TRANSLATION_API;
 
       logger.debug(`Simple icon manager initialized for: ${this.currentProvider}`);
 
@@ -65,7 +65,7 @@ export class ActionbarIconManager {
       if (ExtensionContextManager.isContextError(error)) {
         ExtensionContextManager.handleContextError(error, 'actionbar-icon-manager', {
           fallbackAction: () => {
-            this.currentProvider = ProviderRegistryIds.GOOGLE_V2;
+            this.currentProvider = CONFIG.TRANSLATION_API;
             this.isInitialized = true;
           }
         });

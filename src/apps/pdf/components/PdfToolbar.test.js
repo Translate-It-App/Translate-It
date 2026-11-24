@@ -1634,7 +1634,7 @@ describe('PdfToolbar', () => {
       expect(wrapper.find('.mock-language-selector').attributes('data-provider')).toBe('gemini')
     })
 
-    it('falls back to googlev2 when no provider is configured', async () => {
+    it('falls back to the configured global provider when none is configured', async () => {
       settingsStoreMock.settings.MODE_PROVIDERS = {}
       settingsStoreMock.settings.TRANSLATION_API = ''
       const wrapper = mount(PdfToolbar, {
@@ -1648,7 +1648,7 @@ describe('PdfToolbar', () => {
       const langItem = wrapper.findAll('.pdf-toolbar__export-item')
         .find(item => item.text().includes('Language:'))
       await langItem.trigger('click')
-      expect(wrapper.find('.mock-language-selector').attributes('data-provider')).toBe('googlev2')
+      expect(wrapper.find('.mock-language-selector').attributes('data-provider')).toBe('edge')
     })
 
     it('passes localized auto-detect label to LanguageSelector inside popover', async () => {

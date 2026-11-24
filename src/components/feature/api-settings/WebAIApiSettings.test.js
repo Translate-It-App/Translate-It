@@ -20,8 +20,9 @@ vi.mock('@/features/translation/providers/WebAIModelDiscovery.js', () => ({
 vi.mock('@/shared/config/config.js', () => ({
   CONFIG: {
     WEBAI_API_URL: '',
-    WEBAI_API_MODEL: 'gemini-3-flash',
+    WEBAI_API_MODEL: 'gemini-auto',
     WEBAI_MODELS: [
+      { value: 'gemini-auto', name: 'Gemini Auto' },
       { value: 'gemini-3-flash', name: 'Gemini 3 Flash' },
       { value: 'gemini-3-pro', name: 'Gemini 3 Pro' },
       { value: 'custom', name: 'Custom Model', custom: true },
@@ -70,7 +71,7 @@ describe('WebAIApiSettings model discovery', () => {
     const select = wrapper.get('select')
     expect(select.element.value).toBe('gemini-3-flash')
     expect(select.findAll('option').map(option => option.element.value)).toEqual([
-      'gemini-3-flash', 'gemini-3-pro', 'gemini-auto', 'custom',
+      'gemini-auto', 'gemini-3-flash', 'gemini-3-pro', 'custom',
     ])
     expect(wrapper.text()).toContain('Saved model was not listed by the server.')
     expect(mocks.settingsStore.updateSettingLocally).not.toHaveBeenCalledWith('WEBAI_MODELS', expect.anything())
@@ -82,7 +83,7 @@ describe('WebAIApiSettings model discovery', () => {
     const wrapper = mount(WebAIApiSettings)
     await flushPromises()
     expect(wrapper.get('select').findAll('option').map(option => option.element.value)).toEqual([
-      'gemini-3-flash', 'gemini-3-pro', 'custom',
+      'gemini-auto', 'gemini-3-flash', 'gemini-3-pro', 'custom',
     ])
     wrapper.unmount()
   })

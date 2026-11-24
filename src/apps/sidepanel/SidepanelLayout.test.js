@@ -30,7 +30,7 @@ vi.mock('@/features/history/composables/useHistory.js', () => ({
 }))
 
 vi.mock('@/composables/shared/useErrorHandler.js', () => ({ useErrorHandler: vi.fn() }))
-vi.mock('@/shared/logging/logger.js', () => ({ getScopedLogger: () => ({ debug: vi.fn(), warn: vi.fn() }) }))
+vi.mock('@/shared/logging/logger.js', () => ({ getScopedLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn() }) }))
 vi.mock('@/shared/logging/logConstants.js', () => ({ LOG_COMPONENTS: { UI: 'ui' } }))
 
 vi.mock('./components/SidepanelHistory.vue', () => ({ default: { name: 'SidepanelHistory', props: ['isVisible'], template: '<div />' } }))

@@ -34,6 +34,7 @@
 import './SidepanelLayout.scss'
 import { useSettingsStore } from '@/features/settings/stores/settings.js';
 import { useTranslationStore } from '@/features/translation/stores/translation.js';
+import { CONFIG } from '@/shared/config/config.js';
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useHistory } from '@/features/history/composables/useHistory.js';
 import { useErrorHandler } from '@/composables/shared/useErrorHandler.js';
@@ -110,7 +111,7 @@ onMounted(async () => {
   await consumePendingHistoryIntent()
 
   // Initialize providers from settings
-  const defaultProvider = settingsStore.settings.TRANSLATION_API || 'googlev2'
+  const defaultProvider = settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API
   
   if (!globalProvider.value) {
     globalProvider.value = defaultProvider

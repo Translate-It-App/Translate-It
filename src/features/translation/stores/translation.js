@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { ProviderRegistryIds } from '@/features/translation/providers/ProviderConstants.js';
+import { CONFIG } from '@/shared/config/config.js';
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 
@@ -11,7 +11,7 @@ export const useTranslationStore = defineStore('translation', () => {
   const currentTranslation = ref(null)
   const history = ref([])
   const isLoading = ref(false)
-  const selectedProvider = ref(ProviderRegistryIds.GOOGLE_V2)
+  const selectedProvider = ref(CONFIG.TRANSLATION_API)
   const uiActiveProvider = ref(null) // Tracks currently selected provider in UI (local)
   const ephemeralSync = ref({
     page: false,

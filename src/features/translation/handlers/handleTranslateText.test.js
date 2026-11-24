@@ -4,6 +4,7 @@ import { unifiedTranslationService } from '@/core/services/translation/UnifiedTr
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { MessageHandler } from '@/shared/messaging/core/MessageHandler.js';
+import { CONFIG } from '@/shared/config/config.js';
 
 vi.mock('@/shared/logging/logger.js', () => ({
   getScopedLogger: () => ({
@@ -60,6 +61,14 @@ describe('handleTranslateText', () => {
 
     expect(response.errorDetails.type).toBe(ErrorTypes.TEXT_EMPTY);
     expect(unifiedTranslationService.handleTranslationRequest).not.toHaveBeenCalled();
+  });
+
+  it('uses the configured global provider when no provider is supplied', async () => {
+    unifiedTranslationService.handleTranslationRequest.mockResolvedValue({ success: true, translatedText: 'שלום' });
+
+    await handleTranslateText(message);
+
+    expect(unifiedTranslationService.handleTranslationRequest.mock.calls[0][0].data.provider).toBe(CONFIG.TRANSLATION_API);
   });
 
   it.each([

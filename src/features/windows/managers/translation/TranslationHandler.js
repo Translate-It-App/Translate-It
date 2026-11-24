@@ -4,8 +4,7 @@ import { getScopedLogger } from "@/shared/logging/logger.js";
 import { LOG_COMPONENTS } from "@/shared/logging/logConstants.js";
 import { WindowsConfig } from "../core/WindowsConfig.js";
 import { generateTranslationMessageId } from "@/utils/messaging/messageId.js";
-import { TranslationMode } from "@/shared/config/config.js";
-import { ProviderRegistryIds } from "@/features/translation/providers/ProviderConstants.js";
+import { CONFIG, TranslationMode } from "@/shared/config/config.js";
 import { settingsManager } from '@/shared/managers/SettingsManager.js';
 import { AUTO_DETECT_VALUE } from "@/shared/constants/core.js";
 import { MessageActions } from "@/shared/messaging/core/MessageActions.js";
@@ -33,7 +32,7 @@ export class TranslationHandler {
    */
   getEffectiveProvider(selectedText, options = {}) {
     const settings = {
-      TRANSLATION_API: settingsManager.get('TRANSLATION_API', ProviderRegistryIds.GOOGLE_V2),
+      TRANSLATION_API: settingsManager.get('TRANSLATION_API', CONFIG.TRANSLATION_API),
       MODE_PROVIDERS: settingsManager.get('MODE_PROVIDERS', {}),
       ENABLE_DICTIONARY: settingsManager.get('ENABLE_DICTIONARY', true)
     };
@@ -41,7 +40,7 @@ export class TranslationHandler {
     let translationMode = options.mode || TranslationMode.Selection;
     let modeSpecificProvider = settings.MODE_PROVIDERS?.[translationMode];
 
-    return options.provider || modeSpecificProvider || settings.TRANSLATION_API || ProviderRegistryIds.GOOGLE_V2;
+    return options.provider || modeSpecificProvider || settings.TRANSLATION_API || CONFIG.TRANSLATION_API;
   }
 
   /**
@@ -65,7 +64,7 @@ export class TranslationHandler {
     settings = {
         SOURCE_LANGUAGE: settingsManager.get('SOURCE_LANGUAGE', 'auto'),
         TARGET_LANGUAGE: settingsManager.get('TARGET_LANGUAGE', 'fa'),
-        TRANSLATION_API: settingsManager.get('TRANSLATION_API', ProviderRegistryIds.GOOGLE_V2),
+        TRANSLATION_API: settingsManager.get('TRANSLATION_API', CONFIG.TRANSLATION_API),
         MODE_PROVIDERS: settingsManager.get('MODE_PROVIDERS', {}),
         ENABLE_DICTIONARY: settingsManager.get('ENABLE_DICTIONARY', true)
       };
@@ -74,7 +73,7 @@ export class TranslationHandler {
       let translationMode = options.mode || TranslationMode.Selection;
       let modeSpecificProvider = settings.MODE_PROVIDERS?.[translationMode];
       
-      const finalProvider = options.provider || modeSpecificProvider || settings.TRANSLATION_API || ProviderRegistryIds.GOOGLE_V2;
+      const finalProvider = options.provider || modeSpecificProvider || settings.TRANSLATION_API || CONFIG.TRANSLATION_API;
       const isExplicitProvider = !!options.provider;
 
       // Generate unique messageId

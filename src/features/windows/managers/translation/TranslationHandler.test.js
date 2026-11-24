@@ -29,6 +29,7 @@ vi.mock('@/utils/messaging/messageId.js', () => ({
 
 vi.mock('@/shared/config/config.js', () => ({
   CONFIG: {
+    TRANSLATION_API: 'edge',
     POPUP_MAX_CHARS: 5000,
     SIDEPANEL_MAX_CHARS: 10000,
     SELECTION_MAX_CHARS: 5000,

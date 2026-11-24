@@ -338,7 +338,7 @@ import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js'
 import { useTabSettings } from '../composables/useTabSettings.js'
 import { useValidation } from '@/core/validation.js'
 import { useLanguages } from '@/composables/shared/useLanguages.js'
-import { TranslationMode } from '@/shared/config/config.js'
+import { CONFIG, TranslationMode } from '@/shared/config/config.js'
 import { findProviderById } from '@/features/translation/providers/ProviderManifest.js'
 import { ProviderRegistryIds } from '@/features/translation/providers/ProviderConstants.js'
 import { getScopedLogger } from '@/shared/logging/logger.js'
@@ -404,7 +404,7 @@ const bilingualTranslation = createSetting('BILINGUAL_TRANSLATION', false, {
   }
 })
 
-const selectedProvider = createSetting('TRANSLATION_API', ProviderRegistryIds.GOOGLE_V2)
+const selectedProvider = createSetting('TRANSLATION_API', CONFIG.TRANSLATION_API)
 
 const missingSetting = computed(() => {
   // 1. Check primary provider

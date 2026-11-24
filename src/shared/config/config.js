@@ -60,8 +60,6 @@ export const TRANSLATION_ERRORS = {
   CONTEXT_LOST: "Extension context lost",
 };
 
-// Detect environment
-const isFirefox = typeof __BROWSER__ !== 'undefined' ? __BROWSER__ === 'firefox' : false;
 export { isMobile } from '@/shared/utils/device.js';
 
 // Shared configuration (initial defaults)
@@ -106,7 +104,7 @@ export const CONFIG = {
 
 
   // --- API Settings ---
-  TRANSLATION_API: isFirefox ? ProviderRegistryIds.YANDEX : ProviderRegistryIds.GOOGLE_V2, // gemini, webai, openai, openrouter, requesty, deepseek, custom, google, browserapi
+  TRANSLATION_API: ProviderRegistryIds.EDGE, // gemini, webai, openai, openrouter, requesty, deepseek, custom, google, edge, browserapi
 
   // --- Live Dubbing Settings ---
   POPUP_ACTIVE_VIEW: 'translate',
@@ -129,8 +127,8 @@ export const CONFIG = {
 
   API_KEY: "", // Gemini specific (deprecated, use GEMINI_API_KEY)
   GEMINI_API_KEY: "", // Gemini API keys (newline-separated)
-  GEMINI_API_URL: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent", // Default Gemini API URL
-  GEMINI_MODEL: "gemini-3.8-flash", // Selected Gemini model
+  GEMINI_API_URL: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent", // Default Gemini API URL
+  GEMINI_MODEL: "gemini-3.5-flash-lite", // Selected Gemini model
   // Missing from older settings defaults to legacy routing; new catalog picks set this explicitly.
   GEMINI_MODEL_SOURCE: "legacy",
   GEMINI_THINKING_MODE: "default", // Provider default or minimal thinking when supported
@@ -160,8 +158,9 @@ export const CONFIG = {
   MICROSOFT_EDGE_TRANSLATE_URL: "https://edge.microsoft.com/translate/translatetext",
   LINGVA_API_URL: "",
   WEBAI_API_URL: "",
-  WEBAI_API_MODEL: "gemini-3-flash",
+  WEBAI_API_MODEL: "gemini-auto",
   WEBAI_MODELS: [
+    { value: "gemini-auto", name: "Gemini Auto" },
     { value: "gemini-3-flash", name: "Gemini 3 Flash" },
     { value: "gemini-3-pro", name: "Gemini 3 Pro" },
     { value: "custom", name: "Custom Model", custom: true }
@@ -178,7 +177,7 @@ export const CONFIG = {
   ],
   OPENROUTER_API_KEY: "",
   OPENROUTER_API_URL: "https://openrouter.ai/api/v1/chat/completions",
-  OPENROUTER_API_MODEL: "openai/gpt-6-luna",
+  OPENROUTER_API_MODEL: "google/gemini-3.5-flash-lite",
   // Missing from older settings defaults to legacy routing; new catalog picks set this explicitly.
   OPENROUTER_MODEL_SOURCE: "legacy",
   OPENROUTER_MODELS: [
@@ -197,7 +196,7 @@ export const CONFIG = {
   ],
   REQUESTY_API_KEY: "",
   REQUESTY_API_URL: "https://router.requesty.ai/v1/chat/completions",
-  REQUESTY_API_MODEL: "openai/gpt-4o-mini",
+  REQUESTY_API_MODEL: "gemini-3.5-flash-lite",
   REQUESTY_MODELS: [
     { value: "openai/gpt-4o-mini", name: "OpenAI GPT-4o Mini" },
     { value: "gpt-5.4-mini", name: "OpenAI GPT-5.4 Mini" },
@@ -978,7 +977,7 @@ export const getModeProvidersAsync = async () => {
  * 
  * Includes feature validation: If the resolved provider doesn't support 
  * the mode's requirements (e.g. Bulk for Page Translation), it falls back 
- * to the system default (googlev2).
+ * to the bulk-capability fallback (googlev2).
  * 
  * @param {string} mode - The translation mode (from TranslationMode enum)
  * @returns {Promise<string>} - The effective provider ID
@@ -990,8 +989,8 @@ export const getEffectiveProviderAsync = async (mode) => {
       getTranslationApiAsync()
     ]);
     
-    const systemDefault = ProviderRegistryIds.GOOGLE_V2;
-    let resolvedId = globalApi || systemDefault;
+    const capabilityFallback = ProviderRegistryIds.GOOGLE_V2;
+    let resolvedId = globalApi || CONFIG.TRANSLATION_API;
     
     // 1. Check direct mode-specific setting
     if (mode && modeProviders && modeProviders[mode]) {
@@ -1015,14 +1014,14 @@ export const getEffectiveProviderAsync = async (mode) => {
     ].includes(mode);
 
     if (needsBulk && provider && !provider.features?.includes('bulk')) {
-      logger.warn(`Resolved provider ${resolvedId} for mode ${mode} does not support bulk. Falling back to ${systemDefault}.`);
-      return systemDefault;
+      logger.warn(`Resolved provider ${resolvedId} for mode ${mode} does not support bulk. Falling back to ${capabilityFallback}.`);
+      return capabilityFallback;
     }
     
     return resolvedId;
   } catch (error) {
     logger.error(`Error resolving effective provider for mode ${mode}:`, error);
-    return ProviderRegistryIds.GOOGLE_V2;
+    return CONFIG.TRANSLATION_API;
   }
 };
 

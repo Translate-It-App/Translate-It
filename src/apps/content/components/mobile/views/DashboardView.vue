@@ -208,7 +208,7 @@ import {
 import { WINDOWS_MANAGER_EVENTS } from "@/core/PageEventBus.js";
 import { SELECTION_EVENTS } from "@/features/text-selection/events/SelectionEvents.js";
 import { MOBILE_CONSTANTS } from "@/shared/constants/mobile.js";
-import { TranslationMode } from "@/shared/config/config.js";
+import { CONFIG, TranslationMode } from "@/shared/config/config.js";
 import { useTTSSmart } from "@/features/tts/composables/useTTSSmart.js";
 import { getScopedLogger } from "@/shared/logging/logger.js";
 import { LOG_COMPONENTS } from "@/shared/logging/logConstants.js";
@@ -257,7 +257,7 @@ const getProviderForMode = (mode) => {
   return (
     settingsStore.settings.MODE_PROVIDERS?.[mode] ||
     settingsStore.settings.TRANSLATION_API ||
-    "googlev2"
+    CONFIG.TRANSLATION_API
   );
 };
 

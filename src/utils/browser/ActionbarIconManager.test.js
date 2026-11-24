@@ -21,7 +21,7 @@ vi.mock('@/shared/logging/logConstants.js', () => ({ LOG_COMPONENTS:{CORE:'c'} }
 const isContextErrorMock = vi.fn(()=>false);
 const handleContextErrorMock = vi.fn((err,ctx,{fallbackAction})=>{ if(typeof fallbackAction==='function') fallbackAction(); });
 vi.mock('@/core/extensionContext.js', () => ({ default:{ isContextError: (...a)=>isContextErrorMock(...a), handleContextError: (...a)=>handleContextErrorMock(...a), safeGetURL:(p)=>'chrome-extension://a/'+p } }));
-vi.mock('@/features/translation/providers/ProviderConstants.js', () => ({ ProviderRegistryIds:{ GOOGLE_V2:'google_v2'} }));
+vi.mock('@/features/translation/providers/ProviderConstants.js', () => ({ ProviderRegistryIds:{ GOOGLE_V2:'google_v2', EDGE:'edge'} }));
 vi.mock('@/features/translation/providers/ProviderManifest.js', () => ({ findProviderById:()=>({icon:'x.png'}) }));
 
 describe('ActionbarIconManager A5-10',()=>{
@@ -56,7 +56,7 @@ describe('ActionbarIconManager A5-10',()=>{
     const mgr = new ActionbarIconManager();
     await mgr.initialize();
     expect(mgr.isInitialized).toBe(true);
-    expect(mgr.currentProvider).toBe('google_v2');
+    expect(mgr.currentProvider).toBe('edge');
     expect(storageListeners.size).toBe(0);
     expect(mgr.resourceTracker).toBe(null);
     expect(()=>mgr.destroy()).not.toThrow();
