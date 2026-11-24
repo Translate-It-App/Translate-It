@@ -4,8 +4,14 @@
   const TARGETS = [...document.querySelectorAll("p[data-item]")];
   const originals = new Map(TARGETS.map((p) => [p, p.textContent]));
   const params = new URLSearchParams(location.search);
-  const variantValue = (params.get("variant") || "").toUpperCase();
-  const variant = /^[A-F]$/.test(variantValue) ? variantValue : null;
+  function normalizeVariant(value) {
+    return typeof value === "string" &&
+      /^[A-Za-z0-9_-]{1,64}$/.test(value) &&
+      /[A-Za-z0-9]/.test(value)
+      ? value.toUpperCase()
+      : null;
+  }
+  const variant = normalizeVariant(params.get("variant"));
   const levelValue = Number(params.get("level"));
   const level =
     Number.isInteger(levelValue) && levelValue >= 1 && levelValue <= 5
@@ -150,7 +156,7 @@
       "page-translation-internal-error",
     ]);
     return {
-      variant: /^[A-F]$/.test(record.variant) ? record.variant : null,
+      variant: normalizeVariant(record.variant),
       level:
         Number.isInteger(record.level) && record.level >= 1 && record.level <= 5
           ? record.level

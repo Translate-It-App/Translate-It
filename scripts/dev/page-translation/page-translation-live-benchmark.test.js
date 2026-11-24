@@ -84,6 +84,80 @@ describe("manual live Page Translation benchmark", () => {
     dom.window.close();
   });
 
+  it.each([
+    ["G", "G"],
+    ["V2", "V2"],
+    ["BASELINE-2026", "BASELINE-2026"],
+    ["baseline_2026", "BASELINE_2026"],
+    ["", null],
+    ["bad!", null],
+    ["ß", null],
+    ["---", null],
+    ["A".repeat(65), null],
+  ])("normalizes URL variant %j to %j", (input, expected) => {
+    const dom = createPage(
+      `http://127.0.0.1/?variant=${encodeURIComponent(input)}&level=1`,
+    );
+    const { window } = dom;
+    emit(window, "page-translate-start", { sessionId: "variant" });
+    emit(window, "page-translate-cancelled", {
+      sessionId: "variant",
+      reason: "cancelled",
+    });
+    expect(results(window)[0].variant).toBe(expected);
+    dom.window.close();
+  });
+
+  it("keeps valid stored variants and sanitizes them consistently across storage, copy, and export", async () => {
+    const storedVariants = [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "V2",
+      "BASELINE-2026",
+      "lower_case",
+      "invalid!",
+      "",
+      "X".repeat(65),
+    ];
+    const initialRecords = storedVariants.map((variant) => ({ variant }));
+    const dom = createPage(
+      "http://127.0.0.1/?variant=BASELINE-2026&level=1",
+      initialRecords,
+    );
+    const { window } = dom;
+
+    emit(window, "page-translate-start", { sessionId: "new-variant" });
+    emit(window, "page-translate-cancelled", {
+      sessionId: "new-variant",
+      reason: "cancelled",
+    });
+    const expectedVariants = [
+      ...storedVariants.slice(0, 8),
+      "LOWER_CASE",
+      null,
+      null,
+      null,
+      "BASELINE-2026",
+    ];
+    const savedVariants = results(window).map((record) => record.variant);
+    expect(savedVariants).toEqual(expectedVariants);
+
+    const copied = JSON.parse(await copyResults(window));
+    const exported = await exportResults(window);
+    expect(copied.trials.map((record) => record.variant)).toEqual(
+      expectedVariants,
+    );
+    expect(exported.trials.map((record) => record.variant)).toEqual(
+      expectedVariants,
+    );
+    expect(copied.trials).toEqual(exported.trials);
+    dom.window.close();
+  });
+
   it("serves the fixture on loopback using an available port and closes cleanly", async () => {
     const fixture = await startServer();
     try {
