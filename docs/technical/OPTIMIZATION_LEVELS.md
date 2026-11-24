@@ -44,13 +44,15 @@ Base-2 AI providers use this concurrency curve:
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | Base-2 AI providers | 1 | 2 | 2 | 3 | 4 |
 | Custom | 1 | 2 | 3 | 3 | 4 |
+| DeepSeek | 1 | 2 | 3 | 3 | 4 |
 | Gemini | 1 | 2 | 3 | 5 | 6 |
 
 Other base-2 AI providers intentionally share concurrency `2` at Levels 2
-and 3. Custom uses a benchmark-selected curve: isolated Page Translation
+and 3. Custom and DeepSeek use benchmark-selected curves. Custom's isolated Page Translation
 medians were 12.60s, 9.07s, and 8.34s at concurrency 2, 3, and 4 respectively;
 Level 3 therefore uses 3 as the measured balance between completion time and
-provider load.
+provider load. DeepSeek's 600-target Level 3 comparison is documented with the
+manual benchmark fixture; its result is directional, not a latency guarantee.
 
 #### AI Select Element
 

@@ -72,10 +72,14 @@ describe('ProviderConfigurations optimization scaling', () => {
     const levels = [1, 2, 3, 4, 5];
     const expected = [1, 2, 2, 3, 4];
 
-    for (const providerName of ['WebAI', 'OpenAI', 'DeepSeek', 'OpenRouter', 'Requesty']) {
+    for (const providerName of ['WebAI', 'OpenAI', 'OpenRouter', 'Requesty']) {
       const actual = levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent);
       expect(actual).toEqual(expected);
     }
+    expect(levels.map(level => getProviderRateLimit('DeepSeek', level).maxConcurrent))
+      .toEqual([1, 2, 3, 3, 4]);
+    expect(getProviderConfiguration('DeepSeek', 3).batching)
+      .toEqual(PROVIDER_CONFIGURATIONS.DeepSeek.batching);
   });
 
   it('uses the Custom concurrency curve while preserving unrelated provider configuration', () => {

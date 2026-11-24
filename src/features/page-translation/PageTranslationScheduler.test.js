@@ -73,7 +73,8 @@ vi.mock('@/shared/messaging/core/UnifiedMessaging.js', () => ({
 
 vi.mock('@/config.js', () => ({
   getTranslationApiAsync: vi.fn(async () => 'google'),
-  getTargetLanguageAsync: vi.fn(async () => 'fa')
+  getTargetLanguageAsync: vi.fn(async () => 'fa'),
+  getWholePageAiMaxCharsAsync: vi.fn(async () => 100000)
 }));
 
 describe('PageTranslationScheduler', () => {
@@ -124,6 +125,21 @@ describe('PageTranslationScheduler', () => {
   afterEach(() => {
     scheduler.stop();
     scheduler.reset();
+  });
+
+  it('uses DeepSeek Level 3 concurrency while retaining the AI page batch size', async () => {
+    const configModule = await import('@/shared/config/config.js');
+    const optimization = vi.spyOn(configModule, 'getProviderOptimizationLevelAsync').mockResolvedValue(3);
+    scheduler.setSettings({ translationApi: 'deepseek', targetLanguage: 'en' });
+
+    try {
+      const config = await scheduler._getBatchConfig();
+
+      expect(config.chunkSize).toBe(30);
+      expect(scheduler.settings.maxConcurrentFlushes).toBe(3);
+    } finally {
+      optimization.mockRestore();
+    }
   });
 
   it.each([false, true])('uses filter visibility eligibility (%s) without rechecking item geometry', async hasVisibleEligibleItems => {

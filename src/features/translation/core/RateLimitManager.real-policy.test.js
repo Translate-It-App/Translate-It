@@ -19,16 +19,20 @@ vi.mock('@/shared/config/config.js', () => ({
   }),
 }));
 
-vi.mock('@/features/translation/core/ProviderConfigurations.js', () => ({
-  PROVIDER_CONFIGURATIONS: {
-    IntegrationProvider: {
-      rateLimit: { maxConcurrent: 1, delayBetweenRequests: 0 }
-    }
-  },
-  getProviderConfiguration: vi.fn(() => ({
-    rateLimit: { maxConcurrent: 1, delayBetweenRequests: 0 }
-  }))
-}));
+vi.mock('@/features/translation/core/ProviderConfigurations.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    PROVIDER_CONFIGURATIONS: {
+      IntegrationProvider: {
+        rateLimit: { maxConcurrent: 1, delayBetweenRequests: 0 }
+      }
+    },
+    getProviderConfiguration: vi.fn((providerName, level) => providerName === 'IntegrationProvider'
+      ? { rateLimit: { maxConcurrent: 1, delayBetweenRequests: 0 } }
+      : actual.getProviderConfiguration(providerName, level))
+  };
+});
 
 vi.mock('@/shared/logging/logger.js', () => ({
   getScopedLogger: () => ({
@@ -40,6 +44,7 @@ vi.mock('@/shared/logging/logger.js', () => ({
 }));
 
 import { RateLimitManager } from './RateLimitManager.js';
+import { getProviderConfiguration } from '@/features/translation/core/ProviderConfigurations.js';
 import { isFatalError } from '@/shared/error-management/ErrorMatcher.js';
 import { isLocalDeterministicValidationError } from '@/shared/error-management/ValidationPolicy.js';
 
@@ -100,5 +105,55 @@ describe('RateLimitManager real-policy integration', () => {
     expect(state.isCircuitOpen).toBe(false);
     expect(state.consecutiveFailures).toBe(0);
     expect(state.performanceStats.failedRequests).toBe(0);
+  });
+
+  it('shares DeepSeek Level 3 physical concurrency across Page and Subtitle calls', async () => {
+    mockRuntime.providerLevels.set('DeepSeek', 3);
+    manager.providerStates.delete('DeepSeek');
+    const state = manager._initializeProvider('DeepSeek', getProviderConfiguration('DeepSeek', 3).rateLimit, {
+      isManualConfig: false,
+      optimizationLevel: 3,
+      configSource: 'fresh-load',
+    });
+    expect(state.config.maxConcurrent).toBe(3);
+
+    let active = 0;
+    let peak = 0;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const calls = [
+      manager.executeWithRateLimit('DeepSeek', async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await gate;
+        active--;
+      }, 'Page Translation', undefined, { mode: 'page' }),
+      manager.executeWithRateLimit('DeepSeek', async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await gate;
+        active--;
+      }, 'Subtitle Translation', undefined, { mode: 'subtitle' }),
+      manager.executeWithRateLimit('DeepSeek', async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await gate;
+        active--;
+      }, 'Page Translation', undefined, { mode: 'page' }),
+      manager.executeWithRateLimit('DeepSeek', async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await gate;
+        active--;
+      }, 'Subtitle Translation', undefined, { mode: 'subtitle' }),
+    ];
+
+    await vi.waitFor(() => expect(peak).toBe(3));
+    expect(state.activeRequests).toBe(3);
+    release();
+    await Promise.all(calls);
+
+    expect(peak).toBe(3);
+    expect(state.activeRequests).toBe(0);
   });
 });

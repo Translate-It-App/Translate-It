@@ -122,7 +122,7 @@ Scheduler item IDs are returned by the background and matched before settlement,
 ### Optimization Level Integration
 The system is "Optimization-Aware." It respects the user's preference for **Speed vs. Cost** by dynamically reconfiguring its scheduling strategy:
 - **Level 1 (Economy/Stable)**: Uses larger chunks (up to 80 segments for AI) and lower concurrency. This is highly efficient for LLMs as it reduces the frequency of System Prompt repetition and stays within IP-based rate limits for traditional providers.
-- **Level 5 (Turbo/Fast)**: Uses smaller chunks and higher concurrency. Current Custom page batches retain their existing maximum of 10 segments at level 5 and 25 at level 3 (the separate Custom provider category uses the traditional sizing curve). Other AI providers use 15 and 30 respectively. Character limits can further reduce a batch. Custom's shared request ceilings are 4 at level 5 and 3 at level 3.
+- **Level 5 (Turbo/Fast)**: Uses smaller chunks and higher concurrency. Current Custom page batches retain their existing maximum of 10 segments at level 5 and 25 at level 3 (the separate Custom provider category uses the traditional sizing curve). Other AI providers use 15 and 30 respectively. Character limits can further reduce a batch. Custom's shared request ceilings are 4 at level 5 and 3 at level 3; DeepSeek uses the same shared ceilings.
 
 ### Modular Event Management
 By isolating event handling into `PageTranslationEventManager`, the system prevents "Listener Leaks" and ensures that global signals (like conflict resolution with Select Element mode) are handled consistently.

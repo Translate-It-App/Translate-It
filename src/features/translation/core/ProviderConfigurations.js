@@ -201,7 +201,7 @@ export const PROVIDER_CONFIGURATIONS = {
   // DeepSeek - Optimized settings for better performance
   DeepSeek: {
     rateLimit: {
-      maxConcurrent: 2, // Increased from 1 for better throughput
+      maxConcurrent: 3, // Balanced concurrency selected for DeepSeek
       delayBetweenRequests: 0, // No delay for first request
       adaptiveBackoff: {
         enabled: true,
@@ -939,10 +939,11 @@ function applyOptimizationLevel(config, level) {
   // optimization modes are not concurrency-identical. Larger base values keep
   // the standard multiplier curve.
   const scaleConcurrentLimit = (baseConcurrent, levelValue) => {
-    if (config === PROVIDER_CONFIGURATIONS.Custom && baseConcurrent === 3) {
-      // Custom uses its benchmark-selected discrete concurrency curve.
-      const customCurve = { 1: 1, 2: 2, 3: 3, 4: 3, 5: 4 };
-      return customCurve[levelValue];
+    if ((config === PROVIDER_CONFIGURATIONS.Custom || config === PROVIDER_CONFIGURATIONS.DeepSeek)
+      && baseConcurrent === 3) {
+      // Custom and DeepSeek use their benchmark-selected discrete concurrency curve.
+      const selectedCurve = { 1: 1, 2: 2, 3: 3, 4: 3, 5: 4 };
+      return selectedCurve[levelValue];
     }
 
     if (baseConcurrent === 2) {
