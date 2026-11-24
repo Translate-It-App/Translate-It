@@ -64,6 +64,69 @@ describe('Config Module', () => {
   });
 
   describe('Constants', () => {
+    it('keeps batch prompts free of redundant source-text references', async () => {
+      const normalBatch = await getPromptBASEAIBatchAsync();
+      const autoBatch = await getPromptBASEAIBatchAutoAsync();
+      const normalFollowup = await getPromptBASEAIFollowupAsync();
+      const autoFollowup = await getPromptBASEAIFollowupAutoAsync();
+
+      for (const prompt of [normalBatch, autoBatch, normalFollowup, autoFollowup]) {
+        expect(prompt).not.toContain('the following JSON data');
+      }
+      expect(normalBatch).toContain('from $_{SOURCE} to $_{TARGET}');
+      expect(normalFollowup).toContain('from $_{SOURCE} to $_{TARGET}');
+      expect(autoBatch).toContain('into $_{TARGET}');
+      expect(autoFollowup).toContain('into $_{TARGET}');
+    });
+
+    it('preserves editable prompt semantics and structured batch output requirements', async () => {
+      expect(CONFIG.PROMPT_TEMPLATE).toContain('$_{SOURCE}');
+      expect(CONFIG.PROMPT_TEMPLATE).toContain('$_{TARGET}');
+      expect(CONFIG.PROMPT_TEMPLATE).toContain('$_{TEXT}');
+      expect(CONFIG.PROMPT_TEMPLATE).toContain('(or any other language)');
+      expect(CONFIG.PROMPT_TEMPLATE).toContain('Accurately');
+      expect(CONFIG.PROMPT_TEMPLATE).toContain('fluently, naturally, and idiomatically');
+      expect(CONFIG.PROMPT_TEMPLATE).toContain('tone, clarity, and readability');
+      expect(CONFIG.PROMPT_TEMPLATE_AUTO).toContain('$_{SOURCE}');
+      expect(CONFIG.PROMPT_TEMPLATE_AUTO).toContain('$_{TARGET}');
+      expect(CONFIG.PROMPT_TEMPLATE_AUTO).toContain('$_{TEXT}');
+      expect(CONFIG.PROMPT_TEMPLATE_AUTO).toContain('Accurately');
+      expect(CONFIG.PROMPT_TEMPLATE_AUTO).toContain('fluently, naturally, and idiomatically');
+      expect(CONFIG.PROMPT_TEMPLATE_AUTO).toContain('entire context suggests a reverse translation');
+
+      for (const prompt of [
+        await getPromptBASEAIBatchAsync(),
+        await getPromptBASEAIBatchAutoAsync()
+      ]) {
+        expect(prompt).toContain('valid JSON object');
+        expect(prompt).toContain('translations');
+        expect(prompt).toContain('exactly $_{COUNT} items');
+        expect(prompt).toContain('"id"');
+        expect(prompt).toContain('"text"');
+        expect(prompt).toContain('line breaks');
+        expect(prompt).toContain('formatting');
+        expect(prompt).toContain('$_{MARKER_PRESERVATION_INSTRUCTIONS}');
+        expect(prompt).toContain('Return only');
+      }
+    });
+
+    it('keeps batch instructions separate, formatting unconditional, and marker guidance conditional', async () => {
+      const prompts = [
+        await getPromptBASEAIBatchAsync(),
+        await getPromptBASEAIBatchAutoAsync(),
+        await getPromptBASEAIFollowupAsync(),
+        await getPromptBASEAIFollowupAutoAsync()
+      ];
+
+      for (const prompt of prompts) {
+        expect(prompt).toContain('\n$_{PROMPT_INSTRUCTIONS}\n');
+        expect(prompt).toContain('Preserve all formatting, indentation, and line breaks exactly.');
+        expect(prompt).toContain('Preserve every original id exactly.');
+        expect(prompt).toContain('$_{MARKER_PRESERVATION_INSTRUCTIONS}');
+        expect(prompt).not.toContain('@@TI_SEG_');
+      }
+    });
+
     it('should have correct TranslationMode values', () => {
       expect(TranslationMode.Select_Element).toBe('select-element');
       expect(TranslationMode.Page).toBe('page-translation-batch');
@@ -253,7 +316,8 @@ describe('Config Module', () => {
       (key) => {
         expect(CONFIG[key]).toContain('<n1/>');
         expect(CONFIG[key]).toContain('<n2/>');
-        expect(CONFIG[key]).toContain('If you see markers like <n1/> or <n2/>');
+        expect(CONFIG[key]).toContain('as literal newline markers; preserve them exactly in their original positions.');
+        expect(CONFIG[key]).toContain('$_{MARKER_PRESERVATION_INSTRUCTIONS}');
       }
     );
   });

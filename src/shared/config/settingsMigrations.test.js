@@ -912,6 +912,29 @@ describe('Settings Migrations', () => {
     }
   });
 
+  it('migrates both actual previous prompt defaults while preserving customized prompts', async () => {
+    const previousDefaults = Object.fromEntries(
+      ['PROMPT_TEMPLATE', 'PROMPT_TEMPLATE_AUTO'].map(key => [
+        key,
+        HISTORICAL_PROMPT_DEFAULTS[key][0].value
+      ])
+    );
+    const { updates, logs } = await runSettingsMigrations(previousDefaults);
+
+    expect(updates.PROMPT_TEMPLATE).toBe(CONFIG.PROMPT_TEMPLATE);
+    expect(updates.PROMPT_TEMPLATE_AUTO).toBe(CONFIG.PROMPT_TEMPLATE_AUTO);
+    expect(logs).toContain('Upgraded legacy default prompt PROMPT_TEMPLATE to latest version');
+    expect(logs).toContain('Upgraded legacy default prompt PROMPT_TEMPLATE_AUTO to latest version');
+
+    const customized = {
+      PROMPT_TEMPLATE: `${previousDefaults.PROMPT_TEMPLATE}\nCustom instruction.`,
+      PROMPT_TEMPLATE_AUTO: `${previousDefaults.PROMPT_TEMPLATE_AUTO}\nCustom instruction.`
+    };
+    const customResult = await runSettingsMigrations(customized);
+    expect(customResult.updates.PROMPT_TEMPLATE).toBeUndefined();
+    expect(customResult.updates.PROMPT_TEMPLATE_AUTO).toBeUndefined();
+  });
+
   it('should preserve customized prompt during migration', async () => {
     const customPrompt = 'My custom customized prompt $_{SOURCE} $_{TARGET} $_{TEXT}';
     const currentSettings = {

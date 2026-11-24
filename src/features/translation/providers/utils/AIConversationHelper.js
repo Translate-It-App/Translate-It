@@ -481,8 +481,7 @@ export const AIConversationHelper = {
       
       // Fallback if the custom template doesn't have standard placeholders (e.g. SubtitlePrompt uses _{SOURCE})
       let normalizedTemplate = promptTemplate
-        .replace(/_{SOURCE}/g, "$_{SOURCE}")
-        .replace(/_{TARGET}/g, "$_{TARGET}");
+        .replace(/\$?_{(SOURCE|TARGET)}/g, (_, language) => `$_{${language}}`);
 
       if (!normalizedTemplate.includes("$_{TEXT}")) {
         // If it's a batch prompt but doesn't have $_{TEXT}, append it at the end
@@ -572,7 +571,12 @@ export const AIConversationHelper = {
                                 translateMode === TranslationMode.Selection;
 
     if (metadata && contextEnabled && contextSupportedMode) {
-      finalSystemPrompt += `\nContext: Page: "${metadata.pageTitle || 'Unknown'}", Section: "${metadata.heading || 'Main'}", Role: "${metadata.role || 'Content'}".`;
+      const pageTitle = metadata.pageTitle || 'Unknown';
+      const heading = metadata.heading || 'Main';
+      const role = metadata.role || 'Content';
+      if (pageTitle !== 'Unknown' || heading !== 'Main' || role !== 'Content') {
+        finalSystemPrompt += `\nContext: Page: "${pageTitle}", Section: "${heading}", Role: "${role}".`;
+      }
     }
 
     // Replace text placeholder according to project standard $_{TEXT} with global regex
