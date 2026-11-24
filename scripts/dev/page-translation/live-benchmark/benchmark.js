@@ -1,9 +1,20 @@
 (() => {
   "use strict";
   const STORAGE_KEY = "translate-it-page-translation-ab-results-v1";
+  const params = new URLSearchParams(location.search);
+  const targetCount = params.get("targets") === "600" ? 600 : 120;
+  const fixture = document.getElementById("target-fixture");
+  for (let index = 121; index <= targetCount; index++) {
+    const paragraph = document.createElement("p");
+    paragraph.dataset.item = String(index);
+    paragraph.textContent = `The research team evaluates regional planning scenario ${index} to improve long-term community services.`;
+    fixture.append(paragraph);
+  }
   const TARGETS = [...document.querySelectorAll("p[data-item]")];
   const originals = new Map(TARGETS.map((p) => [p, p.textContent]));
-  const params = new URLSearchParams(location.search);
+  document.querySelectorAll("[data-target-count]").forEach((element) => {
+    element.textContent = String(TARGETS.length);
+  });
   function normalizeVariant(value) {
     return typeof value === "string" &&
       /^[A-Za-z0-9_-]{1,64}$/.test(value) &&
@@ -94,6 +105,8 @@
     el.querySelector("[data-latest-level]").textContent = record
       ? (record.level ?? "not set")
       : "—";
+    el.querySelector("[data-latest-target-count]").textContent =
+      record?.correctness?.targetCount ?? "—";
     el.querySelector("[data-latest-reason]").textContent =
       latestFailureReason(record);
   }
@@ -241,7 +254,7 @@
     }
     const initialTranslatedCount = translatedParagraphs().length;
     const initialPageClean =
-      TARGETS.length === 120 &&
+      TARGETS.length === targetCount &&
       TARGETS.every((p) => p.textContent === originals.get(p));
     const initiallyVisibleTargets = new Set(TARGETS.filter(isVisible));
     active = {

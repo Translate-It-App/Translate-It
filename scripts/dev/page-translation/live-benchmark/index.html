@@ -210,11 +210,11 @@
     <main>
       <h1>Translation Comparison Page</h1>
       <p>
-        Static page with 120 short paragraphs. Use the same source and target
+        Static page with <span data-target-count>120</span> short paragraphs. Use the same source and target
         languages in both browser profiles.
       </p>
       <!-- prettier-ignore -->
-      <div>
+      <div id="target-fixture">
       <p data-item="1">A local library reviews historical records to improve public understanding. This example describes situation 1 in clear English.</p>
       <p data-item="2">The research laboratory tests a new method for better long-term results. This example describes situation 2 in clear English.</p>
       <p data-item="3">Our project team organizes practical workshops during the current season. This example describes situation 3 in clear English.</p>
@@ -348,6 +348,7 @@
           <p>
             <span>Optimization level</span><strong data-value="level">—</strong>
           </p>
+          <p><span>Targets</span><strong data-target-count>120</strong></p>
         </div>
         <p class="ti-ab-note">
           Build and level are URL labels only; they do not configure the
@@ -372,7 +373,8 @@
               First <strong data-latest="firstAccepted">—</strong>
               <span aria-hidden="true">·</span> Visible
               <strong data-latest="firstVisible">—</strong>
-              <span aria-hidden="true">·</span> All 120
+              <span aria-hidden="true">·</span> All
+              <strong data-latest-target-count>—</strong>
               <strong data-latest="allTargets">—</strong>
               <span aria-hidden="true">·</span> Complete
               <strong data-latest="complete">—</strong>
