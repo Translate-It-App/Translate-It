@@ -72,10 +72,12 @@ describe('ProviderConfigurations optimization scaling', () => {
     const levels = [1, 2, 3, 4, 5];
     const expected = [1, 2, 2, 3, 4];
 
-    for (const providerName of ['WebAI', 'OpenAI', 'OpenRouter', 'Requesty']) {
+    for (const providerName of ['WebAI', 'OpenRouter', 'Requesty']) {
       const actual = levels.map(level => getProviderRateLimit(providerName, level).maxConcurrent);
       expect(actual).toEqual(expected);
     }
+    expect(levels.map(level => getProviderRateLimit('OpenAI', level).maxConcurrent))
+      .toEqual([1, 2, 3, 3, 4]);
     expect(levels.map(level => getProviderRateLimit('DeepSeek', level).maxConcurrent))
       .toEqual([1, 2, 3, 3, 4]);
     expect(getProviderConfiguration('DeepSeek', 3).batching)
@@ -98,7 +100,7 @@ describe('ProviderConfigurations optimization scaling', () => {
     expect([1, 2, 3, 4, 5].map(level => getProviderBatching('Custom', 'select_element', level).optimalSize))
       .toEqual([25, 25, 25, 25, 25]);
     expect(customLevel3.errorHandling).toEqual(PROVIDER_CONFIGURATIONS.Custom.errorHandling);
-    expect(getProviderRateLimit('OpenAI', 3).maxConcurrent).toBe(2);
+    expect(getProviderRateLimit('OpenAI', 3).maxConcurrent).toBe(3);
   });
 
   it('should keep representative AI concurrency monotonic while allowing collisions', () => {

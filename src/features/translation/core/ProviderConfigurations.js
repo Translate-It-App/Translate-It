@@ -160,7 +160,7 @@ export const PROVIDER_CONFIGURATIONS = {
   // OpenAI - Moderate settings with good streaming support
   OpenAI: {
     rateLimit: {
-      maxConcurrent: 2,
+      maxConcurrent: 3,
       delayBetweenRequests: 0, // No delay for first request
       adaptiveBackoff: {
         enabled: true,
@@ -939,9 +939,11 @@ function applyOptimizationLevel(config, level) {
   // optimization modes are not concurrency-identical. Larger base values keep
   // the standard multiplier curve.
   const scaleConcurrentLimit = (baseConcurrent, levelValue) => {
-    if ((config === PROVIDER_CONFIGURATIONS.Custom || config === PROVIDER_CONFIGURATIONS.DeepSeek)
+    if ((config === PROVIDER_CONFIGURATIONS.Custom
+      || config === PROVIDER_CONFIGURATIONS.DeepSeek
+      || config === PROVIDER_CONFIGURATIONS.OpenAI)
       && baseConcurrent === 3) {
-      // Custom and DeepSeek use their benchmark-selected discrete concurrency curve.
+      // OpenAI, Custom, and DeepSeek use their benchmark-selected discrete concurrency curve.
       const selectedCurve = { 1: 1, 2: 2, 3: 3, 4: 3, 5: 4 };
       return selectedCurve[levelValue];
     }
