@@ -197,6 +197,10 @@ const marker = {
       cancellationInstrumentationReady = true;
       const originalTranslate = BaseProvider.prototype.translate;
       BaseProvider.prototype.translate = function (text, sourceLanguage, targetLanguage, options = {}) {
+        const abortObserver = controllerAbortObservers.get(options?.messageId);
+        abortObserver?.setOwner({
+          messageId: options?.messageId, sessionId: options?.sessionId, context: 'page-translation-batch',
+        });
         const texts = Array.isArray(text) ? text.map(item => typeof item === 'string' ? item : item?.text ?? item?.t) : [text];
         const ids = Array.isArray(text) ? text.map(item => item && typeof item === 'object' ? item.id : undefined) : null;
         const operation = cancellationLedger.begin('provider.root', options?.sessionId ?? null, {
