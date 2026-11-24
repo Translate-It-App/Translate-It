@@ -503,38 +503,24 @@ $_{TEXT}
 /*--- End PROMPT_BASE_BATCH ---*/
 
 /*--- Start PROMPT_BASE_AI_BATCH ---*/
-  PROMPT_BASE_AI_BATCH: `You are an expert translation service. Translate from $_{SOURCE} to $_{TARGET}.
-
-Strictly follow these instructions:
+  PROMPT_BASE_AI_BATCH: `Translate from $_{SOURCE} to $_{TARGET}.
 $_{PROMPT_INSTRUCTIONS}
-
-Your response MUST be a valid JSON object containing a "translations" array with exactly $_{COUNT} items. 
-Each item MUST contain the "id" and the translated "text".
-
-CRITICAL - Formatting & Structure:
-  - Strictly preserve all line breaks (\\n), indentation, and formatting.
+Return only a valid JSON object with a "translations" array of exactly $_{COUNT} items, each containing "id" and translated "text".
+Preserve all formatting, indentation, and line breaks exactly.
+Preserve every original id exactly.
 $_{MARKER_PRESERVATION_INSTRUCTIONS}
-
-Return ONLY the JSON object, no additional text or markdown.
 
 $_{TEXT}
 `,
 /*--- End PROMPT_BASE_AI_BATCH ---*/
 
 /*--- Start PROMPT_BASE_AI_BATCH_AUTO ---*/
-  PROMPT_BASE_AI_BATCH_AUTO: `You are an expert translation service. Translate into $_{TARGET}.
-
-Strictly follow these instructions:
+  PROMPT_BASE_AI_BATCH_AUTO: `Translate into $_{TARGET}.
 $_{PROMPT_INSTRUCTIONS}
-
-Your response MUST be a valid JSON object containing a "translations" array with exactly $_{COUNT} items. 
-Each item MUST contain the "id" and the translated "text".
-
-CRITICAL - Formatting & Structure:
-  - Strictly preserve all line breaks (\\n), indentation, and formatting.
+Return only a valid JSON object with a "translations" array of exactly $_{COUNT} items, each containing "id" and translated "text".
+Preserve all formatting, indentation, and line breaks exactly.
+Preserve every original id exactly.
 $_{MARKER_PRESERVATION_INSTRUCTIONS}
-
-Return ONLY the JSON object, no additional text or markdown.
 
 $_{TEXT}
 `,
@@ -542,17 +528,12 @@ $_{TEXT}
 
 /*--- Start PROMPT_BASE_AI_FOLLOWUP ---*/
   PROMPT_BASE_AI_FOLLOWUP: `Continue translating from $_{SOURCE} to $_{TARGET}.
-
-Strictly follow these instructions:
 $_{PROMPT_INSTRUCTIONS}
-
-CRITICAL - Formatting & Structure:
-  - Strictly preserve all line breaks (\\n), indentation, and formatting.
-  - If you see markers like <n1/> or <n2/>, treat them as literal line break markers and preserve them exactly in their correct positions.
+Preserve all formatting, indentation, and line breaks exactly.
+Treat <n1/> and <n2/> as literal newline markers; preserve them exactly in their original positions.
+Preserve every original id exactly.
 $_{MARKER_PRESERVATION_INSTRUCTIONS}
-
-Maintain the exact same JSON structure (Object with "translations" array) as the previous batch.
-Return only the JSON object, no additional text.
+Return only a valid JSON object with the same "translations" array structure as the previous batch.
 
 $_{TEXT}
 `,
@@ -560,17 +541,12 @@ $_{TEXT}
 
 /*--- Start PROMPT_BASE_AI_FOLLOWUP_AUTO ---*/
   PROMPT_BASE_AI_FOLLOWUP_AUTO: `Continue translating into $_{TARGET}.
-
-Strictly follow these instructions:
 $_{PROMPT_INSTRUCTIONS}
-
-CRITICAL - Formatting & Structure:
-  - Strictly preserve all line breaks (\\n), indentation, and formatting.
-  - If you see markers like <n1/> or <n2/>, treat them as literal line break markers and preserve them exactly in their correct positions.
+Preserve all formatting, indentation, and line breaks exactly.
+Treat <n1/> and <n2/> as literal newline markers; preserve them exactly in their original positions.
+Preserve every original id exactly.
 $_{MARKER_PRESERVATION_INSTRUCTIONS}
-
-Maintain the exact same JSON structure (Object with "translations" array) as the previous batch.
-Return only the JSON object, no additional text.
+Return only a valid JSON object with the same "translations" array structure as the previous batch.
 
 $_{TEXT}
 `,
@@ -652,10 +628,8 @@ $_{TEXT}`,
   PROMPT_EDITOR_SELECTED_KEY: 'PROMPT_TEMPLATE',
 
   /*--- Start PROMPT_TEMPLATE ---*/
-  PROMPT_TEMPLATE: `- Translate the input text from $_{SOURCE} (or any other language) into $_{TARGET}.
-- Produce fluent, natural, and idiomatic translations as if written by a native speaker.
-- Prioritize clarity, tone, and readability while preserving the original intent and formatting.
-- Maintain the original formatting, structure, and line breaks exactly.
+  PROMPT_TEMPLATE: `- Accurately translate the input from $_{SOURCE} (or any other language) into $_{TARGET}, fluently, naturally, and idiomatically, as a native speaker would; preserve meaning, intent, tone, clarity, and readability.
+- Preserve the original formatting, structure, and line breaks exactly.
 - If the input is already in $_{TARGET}, keep it unchanged or provide a natural refinement if necessary.
 - Do **not** include any additional explanations, comments, markdown, or extra content.
 
@@ -663,10 +637,8 @@ $_{TEXT}`,
   /*--- End PROMPT_TEMPLATE ---*/
 
   /*--- Start PROMPT_TEMPLATE_AUTO ---*/
-  PROMPT_TEMPLATE_AUTO: `- Translate the input text into $_{TARGET}.
-- Produce fluent, natural, and idiomatic translations as if written by a native speaker.
-- Prioritize clarity, tone, and readability while preserving the original intent and formatting.
-- Maintain the original formatting, structure, and line breaks exactly.
+  PROMPT_TEMPLATE_AUTO: `- Accurately translate the input into $_{TARGET}, fluently, naturally, and idiomatically, as a native speaker would; preserve meaning, intent, tone, clarity, and readability.
+- Preserve the original formatting, structure, and line breaks exactly.
 - If the input is already in $_{TARGET}, translate it into $_{SOURCE} only if the entire context suggests a reverse translation is intended.
 - Do **not** include any additional explanations, comments, markdown, or extra content.
 

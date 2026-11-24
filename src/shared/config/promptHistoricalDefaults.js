@@ -39,14 +39,33 @@
 
 export const HISTORICAL_PROMPT_DEFAULTS = {
   PROMPT_TEMPLATE: [
-    // Example:
-    // {
-    //   version: 'v1.17.0',
-    //   reason: 'Initial general prompt template',
-    //   value: '...'
-    // }
+    {
+      version: 'v1.26.0',
+      reason: 'Consolidated repetitive translation quality guidance',
+      value: `- Translate the input text from $_{SOURCE} (or any other language) into $_{TARGET}.
+- Produce fluent, natural, and idiomatic translations as if written by a native speaker.
+- Prioritize clarity, tone, and readability while preserving the original intent and formatting.
+- Maintain the original formatting, structure, and line breaks exactly.
+- If the input is already in $_{TARGET}, keep it unchanged or provide a natural refinement if necessary.
+- Do **not** include any additional explanations, comments, markdown, or extra content.
+
+$_{TEXT}`
+    }
   ],
-  PROMPT_TEMPLATE_AUTO: [],
+  PROMPT_TEMPLATE_AUTO: [
+    {
+      version: 'v1.26.0',
+      reason: 'Consolidated repetitive translation quality guidance',
+      value: `- Translate the input text into $_{TARGET}.
+- Produce fluent, natural, and idiomatic translations as if written by a native speaker.
+- Prioritize clarity, tone, and readability while preserving the original intent and formatting.
+- Maintain the original formatting, structure, and line breaks exactly.
+- If the input is already in $_{TARGET}, translate it into $_{SOURCE} only if the entire context suggests a reverse translation is intended.
+- Do **not** include any additional explanations, comments, markdown, or extra content.
+
+$_{TEXT}`
+    }
+  ],
   PROMPT_BASE_FIELD: [],
   PROMPT_BASE_FIELD_AUTO: [],
   PROMPT_BASE_POPUP_TRANSLATE: [],
