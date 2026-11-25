@@ -12,6 +12,7 @@ import jaMessages from '../../../../../_locales/ja/messages.json'
 let mobileStore
 let settingsStore
 let autoRules
+const mocks = vi.hoisted(() => ({ handleError: vi.fn() }))
 
 vi.mock('@/store/modules/mobile.js', () => ({
   useMobileStore: () => mobileStore,
@@ -26,11 +27,14 @@ vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
 }))
 
 vi.mock('@/composables/shared/useErrorHandler.js', () => ({
-  useErrorHandler: () => ({ handleError: vi.fn() }),
+  useErrorHandler: () => ({ handleError: mocks.handleError }),
 }))
 
 vi.mock('@/features/translation/providers/ProviderManifest.js', () => ({
-  findProviderById: (id) => ({ features: id === 'vajehyab' ? ['dictionary'] : ['bulk'] }),
+  findProviderById: (id) => ({
+    features: id === 'vajehyab' ? ['dictionary'] : ['bulk'],
+    ...(id === 'gemini' ? { requiredSettings: ['GEMINI_API_KEY'] } : {}),
+  }),
 }))
 
 vi.mock('@/features/page-translation/composables/useAutoTranslateRules.js', () => ({
@@ -135,6 +139,20 @@ describe('PageTranslationView page action', () => {
     const wrapper = mount(PageTranslationView)
 
     expect(wrapper.get('.ti-m-header-primary-btn').classes()).toContain('is-disabled')
+  })
+
+  it('reports a missing provider API key as configuration, not unsupported capability', async () => {
+    settingsStore.effectiveProvider = 'gemini'
+    const wrapper = mount(PageTranslationView)
+
+    await wrapper.get('.ti-m-header-primary-btn').trigger('click')
+
+    expect(mocks.handleError).toHaveBeenCalledWith(
+      'ERRORS_API_KEY_MISSING',
+      'mobile-page-translation:bulk-check',
+      expect.objectContaining({ type: 'API_KEY_MISSING' }),
+    )
+    expect(sendRegularMessage).not.toHaveBeenCalled()
   })
 
   it('resets terminal error and starts a fresh PAGE_TRANSLATE session', async () => {

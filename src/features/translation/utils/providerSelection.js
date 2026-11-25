@@ -2,6 +2,21 @@ import { findProviderById } from '../providers/ProviderManifest.js';
 import { getFirstMissingSetting } from './providerValidator.js';
 import { MessageContexts } from '@/shared/messaging/core/MessagingConstants.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
+import { mapCanonicalTranslationError } from '@/shared/error-management/PublicTranslationErrorPolicy.js';
+
+export const PROVIDER_CAPABILITY_UNSUPPORTED = 'PROVIDER_CAPABILITY_UNSUPPORTED';
+
+export function getProviderModeValidationMessage(error, t) {
+  if (error?.code === PROVIDER_CAPABILITY_UNSUPPORTED) {
+    return t(
+      'provider_does_not_support_bulk',
+      'This provider does not support page/element translation',
+    );
+  }
+
+  const { messageKey } = mapCanonicalTranslationError(error);
+  return t(messageKey, messageKey);
+}
 
 const requiredFeatures = new Map([
   [MessageContexts.PAGE_TRANSLATION_BATCH, 'bulk'],
@@ -30,6 +45,7 @@ export function getProviderModeValidationError(providerId, mode, settings = {}) 
   if (feature && !provider.features?.includes(feature)) {
     const error = new Error(`${provider.displayName} does not support ${feature} for ${mode}`);
     error.type = ErrorTypes.VALIDATION;
+    error.code = PROVIDER_CAPABILITY_UNSUPPORTED;
     return error;
   }
 

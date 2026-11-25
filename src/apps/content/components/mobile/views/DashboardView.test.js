@@ -182,13 +182,31 @@ describe('DashboardView page command transport', () => {
   });
 
   it('rejects an unsupported mode provider using shared validation', async () => {
-    mocks.settingsStore.settings.MODE_PROVIDERS.page = 'gemini';
+    mocks.settingsStore.settings.MODE_PROVIDERS.page = 'vajehyab';
     const wrapper = mount(DashboardView);
 
     expect(wrapper.findAll('.ti-m-action-btn')[0].classes()).toContain('is-disabled');
     await wrapper.findAll('.ti-m-action-btn')[0].trigger('click');
 
     expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
-    expect(mocks.handleError).toHaveBeenCalled();
+    expect(mocks.handleError).toHaveBeenCalledWith(
+      'This provider does not support page/element translation',
+      'mobile-dashboard:bulk-check',
+      expect.objectContaining({ type: 'VALIDATION' }),
+    );
+  });
+
+  it('uses the missing-key configuration error instead of the unsupported-capability error', async () => {
+    mocks.settingsStore.settings.MODE_PROVIDERS.page = 'gemini';
+    const wrapper = mount(DashboardView);
+
+    await wrapper.findAll('.ti-m-action-btn')[0].trigger('click');
+
+    expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+    expect(mocks.handleError).toHaveBeenCalledWith(
+      'ERRORS_API_KEY_MISSING',
+      'mobile-dashboard:bulk-check',
+      expect.objectContaining({ type: 'API_KEY_MISSING' }),
+    );
   });
 });

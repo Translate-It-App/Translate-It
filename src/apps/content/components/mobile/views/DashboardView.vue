@@ -201,6 +201,7 @@ import { useErrorHandler } from "@/composables/shared/useErrorHandler.js";
 import { ErrorTypes } from "@/shared/error-management/ErrorTypes.js";
 import {
   getProviderModeValidationError,
+  getProviderModeValidationMessage,
   resolveModeProvider,
 } from "@/features/translation/utils/providerSelection.js";
 import { MessageActions } from "@/shared/messaging/core/MessageActions.js";
@@ -270,8 +271,10 @@ const selectElementProvider = computed(() =>
   getProviderForMode(TranslationMode.Select_Element),
 );
 
+const getModeValidationError = (providerId, mode) =>
+  getProviderModeValidationError(providerId, mode, settingsStore.settings);
 const checkBulkSupport = (providerId, mode) =>
-  !getProviderModeValidationError(providerId, mode, settingsStore.settings);
+  !getModeValidationError(providerId, mode);
 
 const isPageTranslationSupported = computed(() =>
   checkBulkSupport(pageProvider.value, TranslationMode.Page),
@@ -280,17 +283,14 @@ const isSelectElementSupported = computed(() =>
   checkBulkSupport(selectElementProvider.value, TranslationMode.Select_Element),
 );
 
-const handleBulkNotSupported = async () => {
+const handleBulkNotSupported = async (error) => {
   mobileStore.closeSheet();
   await handleError(
-    t(
-      "provider_does_not_support_bulk",
-      "این سرویس از قابلیت‌های دسته‌ای پشتیبانی نمی‌کند",
-    ),
+    getProviderModeValidationMessage(error, t),
     "mobile-dashboard:bulk-check",
     {
       showToast: true,
-      type: ErrorTypes.VALIDATION,
+      type: error?.type || ErrorTypes.VALIDATION,
     },
   );
 };
@@ -340,8 +340,9 @@ const isTTSVisible = computed(
 const translatePage = (event) => {
   try {
     const provider = pageProvider.value;
-    if (!checkBulkSupport(provider, TranslationMode.Page)) {
-      handleBulkNotSupported();
+    const validationError = getModeValidationError(provider, TranslationMode.Page);
+    if (validationError) {
+      handleBulkNotSupported(validationError);
       return;
     }
     if (event) {
@@ -387,8 +388,9 @@ const translatePage = (event) => {
 const activateSelectElement = async () => {
   try {
     const provider = selectElementProvider.value;
-    if (!checkBulkSupport(provider, TranslationMode.Select_Element)) {
-      handleBulkNotSupported();
+    const validationError = getModeValidationError(provider, TranslationMode.Select_Element);
+    if (validationError) {
+      handleBulkNotSupported(validationError);
       return;
     }
     logger.info("Select Element mode requested from Mobile Dashboard", {

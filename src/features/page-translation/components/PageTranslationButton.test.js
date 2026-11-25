@@ -736,5 +736,19 @@ describe("PageTranslationButton.vue", () => {
       expect(btn.attributes("disabled")).toBeUndefined();
       expect(btn.classes()).not.toContain("ti-btn--disabled");
     });
+
+    it("uses an owning component's localized configuration reason for its tooltip", () => {
+      const wrapper = mount(PageTranslationButton, {
+        props: {
+          compact: true,
+          disabled: true,
+          disabledReason: "ERRORS_API_URL_MISSING",
+        },
+      });
+
+      expect(wrapper.find(".is-compact-icon").attributes("title")).toBe(
+        "ERRORS_API_URL_MISSING",
+      );
+    });
   });
 });

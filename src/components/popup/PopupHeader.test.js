@@ -155,7 +155,7 @@ vi.mock('@/components/base/ToolbarMenu/ToolbarMenu.vue', () => ({
 vi.mock('@/features/page-translation/components/PageTranslationButton.vue', () => ({
   default: {
     name: 'PageTranslationButton',
-    props: ['compact', 'textOnly', 'targetLanguage', 'disabled', 'showAutoTranslateToggle', 'statusBadgePosition'],
+    props: ['compact', 'textOnly', 'targetLanguage', 'disabled', 'disabledReason', 'showAutoTranslateToggle', 'statusBadgePosition'],
     template: '<div class="page-translation-button-stub" />'
   }
 }))
@@ -402,6 +402,24 @@ describe('PopupHeader', () => {
     // Unsupported: the Select button explains itself and stays disabled.
     expect(wrapper.find('.ti-btn-select').attributes('title')).toBe('This provider does not support page/element translation')
     expect(wrapper.find('.ti-btn-select').attributes('disabled')).toBeDefined()
+  })
+
+  it('passes a localized missing-key error to the disabled page button', async () => {
+    settings.TRANSLATION_API = 'gemini'
+    mockFindProviderById.mockReturnValue({
+      features: ['bulk'],
+      requiredSettings: ['GEMINI_API_KEY'],
+    })
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findComponent({ name: 'PageTranslationButton' }).props('disabledReason'))
+      .toBe('ERRORS_API_KEY_MISSING')
+    expect(mockT).toHaveBeenCalledWith('ERRORS_API_KEY_MISSING', 'ERRORS_API_KEY_MISSING')
+    expect(mockT).not.toHaveBeenCalledWith(
+      'provider_does_not_support_bulk',
+      expect.anything(),
+    )
   })
 
   it('passes compact mode to the page translation button', async () => {

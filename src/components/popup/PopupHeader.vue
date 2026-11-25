@@ -7,6 +7,7 @@
         :compact="true"
         :target-language="targetLanguage"
         :disabled="!isPageTranslationSupported"
+        :disabled-reason="pageTranslationDisabledReason"
         :show-auto-translate-toggle="true"
         status-badge-position="corner"
         class="ti-page-translate-btn"
@@ -283,7 +284,10 @@ import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js'
 import { useSettingsStore } from '@/features/settings/stores/settings.js'
 import { useTranslationStore } from '@/features/translation/stores/translation.js'
 import { CONFIG, TranslationMode } from '@/shared/config/config.js'
-import { getProviderModeValidationError } from '@/features/translation/utils/providerSelection.js'
+import {
+  getProviderModeValidationError,
+  getProviderModeValidationMessage,
+} from '@/features/translation/utils/providerSelection.js'
 import browser from 'webextension-polyfill'
 import IconButton from '@/components/shared/IconButton.vue'
 import MaskIcon from '@/components/shared/MaskIcon.vue'
@@ -378,13 +382,20 @@ const getEffectiveProvider = (mode) => {
 /**
  * Checks if the provider for a specific mode supports bulk operations
  */
-const supportsBulk = (mode) => {
+const getModeValidationError = (mode) => {
   const providerId = getEffectiveProvider(mode)
-  return !getProviderModeValidationError(providerId, mode, settingsStore.settings)
+  return getProviderModeValidationError(providerId, mode, settingsStore.settings)
 }
 
-const isSelectElementSupported = computed(() => supportsBulk(TranslationMode.Select_Element))
-const isPageTranslationSupported = computed(() => supportsBulk(TranslationMode.Page))
+const selectElementValidationError = computed(() => getModeValidationError(TranslationMode.Select_Element))
+const pageTranslationValidationError = computed(() => getModeValidationError(TranslationMode.Page))
+const isSelectElementSupported = computed(() => !selectElementValidationError.value)
+const isPageTranslationSupported = computed(() => !pageTranslationValidationError.value)
+const pageTranslationDisabledReason = computed(() =>
+  pageTranslationValidationError.value
+    ? getProviderModeValidationMessage(pageTranslationValidationError.value, t)
+    : '',
+)
 
 /**
  * Support-aware tooltip for the Select Element main button (title only).
@@ -392,10 +403,7 @@ const isPageTranslationSupported = computed(() => supportsBulk(TranslationMode.P
  * independent of support state.
  */
 const selectElementTitle = computed(() => !isSelectElementSupported.value
-  ? t(
-    'provider_does_not_support_bulk',
-    'This provider does not support page/element translation'
-  )
+  ? getProviderModeValidationMessage(selectElementValidationError.value, t)
   : t(
     'popup_select_element_title_icon',
     'Select Element mode'

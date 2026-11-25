@@ -1145,7 +1145,7 @@ describe('SidepanelToolbar Desktop FAB toggle', () => {
       // The NAME stays the action in all states; the disabled reason lives
       // in title only, so AT users always hear the same control identity.
       expect(select.attributes('aria-label')).toBe('SIDEPANEL_SELECT_ELEMENT_TOOLTIP')
-      expect(select.attributes('title')).toBe('provider_does_not_support_bulk')
+      expect(select.attributes('title')).toBe('This provider does not support page/element translation')
       expect(select.attributes('title')).not.toBe(select.attributes('aria-label'))
       expect(select.attributes('disabled')).toBeDefined()
     })

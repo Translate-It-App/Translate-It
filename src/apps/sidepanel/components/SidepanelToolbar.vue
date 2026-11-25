@@ -17,7 +17,7 @@
           id="selectElementBtn"
           type="button"
           class="toolbar-button"
-          :title="!isSelectElementSupported ? (t('provider_does_not_support_bulk') || 'این سرویس از حالت انتخاب پشتیبانی نمی‌کند') : t('SIDEPANEL_SELECT_ELEMENT_TOOLTIP')"
+          :title="!isSelectElementSupported ? getProviderModeValidationMessage(selectElementValidationError, t) : t('SIDEPANEL_SELECT_ELEMENT_TOOLTIP')"
           :aria-label="t('SIDEPANEL_SELECT_ELEMENT_TOOLTIP')"
           :disabled="isActivating || !isSelectElementSupported"
           :aria-pressed="isSelectModeActive"
@@ -79,6 +79,7 @@
           compact 
           :target-language="translationStore.uiTargetLanguage"
           :disabled="!isPageTranslationSupported"
+          :disabled-reason="pageTranslationDisabledReason"
         />
       </div>
 
@@ -209,7 +210,10 @@ import { useErrorHandler } from '@/composables/shared/useErrorHandler.js';
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js';
 import { useSettingsStore } from '@/features/settings/stores/settings.js';
 import { CONFIG, TranslationMode } from '@/shared/config/config.js';
-import { getProviderModeValidationError } from '@/features/translation/utils/providerSelection.js';
+import {
+  getProviderModeValidationError,
+  getProviderModeValidationMessage,
+} from '@/features/translation/utils/providerSelection.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { sendMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
 import { openExtensionApp } from '@/core/ExtensionAppLauncher.js';
@@ -290,13 +294,20 @@ const getEffectiveProvider = (mode) => {
 /**
  * Checks if the provider for a specific mode supports bulk operations
  */
-const supportsBulk = (mode) => {
+const getModeValidationError = (mode) => {
   const providerId = getEffectiveProvider(mode)
-  return !getProviderModeValidationError(providerId, mode, settingsStore.settings)
+  return getProviderModeValidationError(providerId, mode, settingsStore.settings)
 }
 
-const isSelectElementSupported = computed(() => supportsBulk(TranslationMode.Select_Element))
-const isPageTranslationSupported = computed(() => supportsBulk(TranslationMode.Page))
+const selectElementValidationError = computed(() => getModeValidationError(TranslationMode.Select_Element))
+const pageTranslationValidationError = computed(() => getModeValidationError(TranslationMode.Page))
+const isSelectElementSupported = computed(() => !selectElementValidationError.value)
+const isPageTranslationSupported = computed(() => !pageTranslationValidationError.value)
+const pageTranslationDisabledReason = computed(() =>
+  pageTranslationValidationError.value
+    ? getProviderModeValidationMessage(pageTranslationValidationError.value, t)
+    : '',
+)
 
 const isSelectElementEnabled = computed(() => {
   return isExtensionEnabledGlobal.value && (settingsStore.settings?.TRANSLATE_WITH_SELECT_ELEMENT ?? true)
