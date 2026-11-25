@@ -67,7 +67,7 @@ export const CONFIG = {
   APP_NAME: "Translate It",
   // --- Core Settings ---
   DEBUG_MODE: false,
-  HIDDEN_PROVIDERS: [ProviderRegistryIds.BING, ProviderRegistryIds.GOOGLE],
+  HIDDEN_PROVIDERS: [ProviderRegistryIds.BING, ProviderRegistryIds.GOOGLE, ProviderRegistryIds.VAJEHYAB],
   CUSTOM_PROVIDER_LIST_ENABLED: false,
   CUSTOM_PROVIDER_LIST: [],
   COLLAPSED_PROVIDER_CATEGORIES: { ids: [], revision: 0 },

@@ -25,7 +25,11 @@ describe('getPersistedDefaultSettings', () => {
     expect(defaults.TRANSLATION_API).toBe('edge');
     expect(defaults.MODE_PROVIDERS[TranslationMode.Dictionary_Translation]).toBe('googlev2');
     expect(defaults.THEME).toBe(CONFIG.THEME);
-    expect(CONFIG.HIDDEN_PROVIDERS).toEqual([ProviderRegistryIds.BING, ProviderRegistryIds.GOOGLE]);
+    expect(CONFIG.HIDDEN_PROVIDERS).toEqual([
+      ProviderRegistryIds.BING,
+      ProviderRegistryIds.GOOGLE,
+      ProviderRegistryIds.VAJEHYAB,
+    ]);
     expect(defaults.HIDDEN_PROVIDERS).toEqual(CONFIG.HIDDEN_PROVIDERS);
     expect(defaults.TIMEOUT).toBe(CONFIG.TIMEOUT);
     expect(CONFIG.LIVE_DUBBING_PROVIDER).toBe('gemini');
