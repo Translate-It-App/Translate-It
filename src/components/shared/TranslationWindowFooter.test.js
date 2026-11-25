@@ -6,7 +6,7 @@ describe('TranslationWindowFooter', () => {
   it('renders the target language label', () => {
     const wrapper = mount(TranslationWindowFooter, {
       props: {
-        targetLanguageLabel: 'Persian (Farsi)',
+        targetLanguageLabel: 'Persian',
         showTargetLanguage: true,
         showRetry: false,
         theme: 'dark'
@@ -14,7 +14,7 @@ describe('TranslationWindowFooter', () => {
     })
 
     const label = wrapper.get('[data-testid="translation-window-footer-target-language"]')
-    expect(label.text()).toBe('Persian (Farsi)')
+    expect(label.text()).toBe('Persian')
   })
 
   it('renders the detected language label', () => {
@@ -38,7 +38,7 @@ describe('TranslationWindowFooter', () => {
       props: {
         detectedLanguageLabel: 'English',
         showDetectedLanguage: true,
-        targetLanguageLabel: 'Persian (Farsi)',
+        targetLanguageLabel: 'Persian',
         showTargetLanguage: true,
         showRetry: false,
         theme: 'dark'

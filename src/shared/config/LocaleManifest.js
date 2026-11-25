@@ -16,7 +16,7 @@ export const UI_LOCALES = [
     name: 'فارسی', 
     flag: 'ir', // References icons/flags/ir.svg
     dir: 'rtl',
-    aliases: ['فارسی', 'Farsi', 'fa']
+    aliases: ['فارسی', 'Persian', 'Farsi', 'fa']
   },
   { 
     code: 'ja', 

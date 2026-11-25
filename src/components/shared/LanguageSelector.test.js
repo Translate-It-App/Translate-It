@@ -11,7 +11,7 @@ const mockUtils = vi.hoisted(() => ({ getI18nUtils: vi.fn() }))
 
 const mockLanguages = ref([
   { code: 'en', name: 'English' },
-  { code: 'fa', name: 'Farsi' },
+  { code: 'fa', name: 'Persian' },
   { code: 'fr', name: 'French' }
 ])
 
@@ -344,9 +344,8 @@ describe('LanguageSelector', () => {
     const wrapper = mountSelector({ provider: 'deepl', sourceLanguage: 'en', targetLanguage: 'fa' })
     await flushPromises()
 
-    // DeepL calls it 'Persian'; the canonical list calls it 'Farsi'
-    expect(wrapper.find('.ti-language-control-group--target option[value="fa"]').text()).toBe('Farsi')
-    expect(wrapper.find('.ti-language-control-group--source option[value="fa"]').text()).toBe('Farsi')
+    expect(wrapper.find('.ti-language-control-group--target option[value="fa"]').text()).toBe('Persian')
+    expect(wrapper.find('.ti-language-control-group--source option[value="fa"]').text()).toBe('Persian')
     wrapper.unmount()
   })
 
@@ -370,7 +369,7 @@ describe('LanguageSelector', () => {
     const wrapper = mountSelector({ provider: 'deepl', sourceLanguage: 'en', targetLanguage: 'fa' })
     await flushPromises()
 
-    expect(wrapper.find('.ti-language-control-group--target option[value="fa"]').text()).toBe('Farsi (deepl_beta_label)')
+    expect(wrapper.find('.ti-language-control-group--target option[value="fa"]').text()).toBe('Persian (deepl_beta_label)')
     wrapper.unmount()
   })
 
@@ -383,7 +382,7 @@ describe('LanguageSelector', () => {
 
     const option = wrapper.find('.ti-language-control-group--target option[value="fa"]')
     expect(option.exists()).toBe(true)
-    expect(option.text()).toBe('Farsi')
+    expect(option.text()).toBe('Persian')
     wrapper.unmount()
   })
 

@@ -1,7 +1,7 @@
 {
-  "name": "Farsi",
+  "name": "Persian",
   "voiceCode": "fa-IR",
-  "promptName": "Farsi",
+  "promptName": "Persian",
   "code": "fa",
   "locale": "fa",
   "flagCode": "ir"

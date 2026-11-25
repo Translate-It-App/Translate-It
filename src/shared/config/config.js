@@ -495,7 +495,7 @@ Hello
 
 Goodbye
 
-Example Output (for Farsi):
+Example Output (for Persian):
 سلام
 
 
