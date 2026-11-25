@@ -383,7 +383,7 @@ export function getCanonicalCode(code) {
   const stripped = lower.replace(/[-_]/g, '');
   
   // Only apply mapping if we have a specific rule for this variation
-  if (CANONICAL_CODE_MAP[stripped]) {
+  if (Object.prototype.hasOwnProperty.call(CANONICAL_CODE_MAP, stripped)) {
     return CANONICAL_CODE_MAP[stripped];
   }
   
@@ -485,7 +485,7 @@ const AI_ENHANCED_LANGUAGE_MAPPINGS = {
   'lzh': 'Chinese (Literary / Classical)',
   'yue': 'Cantonese (Traditional Script)',
   'he': 'Hebrew (Modern)',
-  'fa': 'Persian (Farsi)',
+  'fa': 'Persian',
 };
 
 // Utility function to convert language code to language name (for AI providers)

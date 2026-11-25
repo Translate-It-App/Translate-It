@@ -2,12 +2,12 @@
 
 import { getAvailableLanguageCodes } from './LanguagePackLoader.js';
 import { lazyLoadTranslationLanguage, preloadUserLanguages, getLanguageDataLazy } from './LazyLanguageLoader.js';
-import { getCanonicalCode } from '@/shared/config/languageConstants.js';
+import { getCanonicalCode, LANGUAGE_NAME_TO_CODE_MAP } from '@/shared/config/languageConstants.js';
 
 // A minimal list of languages for UI elements to avoid loading all language data.
 export const basicLanguageList = [
   { code: "en", name: "English" },
-  { code: "fa", name: "Farsi" },
+  { code: "fa", name: "Persian" },
   { code: "de", name: "German" },
   { code: "fr", name: "French" },
   { code: "zh-cn", name: "Chinese (Simplified)" },
@@ -23,6 +23,11 @@ export const basicLanguageList = [
 
 // Cache for loaded language data (now managed by LanguagePackLoader)
 const languageCache = new Map();
+
+function getPersianAliasCode(name) {
+  if (!Object.prototype.hasOwnProperty.call(LANGUAGE_NAME_TO_CODE_MAP, name)) return null;
+  return LANGUAGE_NAME_TO_CODE_MAP[name] === 'fa' ? 'fa' : null;
+}
 
 /**
  * Dynamically imports the data for a specific language using lazy loading.
@@ -69,7 +74,11 @@ export async function getFullLanguageList() {
 export async function getLanguageCodeForTTS(languageName) {
   if (!languageName) return "en";
 
-  const lowerCaseName = languageName.toLowerCase();
+  const lowerCaseName = languageName.toLowerCase().trim();
+
+  // Resolve Persian aliases before loading, whose fallback is English.
+  const persianCode = getPersianAliasCode(lowerCaseName);
+  if (persianCode) return persianCode;
 
   // Quick check for code
   const canonicalCode = getCanonicalCode(lowerCaseName);
@@ -105,7 +114,10 @@ export async function getLanguageByCode(code, type = 'translation') {
  * @returns {Promise<Object|null>} The language object or null.
  */
 export async function getLanguageByName(name) {
-    const lowerCaseName = name.toLowerCase();
+    if (!name) return null;
+    const lowerCaseName = name.toLowerCase().trim();
+    const code = getPersianAliasCode(lowerCaseName);
+    if (code) return getLanguageData(code);
     const fullList = await getFullLanguageList();
     return fullList.find(lang => lang.name.toLowerCase() === lowerCaseName);
 }
@@ -123,6 +135,10 @@ export async function findLanguageCode(identifier) {
   if (['auto', 'auto-detect'].includes(lowerIdentifier)) {
       return 'auto';
   }
+
+  // Resolve Persian aliases before loading, whose fallback is English.
+  const persianCode = getPersianAliasCode(lowerIdentifier);
+  if (persianCode) return persianCode;
 
   // Try to get by code first
   let lang = await getLanguageData(lowerIdentifier);

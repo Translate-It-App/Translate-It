@@ -74,7 +74,7 @@ vi.mock('@/composables/shared/useLanguages.js', () => ({
   useLanguages: () => ({
     allLanguages: ref([
       { code: 'en', name: 'English' },
-      { code: 'fa', name: 'Farsi' },
+      { code: 'fa', name: 'Persian' },
       { code: 'de', name: 'German' }
     ]),
     loadLanguages: vi.fn().mockResolvedValue(),
@@ -492,11 +492,10 @@ describe('LanguagesTab.vue - DeepL language metadata', () => {
     const wrapper = mountTab();
     await flushPromises();
 
-    // DeepL calls it 'Persian'; the canonical list calls it 'Farsi'
     const source = dropdownProps(wrapper, 'SOURCE_LANGUAGE').languages;
     const target = dropdownProps(wrapper, 'TARGET_LANGUAGE').languages;
-    expect(source.find(language => language.code === 'fa')).toMatchObject({ name: 'Farsi' });
-    expect(target.find(language => language.code === 'fa')).toMatchObject({ name: 'Farsi' });
+    expect(source.find(language => language.code === 'fa')).toMatchObject({ name: 'Persian' });
+    expect(target.find(language => language.code === 'fa')).toMatchObject({ name: 'Persian' });
   });
 
   it('keeps the official DeepL name for a regional variant without an exact canonical match', async () => {
@@ -529,7 +528,7 @@ describe('LanguagesTab.vue - DeepL language metadata', () => {
     await flushPromises();
 
     const target = dropdownProps(wrapper, 'TARGET_LANGUAGE').languages;
-    expect(target.find(language => language.code === 'fa')).toMatchObject({ name: 'Farsi', isBeta: true, status: 'beta' });
+    expect(target.find(language => language.code === 'fa')).toMatchObject({ name: 'Persian', isBeta: true, status: 'beta' });
   });
 
   it('backfills a preserved selection with the canonical name instead of the raw code', async () => {
@@ -546,7 +545,7 @@ describe('LanguagesTab.vue - DeepL language metadata', () => {
     const target = dropdownProps(wrapper, 'TARGET_LANGUAGE').languages;
     const kept = target.find(language => language.code === 'fa');
     expect(kept).toBeDefined();
-    expect(kept.name).toBe('Farsi');
+    expect(kept.name).toBe('Persian');
   });
 
   it('backfills a direction-unsupported selection with the official DeepL name when no canonical match exists', async () => {
@@ -585,7 +584,7 @@ describe('LanguagesTab.vue - DeepL language metadata', () => {
     // API order; DeepL-only variants keep relative API order at the tail.
     const target = dropdownProps(wrapper, 'TARGET_LANGUAGE').languages;
     expect(target.map(language => language.code)).toEqual(['en', 'fa', 'de', 'pt-BR', 'en-GB']);
-    expect(target.find(language => language.code === 'fa').name).toBe('Farsi');
+    expect(target.find(language => language.code === 'fa').name).toBe('Persian');
 
     // Auto-Detect stays first in Source, then the same canonical ordering.
     const source = dropdownProps(wrapper, 'SOURCE_LANGUAGE').languages;

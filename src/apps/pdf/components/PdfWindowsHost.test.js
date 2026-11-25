@@ -973,7 +973,7 @@ describe('PdfWindowsHost', () => {
     expect(wrapper.find('[data-testid="translation-window-toolbar-target-language"]').exists()).toBe(false)
     const targetBadge = wrapper.get('[data-testid="translation-window-footer-target-language"]')
     expect(targetBadge.exists()).toBe(true)
-    expect(targetBadge.text()).toBe('Persian (Farsi)')
+    expect(targetBadge.text()).toBe('Persian')
 
     await wrapper.setProps({ pdfTargetLanguage: 'ja' })
     sendRegularMessageMock.mockResolvedValueOnce({
@@ -1055,7 +1055,7 @@ describe('PdfWindowsHost', () => {
 
     const badge = wrapper.get('[data-testid="translation-window-footer-detected-language"]')
     expect(badge.exists()).toBe(true)
-    expect(badge.text()).toBe('Persian (Farsi)')
+    expect(badge.text()).toBe('Persian')
   })
 
   it('hides the detected language badge for missing or auto source language values', async () => {
@@ -1165,7 +1165,7 @@ describe('PdfWindowsHost', () => {
     expect(wrapper.get('[data-testid="pdf-windows-host-result"]').text()).toContain('Provider initial result')
     expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('English')
     expect(wrapper.find('[data-testid="translation-window-toolbar-target-language"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian (Farsi)')
+    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian')
 
     const providerSelect = wrapper.get('[data-testid="translation-window-toolbar-provider-select"]')
     await providerSelect.setValue('deepl')
@@ -1180,7 +1180,7 @@ describe('PdfWindowsHost', () => {
     expect(storageSetMock).not.toHaveBeenCalled()
     expect(globalThis.__pdfWindowsHostStorageState.pdfWindowsHostLayout).toBeDefined()
     expect(wrapper.find('[data-testid="translation-window-toolbar-target-language"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian (Farsi)')
+    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian')
 
     sendRegularMessageMock.__resolveProviderChange({
       success: true,
@@ -1191,8 +1191,8 @@ describe('PdfWindowsHost', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="pdf-windows-host-result"]').text()).toContain('Provider updated result')
-    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian (Farsi)')
-    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian (Farsi)')
+    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian')
+    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian')
     expect(sendRegularMessageMock).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         provider: 'deepl',
@@ -1459,7 +1459,7 @@ describe('PdfWindowsHost', () => {
     expect(wrapper.find('[data-testid="pdf-windows-host-result"]').text()).toContain('Stale result')
     expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('English')
     expect(wrapper.find('[data-testid="translation-window-toolbar-target-language"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian (Farsi)')
+    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian')
 
     const providerSelector = wrapper.findComponent({ name: 'ProviderSelector' })
     providerSelector.vm.$emit('update:modelValue', 'deepl')
@@ -1482,8 +1482,8 @@ describe('PdfWindowsHost', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="pdf-windows-host-result"]').text()).toContain('Translated after provider change')
-    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian (Farsi)')
-    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian (Farsi)')
+    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian')
+    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian')
   })
 
   it('keeps the window open for teleported provider dropdown interactions and retriggers translation', async () => {
@@ -1538,7 +1538,7 @@ describe('PdfWindowsHost', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="pdf-windows-host-result"]').text()).toContain('Dropdown provider updated')
-    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian (Farsi)')
+    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian')
 
     document.body.removeChild(dropdownMenu)
   })
@@ -1796,8 +1796,8 @@ describe('PdfWindowsHost', () => {
     await wrapper.get('[data-testid="translation-window-footer-retry"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian (Farsi)')
-    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian (Farsi)')
+    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian')
+    expect(wrapper.get('[data-testid="translation-window-footer-target-language"]').text()).toBe('Persian')
   })
 
   it('copies a normal markdown translation as cleaned plain text', async () => {
@@ -2201,7 +2201,7 @@ describe('PdfWindowsHost', () => {
     expect(wrapper.get('[data-testid="pdf-windows-host-icon-stage"]').isVisible()).toBe(false)
     expect(wrapper.find('[data-testid="pdf-windows-host"]').exists()).toBe(true)
     expect(sendRegularMessageMock).toHaveBeenCalledTimes(1)
-    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian (Farsi)')
+    expect(wrapper.get('[data-testid="translation-window-footer-detected-language"]').text()).toBe('Persian')
   })
 
   it('drags the floating window and persists positions by fingerprint and global fallback', async () => {
