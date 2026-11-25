@@ -9,6 +9,7 @@ import {
   TranslationMode, 
   getModeProvidersAsync, 
   getTranslationApiAsync, 
+  getProviderSettingsAsync,
   getPopupMaxCharsAsync,
   getSidepanelMaxCharsAsync,
   getSelectionMaxCharsAsync,
@@ -20,6 +21,8 @@ import { UnifiedResultDispatcher } from './UnifiedResultDispatcher.js';
 import { UnifiedModeCoordinator } from './UnifiedModeCoordinator.js';
 import { statsManager } from '@/features/translation/core/TranslationStatsManager.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
+import { findProviderById } from '@/features/translation/providers/ProviderManifest.js';
+import { getProviderModeValidationError, resolveModeProvider } from '@/features/translation/utils/providerSelection.js';
 import { isEligibleForDictionaryUpgrade } from '@/features/translation/utils/translationModeHelper.js';
 import {
   appendTranslationDiagnostic,
@@ -82,7 +85,14 @@ export class UnifiedTranslationService {
     }
 
     const modeProviders = await getModeProvidersAsync();
-    const modeSpecificProvider = modeProviders ? modeProviders[data.mode] : null;
+    const modeSpecificProvider = resolveModeProvider(
+      data.mode,
+      modeProviders,
+      null,
+      TranslationMode.Dictionary_Translation,
+      TranslationMode.Selection,
+      null
+    );
 
     // 2. Feature-Specific Setting (e.g., Dictionary, Page Translation)
     if (modeSpecificProvider && modeSpecificProvider !== 'default') {
@@ -203,16 +213,27 @@ export class UnifiedTranslationService {
     try {
       if (data) {
         let effectiveMode = data.mode || TranslationMode.Selection;
-        if (await isEligibleForDictionaryUpgrade(data.text, effectiveMode, data)) {
-          logger.debug(`[UnifiedTranslationService] Detected single word, using dictionary mode for provider resolution.`);
-          effectiveMode = TranslationMode.Dictionary_Translation;
-        }
         const suppressed = suppressIfTerminal();
         if (suppressed) return suppressed;
 
+        if (!data.isExplicitProvider && effectiveMode !== TranslationMode.Dictionary_Translation
+          && await isEligibleForDictionaryUpgrade(data.text, effectiveMode, data)) {
+          effectiveMode = TranslationMode.Dictionary_Translation;
+        }
         const provider = await this._resolveEffectiveProvider({ ...data, mode: effectiveMode }, context);
         const providerSuppressed = suppressIfTerminal();
         if (providerSuppressed) return providerSuppressed;
+        const manifest = findProviderById(provider);
+        const providerSettings = await getProviderSettingsAsync(manifest?.requiredSettings || []);
+        const settingsSuppressed = suppressIfTerminal();
+        if (settingsSuppressed) return settingsSuppressed;
+        const validationError = getProviderModeValidationError(provider, effectiveMode, providerSettings);
+        if (validationError) {
+          validationError.type ||= ErrorTypes.VALIDATION;
+          const suppressed = failPreparation(validationError);
+          if (suppressed) return suppressed;
+          return MessageFormat.createErrorResponse(validationError, messageId);
+        }
         data.provider = provider;
         if (request.data) request.data.provider = provider;
         if (request.metadata) request.metadata.provider = provider;

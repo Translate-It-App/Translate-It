@@ -402,6 +402,92 @@ describe("useUnifiedTranslation", () => {
     expect(provider.value).toBe('deepl');
   });
 
+  it('restores same-as-default manual selection and marks ordinary requests non-explicit', async () => {
+    const provider = ref('google_v2');
+    const isExplicitProvider = ref(false);
+    sessionMocks.load.mockResolvedValue({
+      draftSource: 'hello',
+      provider: 'google_v2',
+      isExplicitProvider: true,
+      revision: 1,
+      completedTranslation: null,
+    });
+    const [composable] = withSetup(() => useUnifiedTranslation('popup', { provider, isExplicitProvider }));
+    const { sendMessage } = await import('@/shared/messaging/core/UnifiedMessaging.js');
+    sendMessage.mockResolvedValue({
+      success: true,
+      translatedText: 'bonjour',
+      sourceLanguage: 'en',
+      targetLanguage: 'fr',
+    });
+
+    await composable.initializeSessionState();
+    expect(isExplicitProvider.value).toBe(true);
+    await composable.triggerTranslation();
+    expect(sendMessage.mock.calls[0][0].data).toMatchObject({
+      provider: 'google_v2',
+      isExplicitProvider: true,
+    });
+
+    const [automatic] = withSetup(() => useUnifiedTranslation('popup'));
+    automatic.sourceText.value = 'hello';
+    await automatic.triggerTranslation();
+    expect(sendMessage.mock.calls[1][0].data.isExplicitProvider).toBe(false);
+  });
+
+  it('persists and restores manual intent when the selected provider is unchanged', async () => {
+    const provider = ref('google_v2');
+    const isExplicitProvider = ref(false);
+    sessionMocks.load.mockResolvedValue({
+      draftSource: 'hello',
+      provider: 'google_v2',
+      isExplicitProvider: false,
+      revision: 1,
+      completedTranslation: null,
+    });
+    const [composable] = withSetup(() => useUnifiedTranslation('popup', { provider, isExplicitProvider }));
+    await composable.initializeSessionState();
+
+    isExplicitProvider.value = true;
+    await nextTick();
+    await Promise.resolve();
+
+    const snapshot = sessionMocks.save.mock.lastCall[1];
+    expect(snapshot).toMatchObject({
+      provider: 'google_v2',
+      isExplicitProvider: true,
+    });
+
+    sessionMocks.load.mockResolvedValue(snapshot);
+    const restoredProvider = ref('google_v2');
+    const restoredExplicitProvider = ref(false);
+    const [restored] = withSetup(() => useUnifiedTranslation('popup', {
+      provider: restoredProvider,
+      isExplicitProvider: restoredExplicitProvider,
+    }));
+    await restored.initializeSessionState();
+    expect(restoredExplicitProvider.value).toBe(true);
+  });
+
+  it('restores inherited provider intent using the current global provider', async () => {
+    const provider = ref('google_v2');
+    const isExplicitProvider = ref(false);
+    sessionMocks.load.mockResolvedValue({
+      draftSource: 'hello',
+      provider: 'google_v2',
+      isExplicitProvider: false,
+      revision: 1,
+      completedTranslation: null,
+    });
+    const [composable] = withSetup(() => useUnifiedTranslation('sidepanel', { provider, isExplicitProvider }));
+    useSettingsStore().settings.TRANSLATION_API = 'edge';
+
+    await composable.initializeSessionState();
+
+    expect(provider.value).toBe('edge');
+    expect(isExplicitProvider.value).toBe(false);
+  });
+
   it('restores sidepanel session languages from its snapshot', async () => {
     sessionMocks.load.mockResolvedValue({
       draftSource: 'Sidepanel draft',

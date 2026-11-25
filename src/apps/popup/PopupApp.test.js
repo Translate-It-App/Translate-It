@@ -336,6 +336,14 @@ describe('PopupApp', () => {
 
     expect(useUnifiedTranslationMock).toHaveBeenCalledTimes(1)
     expect(wrapper.findComponent({ name: 'TranslationView' }).props('translation')).toBe(mockUnifiedTranslation)
+    const options = useUnifiedTranslationMock.mock.calls[0][1]
+    expect(options.provider.value).toBe('google')
+    expect(options.isExplicitProvider.value).toBe(false)
+
+    wrapper.findComponent({ name: 'TranslationView' }).vm.$emit('update:currentProvider', 'edge')
+    await wrapper.vm.$nextTick()
+    expect(options.provider.value).toBe('edge')
+    expect(options.isExplicitProvider.value).toBe(true)
   })
 
   it('waits for a successful clear before focusing source and dispatches clear-storage once', async () => {

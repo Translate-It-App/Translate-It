@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { ref, onMounted, onUnmounted } from 'vue'
+import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -155,7 +155,7 @@ vi.mock('@/components/base/ToolbarMenu/ToolbarMenu.vue', () => ({
 vi.mock('@/features/page-translation/components/PageTranslationButton.vue', () => ({
   default: {
     name: 'PageTranslationButton',
-    props: ['compact', 'textOnly', 'targetLanguage', 'disabled', 'showAutoTranslateToggle', 'statusBadgePosition'],
+    props: ['compact', 'textOnly', 'targetLanguage', 'disabled', 'disabledReason', 'showAutoTranslateToggle', 'statusBadgePosition'],
     template: '<div class="page-translation-button-stub" />'
   }
 }))
@@ -185,14 +185,14 @@ describe('PopupHeader', () => {
     sidebarToggle = vi.fn()
     sidebarOpen = vi.fn().mockResolvedValue(undefined)
     globalThis.browser.sidebarAction = { toggle: sidebarToggle, open: sidebarOpen }
-    settings = {
+    settings = reactive({
       EXTENSION_ENABLED: true,
       TRANSLATE_WITH_SELECT_ELEMENT: true,
       ENABLE_SCREEN_CAPTURE: true,
       WHOLE_PAGE_TRANSLATION_ENABLED: true,
       MODE_PROVIDERS: {},
       TRANSLATION_API: 'google'
-    }
+    })
   })
 
   afterEach(() => {
@@ -402,6 +402,42 @@ describe('PopupHeader', () => {
     // Unsupported: the Select button explains itself and stays disabled.
     expect(wrapper.find('.ti-btn-select').attributes('title')).toBe('This provider does not support page/element translation')
     expect(wrapper.find('.ti-btn-select').attributes('disabled')).toBeDefined()
+  })
+
+  it('allows an active Select session to deactivate after provider validation becomes invalid', async () => {
+    mockSelectModeHolder.ref.value = true
+    mockFindProviderById.mockReturnValue({
+      features: ['bulk'],
+      requiredSettings: ['GEMINI_API_KEY'],
+    })
+    settings.TRANSLATION_API = 'gemini'
+    settings.GEMINI_API_KEY = 'valid-key'
+    mockToggleSelectElement.mockResolvedValue(true)
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+
+    const select = wrapper.get('.ti-btn-select')
+    expect(select.attributes('disabled')).toBeUndefined()
+    settings.GEMINI_API_KEY = ''
+    await wrapper.vm.$nextTick()
+    expect(select.attributes('disabled')).toBeUndefined()
+    expect(select.attributes('title')).toBe('Select Element mode')
+    await select.trigger('click')
+    expect(mockToggleSelectElement).toHaveBeenCalledOnce()
+  })
+
+  it('passes a localized missing-key error to the disabled page button', async () => {
+    settings.TRANSLATION_API = 'gemini'
+    mockFindProviderById.mockReturnValue({
+      features: ['bulk'],
+      requiredSettings: ['GEMINI_API_KEY'],
+    })
+    const wrapper = mount(PopupHeader)
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findComponent({ name: 'PageTranslationButton' }).props('disabledReason'))
+      .toBe('ERRORS_API_KEY_MISSING')
+    expect(mockT).toHaveBeenCalledWith('ERRORS_API_KEY_MISSING', 'ERRORS_API_KEY_MISSING')
   })
 
   it('passes compact mode to the page translation button', async () => {

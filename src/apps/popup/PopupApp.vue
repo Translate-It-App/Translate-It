@@ -81,7 +81,7 @@
               @can-translate-change="canTranslateFromForm = $event"
               @update:source-language="sourceLanguage = $event"
               @update:target-language="targetLanguage = $event"
-              @update:current-provider="currentProvider = $event"
+              @update:current-provider="handleProviderChange"
             />
           </div>
           <div
@@ -157,7 +157,8 @@ const { sendMessage } = useMessaging(MessageContexts.POPUP)
 const { handleError } = useErrorHandler()
 const { t } = useUnifiedI18n()
 const currentProvider = ref('')
-const translation = useUnifiedTranslation('popup', { provider: currentProvider });
+const isExplicitProvider = ref(false)
+const translation = useUnifiedTranslation('popup', { provider: currentProvider, isExplicitProvider });
 const {
   sourceLanguage,
   targetLanguage,
@@ -282,6 +283,11 @@ const handleTranslate = (data) => {
     const providerId = data?.provider || currentProvider.value;
     activeForm.triggerTranslation(providerId);
   }
+}
+
+const handleProviderChange = (provider) => {
+  currentProvider.value = provider
+  isExplicitProvider.value = true
 }
 
 /**

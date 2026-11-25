@@ -98,7 +98,7 @@
       <div class="ti-m-actions-row">
         <div class="ti-m-provider-wrapper">
           <ProviderSelector
-            v-model="currentProvider"
+            v-model="currentProviderModel"
             mode="mobile"
             :is-global="false"
             :show-sync="false"
@@ -235,6 +235,14 @@ const targetLang = ref(
     "fa",
 );
 const currentProvider = ref(settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API);
+const isExplicitProvider = ref(false);
+const currentProviderModel = computed({
+  get: () => currentProvider.value,
+  set: (provider) => {
+    currentProvider.value = provider;
+    isExplicitProvider.value = true;
+  },
+});
 const isLoading = ref(false);
 const currentMessageId = ref(null);
 const resultText = ref(
@@ -265,8 +273,10 @@ watch(
       if (!mobileStore.selectionData.text) {
         sourceLang.value = settingsStore.settings.SOURCE_LANGUAGE || "auto";
         targetLang.value = settingsStore.settings.TARGET_LANGUAGE || "fa";
-        currentProvider.value =
-          settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API;
+        if (!isExplicitProvider.value) {
+          currentProvider.value =
+            settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API;
+        }
       }
     }
   },
@@ -355,7 +365,7 @@ const handleTranslate = async () => {
       sourceLanguage: sourceLang.value,
       targetLanguage: targetLang.value,
       provider: currentProvider.value,
-      isExplicitProvider: true,
+      isExplicitProvider: isExplicitProvider.value,
       mode: TranslationMode.Mobile_Translate,
       messageId: currentMessageId.value,
     };

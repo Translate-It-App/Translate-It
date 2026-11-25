@@ -272,6 +272,10 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  disabledReason: {
+    type: String,
+    default: '',
+  },
   showAutoTranslateToggle: {
     type: Boolean,
     default: false
@@ -405,7 +409,7 @@ const restoreButtonText = computed(() => {
 
 const translateButtonTitle = computed(() => {
   if (props.disabled) {
-    return t('provider_does_not_support_bulk') || 'This provider does not support page/element translation';
+    return props.disabledReason || t('provider_does_not_support_bulk') || 'This provider does not support page/element translation';
   }
   if (!canTranslate.value) {
     return isTranslating.value || isAutoTranslating.value ? t('page_translation_tooltip_in_progress', 'Translation in progress...') : t('page_translation_tooltip_translate', 'Translate entire page');

@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { reactive } from 'vue'
 import SidepanelLayout from './SidepanelLayout.vue'
 
 const mocks = vi.hoisted(() => ({
+  settings: { TRANSLATION_API: 'googlev2' },
   openHistoryPanel: vi.fn(),
   closeHistoryPanel: vi.fn(),
   setHistoryPanelOpen: vi.fn(),
@@ -12,10 +14,14 @@ const mocks = vi.hoisted(() => ({
   addListener: vi.fn(),
   removeListener: vi.fn()
 }))
+const settings = reactive(mocks.settings)
 
-vi.mock('@/features/settings/stores/settings.js', () => ({
-  useSettingsStore: () => ({ isInitialized: true, settings: { TRANSLATION_API: 'googlev2' }, loadSettings: mocks.loadSettings })
-}))
+vi.mock('@/features/settings/stores/settings.js', async () => {
+  const { reactive: makeReactive } = await import('vue')
+  return {
+    useSettingsStore: () => ({ isInitialized: true, settings: makeReactive(mocks.settings), loadSettings: mocks.loadSettings })
+  }
+})
 
 vi.mock('@/features/translation/stores/translation.js', () => ({
   useTranslationStore: () => ({ currentTranslation: null })
@@ -37,6 +43,8 @@ vi.mock('./components/SidepanelHistory.vue', () => ({ default: { name: 'Sidepane
 vi.mock('./components/SidepanelToolbar.vue', () => ({ default: { template: '<div />' } }))
 vi.mock('./components/SidepanelMainContent.vue', () => ({
   default: {
+    props: ['provider', 'isExplicitProvider'],
+    emits: ['update:provider', 'update:isExplicitProvider'],
     template: '<div />',
     methods: { initializeSessionState: vi.fn().mockResolvedValue(undefined) }
   }
@@ -49,6 +57,7 @@ describe('SidepanelLayout pending history intent', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    settings.TRANSLATION_API = 'googlev2'
     sessionData = {}
     mocks.sessionGet.mockImplementation(async (key) => ({ [key]: sessionData[key] }))
     mocks.sessionRemove.mockImplementation(async (key) => { delete sessionData[key] })
@@ -106,6 +115,45 @@ describe('SidepanelLayout pending history intent', () => {
     expect(mocks.sessionGet).toHaveBeenCalledWith(intentKey(7))
     expect(mocks.sessionRemove).not.toHaveBeenCalled()
     expect(sessionData[intentKey(8)]).toEqual({ action: 'open-history' })
+    wrapper.unmount()
+  })
+
+  it('clears an explicit provider override when the global provider changes during a session', async () => {
+    const wrapper = mount(SidepanelLayout)
+    await flushPromises()
+    const content = wrapper.findComponent({ name: 'SidepanelMainContent' })
+
+    content.vm.$emit('update:provider', 'manual-provider')
+    content.vm.$emit('update:isExplicitProvider', true)
+    await wrapper.vm.$nextTick()
+    expect(content.props()).toMatchObject({
+      provider: 'manual-provider',
+      isExplicitProvider: true,
+    })
+
+    settings.TRANSLATION_API = 'edge'
+    await flushPromises()
+
+    expect(content.props()).toMatchObject({
+      provider: 'edge',
+      isExplicitProvider: false,
+    })
+    wrapper.unmount()
+  })
+
+  it('preserves a manual override when the global provider does not change', async () => {
+    const wrapper = mount(SidepanelLayout)
+    await flushPromises()
+    const content = wrapper.findComponent({ name: 'SidepanelMainContent' })
+
+    content.vm.$emit('update:provider', 'manual-provider')
+    content.vm.$emit('update:isExplicitProvider', true)
+    await wrapper.vm.$nextTick()
+
+    expect(content.props()).toMatchObject({
+      provider: 'manual-provider',
+      isExplicitProvider: true,
+    })
     wrapper.unmount()
   })
 })

@@ -16,6 +16,9 @@ const { openOptionsPageMock, useSubtitleTranslationMock } = vi.hoisted(() => ({
 const { loggerErrorMock } = vi.hoisted(() => ({
   loggerErrorMock: vi.fn(),
 }));
+const { providerValidationMock } = vi.hoisted(() => ({
+  providerValidationMock: vi.fn(() => null),
+}));
 
 vi.mock('@/core/helpers.js', () => ({
   openOptionsPage: (...args) => openOptionsPageMock(...args),
@@ -63,6 +66,9 @@ vi.mock('@/features/translation/providers/ProviderManifest.js', () => ({
 
 vi.mock('@/features/translation/utils/providerValidator.js', () => ({
   isProviderConfigured: vi.fn(() => true),
+}));
+vi.mock('@/features/translation/utils/providerSelection.js', () => ({
+  getProviderModeValidationError: providerValidationMock,
 }));
 
 vi.mock('@/utils/ui/theme.js', () => ({
@@ -140,6 +146,7 @@ describe('SubtitleApp', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    providerValidationMock.mockReset().mockReturnValue(null);
     loggerErrorMock.mockReset();
     subtitleState = {
       status: ref('idle'),
@@ -149,6 +156,7 @@ describe('SubtitleApp', () => {
       currentFile: ref(null),
       cues: ref([]),
       startTranslation: vi.fn(),
+      presentError: vi.fn(),
       cancelTranslation: vi.fn(),
       downloadResult: vi.fn(),
       cleanup: vi.fn(),
@@ -304,6 +312,25 @@ describe('SubtitleApp', () => {
     await buttons[0].trigger('click');
     expect(subtitleState.status.value).toBe('idle');
 
+    wrapper.unmount();
+  });
+
+  it.each([
+    ['incompatible', Object.assign(new Error('provider unsupported'), { type: 'VALIDATION' })],
+    ['unconfigured', Object.assign(new Error('API_KEY_MISSING'), { type: 'API_KEY_MISSING' })],
+  ])('does not start translation for a %s provider and presents its typed error', async (_kind, error) => {
+    providerValidationMock.mockReturnValue(error);
+    const wrapper = mountSubtitleApp();
+    await flushPromises();
+    await wrapper.find('button.subtitle-dropzone-stub').trigger('click');
+    await flushPromises();
+    wrapper.vm.config.sourceLanguage = 'fr';
+    wrapper.vm.config.targetLanguage = 'en';
+    await nextTick();
+    await wrapper.find('.primary-btn').trigger('click');
+
+    expect(subtitleState.startTranslation).not.toHaveBeenCalled();
+    expect(subtitleState.presentError).toHaveBeenCalledWith(error);
     wrapper.unmount();
   });
 });

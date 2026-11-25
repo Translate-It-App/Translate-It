@@ -457,7 +457,10 @@ import ExclusionChecker from "@/features/exclusion/core/ExclusionChecker.js";
 import PageTranslationStatus from "@/components/shared/PageTranslationStatus.vue";
 import { deviceDetector } from "@/utils/browser/compatibility.js";
 import { getLanguageNameFromCode } from "@/shared/config/languageConstants.js";
-import { findProviderById } from "@/features/translation/providers/ProviderManifest.js";
+import {
+  getProviderModeValidationError,
+  getProviderModeValidationMessage,
+} from "@/features/translation/utils/providerSelection.js";
 import { useAutoTranslateRules } from "@/features/page-translation/composables/useAutoTranslateRules.js";
 import {
   addDesktopFabExclusion,
@@ -706,17 +709,22 @@ const handleMouseLeave = () => {
 /**
  * Checks if the provider for a specific mode supports bulk operations
  */
-const supportsBulk = (mode) => {
+const getModeValidationError = (mode) => {
   const providerId = settingsStore.getEffectiveProvider(mode);
-  const provider = findProviderById(providerId);
-  return provider?.features?.includes("bulk") ?? true;
+  return getProviderModeValidationError(providerId, mode, settingsStore.settings);
 };
 
+const selectElementValidationError = computed(() =>
+  getModeValidationError(TranslationMode.Select_Element),
+);
+const pageTranslationValidationError = computed(() =>
+  getModeValidationError(TranslationMode.Page),
+);
 const isSelectElementSupported = computed(() =>
-  supportsBulk(TranslationMode.Select_Element),
+  !selectElementValidationError.value,
 );
 const isPageTranslationSupported = computed(() =>
-  supportsBulk(TranslationMode.Page),
+  !pageTranslationValidationError.value,
 );
 
 const currentUrlStr = computed(() =>
@@ -1016,8 +1024,7 @@ const menuItems = computed(() => {
       id: "select_element",
       label: t("desktop_fab_select_element_label"),
       tooltip: !isSelectElementSupported.value
-        ? t("provider_does_not_support_bulk") ||
-          "این سرویس از حالت انتخاب المان پشتیبانی نمی‌کند"
+        ? getProviderModeValidationMessage(selectElementValidationError.value, t)
         : "",
       icon: IconSelectElement,
       disabled: !isSelectElementSupported.value,
@@ -1115,8 +1122,7 @@ const menuItems = computed(() => {
       id: "translate_page",
       label: t("desktop_fab_translate_page_label"),
       tooltip: !isPageTranslationSupported.value
-        ? t("provider_does_not_support_bulk") ||
-          "این سرویس از ترجمه صفحه پشتیبانی نمی‌کند"
+        ? getProviderModeValidationMessage(pageTranslationValidationError.value, t)
         : "",
       icon: IconTranslatePage,
       disabled: !isPageTranslationSupported.value,

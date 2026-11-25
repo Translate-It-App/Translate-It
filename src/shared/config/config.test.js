@@ -159,7 +159,7 @@ describe('Config Module', () => {
       expect(CONFIG.CUSTOM_API_MODEL).toBe('');
     });
 
-    it('uses CONFIG for missing generic providers but retains the bulk-capability fallback', async () => {
+    it('uses configured providers without cross-provider capability substitution', async () => {
       storageManager.get.mockImplementation(async (defaults) => {
         if (Object.hasOwn(defaults, 'MODE_PROVIDERS')) return { MODE_PROVIDERS: {} };
         return {};
@@ -171,7 +171,17 @@ describe('Config Module', () => {
           ? {}
           : 'vajehyab'
       }));
-      await expect(getEffectiveProviderAsync(TranslationMode.Page)).resolves.toBe('googlev2');
+      await expect(getEffectiveProviderAsync(TranslationMode.Page)).resolves.toBe('vajehyab');
+    });
+
+    it('uses Google V2 as the dedicated dictionary default and preserves explicit inheritance', async () => {
+      expect(CONFIG.MODE_PROVIDERS[TranslationMode.Dictionary_Translation]).toBe('googlev2');
+      storageManager.get.mockImplementation(async (defaults) => ({
+        [Object.keys(defaults)[0]]: Object.hasOwn(defaults, 'MODE_PROVIDERS')
+          ? { [TranslationMode.Dictionary_Translation]: null, [TranslationMode.Selection]: 'gemini' }
+          : 'edge'
+      }));
+      await expect(getEffectiveProviderAsync(TranslationMode.Dictionary_Translation)).resolves.toBe('gemini');
     });
 
     it('uses CONFIG when effective-provider lookup fails', async () => {

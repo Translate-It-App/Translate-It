@@ -11,8 +11,8 @@ import ExtensionContextManager from '@/core/extensionContext.js'
 import { runSettingsMigrations } from '@/shared/config/settingsMigrations.js'
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js'
 import { PROMPT_REGISTRY } from '@/shared/config/PromptRegistry.js'
-import { findProviderById } from '@/features/translation/providers/ProviderManifest.js'
 import { getFirstMissingSetting } from '@/features/translation/utils/providerValidator.js'
+import { resolveModeProvider } from '@/features/translation/utils/providerSelection.js'
 import {
   DEEPL_LANGUAGE_CATALOG_TTL_MS,
   fetchDeepLLanguageCatalogWithKeyFailover,
@@ -299,39 +299,17 @@ export const useSettingsStore = defineStore('settings', () => {
   
   /**
    * Helper to get the effective provider for a mode from reactive state.
-   * Follows the same logic as getEffectiveProviderAsync in config.js.
-   * Includes feature validation to ensure the provider is suitable for the mode.
+   * Follows the same selection precedence as getEffectiveProviderAsync in config.js.
    */
   const getEffectiveProvider = (mode) => {
-    const modeProviders = settings.value.MODE_PROVIDERS || {};
-    const globalApi = settings.value.TRANSLATION_API || CONFIG.TRANSLATION_API;
-    const capabilityFallback = ProviderRegistryIds.GOOGLE_V2;
-
-    let resolvedId = globalApi;
-
-    // 1. Direct mode-specific setting
-    if (mode && modeProviders[mode]) {
-      resolvedId = modeProviders[mode];
-    } 
-    // 2. Hierarchical Fallbacks
-    else if (mode === TranslationMode.Dictionary_Translation && modeProviders[TranslationMode.Selection]) {
-      resolvedId = modeProviders[TranslationMode.Selection];
-    }
-
-    // 3. Validation
-    const provider = findProviderById(resolvedId);
-    const needsBulk = [
-      TranslationMode.Page,
-      TranslationMode.PDF,
-      TranslationMode.Select_Element,
-      TranslationMode.Field
-    ].includes(mode);
-
-    if (needsBulk && provider && !provider.features?.includes('bulk')) {
-      return capabilityFallback;
-    }
-
-    return resolvedId;
+    return resolveModeProvider(
+      mode,
+      settings.value.MODE_PROVIDERS,
+      settings.value.TRANSLATION_API,
+      TranslationMode.Dictionary_Translation,
+      TranslationMode.Selection,
+      CONFIG.TRANSLATION_API
+    );
   };
 
   // Font settings getters

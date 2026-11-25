@@ -1,6 +1,5 @@
 // src/config.js
 import { ProviderRegistryIds, nameToRegistryId } from '@/features/translation/providers/ProviderConstants.js';
-import { findProviderById } from '@/features/translation/providers/ProviderManifest.js';
 import { storageManager } from '../storage/core/StorageCore.js';
 import ExtensionContextManager from '@/core/extensionContext.js';
 import { getScopedLogger } from '@/shared/logging/logger.js';
@@ -9,6 +8,7 @@ import { MessageContexts } from '@/shared/messaging/core/MessagingConstants.js';
 import { TRANSLATION_HTML, MOBILE_CONSTANTS, TTS_ENGINES } from './constants.js';
 import { isMobile } from '@/shared/utils/device.js';
 import { LIVE_DUBBING_PROVIDER_ID } from '@/features/live-dubbing/constants.js';
+import { resolveModeProvider } from '@/features/translation/utils/providerSelection.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.CONFIG, 'config');
 logger.info('Config module initialized');
@@ -122,7 +122,10 @@ export const CONFIG = {
 
   // --- Mode Specific Provider Settings (Generated Dynamically) ---
   MODE_PROVIDERS: Object.fromEntries(
-    Object.values(TranslationMode).map(mode => [mode, null])
+    Object.values(TranslationMode).map(mode => [
+      mode,
+      mode === TranslationMode.Dictionary_Translation ? ProviderRegistryIds.GOOGLE_V2 : null
+    ])
   ),
 
   API_KEY: "", // Gemini specific (deprecated, use GEMINI_API_KEY)
@@ -970,14 +973,21 @@ export const getModeProvidersAsync = async () => {
   return getSettingValueAsync("MODE_PROVIDERS", CONFIG.MODE_PROVIDERS);
 };
 
+export const getProviderSettingsAsync = async (keys = []) => {
+  const values = await Promise.all(keys.map(async key => [
+    key,
+    await getSettingValueAsync(key, CONFIG[key])
+  ]));
+  return Object.fromEntries(values);
+};
+
 /**
  * Resolves the effective provider for a specific translation mode.
  * Returns the mode-specific provider if configured, otherwise falls back 
  * to related modes (e.g., Dictionary -> Selection) or the global translation API.
  * 
- * Includes feature validation: If the resolved provider doesn't support 
- * the mode's requirements (e.g. Bulk for Page Translation), it falls back 
- * to the bulk-capability fallback (googlev2).
+ * Resolves the configured provider without substituting a different provider
+ * when it lacks a feature. Callers validate the selected provider's capability.
  * 
  * @param {string} mode - The translation mode (from TranslationMode enum)
  * @returns {Promise<string>} - The effective provider ID
@@ -989,39 +999,19 @@ export const getEffectiveProviderAsync = async (mode) => {
       getTranslationApiAsync()
     ]);
     
-    const capabilityFallback = ProviderRegistryIds.GOOGLE_V2;
-    let resolvedId = globalApi || CONFIG.TRANSLATION_API;
-    
-    // 1. Check direct mode-specific setting
-    if (mode && modeProviders && modeProviders[mode]) {
-      resolvedId = modeProviders[mode];
-    } 
-    // 2. Hierarchical Fallbacks
-    // Dictionary mode falls back to Selection provider if not explicitly set
-    else if (mode === TranslationMode.Dictionary_Translation && modeProviders?.[TranslationMode.Selection]) {
-      resolvedId = modeProviders[TranslationMode.Selection];
-    }
-    
-    // 3. Validation: Ensure the resolved provider supports the mode's requirements
-    const provider = findProviderById(resolvedId);
-    
-    // Mode-specific requirements
-    const needsBulk = [
-      TranslationMode.Page, 
-      TranslationMode.PDF,
-      TranslationMode.Select_Element, 
-      TranslationMode.Field
-    ].includes(mode);
-
-    if (needsBulk && provider && !provider.features?.includes('bulk')) {
-      logger.warn(`Resolved provider ${resolvedId} for mode ${mode} does not support bulk. Falling back to ${capabilityFallback}.`);
-      return capabilityFallback;
-    }
-    
-    return resolvedId;
+    return resolveModeProvider(
+      mode,
+      modeProviders,
+      globalApi,
+      TranslationMode.Dictionary_Translation,
+      TranslationMode.Selection,
+      CONFIG.TRANSLATION_API
+    );
   } catch (error) {
     logger.error(`Error resolving effective provider for mode ${mode}:`, error);
-    return CONFIG.TRANSLATION_API;
+    return mode === TranslationMode.Dictionary_Translation
+      ? CONFIG.MODE_PROVIDERS[TranslationMode.Dictionary_Translation]
+      : CONFIG.TRANSLATION_API;
   }
 };
 

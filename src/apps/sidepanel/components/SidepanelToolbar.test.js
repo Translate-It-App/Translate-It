@@ -3,7 +3,7 @@ import { mount } from '@vue/test-utils'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ref } from 'vue'
+import { reactive, ref } from 'vue'
 import SidepanelToolbar from './SidepanelToolbar.vue'
 import MaskIcon from '@/components/shared/MaskIcon.vue'
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js'
@@ -20,6 +20,7 @@ const reply = (status, extra = {}) => ({ success: true, status, url: TAB.url, ..
 const mocks = vi.hoisted(() => ({
   translations: {},
   settings: null,
+  selectActive: null,
   sendMessage: vi.fn(),
   showVisualFeedback: vi.fn(),
   toggleMouseHover: vi.fn(),
@@ -31,7 +32,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/features/translation/composables/useTranslationModes.js', () => ({
   useSelectElementTranslation: () => ({
-    isSelectModeActive: ref(false),
+    isSelectModeActive: mocks.selectActive || ref(false),
     activateSelectMode: mocks.activateSelectMode,
     deactivateSelectMode: mocks.deactivateSelectMode,
     isActivating: ref(false)
@@ -149,14 +150,15 @@ describe('SidepanelToolbar Desktop FAB toggle', () => {
 
   beforeEach(() => {
     mocks.translations = {}
-    mocks.settings = {
+    mocks.settings = reactive({
       EXTENSION_ENABLED: true,
       TRANSLATE_WITH_SELECT_ELEMENT: true,
       WHOLE_PAGE_TRANSLATION_ENABLED: true,
       ENABLE_SCREEN_CAPTURE: true,
       MODE_PROVIDERS: {},
       TRANSLATION_API: 'google'
-    }
+    })
+    mocks.selectActive = ref(false)
     mocks.sendMessage = vi.fn().mockResolvedValue({})
     mocks.showVisualFeedback.mockReset()
     mocks.toggleMouseHover.mockReset()
@@ -1130,6 +1132,29 @@ describe('SidepanelToolbar Desktop FAB toggle', () => {
       expect(mocks.activateSelectMode).not.toHaveBeenCalled()
     })
 
+    it('allows an active Select session to deactivate after provider validation becomes invalid', async () => {
+      mocks.selectActive.value = true
+      mocks.findProviderById.mockReturnValue({
+        features: ['bulk'],
+        requiredSettings: ['GEMINI_API_KEY'],
+      })
+      mocks.settings.TRANSLATION_API = 'gemini'
+      mocks.settings.GEMINI_API_KEY = 'valid-key'
+      await mountToolbar()
+
+      const select = wrapper.get('#selectElementBtn')
+      expect(select.attributes('disabled')).toBeUndefined()
+      expect(select.attributes('title')).toBe('SIDEPANEL_SELECT_ELEMENT_TOOLTIP')
+      mocks.settings.GEMINI_API_KEY = ''
+      await wrapper.vm.$nextTick()
+      expect(select.attributes('disabled')).toBeUndefined()
+      await select.trigger('click')
+      await drain()
+
+      expect(mocks.deactivateSelectMode).toHaveBeenCalledOnce()
+      expect(mocks.activateSelectMode).not.toHaveBeenCalled()
+    })
+
     it('pins type=button on both pair controls (no implicit submit)', async () => {
       await mountToolbar()
 
@@ -1145,7 +1170,7 @@ describe('SidepanelToolbar Desktop FAB toggle', () => {
       // The NAME stays the action in all states; the disabled reason lives
       // in title only, so AT users always hear the same control identity.
       expect(select.attributes('aria-label')).toBe('SIDEPANEL_SELECT_ELEMENT_TOOLTIP')
-      expect(select.attributes('title')).toBe('provider_does_not_support_bulk')
+      expect(select.attributes('title')).toBe('This provider does not support page/element translation')
       expect(select.attributes('title')).not.toBe(select.attributes('aria-label'))
       expect(select.attributes('disabled')).toBeDefined()
     })

@@ -1073,6 +1073,18 @@ describe('Settings Migrations', () => {
     expect(updates.MODE_PROVIDERS[TranslationMode.Page]).toBe(null);
   });
 
+  it('preserves explicit null for the Dictionary provider instead of replacing its inheritance choice', async () => {
+    const { updates } = await runSettingsMigrations({
+      MODE_PROVIDERS: {
+        [TranslationMode.Dictionary_Translation]: null,
+        [TranslationMode.Selection]: 'openai'
+      }
+    });
+
+    expect(updates.MODE_PROVIDERS[TranslationMode.Dictionary_Translation]).toBe(null);
+    expect(updates.MODE_PROVIDERS[TranslationMode.Selection]).toBe('openai');
+  });
+
   it('should not clobber a remap result from an earlier migration pass', async () => {
     const currentSettings = {
       MODE_PROVIDERS: {

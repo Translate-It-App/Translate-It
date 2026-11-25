@@ -60,6 +60,7 @@
             :loading="isTranslating"
             @translate="handleTranslate"
             @cancel="cancelTranslation"
+            @update:model-value="markProviderExplicit"
           />
         </div>
       </div>
@@ -97,6 +98,7 @@
             :loading="isTranslating"
             @translate="handleTranslate"
             @cancel="cancelTranslation"
+            @update:model-value="markProviderExplicit"
           />
         </div>
         <div class="end-spacer" />
@@ -191,16 +193,27 @@ const props = defineProps({
   provider: {
     type: String,
     default: ''
+  },
+  isExplicitProvider: {
+    type: Boolean,
+    default: false
   }
 })
 
 // Emits
-const emit = defineEmits(['can-translate-change', 'update:provider'])
+const emit = defineEmits(['can-translate-change', 'update:provider', 'update:isExplicitProvider'])
 
+const explicitProviderModel = computed({
+  get: () => props.isExplicitProvider,
+  set: (value) => emit('update:isExplicitProvider', value)
+})
 const currentProviderLocal = computed({
   get: () => props.provider,
   set: (value) => emit('update:provider', value)
 })
+const markProviderExplicit = () => {
+  explicitProviderModel.value = true
+}
 
 const {
   sourceText,
@@ -223,7 +236,7 @@ const {
   cancelTranslation,
   clearTranslation,
   initializeSessionState
-} = useUnifiedTranslation('sidepanel', { provider: currentProviderLocal });
+} = useUnifiedTranslation('sidepanel', { provider: currentProviderLocal, isExplicitProvider: explicitProviderModel });
 const {
   savedSourceLanguage,
   savedTargetLanguage,

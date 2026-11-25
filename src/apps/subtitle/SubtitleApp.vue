@@ -243,12 +243,11 @@ import { SubtitleParserFactory } from '@/features/subtitle-translation/parsers/S
 import LanguageSelector from '@/components/shared/LanguageSelector.vue';
 import ProviderSelector from '@/components/shared/ProviderSelector.vue';
 import { useSubtitleTranslation } from '@/features/subtitle-translation/composables/useSubtitleTranslation.js';
-import { CONFIG } from '@/shared/config/config.js';
+import { CONFIG, TranslationMode } from '@/shared/config/config.js';
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js';
 import { useSettingsStore } from '@/features/settings/stores/settings.js';
 import ThemeSelector from '@/apps/options/components/ThemeSelector.vue';
-import { findProviderById } from '@/features/translation/providers/ProviderManifest.js';
-import { isProviderConfigured } from '@/features/translation/utils/providerValidator.js';
+import { getProviderModeValidationError } from '@/features/translation/utils/providerSelection.js';
 import { applyTheme } from '@/utils/ui/theme.js';
 import { useResourceTracker } from '@/composables/core/useResourceTracker.js';
 import { openOptionsPage } from '@/core/helpers.js';
@@ -274,6 +273,7 @@ const {
   currentFile,
   cues,
   startTranslation,
+  presentError,
   cancelTranslation,
   downloadResult: downloadResultOriginal,
   cleanup
@@ -328,20 +328,9 @@ onMounted(async () => {
       config.targetLanguage = settingsStore.settings.TARGET_LANGUAGE;
     }
 
-    // Sync provider with settings - Ensure it supports subtitles and is configured
+    // Keep the configured global provider; validate it when translation starts.
     const defaultProviderId = settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API;
-    const provider = findProviderById(defaultProviderId);
-    
-    const isSubtitleCapable = provider && provider.features?.includes('subtitle');
-    const isConfigured = isProviderConfigured(defaultProviderId, settingsStore.settings);
-
-    if (isSubtitleCapable && isConfigured) {
-      config.providerId = defaultProviderId;
-    } else {
-      // Fallback to Google Translate if default doesn't support subtitles or isn't configured
-      config.providerId = 'googlev2';
-      logger.info('Default provider is incompatible or not configured for subtitles, falling back to Google Translate V2');
-    }
+    config.providerId = defaultProviderId;
     
     // Listen for theme changes from other options/extension pages
     tracker.addEventListener(browser.runtime.onMessage, 'addListener', (message) => {
@@ -421,7 +410,16 @@ const reportUrl = computed(() => {
   return `${baseUrl}?title=${title}&body=${body}`;
 });
 
-const startJob = () => {
+const startJob = async () => {
+  const validationError = getProviderModeValidationError(
+    config.providerId,
+    TranslationMode.Subtitle,
+    settingsStore.settings,
+  );
+  if (validationError) {
+    await presentError(validationError);
+    return;
+  }
   startTranslation(fileContent.value, currentFile.value.name, config);
 };
 

@@ -234,7 +234,10 @@ import { useMobileStore } from "@/store/modules/mobile.js";
 import { useSettingsStore } from "@/features/settings/stores/settings.js";
 import { useErrorHandler } from "@/composables/shared/useErrorHandler.js";
 import { ErrorTypes } from "@/shared/error-management/ErrorTypes.js";
-import { findProviderById } from "@/features/translation/providers/ProviderManifest.js";
+import {
+  getProviderModeValidationError,
+  getProviderModeValidationMessage,
+} from "@/features/translation/utils/providerSelection.js";
 import { TranslationMode } from "@/shared/config/config.js";
 import { pageEventBus } from "@/core/PageEventBus.js";
 import { MessageActions } from "@/shared/messaging/core/MessageActions.js";
@@ -295,22 +298,23 @@ const pageProvider = computed(() => {
   return settingsStore.getEffectiveProvider(TranslationMode.Page);
 });
 
-const isBulkSupported = computed(() => {
-  const provider = findProviderById(pageProvider.value);
-  return provider?.features?.includes("bulk") ?? false;
-});
+const pageValidationError = computed(() =>
+  getProviderModeValidationError(
+    pageProvider.value,
+    TranslationMode.Page,
+    settingsStore.settings,
+  ),
+);
+const isBulkSupported = computed(() => !pageValidationError.value);
 
-const handleBulkNotSupported = async () => {
+const handleBulkNotSupported = async (error) => {
   mobileStore.closeSheet();
   await handleError(
-    t(
-      "provider_does_not_support_bulk",
-      "این سرویس از قابلیت‌های دسته‌ای پشتیبانی نمی‌کند",
-    ),
+    getProviderModeValidationMessage(error, t),
     "mobile-page-translation:bulk-check",
     {
       showToast: true,
-      type: ErrorTypes.VALIDATION,
+      type: error?.type || ErrorTypes.VALIDATION,
     },
   );
 };
@@ -422,8 +426,13 @@ const toggleAutoClose = async () => {
 
 const startTranslation = () => {
   const provider = pageProvider.value;
-  if (!findProviderById(provider)?.features?.includes("bulk")) {
-    handleBulkNotSupported();
+  const validationError = getProviderModeValidationError(
+    provider,
+    TranslationMode.Page,
+    settingsStore.settings,
+  );
+  if (validationError) {
+    handleBulkNotSupported(validationError);
     return;
   }
   logger.info("Starting page translation from Mobile View", { provider });

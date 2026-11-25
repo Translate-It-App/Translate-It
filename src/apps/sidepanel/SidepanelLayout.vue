@@ -16,6 +16,7 @@
       <SidepanelMainContent
         ref="mainContentRef"
         v-model:provider="manualProvider"
+        v-model:is-explicit-provider="isExplicitProvider"
       />
 
       <!-- History Panel -->
@@ -61,6 +62,7 @@ const mainContentRef = ref(null);
 const isHistoryVisible = ref(false)
 const globalProvider = ref('')
 const manualProvider = ref('')
+const isExplicitProvider = ref(false)
 let pendingHistoryIntentKey = null
 let isStorageListenerRegistered = false
 let isComponentMounted = true
@@ -137,6 +139,7 @@ watch(() => settingsStore.settings.TRANSLATION_API, (newVal) => {
 watch(globalProvider, (newVal) => {
   if (newVal && newVal !== manualProvider.value) {
     manualProvider.value = newVal
+    isExplicitProvider.value = false
     logger.debug('[SidepanelLayout] Manual provider synced with global change:', newVal)
   }
 })
