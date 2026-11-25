@@ -3,6 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { ref, nextTick } from 'vue';
 import { useSettingsStore } from '@/features/settings/stores/settings.js';
+import { CONFIG } from '@/shared/config/config.js';
 import PromptTab from './tabs/PromptTab.vue';
 import TTSTab from './tabs/TTSTab.vue';
 import ProvidersTab from './tabs/ProvidersTab.vue';
@@ -449,10 +450,10 @@ describe('Options save integration (store + tabs + Global Save)', () => {
 
     await clickGlobalSave(nav);
     expect(saveStatusClass(nav)).toContain('status-success');
-    expect(fakeBrowserStorage.data.HIDDEN_PROVIDERS).toEqual(['edge']);
+    expect(fakeBrowserStorage.data.HIDDEN_PROVIDERS).toEqual([...CONFIG.HIDDEN_PROVIDERS, 'edge']);
 
     const reloadedStore = await reloadStore();
-    expect(reloadedStore.settings.HIDDEN_PROVIDERS).toEqual(['edge']);
+    expect(reloadedStore.settings.HIDDEN_PROVIDERS).toEqual([...CONFIG.HIDDEN_PROVIDERS, 'edge']);
     const reloadedTab = mountTab(ProvidersTab);
     expect(reloadedTab.get('#HIDDEN_PROVIDERS_CHECKBOX input').element.checked).toBe(false);
   });

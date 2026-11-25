@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { reactive, ref } from 'vue'
 import { readFileSync } from 'node:fs'
+import { CONFIG } from '@/shared/config/config.js'
 import { findProviderById } from '@/features/translation/providers/ProviderManifest.js'
 import { ProviderRegistryIds } from '@/features/translation/providers/ProviderConstants.js'
 import MaskIcon from '@/components/shared/MaskIcon.vue'
@@ -826,6 +827,56 @@ describe('ProviderSelector provider list contract', () => {
     } finally {
       mounted.wrapper.unmount()
       mounted.container.remove()
+    }
+  })
+
+  it('keeps a currently selected provider visible when it is hidden by default', async () => {
+    registry.providers.push(
+      { id: 'bing', name: 'Bing', category: 'free', icon: 'providers/bing.svg', supported: true, features: ['translation'] },
+      { id: 'google', name: 'Google Classic', category: 'free', icon: 'providers/google-classic.svg', supported: true, features: ['translation'] },
+      { id: 'vajehyab', name: 'Vajehyab Dictionary', category: 'free', icon: 'providers/vajehyab.svg', supported: true, features: ['translation'] },
+    )
+    settingsStore.settings.HIDDEN_PROVIDERS = [...CONFIG.HIDDEN_PROVIDERS]
+    const { wrapper, container } = await attachSelector({ mode: 'button', modelValue: 'googlev2' })
+    try {
+      await wrapper.find('.ti-provider-button').trigger('click')
+      const labels = () => wrapper.findAll('.ti-dropdown-item').map(item => item.text().trim())
+      expect(settingsStore.settings.HIDDEN_PROVIDERS).toEqual(['bing', 'google', 'vajehyab', 'browser'])
+      expect(labels()).not.toContain('Bing')
+      expect(labels()).not.toContain('Google Classic')
+      expect(labels()).not.toContain('Vajehyab Dictionary')
+      expect(labels()).not.toContain('Browser')
+
+      settingsStore.settings.HIDDEN_PROVIDERS = settingsStore.settings.HIDDEN_PROVIDERS.filter(id => id !== 'bing')
+      await wrapper.vm.$nextTick()
+      expect(labels()).toContain('Bing')
+      expect(labels()).not.toContain('Google Classic')
+      expect(labels()).not.toContain('Vajehyab Dictionary')
+
+      settingsStore.settings.HIDDEN_PROVIDERS = settingsStore.settings.HIDDEN_PROVIDERS.filter(id => id !== 'google')
+      await wrapper.vm.$nextTick()
+      expect(labels()).toContain('Google Classic')
+      expect(labels()).not.toContain('Vajehyab Dictionary')
+      expect(labels()).not.toContain('Browser')
+
+      settingsStore.settings.HIDDEN_PROVIDERS = settingsStore.settings.HIDDEN_PROVIDERS.filter(id => id !== 'vajehyab')
+      await wrapper.vm.$nextTick()
+      expect(labels()).toContain('Vajehyab Dictionary')
+      expect(labels()).not.toContain('Browser')
+
+      settingsStore.settings.HIDDEN_PROVIDERS = settingsStore.settings.HIDDEN_PROVIDERS.filter(id => id !== 'browser')
+      await wrapper.vm.$nextTick()
+      expect(labels()).toContain('Browser')
+
+      settingsStore.settings.HIDDEN_PROVIDERS = [...CONFIG.HIDDEN_PROVIDERS]
+      await wrapper.setProps({ modelValue: 'google' })
+      expect(labels()).toContain('Google Classic')
+      expect(labels()).not.toContain('Bing')
+      expect(labels()).not.toContain('Vajehyab Dictionary')
+      expect(labels()).not.toContain('Browser')
+    } finally {
+      wrapper.unmount()
+      container.remove()
     }
   })
 

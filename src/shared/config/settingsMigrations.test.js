@@ -3,6 +3,7 @@ import { runSettingsMigrations, mergeMissingNestedMembers } from './settingsMigr
 import { HISTORICAL_PROMPT_DEFAULTS } from './promptHistoricalDefaults.js';
 import { CONFIG, TranslationMode } from './config.js';
 import { getPersistedDefaultSettings } from './settingsDefaults.js';
+import { ProviderRegistryIds } from '@/features/translation/providers/ProviderConstants.js';
 
 // Mock logger
 vi.mock('@/shared/logging/logger.js', () => ({
@@ -44,6 +45,22 @@ describe('Settings Migrations', () => {
     expect(updates.DEEPSEEK_API_MODEL).toBe('deepseek-flash');
     expect(updates.WEBAI_API_MODEL).toBe('gemini-auto');
     expect(updates.CUSTOM_API_MODEL).toBe('');
+  });
+
+  it('adds default hidden providers only when the persisted key is missing', async () => {
+    const defaults = [
+      ProviderRegistryIds.BING,
+      ProviderRegistryIds.GOOGLE,
+      ProviderRegistryIds.VAJEHYAB,
+      ProviderRegistryIds.BROWSER,
+    ];
+    const missing = await runSettingsMigrations({});
+    expect(missing.updates.HIDDEN_PROVIDERS).toEqual(defaults);
+
+    for (const preference of [[], ['openai', ProviderRegistryIds.BING]]) {
+      const migrated = await runSettingsMigrations({ HIDDEN_PROVIDERS: preference });
+      expect(migrated.updates.HIDDEN_PROVIDERS).toBeUndefined();
+    }
   });
 
   it('preserves existing provider, model, custom configuration and credentials during defaults migration', async () => {
