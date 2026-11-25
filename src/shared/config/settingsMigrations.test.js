@@ -35,6 +35,60 @@ describe('Settings Migrations', () => {
     expect(updates.TEXT_FIELD_SHORTCUT).toBe(CONFIG.TEXT_FIELD_SHORTCUT);
     expect(updates.translationHistory).toBeUndefined();
     expect(updates.CHANGELOG_URL).toBeUndefined();
+    expect(updates.TRANSLATION_API).toBe('edge');
+    expect(updates.GEMINI_MODEL).toBe('gemini-3.5-flash-lite');
+    expect(updates.GEMINI_API_URL).toBe(CONFIG.GEMINI_API_URL);
+    expect(updates.OPENAI_API_MODEL).toBe('gpt-6-luna');
+    expect(updates.OPENROUTER_API_MODEL).toBe('google/gemini-3.5-flash-lite');
+    expect(updates.REQUESTY_API_MODEL).toBe('gemini-3.5-flash-lite');
+    expect(updates.DEEPSEEK_API_MODEL).toBe('deepseek-flash');
+    expect(updates.WEBAI_API_MODEL).toBe('gemini-auto');
+    expect(updates.CUSTOM_API_MODEL).toBe('');
+  });
+
+  it('preserves existing provider, model, custom configuration and credentials during defaults migration', async () => {
+    const current = {
+      TRANSLATION_API: 'openai',
+      GEMINI_MODEL: 'gemini-3.8-flash',
+      GEMINI_API_URL: 'https://custom.example/generate',
+      GEMINI_API_KEY: 'gemini-key',
+      OPENAI_API_MODEL: 'gpt-6-sol',
+      OPENAI_API_KEY: 'openai-key',
+      OPENROUTER_API_MODEL: 'openai/gpt-6-luna',
+      OPENROUTER_API_KEY: 'openrouter-key',
+      REQUESTY_API_MODEL: 'gpt-5.4-mini',
+      REQUESTY_API_KEY: 'requesty-key',
+      DEEPSEEK_API_MODEL: 'deepseek-v4-pro',
+      DEEPSEEK_API_KEY: 'deepseek-key',
+      CUSTOM_API_MODEL: 'user-model',
+      CUSTOM_API_URL: 'https://custom.example/chat',
+      CUSTOM_API_KEY: 'custom-key',
+      WEBAI_API_MODEL: 'gemini-3-pro',
+      WEBAI_MODELS: CONFIG.WEBAI_MODELS,
+      GEMINI_MODELS: CONFIG.GEMINI_MODELS,
+      OPENAI_MODELS: CONFIG.OPENAI_MODELS,
+      OPENROUTER_MODELS: CONFIG.OPENROUTER_MODELS,
+      REQUESTY_MODELS: CONFIG.REQUESTY_MODELS,
+      DEEPSEEK_MODELS: CONFIG.DEEPSEEK_MODELS
+    };
+    const { updates } = await runSettingsMigrations(current);
+
+    expect(updates.TRANSLATION_API).toBeUndefined();
+    expect(updates.GEMINI_MODEL).toBeUndefined();
+    expect(updates.GEMINI_API_URL).toBeUndefined();
+    expect(updates.GEMINI_API_KEY).toBeUndefined();
+    expect(updates.OPENAI_API_MODEL).toBeUndefined();
+    expect(updates.OPENAI_API_KEY).toBeUndefined();
+    expect(updates.OPENROUTER_API_MODEL).toBeUndefined();
+    expect(updates.OPENROUTER_API_KEY).toBeUndefined();
+    expect(updates.REQUESTY_API_MODEL).toBeUndefined();
+    expect(updates.REQUESTY_API_KEY).toBeUndefined();
+    expect(updates.DEEPSEEK_API_MODEL).toBeUndefined();
+    expect(updates.DEEPSEEK_API_KEY).toBeUndefined();
+    expect(updates.CUSTOM_API_MODEL).toBeUndefined();
+    expect(updates.CUSTOM_API_URL).toBeUndefined();
+    expect(updates.CUSTOM_API_KEY).toBeUndefined();
+    expect(updates.WEBAI_API_MODEL).toBeUndefined();
   });
 
   it('removes the retired DeepL beta toggle while preserving imported settings', async () => {
@@ -708,7 +762,7 @@ describe('Settings Migrations', () => {
       WEBAI_API_MODEL: ''
     });
 
-    expect(updates.WEBAI_API_MODEL).toBe('gemini-3-flash');
+    expect(updates.WEBAI_API_MODEL).toBe('gemini-auto');
     expect(logs.some(log => log.includes('Reset WEBAI_API_MODEL'))).toBe(true);
   });
 

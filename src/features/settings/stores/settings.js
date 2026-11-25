@@ -304,8 +304,8 @@ export const useSettingsStore = defineStore('settings', () => {
    */
   const getEffectiveProvider = (mode) => {
     const modeProviders = settings.value.MODE_PROVIDERS || {};
-    const globalApi = settings.value.TRANSLATION_API || ProviderRegistryIds.GOOGLE_V2;
-    const systemDefault = ProviderRegistryIds.GOOGLE_V2;
+    const globalApi = settings.value.TRANSLATION_API || CONFIG.TRANSLATION_API;
+    const capabilityFallback = ProviderRegistryIds.GOOGLE_V2;
 
     let resolvedId = globalApi;
 
@@ -328,7 +328,7 @@ export const useSettingsStore = defineStore('settings', () => {
     ].includes(mode);
 
     if (needsBulk && provider && !provider.features?.includes('bulk')) {
-      return systemDefault;
+      return capabilityFallback;
     }
 
     return resolvedId;
@@ -542,7 +542,7 @@ export const useSettingsStore = defineStore('settings', () => {
       // SMART CLEANUP: If Debug Mode is disabled while Mock provider is active, 
       // automatically switch to the system default provider.
       if (key === 'DEBUG_MODE' && value === false) {
-        const defaultApi = CONFIG.TRANSLATION_API || 'googlev2';
+        const defaultApi = CONFIG.TRANSLATION_API;
         let hasChanges = false;
 
         // Cleanup Global Provider

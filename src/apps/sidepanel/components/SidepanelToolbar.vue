@@ -208,7 +208,7 @@ import { useUI } from '@/composables/ui/useUI.js';
 import { useErrorHandler } from '@/composables/shared/useErrorHandler.js';
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js';
 import { useSettingsStore } from '@/features/settings/stores/settings.js';
-import { TranslationMode } from '@/shared/config/config.js';
+import { CONFIG, TranslationMode } from '@/shared/config/config.js';
 import { findProviderById } from '@/features/translation/providers/ProviderManifest.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { sendMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
@@ -284,7 +284,7 @@ const getEffectiveProvider = (mode) => {
   return settingsStore.settings?.MODE_PROVIDERS?.[mode] || 
          props.currentProvider || 
          settingsStore.settings.TRANSLATION_API || 
-         'googlev2'
+         CONFIG.TRANSLATION_API
 }
 
 /**

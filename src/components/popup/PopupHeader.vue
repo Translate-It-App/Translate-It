@@ -282,7 +282,7 @@ import { useErrorHandler } from '@/composables/shared/useErrorHandler.js'
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js'
 import { useSettingsStore } from '@/features/settings/stores/settings.js'
 import { useTranslationStore } from '@/features/translation/stores/translation.js'
-import { TranslationMode } from '@/shared/config/config.js'
+import { CONFIG, TranslationMode } from '@/shared/config/config.js'
 import { findProviderById } from '@/features/translation/providers/ProviderManifest.js'
 import browser from 'webextension-polyfill'
 import IconButton from '@/components/shared/IconButton.vue'
@@ -372,7 +372,7 @@ const getEffectiveProvider = (mode) => {
   // Fallback to mode-specific settings or global provider
   return settingsStore.settings?.MODE_PROVIDERS?.[mode] || 
          settingsStore.settings.TRANSLATION_API || 
-         'googlev2'
+         CONFIG.TRANSLATION_API
 }
 
 /**

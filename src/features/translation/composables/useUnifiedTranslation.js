@@ -6,8 +6,7 @@ import { useBrowserAPI } from "@/composables/core/useBrowserAPI.js";
 import { useTranslationError } from "@/features/translation/composables/useTranslationError.js";
 import { generateMessageId } from "@/utils/messaging/messageId.js";
 import { isSingleWordOrShortPhrase } from "@/shared/utils/text/textAnalysis.js";
-import { TranslationMode } from "@/shared/config/config.js";
-import { ProviderRegistryIds } from "@/features/translation/providers/ProviderConstants.js";
+import { CONFIG, TranslationMode } from "@/shared/config/config.js";
 import { MessageActions } from "@/shared/messaging/core/MessageActions.js";
 import { MessagingContexts, reconstructTranslationError, isStructuredTranslationError } from "@/shared/messaging/core/MessagingCore.js";
 import { ErrorTypes } from "@/shared/error-management/ErrorTypes.js";
@@ -332,7 +331,7 @@ export function useUnifiedTranslation(context = 'popup', { provider = null } = {
   };
 
   const createTranslationRequest = (sourceLang, targetLang, messageId, overrideProvider = null) => {
-    const currentProvider = overrideProvider || settingsStore.settings.TRANSLATION_API || ProviderRegistryIds.GOOGLE_V2;
+    const currentProvider = overrideProvider || settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API;
     const mode = getTranslationMode(sourceText.value);
 
     return {

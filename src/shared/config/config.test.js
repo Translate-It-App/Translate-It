@@ -18,6 +18,7 @@ import {
   getPromptBASEFieldAsync,
   getGeminiThinkingModeAsync,
   getDeepSeekThinkingModeAsync,
+  getEffectiveProviderAsync,
   getOpenAIModelSourceAsync,
   getOpenRouterModelSourceAsync,
   getDeepSeekModelSourceAsync
@@ -147,6 +148,37 @@ describe('Config Module', () => {
       expect(CONFIG.LIVE_DUBBING_PROVIDER).toBe('gemini');
     });
 
+    it('uses the approved canonical provider and AI model defaults', () => {
+      expect(CONFIG.TRANSLATION_API).toBe('edge');
+      expect(CONFIG.GEMINI_MODEL).toBe('gemini-3.5-flash-lite');
+      expect(CONFIG.OPENAI_API_MODEL).toBe('gpt-6-luna');
+      expect(CONFIG.OPENROUTER_API_MODEL).toBe('google/gemini-3.5-flash-lite');
+      expect(CONFIG.REQUESTY_API_MODEL).toBe('gemini-3.5-flash-lite');
+      expect(CONFIG.DEEPSEEK_API_MODEL).toBe('deepseek-flash');
+      expect(CONFIG.WEBAI_API_MODEL).toBe('gemini-auto');
+      expect(CONFIG.CUSTOM_API_MODEL).toBe('');
+    });
+
+    it('uses CONFIG for missing generic providers but retains the bulk-capability fallback', async () => {
+      storageManager.get.mockImplementation(async (defaults) => {
+        if (Object.hasOwn(defaults, 'MODE_PROVIDERS')) return { MODE_PROVIDERS: {} };
+        return {};
+      });
+      await expect(getEffectiveProviderAsync(TranslationMode.Selection)).resolves.toBe(CONFIG.TRANSLATION_API);
+
+      storageManager.get.mockImplementation(async (defaults) => ({
+        [Object.keys(defaults)[0]]: Object.hasOwn(defaults, 'MODE_PROVIDERS')
+          ? {}
+          : 'vajehyab'
+      }));
+      await expect(getEffectiveProviderAsync(TranslationMode.Page)).resolves.toBe('googlev2');
+    });
+
+    it('uses CONFIG when effective-provider lookup fails', async () => {
+      storageManager.get.mockRejectedValue(new Error('storage unavailable'));
+      await expect(getEffectiveProviderAsync(TranslationMode.Selection)).resolves.toBe(CONFIG.TRANSLATION_API);
+    });
+
     it('should default provider-specific Original transcript preferences to disabled', () => {
       expect(CONFIG.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_GEMINI).toBe(false);
       expect(CONFIG.LIVE_DUBBING_SHOW_ORIGINAL_TRANSCRIPT_OPENAI).toBe(false);
@@ -160,9 +192,10 @@ describe('Config Module', () => {
     });
 
     it('should expose approved WebAI models in order', () => {
-      expect(CONFIG.WEBAI_API_MODEL).toBe('gemini-3-flash');
+      expect(CONFIG.WEBAI_API_MODEL).toBe('gemini-auto');
       expect(CONFIG.WEBAI_API_URL).toBe('');
       expect(CONFIG.WEBAI_MODELS).toEqual([
+        { value: 'gemini-auto', name: 'Gemini Auto' },
         { value: 'gemini-3-flash', name: 'Gemini 3 Flash' },
         { value: 'gemini-3-pro', name: 'Gemini 3 Pro' },
         { value: 'custom', name: 'Custom Model', custom: true }
@@ -228,7 +261,7 @@ describe('Config Module', () => {
     });
 
     it('should expose the curated OpenRouter models in order', () => {
-      expect(CONFIG.OPENROUTER_API_MODEL).toBe('openai/gpt-6-luna');
+      expect(CONFIG.OPENROUTER_API_MODEL).toBe('google/gemini-3.5-flash-lite');
       expect(CONFIG.OPENROUTER_MODEL_SOURCE).toBe('legacy');
       expect(CONFIG.OPENROUTER_API_URL).toBe('https://openrouter.ai/api/v1/chat/completions');
       expect(CONFIG.OPENROUTER_MODELS).toEqual([
@@ -255,7 +288,7 @@ describe('Config Module', () => {
     });
 
     it('should expose the curated Requesty models in order', () => {
-      expect(CONFIG.REQUESTY_API_MODEL).toBe('openai/gpt-4o-mini');
+      expect(CONFIG.REQUESTY_API_MODEL).toBe('gemini-3.5-flash-lite');
       expect(CONFIG.REQUESTY_API_URL).toBe('https://router.requesty.ai/v1/chat/completions');
       expect(CONFIG.REQUESTY_MODELS).toEqual([
         { value: 'openai/gpt-4o-mini', name: 'OpenAI GPT-4o Mini' },
@@ -272,10 +305,10 @@ describe('Config Module', () => {
     });
 
     it('should expose approved Gemini selector models in order', () => {
-      expect(CONFIG.GEMINI_MODEL).toBe('gemini-3.8-flash');
+      expect(CONFIG.GEMINI_MODEL).toBe('gemini-3.5-flash-lite');
       expect(CONFIG.GEMINI_MODEL_SOURCE).toBe('legacy');
       expect(CONFIG.GEMINI_API_URL).toBe(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent'
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent'
       );
       expect(CONFIG.GEMINI_MODELS.map(model => model.value)).toEqual([
         'gemini-3.8-flash',
@@ -283,6 +316,7 @@ describe('Config Module', () => {
         'custom'
       ]);
       expect(CONFIG.GEMINI_MODELS.every(model => !model.value.startsWith('gemini-2.5-'))).toBe(true);
+      expect(CONFIG.GEMINI_MODELS.find(model => model.value === CONFIG.GEMINI_MODEL)?.url).toBe(CONFIG.GEMINI_API_URL);
     });
 
     it('should retain exact Gemini model endpoints and Thinking metadata', () => {

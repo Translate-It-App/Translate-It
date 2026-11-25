@@ -136,6 +136,9 @@ describe('InstallHandler fresh-install persistence', () => {
     );
     expect(persisted).toHaveProperty('THEME');
     expect(persisted).toHaveProperty('PROMPT_TEMPLATE');
+    expect(persisted.TRANSLATION_API).toBe('edge');
+    expect(persisted.GEMINI_MODEL).toBe('gemini-3.5-flash-lite');
+    expect(persisted.WEBAI_API_MODEL).toBe('gemini-auto');
   });
 });
 

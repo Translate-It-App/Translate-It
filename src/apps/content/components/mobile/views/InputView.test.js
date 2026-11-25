@@ -142,6 +142,7 @@ vi.mock('@/shared/constants/mobile.js', () => ({
 }))
 
 vi.mock('@/shared/config/config.js', () => ({
+  CONFIG: { TRANSLATION_API: 'edge' },
   TranslationMode: {
     Dictionary_Translation: 'dictionary',
     Mobile_Translate: 'mobile'

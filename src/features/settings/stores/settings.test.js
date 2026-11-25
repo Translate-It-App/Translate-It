@@ -1644,7 +1644,7 @@ describe('Settings Store', () => {
       expect(storageManager.set).toHaveBeenCalledTimes(1);
       expect(storageManager.set.mock.calls[0][0]).toEqual(expect.objectContaining({
         DEBUG_MODE: false,
-        TRANSLATION_API: CONFIG.TRANSLATION_API || 'googlev2'
+        TRANSLATION_API: CONFIG.TRANSLATION_API
       }));
       expect(storageManager.set.mock.calls[0][0]).toHaveProperty('MODE_PROVIDERS');
     });
@@ -2665,6 +2665,8 @@ describe('Settings Store', () => {
       Object.hasOwn(snapshot, 'WINDOW_SHOW_ORIGINAL') && snapshot.WINDOW_SHOW_ORIGINAL === false
     ))).toBe(true);
     expect(store.settings.THEME).toBe('auto');
+    expect(store.settings.TRANSLATION_API).toBe('edge');
+    expect(store.settings.GEMINI_MODEL).toBe('gemini-3.5-flash-lite');
     expect(store.settings.translationHistory).toEqual([]);
   });
 

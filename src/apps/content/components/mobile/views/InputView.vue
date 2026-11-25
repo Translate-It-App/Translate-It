@@ -175,7 +175,7 @@ import {
 } from "@/shared/messaging/core/MessagingCore.js";
 import { shouldApplyRtl } from "@/shared/utils/text/textAnalysis.js";
 import { MOBILE_CONSTANTS } from "@/shared/constants/mobile.js";
-import { TranslationMode } from "@/shared/config/config.js";
+import { CONFIG, TranslationMode } from "@/shared/config/config.js";
 import { useErrorHandler } from "@/composables/shared/useErrorHandler.js";
 import { useTTSSmart } from "@/features/tts/composables/useTTSSmart.js";
 import { getScopedLogger } from "@/shared/logging/logger.js";
@@ -234,7 +234,7 @@ const targetLang = ref(
     settingsStore.settings.TARGET_LANGUAGE ||
     "fa",
 );
-const currentProvider = ref(settingsStore.settings.TRANSLATION_API || "google");
+const currentProvider = ref(settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API);
 const isLoading = ref(false);
 const currentMessageId = ref(null);
 const resultText = ref(
@@ -266,7 +266,7 @@ watch(
         sourceLang.value = settingsStore.settings.SOURCE_LANGUAGE || "auto";
         targetLang.value = settingsStore.settings.TARGET_LANGUAGE || "fa";
         currentProvider.value =
-          settingsStore.settings.TRANSLATION_API || "google";
+          settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API;
       }
     }
   },

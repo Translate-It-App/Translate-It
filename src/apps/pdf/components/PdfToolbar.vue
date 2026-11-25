@@ -430,7 +430,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CONTENT_VIEW, LAYOUT_MODE } from '../composables/usePdfViewerMode.js'
-import { TranslationMode } from '@/shared/config/config.js'
+import { CONFIG, TranslationMode } from '@/shared/config/config.js'
 import { useSettingsStore } from '@/features/settings/stores/settings.js'
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js'
 import { getScopedLogger } from '@/shared/logging/logger.js'
@@ -499,7 +499,7 @@ const pdfProviderValue = computed(() => {
 const effectivePdfProvider = computed(() => {
   const modeProvider = settingsStore.settings?.MODE_PROVIDERS?.[TranslationMode.PDF]
   if (modeProvider && modeProvider !== 'default') return modeProvider
-  return settingsStore.settings?.TRANSLATION_API || 'googlev2'
+  return settingsStore.settings?.TRANSLATION_API || CONFIG.TRANSLATION_API
 })
 
 const isDebugMode = computed(() => settingsStore.settings?.DEBUG_MODE === true)

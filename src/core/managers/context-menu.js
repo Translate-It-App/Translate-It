@@ -1244,7 +1244,7 @@ export class ContextMenuManager extends ResourceTracker {
             if (changes.DEBUG_MODE && changes.DEBUG_MODE.newValue === false) {
               const settings = await storageManager.get(['TRANSLATION_API']);
               if (settings.TRANSLATION_API === 'mock') {
-                const defaultApi = CONFIG.TRANSLATION_API || 'googlev2';
+                const defaultApi = CONFIG.TRANSLATION_API;
                 
                 await storageManager.set({ TRANSLATION_API: defaultApi });
                 logger.info(`Background Integrity: Debug mode disabled while Mock was active. Reverted to ${defaultApi}`);

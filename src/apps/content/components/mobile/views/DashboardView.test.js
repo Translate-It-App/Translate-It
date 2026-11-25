@@ -72,6 +72,7 @@ vi.mock('@/shared/constants/mobile.js', () => ({
 }));
 
 vi.mock('@/shared/config/config.js', () => ({
+  CONFIG: { TRANSLATION_API: 'edge' },
   TranslationMode: {
     Page: 'page',
     Select_Element: 'select-element',
@@ -156,5 +157,18 @@ describe('DashboardView page command transport', () => {
       MessageActions.PAGE_TRANSLATE,
       expect.anything(),
     );
+  });
+
+  it('uses CONFIG when the mode and global providers are absent', async () => {
+    delete mocks.settingsStore.settings.MODE_PROVIDERS;
+    delete mocks.settingsStore.settings.TRANSLATION_API;
+    const wrapper = mount(DashboardView);
+
+    await wrapper.get('.ti-m-action-btn').trigger('click');
+
+    expect(mocks.sendRegularMessage).toHaveBeenCalledWith({
+      action: MessageActions.PAGE_TRANSLATE,
+      data: { provider: 'edge' },
+    }, { returnFailureResponse: true });
   });
 });
