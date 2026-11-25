@@ -7,6 +7,7 @@ import { reactive, ref } from 'vue'
 import SidepanelToolbar from './SidepanelToolbar.vue'
 import MaskIcon from '@/components/shared/MaskIcon.vue'
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js'
+import { openExtensionApp } from '@/core/ExtensionAppLauncher.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const srcDir = resolve(here, '..', '..', '..')
@@ -19,6 +20,7 @@ const reply = (status, extra = {}) => ({ success: true, status, url: TAB.url, ..
 
 const mocks = vi.hoisted(() => ({
   translations: {},
+  t: vi.fn((key, fallback) => key === 'pdf_app_title' ? 'PDF Viewer' : (fallback ?? key)),
   settings: null,
   selectActive: null,
   sendMessage: vi.fn(),
@@ -62,7 +64,7 @@ vi.mock('@/composables/shared/useErrorHandler.js', () => ({
 }))
 
 vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
-  useUnifiedI18n: () => ({ t: (key, fallback) => (fallback !== undefined ? fallback : key) })
+  useUnifiedI18n: () => ({ t: mocks.t })
 }))
 
 vi.mock('@/features/settings/stores/settings.js', () => ({
@@ -150,6 +152,7 @@ describe('SidepanelToolbar Desktop FAB toggle', () => {
 
   beforeEach(() => {
     mocks.translations = {}
+    mocks.t.mockClear()
     mocks.settings = reactive({
       EXTENSION_ENABLED: true,
       TRANSLATE_WITH_SELECT_ELEMENT: true,
@@ -216,6 +219,19 @@ describe('SidepanelToolbar Desktop FAB toggle', () => {
     expect(selectAction.find('#revertActionBtn').exists()).toBe(true)
     // Both groups keep the shared row contract.
     for (const button of lower) expect(button.classes()).toContain('toolbar-button')
+  })
+
+  it('keeps the PDF launcher label and navigation target', async () => {
+    await mountToolbar()
+
+    const button = wrapper.get('#pdfBtn')
+    expect(button.attributes('title')).toBe('PDF Viewer')
+    expect(button.get('img').attributes('alt')).toBe(button.attributes('title'))
+    expect(mocks.t).toHaveBeenCalledWith('pdf_app_title', 'PDF Viewer')
+
+    await button.trigger('click')
+
+    expect(openExtensionApp).toHaveBeenCalledWith('pdf')
   })
 
   it('renders decorative accessible mask icons on the four migrated rail actions', async () => {

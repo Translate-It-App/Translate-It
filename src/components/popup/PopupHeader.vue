@@ -72,7 +72,7 @@
               alt=""
               aria-hidden="true"
             >
-            <span>{{ t('pdf_app_title') || 'PDF' }}</span>
+            <span>{{ t('pdf_app_title', 'PDF Viewer') }}</span>
           </button>
           <button
             v-if="!IsMobile"

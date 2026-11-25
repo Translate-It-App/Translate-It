@@ -3,7 +3,7 @@
     <img
       class="pdf-app-brand__icon"
       :src="iconSrc"
-      alt="PDF Translator"
+      :alt="title"
       width="20"
       height="20"
     >

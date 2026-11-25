@@ -61,7 +61,7 @@ Powered by **10+ translation providers**, Translate It focuses on privacy, flexi
 | **Whole Page** | Translate full pages continuously, including dynamically loaded content. |
 | **Popup & Side Panel** | Translate text directly from the extension popup or persistent side panel. |
 | **Live Dubbing** | Translate active-tab audio in real time using Gemini or OpenAI. **Chrome only.** |
-| **PDF Translator** | Translate local and online PDFs with bilingual views, OCR, and export support. |
+| **PDF Viewer** | Open local and online PDFs with bilingual views, OCR, and export support. |
 | **Subtitle (SRT) Translator** | Translate `.srt` subtitle files while preserving timestamps and formatting. |
 | **Screen Capture & OCR** | Capture and translate text from images, videos, PDFs, or other non-selectable content. |
 | **Mouse Hover** | Translate words, sentences, or text containers directly on hover. |
@@ -158,8 +158,8 @@ Continuously translate pages as content appears, with Fluid and Translate-on-Scr
 ### 4. Live Dubbing
 Translate active-tab audio in real time using Gemini or OpenAI, with independent controls for original and dubbed audio. **Chrome only.**
 
-### 5. PDF Translator
-Translate local or online PDFs with bilingual views, text selection, OCR for scanned documents, and TXT, Markdown, or HTML export.
+### 5. PDF Viewer
+Open local or online PDFs with bilingual views, text selection, OCR for scanned documents, and TXT, Markdown, or HTML export.
 
 ### 6. Screen Capture & OCR
 Capture any area of a webpage and translate text from images, videos, PDFs, or other non-selectable content using local OCR.

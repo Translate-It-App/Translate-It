@@ -215,7 +215,11 @@ vi.mock('@/core/helpers.js', () => ({
   openOptionsPage: openOptionsPageMock
 }))
 
-const tMock = vi.fn((key, fallback) => fallback ?? key)
+const localeMock = ref('en')
+const localeMessagesMock = ref({})
+const tMock = vi.fn((key, fallback) =>
+  localeMessagesMock.value[localeMock.value]?.[key] ?? fallback ?? key
+)
 
 vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
   useUnifiedI18n: () => ({ t: tMock })
@@ -548,6 +552,11 @@ function createMocks({
 describe('PdfApp', () => {
   beforeEach(async () => {
     vi.useRealTimers()
+    localeMock.value = 'en'
+    localeMessagesMock.value = {}
+    tMock.mockImplementation((key, fallback) =>
+      localeMessagesMock.value[localeMock.value]?.[key] ?? fallback ?? key
+    )
     const { toast } = await import('vue-sonner')
     toast.success.mockClear()
     toast.error.mockClear()
@@ -925,8 +934,8 @@ describe('PdfApp', () => {
     ['combines metadata title and file name', 'Annual Report', 'annual-report.pdf', 'Annual Report - annual-report.pdf'],
     ['uses metadata title without a file name', 'Annual Report', '', 'Annual Report'],
     ['uses file name without metadata title', '', 'annual-report.pdf', 'annual-report.pdf'],
-    ['uses fallback title without document values', '', '', 'PDF Translator'],
-    ['uses fallback title for whitespace-only file name', '', '   ', 'PDF Translator'],
+    ['uses fallback title without document values', '', '', 'PDF Viewer'],
+    ['uses fallback title for whitespace-only file name', '', '   ', 'PDF Viewer'],
     ['suppresses duplicate metadata title and file name', 'annual-report.pdf', 'annual-report.pdf', 'annual-report.pdf'],
     ['ignores whitespace-only metadata title', '   ', 'annual-report.pdf', 'annual-report.pdf']
   ])('sets browser title: %s', (_, metadataTitle, fileName, expectedTitle) => {
@@ -935,6 +944,54 @@ describe('PdfApp', () => {
     mockPdfSession.fileName = fileName
 
     mount(PdfApp)
+
+    expect(document.title).toBe(expectedTitle)
+  })
+
+  it('uses the localized PDF Viewer name for the empty browser title', () => {
+    createMocks({ sessionAsRef: false })
+    tMock.mockImplementation((key, fallback) => key === 'pdf_app_title' ? 'نمایشگر PDF' : fallback ?? key)
+
+    mount(PdfApp)
+
+    expect(document.title).toBe('نمایشگر PDF')
+  })
+
+  it('updates the fallback browser title when configured-locale messages load after mount', async () => {
+    createMocks({ sessionAsRef: false })
+    localeMock.value = 'ja'
+    mount(PdfApp)
+
+    expect(document.title).toBe('PDF Viewer')
+    localeMessagesMock.value = { ja: { pdf_app_title: 'PDFビューアー' } }
+    await nextTick()
+
+    expect(document.title).toBe('PDFビューアー')
+    localeMock.value = 'fa'
+    await nextTick()
+
+    expect(document.title).toBe('PDF Viewer')
+    localeMessagesMock.value = {
+      ja: { pdf_app_title: 'PDFビューアー' },
+      fa: { pdf_app_title: 'نمایشگر PDF' }
+    }
+    await nextTick()
+
+    expect(document.title).toBe('نمایشگر PDF')
+  })
+
+  it.each([
+    ['metadata and filename', 'Annual Report', 'annual-report.pdf', 'Annual Report - annual-report.pdf'],
+    ['filename only', '', 'annual-report.pdf', 'annual-report.pdf']
+  ])('preserves the %s browser title while locale translations load', async (_, metadataTitle, fileName, expectedTitle) => {
+    createMocks({ sessionAsRef: false })
+    localeMock.value = 'ja'
+    mockPdfSession.documentMetadata.title = metadataTitle
+    mockPdfSession.fileName = fileName
+    mount(PdfApp)
+
+    localeMessagesMock.value = { ja: { pdf_app_title: 'PDFビューアー' } }
+    await nextTick()
 
     expect(document.title).toBe(expectedTitle)
   })
@@ -981,7 +1038,7 @@ describe('PdfApp', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(document.title).toBe('PDF Translator')
+    expect(document.title).toBe('PDF Viewer')
   })
 
   it('reveals translated pages side by side after a successful page translation', async () => {

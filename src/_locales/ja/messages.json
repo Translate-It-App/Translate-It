@@ -3577,7 +3577,7 @@
     "message": "字幕翻訳"
   },
   "pdf_app_title": {
-    "message": "PDF翻訳"
+    "message": "PDFビューアー"
   },
   "pdf_tab_title": {
     "message": "PDF"
@@ -3589,16 +3589,16 @@
     "message": "コンテキストメニュー"
   },
   "pdf_context_menu_label": {
-    "message": "ブラウザのコンテキストメニューに「PDF翻訳」を表示"
+    "message": "ブラウザのコンテキストメニューに「PDFビューアー」を表示"
   },
   "pdf_context_menu_desc": {
-    "message": "PDFリンクの右クリックメニューに「PDF翻訳」オプションを表示します。"
+    "message": "PDFリンクの右クリックメニューに「PDFビューアー」オプションを表示します。"
   },
   "pdf_action_context_menu_label": {
-    "message": "ブラウザアクションメニューに「PDF翻訳」を表示"
+    "message": "ブラウザアクションメニューに「PDFビューアー」を表示"
   },
   "pdf_action_context_menu_desc": {
-    "message": "拡張機能のツールバーメニューに「PDF翻訳」ランチャーを表示します。"
+    "message": "拡張機能のツールバーメニューに「PDFビューアー」ランチャーを表示します。"
   },
   "subtitle_action_context_menu_label": {
     "message": "ブラウザアクションメニューに「字幕翻訳」を表示"

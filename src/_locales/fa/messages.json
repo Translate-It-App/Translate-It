@@ -3575,7 +3575,7 @@
     "message": "مترجم زیرنویس"
   },
   "pdf_app_title": {
-    "message": "مترجم PDF"
+    "message": "نمایشگر PDF"
   },
   "pdf_tab_title": {
     "message": "PDF"
@@ -3587,16 +3587,16 @@
     "message": "منوی زمینه"
   },
   "pdf_context_menu_label": {
-    "message": "نمایش «مترجم PDF» در منوی زمینه مرورگر"
+    "message": "نمایش «نمایشگر PDF» در منوی زمینه مرورگر"
   },
   "pdf_context_menu_desc": {
-    "message": "نمایش گزینه «مترجم PDF» در منوی کلیک‌راست مرورگر برای لینک‌های PDF."
+    "message": "نمایش گزینه «نمایشگر PDF» در منوی کلیک‌راست مرورگر برای لینک‌های PDF."
   },
   "pdf_action_context_menu_label": {
-    "message": "نمایش «مترجم PDF» در منوی آیکون افزونه"
+    "message": "نمایش «نمایشگر PDF» در منوی آیکون افزونه"
   },
   "pdf_action_context_menu_desc": {
-    "message": "نمایش میانبر «مترجم PDF» در منوی نوار ابزار افزونه."
+    "message": "نمایش میانبر «نمایشگر PDF» در منوی نوار ابزار افزونه."
   },
   "subtitle_action_context_menu_label": {
     "message": "نمایش «مترجم زیرنویس» در منوی آیکون افزونه"
