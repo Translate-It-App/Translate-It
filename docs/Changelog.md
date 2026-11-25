@@ -1,3 +1,16 @@
+#### v1.27.0 – Released on November 25, 2026
+
+##### Changed
+
+- Improved Page Translation speed, startup time, and reliability.
+- Optimized AI translation prompts to reduce token usage.
+
+##### Fixed
+
+- Various bug fixes, usability improvements, and website compatibility enhancements.
+
+---
+
 #### v1.26.0 – Released on November 17, 2026
 
 ##### Changed
