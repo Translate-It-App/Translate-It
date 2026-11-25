@@ -1730,6 +1730,7 @@ describe('Settings Store', () => {
 
     expect(storageManager.get).toHaveBeenCalledWith([...Object.keys(getPersistedDefaultSettings()), 'translationHistory'], false);
     expect(store.settings.THEME).toBe('dark');
+    expect(store.settings.HIDDEN_PROVIDERS).toEqual(getPersistedDefaultSettings().HIDDEN_PROVIDERS);
     expect(store.settings.translationHistory).toEqual(history);
     expect(store.settings).not.toHaveProperty('unrelated');
   });
@@ -2689,6 +2690,7 @@ describe('Settings Store', () => {
     ))).toBe(true);
     expect(store.settings.THEME).toBe('auto');
     expect(store.settings.TRANSLATION_API).toBe('edge');
+    expect(store.settings.HIDDEN_PROVIDERS).toEqual(getPersistedDefaultSettings().HIDDEN_PROVIDERS);
     expect(store.settings.GEMINI_MODEL).toBe('gemini-3.5-flash-lite');
     expect(store.settings.translationHistory).toEqual([]);
   });
