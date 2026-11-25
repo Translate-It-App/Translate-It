@@ -29,6 +29,7 @@ describe('getPersistedDefaultSettings', () => {
       ProviderRegistryIds.BING,
       ProviderRegistryIds.GOOGLE,
       ProviderRegistryIds.VAJEHYAB,
+      ProviderRegistryIds.BROWSER,
     ]);
     expect(defaults.HIDDEN_PROVIDERS).toEqual(CONFIG.HIDDEN_PROVIDERS);
     expect(defaults.TIMEOUT).toBe(CONFIG.TIMEOUT);

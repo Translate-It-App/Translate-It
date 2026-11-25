@@ -841,10 +841,11 @@ describe('ProviderSelector provider list contract', () => {
     try {
       await wrapper.find('.ti-provider-button').trigger('click')
       const labels = () => wrapper.findAll('.ti-dropdown-item').map(item => item.text().trim())
-      expect(settingsStore.settings.HIDDEN_PROVIDERS).toEqual(['bing', 'google', 'vajehyab'])
+      expect(settingsStore.settings.HIDDEN_PROVIDERS).toEqual(['bing', 'google', 'vajehyab', 'browser'])
       expect(labels()).not.toContain('Bing')
       expect(labels()).not.toContain('Google Classic')
       expect(labels()).not.toContain('Vajehyab Dictionary')
+      expect(labels()).not.toContain('Browser')
 
       settingsStore.settings.HIDDEN_PROVIDERS = settingsStore.settings.HIDDEN_PROVIDERS.filter(id => id !== 'bing')
       await wrapper.vm.$nextTick()
@@ -856,16 +857,23 @@ describe('ProviderSelector provider list contract', () => {
       await wrapper.vm.$nextTick()
       expect(labels()).toContain('Google Classic')
       expect(labels()).not.toContain('Vajehyab Dictionary')
+      expect(labels()).not.toContain('Browser')
 
       settingsStore.settings.HIDDEN_PROVIDERS = settingsStore.settings.HIDDEN_PROVIDERS.filter(id => id !== 'vajehyab')
       await wrapper.vm.$nextTick()
       expect(labels()).toContain('Vajehyab Dictionary')
+      expect(labels()).not.toContain('Browser')
+
+      settingsStore.settings.HIDDEN_PROVIDERS = settingsStore.settings.HIDDEN_PROVIDERS.filter(id => id !== 'browser')
+      await wrapper.vm.$nextTick()
+      expect(labels()).toContain('Browser')
 
       settingsStore.settings.HIDDEN_PROVIDERS = [...CONFIG.HIDDEN_PROVIDERS]
       await wrapper.setProps({ modelValue: 'google' })
       expect(labels()).toContain('Google Classic')
       expect(labels()).not.toContain('Bing')
       expect(labels()).not.toContain('Vajehyab Dictionary')
+      expect(labels()).not.toContain('Browser')
     } finally {
       wrapper.unmount()
       container.remove()

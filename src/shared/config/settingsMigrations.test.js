@@ -48,7 +48,12 @@ describe('Settings Migrations', () => {
   });
 
   it('adds default hidden providers only when the persisted key is missing', async () => {
-    const defaults = [ProviderRegistryIds.BING, ProviderRegistryIds.GOOGLE, ProviderRegistryIds.VAJEHYAB];
+    const defaults = [
+      ProviderRegistryIds.BING,
+      ProviderRegistryIds.GOOGLE,
+      ProviderRegistryIds.VAJEHYAB,
+      ProviderRegistryIds.BROWSER,
+    ];
     const missing = await runSettingsMigrations({});
     expect(missing.updates.HIDDEN_PROVIDERS).toEqual(defaults);
 
