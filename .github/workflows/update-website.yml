@@ -1,0 +1,38 @@
+name: Update Website Release Metadata
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.event.release.prerelease == false && github.event.release.tag_name != 'development'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger Cloudflare Pages deployment
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$DEPLOY_HOOK_URL" ]]; then
+            printf 'Required secret CLOUDFLARE_DEPLOY_HOOK is not configured.\n' >&2
+            exit 1
+          fi
+
+          if ! http_status="$(curl --request POST --silent --output /dev/null --write-out '%{http_code}' --max-time 30 "$DEPLOY_HOOK_URL")"; then
+            printf 'Cloudflare deploy hook request failed before receiving an HTTP response.\n' >&2
+            exit 1
+          fi
+
+          if [[ ! "$http_status" =~ ^2[0-9]{2}$ ]]; then
+            printf 'Cloudflare deploy hook returned HTTP %s.\n' "$http_status" >&2
+            exit 1
+          fi
+
+          printf 'Cloudflare deploy hook accepted the request (HTTP %s).\n' "$http_status"
