@@ -69,7 +69,7 @@
           class="app-link-icon"
           alt="PDF"
         >
-        <span class="app-link-label">{{ t('pdf_app_title', 'PDF Translator') }}</span>
+        <span class="app-link-label">{{ t('pdf_app_title', 'PDF Viewer') }}</span>
       </a>
 
       <div class="sidebar-footer">

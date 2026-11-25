@@ -524,6 +524,8 @@ describe('PopupHeader', () => {
     expect(icons.some((src) => src?.includes('capture'))).toBe(false)
     expect(panel.text()).toContain('Disable on this site')
     expect(panel.text()).toContain('Translation History')
+    expect(panel.findAll('[role="menuitem"]')[1].text()).toBe('PDF Viewer')
+    expect(mockT).toHaveBeenCalledWith('pdf_app_title', 'PDF Viewer')
     expect(mockT).toHaveBeenCalledWith('SIDEPANEL_HISTORY_TOOLTIP', 'Translation History')
 
     // Breakpoint contract classes: direct buttons hide at narrow widths,

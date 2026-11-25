@@ -3577,7 +3577,7 @@
     "message": "Subtitle Translator"
   },
   "pdf_app_title": {
-    "message": "PDF Translator"
+    "message": "PDF Viewer"
   },
   "pdf_tab_title": {
     "message": "PDF"
@@ -3589,16 +3589,16 @@
     "message": "Context Menu"
   },
   "pdf_context_menu_label": {
-    "message": "Show PDF Translator in the browser context menu"
+    "message": "Show PDF Viewer in the browser context menu"
   },
   "pdf_context_menu_desc": {
-    "message": "Display the \"PDF Translator\" option in the browser's right-click menu for PDF links."
+    "message": "Display the \"PDF Viewer\" option in the browser's right-click menu for PDF links."
   },
   "pdf_action_context_menu_label": {
-    "message": "Show PDF Translator in the extension action menu"
+    "message": "Show PDF Viewer in the extension action menu"
   },
   "pdf_action_context_menu_desc": {
-    "message": "Display the PDF Translator launcher in the extension's toolbar menu."
+    "message": "Display the PDF Viewer launcher in the extension's toolbar menu."
   },
   "subtitle_action_context_menu_label": {
     "message": "Show Subtitle Translator in the extension action menu"

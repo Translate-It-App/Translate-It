@@ -504,11 +504,11 @@ export class ContextMenuManager extends ResourceTracker {
         }
       }
 
-      // --- 1.5. Create Page Context Menu (Open in PDF Translator) ---
+      // --- 1.5. Create Page Context Menu (Open in PDF Viewer) ---
       if (visibility.PAGE_CONTEXT_PDF_TRANSLATOR !== false) {
         await this.createMenu({
           id: PAGE_CONTEXT_PDF_ID,
-          title: (await getTranslationString("pdf_app_title", locale)) || "PDF Translator",
+          title: (await getTranslationString("pdf_app_title", locale)) || "PDF Viewer",
           contexts: ["link"],
           targetUrlPatterns: ["*://*/*.pdf", "*://*/*.PDF"],
         });
@@ -630,7 +630,7 @@ export class ContextMenuManager extends ResourceTracker {
             await this.createMenu({
               id: ACTION_CONTEXT_MENU_PDF_ID,
               parentId: TRANSLATORS_PARENT_ID,
-              title: (await getTranslationString("pdf_app_title", locale)) || "PDF Translator",
+              title: (await getTranslationString("pdf_app_title", locale)) || "PDF Viewer",
               contexts: ["action"],
             });
           }

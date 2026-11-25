@@ -56,7 +56,7 @@
         <PdfAppBrand
           v-if="!hasDocument"
           :icon-src="pdfBrandIcon"
-          :title="t('pdf_app_title', 'PDF Translator')"
+          :title="t('pdf_app_title', 'PDF Viewer')"
           :subtitle="t('subtitle_app_powered_by', 'Powered by Translate It')"
         />
       </template>
@@ -802,8 +802,10 @@ function updateDocumentTitle() {
       : metadataTitle
     return
   }
-  document.title = normalizedFileName ? fileName : 'PDF Translator'
+  document.title = normalizedFileName ? fileName : t('pdf_app_title', 'PDF Viewer')
 }
+
+watch(() => t('pdf_app_title', 'PDF Viewer'), updateDocumentTitle)
 
 function prepareDocumentReplacement() {
   detachDocument()

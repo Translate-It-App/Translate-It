@@ -152,14 +152,14 @@
       <button
         id="pdfBtn"
         class="toolbar-button"
-        :title="t('pdf_app_title') || 'PDF Translator'"
+        :title="t('pdf_app_title', 'PDF Viewer')"
         @click="handlePdfClick"
         @keydown.enter.prevent="handlePdfClick"
         @keydown.space.prevent="handlePdfClick"
       >
         <img
           :src="pdfIcon"
-          alt="PDF Translator"
+          :alt="t('pdf_app_title', 'PDF Viewer')"
           class="toolbar-icon"
         >
       </button>
@@ -814,7 +814,7 @@ const handleSubtitleClick = async () => {
 };
 
 const handlePdfClick = async () => {
-  getLogger().debug('PDF Translator button clicked!')
+  getLogger().debug('PDF Viewer button clicked!')
   await launchAppWithFeedback('pdf', 'pdfBtn', 'SidepanelToolbar-openPdf')
 };
 </script>
