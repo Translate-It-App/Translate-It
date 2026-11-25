@@ -309,6 +309,13 @@ export class PageTranslationManager extends ResourceTracker {
               queueMicrotask(() => this._reconcileDiscoveredWork(attempt));
             }
           },
+          onInitialDiscoveryDrained: () => {
+            if (!this._ownsDiscoveryAttempt(attempt)
+                || this.settings.lazyLoading !== false
+                || this.settings.autoTranslateOnDOMChanges !== false
+                || this.settings.translateAfterScrollStop === true) return;
+            this.scheduler.releaseFirstBatchAfterDiscovery(attempt.messageId, attempt.sessionContext);
+          },
           onDiscoveryError: (error) => this._handleDiscoveryError(attempt, error),
         }
       );

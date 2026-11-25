@@ -172,7 +172,7 @@ export class PageTranslationBridge extends ResourceTracker {
 
   async initialize(settings, onTranslateCallback, sessionContext = null, {
     preserveAcceptedTranslations = false, onRetainedTranslation = null, settingsRevision = 0,
-    onDiscoveryStateChange = null, onDiscoveryError = null,
+    onDiscoveryStateChange = null, onDiscoveryError = null, onInitialDiscoveryDrained = null,
   } = {}) {
     const previous = preserveAcceptedTranslations && this.session ? {
       nodeStorage: this.session.nodesTranslator?.nodeStorage,
@@ -235,6 +235,7 @@ export class PageTranslationBridge extends ResourceTracker {
       discovery: null,
       onDiscoveryStateChange,
       onDiscoveryError,
+      onInitialDiscoveryDrained,
     };
     const targetGenerations = new WeakMap();
     const applyDecisions = new WeakMap();
@@ -1052,6 +1053,8 @@ export class PageTranslationBridge extends ResourceTracker {
         starting: false,
         cancelled: false,
         failed: false,
+        initialTraversalStarted: false,
+        initialDrainReported: false,
       };
       currentSession.discovery = discovery;
 
@@ -1351,6 +1354,15 @@ export class PageTranslationBridge extends ResourceTracker {
           discovery.queue.length = 0;
           discovery.head = 0;
           setDiscoveryPending(false);
+          if (discovery.initialTraversalStarted && !discovery.initialDrainReported
+              && this.session === currentSession && currentSession.active) {
+            discovery.initialDrainReported = true;
+            try {
+              currentSession.onInitialDiscoveryDrained?.();
+            } catch (error) {
+              this.logger.warn('Initial discovery drain callback failed', error);
+            }
+          }
         }
       };
 
@@ -1470,6 +1482,7 @@ export class PageTranslationBridge extends ResourceTracker {
         }
       };
       currentSession.domTranslator.translate = (node, callback) => {
+        discovery.initialTraversalStarted = true;
         enqueueDiscovery(node, callback);
       };
     }

@@ -35,6 +35,7 @@ import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { ActionReasons, MessageFormat } from '@/shared/messaging/core/MessagingCore.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import ExtensionContextManager from '@/core/extensionContext.js';
+import { AUTO_DETECT_VALUE } from '@/shared/constants/core.js';
 
 // 3. Mock other dependencies
 vi.mock('./utils/PageTranslationQueueFilter.js', () => ({
@@ -125,6 +126,77 @@ describe('PageTranslationScheduler', () => {
   afterEach(() => {
     scheduler.stop();
     scheduler.reset();
+  });
+
+  it('flushes the complete admitted batch once after discovery drains and preserves Page AUTO', async () => {
+    scheduler.setSettings({
+      lazyLoading: false,
+      autoTranslateOnDOMChanges: false,
+      translateAfterScrollStop: false,
+    });
+    const items = ['one', 'two', 'three'].map((text, index) => ({
+      id: `initial-${index}`,
+      text,
+      enqueuedAt: performance.now(),
+      isHighPriority: false,
+      resolve: vi.fn(),
+    }));
+    scheduler.queue.push(...items);
+    scheduler.batchTimer = setTimeout(() => {}, 800);
+    scheduler.batchTimerDelay = 800;
+    scheduler._batchTimerDeadline = performance.now() + 800;
+    vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({
+      providerRegistryId: 'google',
+      targetLanguage: 'en',
+      chunkSize: 10,
+      maxChars: 1000,
+      parallelExecution: false,
+      lazyLoading: false,
+    });
+    PageTranslationFluidFilter.process.mockImplementation(queue => ({
+      batchItems: [...queue],
+      remainingItems: [],
+    }));
+    safeSendMessage.mockImplementation(async message => {
+      const requestItems = JSON.parse(message.data.text);
+      return {
+        success: true,
+        translatedText: JSON.stringify(requestItems.map(({ id, text }) => ({ id, text: `translated:${text}` }))),
+      };
+    });
+
+    expect(scheduler.releaseFirstBatchAfterDiscovery('test-session-123', scheduler.sessionContext)).toBe(true);
+    expect(scheduler.batchTimer).toBeNull();
+    await vi.waitFor(() => expect(safeSendMessage).toHaveBeenCalledOnce());
+    const message = safeSendMessage.mock.calls[0][0];
+    const sentItems = JSON.parse(message.data.text);
+    expect(sentItems).toEqual(items.map(({ id, text }) => ({ id, text })));
+    expect(message.data.sourceLanguage).toBe(AUTO_DETECT_VALUE);
+    expect(scheduler.releaseFirstBatchAfterDiscovery('test-session-123', scheduler.sessionContext)).toBe(false);
+    expect(safeSendMessage).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { lazyLoading: true },
+    { autoTranslateOnDOMChanges: true },
+    { translateAfterScrollStop: true },
+  ])('does not release the first batch for ineligible settings %o', (settings) => {
+    scheduler.setSettings({
+      lazyLoading: false,
+      autoTranslateOnDOMChanges: false,
+      translateAfterScrollStop: false,
+      ...settings,
+    });
+    scheduler.queue.push({ text: 'initial work' });
+    scheduler.batchTimer = setTimeout(() => {}, 800);
+    scheduler.batchTimerDelay = 800;
+    scheduler._batchTimerDeadline = performance.now() + 800;
+    const timer = scheduler.batchTimer;
+    const flush = vi.spyOn(scheduler, 'flush').mockResolvedValue();
+
+    expect(scheduler.releaseFirstBatchAfterDiscovery('test-session-123', scheduler.sessionContext)).toBe(false);
+    expect(scheduler.batchTimer).toBe(timer);
+    expect(flush).not.toHaveBeenCalled();
   });
 
   it('uses DeepSeek Level 3 concurrency while retaining the AI page batch size', async () => {
@@ -424,6 +496,11 @@ describe('PageTranslationScheduler', () => {
       const items = JSON.parse(safeSendMessage.mock.calls[0][0].data.text);
       expect(items).toHaveLength(4);
       expect(new Set(items.map(item => item.id)).size).toBe(4);
+      expect(scheduler.releaseFirstBatchAfterDiscovery(
+        scheduler.translationSessionId,
+        scheduler.sessionContext
+      )).toBe(false);
+      expect(safeSendMessage).toHaveBeenCalledTimes(1);
     });
 
     it('coalesces burst enqueues into one eligibility recheck at the arrival threshold', async () => {
