@@ -7,6 +7,7 @@ import { TranslationMode } from '@/shared/config/config.js';
 
 const mockFocusTextarea = vi.fn();
 const mockSettingsCallback = vi.fn();
+const mockUseUnifiedTranslation = vi.fn(() => mockUnifiedTranslation);
 const mockUnifiedTranslation = {
   sourceText: ref('expressions'),
   translatedText: ref('表达方式'),
@@ -52,7 +53,10 @@ const mockLanguageDefaults = {
 };
 
 vi.mock('@/features/translation/composables/useUnifiedTranslation.js', () => ({
-  useUnifiedTranslation: () => mockUnifiedTranslation,
+  useUnifiedTranslation: (...args) => {
+    mockUseUnifiedTranslation(...args);
+    return mockUnifiedTranslation;
+  },
 }));
 
 vi.mock('@/composables/shared/useErrorHandler.js', () => ({
@@ -136,6 +140,7 @@ vi.mock('webextension-polyfill', () => ({
 describe('SidepanelMainContent.vue', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockUseUnifiedTranslation.mockClear();
     mockFocusTextarea.mockClear();
     mockUnifiedTranslation.sourceText.value = 'expressions';
     mockUnifiedTranslation.translatedText.value = '表达方式';
@@ -168,6 +173,20 @@ describe('SidepanelMainContent.vue', () => {
     } finally {
       wrapper.unmount();
     }
+  });
+
+  it('tracks selector changes as explicit provider overrides', async () => {
+    const wrapper = mount(SidepanelMainContent, { props: { provider: 'google' } });
+    const options = mockUseUnifiedTranslation.mock.calls[0][1];
+    expect(options.isExplicitProvider.value).toBe(false);
+
+    wrapper.findComponent({ name: 'ProviderSelector' }).vm.$emit('update:modelValue', 'edge');
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.emitted('update:provider')).toEqual([['edge']]);
+    expect(wrapper.emitted('update:isExplicitProvider')).toEqual([[true]]);
+    await wrapper.setProps({ isExplicitProvider: true });
+    expect(options.isExplicitProvider.value).toBe(true);
   });
 
   it('passes default action props and forwards star events', async () => {

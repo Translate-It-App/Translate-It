@@ -283,7 +283,7 @@ import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js'
 import { useSettingsStore } from '@/features/settings/stores/settings.js'
 import { useTranslationStore } from '@/features/translation/stores/translation.js'
 import { CONFIG, TranslationMode } from '@/shared/config/config.js'
-import { findProviderById } from '@/features/translation/providers/ProviderManifest.js'
+import { getProviderModeValidationError } from '@/features/translation/utils/providerSelection.js'
 import browser from 'webextension-polyfill'
 import IconButton from '@/components/shared/IconButton.vue'
 import MaskIcon from '@/components/shared/MaskIcon.vue'
@@ -380,8 +380,7 @@ const getEffectiveProvider = (mode) => {
  */
 const supportsBulk = (mode) => {
   const providerId = getEffectiveProvider(mode)
-  const provider = findProviderById(providerId)
-  return provider?.features?.includes('bulk') ?? true
+  return !getProviderModeValidationError(providerId, mode, settingsStore.settings)
 }
 
 const isSelectElementSupported = computed(() => supportsBulk(TranslationMode.Select_Element))

@@ -199,7 +199,10 @@ import { useMobileStore } from "@/store/modules/mobile.js";
 import { useSettingsStore } from "@/features/settings/stores/settings.js";
 import { useErrorHandler } from "@/composables/shared/useErrorHandler.js";
 import { ErrorTypes } from "@/shared/error-management/ErrorTypes.js";
-import { findProviderById } from "@/features/translation/providers/ProviderManifest.js";
+import {
+  getProviderModeValidationError,
+  resolveModeProvider,
+} from "@/features/translation/utils/providerSelection.js";
 import { MessageActions } from "@/shared/messaging/core/MessageActions.js";
 import {
   sendMessage,
@@ -253,29 +256,28 @@ const sendPageCommand = (message) => {
     });
 };
 
-const getProviderForMode = (mode) => {
-  return (
-    settingsStore.settings.MODE_PROVIDERS?.[mode] ||
-    settingsStore.settings.TRANSLATION_API ||
-    CONFIG.TRANSLATION_API
-  );
-};
+const getProviderForMode = (mode) => resolveModeProvider(
+  mode,
+  settingsStore.settings.MODE_PROVIDERS,
+  settingsStore.settings.TRANSLATION_API,
+  TranslationMode.Dictionary_Translation,
+  TranslationMode.Selection,
+  CONFIG.TRANSLATION_API,
+);
 
 const pageProvider = computed(() => getProviderForMode(TranslationMode.Page));
 const selectElementProvider = computed(() =>
   getProviderForMode(TranslationMode.Select_Element),
 );
 
-const checkBulkSupport = (providerId) => {
-  const provider = findProviderById(providerId);
-  return provider?.features?.includes("bulk") ?? false;
-};
+const checkBulkSupport = (providerId, mode) =>
+  !getProviderModeValidationError(providerId, mode, settingsStore.settings);
 
 const isPageTranslationSupported = computed(() =>
-  checkBulkSupport(pageProvider.value),
+  checkBulkSupport(pageProvider.value, TranslationMode.Page),
 );
 const isSelectElementSupported = computed(() =>
-  checkBulkSupport(selectElementProvider.value),
+  checkBulkSupport(selectElementProvider.value, TranslationMode.Select_Element),
 );
 
 const handleBulkNotSupported = async () => {
@@ -338,7 +340,7 @@ const isTTSVisible = computed(
 const translatePage = (event) => {
   try {
     const provider = pageProvider.value;
-    if (!checkBulkSupport(provider)) {
+    if (!checkBulkSupport(provider, TranslationMode.Page)) {
       handleBulkNotSupported();
       return;
     }
@@ -385,7 +387,7 @@ const translatePage = (event) => {
 const activateSelectElement = async () => {
   try {
     const provider = selectElementProvider.value;
-    if (!checkBulkSupport(provider)) {
+    if (!checkBulkSupport(provider, TranslationMode.Select_Element)) {
       handleBulkNotSupported();
       return;
     }

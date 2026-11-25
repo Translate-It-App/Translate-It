@@ -19,8 +19,9 @@ const mocks = vi.hoisted(() => {
     pageEventBus,
     mobileStore: null,
     settingsStore: null,
-    sendMessage: vi.fn(),
-    sendRegularMessage: vi.fn(),
+  sendMessage: vi.fn(),
+  sendRegularMessage: vi.fn(),
+  handleError: vi.fn(),
   };
 });
 
@@ -37,11 +38,7 @@ vi.mock('@/composables/shared/useUnifiedI18n.js', () => ({
 }));
 
 vi.mock('@/composables/shared/useErrorHandler.js', () => ({
-  useErrorHandler: () => ({ handleError: vi.fn() }),
-}));
-
-vi.mock('@/features/translation/providers/ProviderManifest.js', () => ({
-  findProviderById: () => ({ features: ['bulk'] }),
+  useErrorHandler: () => ({ handleError: mocks.handleError }),
 }));
 
 vi.mock('@/shared/messaging/core/UnifiedMessaging.js', () => ({
@@ -137,7 +134,7 @@ describe('DashboardView page command transport', () => {
     mocks.settingsStore = reactive({
       isDarkTheme: false,
       settings: {
-        MODE_PROVIDERS: { page: 'google' },
+        MODE_PROVIDERS: { page: 'google', 'select-element': 'edge' },
         TRANSLATION_API: 'google',
         MOBILE_PAGE_TRANSLATION_AUTO_CLOSE: false,
       },
@@ -170,5 +167,28 @@ describe('DashboardView page command transport', () => {
       action: MessageActions.PAGE_TRANSLATE,
       data: { provider: 'edge' },
     }, { returnFailureResponse: true });
+  });
+
+  it('resolves and dispatches the mode-specific provider for Select Element', async () => {
+    const wrapper = mount(DashboardView);
+    const selectButton = wrapper.findAll('.ti-m-action-btn')[1];
+
+    await selectButton.trigger('click');
+
+    expect(mocks.sendMessage).toHaveBeenCalledWith({
+      action: MessageActions.ACTIVATE_SELECT_ELEMENT_MODE,
+      data: { provider: 'edge' },
+    });
+  });
+
+  it('rejects an unsupported mode provider using shared validation', async () => {
+    mocks.settingsStore.settings.MODE_PROVIDERS.page = 'gemini';
+    const wrapper = mount(DashboardView);
+
+    expect(wrapper.findAll('.ti-m-action-btn')[0].classes()).toContain('is-disabled');
+    await wrapper.findAll('.ti-m-action-btn')[0].trigger('click');
+
+    expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+    expect(mocks.handleError).toHaveBeenCalled();
   });
 });

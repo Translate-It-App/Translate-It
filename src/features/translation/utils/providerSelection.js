@@ -1,0 +1,51 @@
+import { findProviderById } from '../providers/ProviderManifest.js';
+import { getFirstMissingSetting } from './providerValidator.js';
+import { MessageContexts } from '@/shared/messaging/core/MessagingConstants.js';
+import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
+
+const requiredFeatures = new Map([
+  [MessageContexts.PAGE_TRANSLATION_BATCH, 'bulk'],
+  ['page', 'bulk'],
+  [MessageContexts.PDF_TRANSLATION, 'bulk'],
+  [MessageContexts.SELECT_ELEMENT, 'bulk'],
+  [MessageContexts.CONTENT, 'bulk'],
+  [MessageContexts.SUBTITLE_TRANSLATION, 'subtitle'],
+]);
+
+export function resolveModeProvider(mode, modeProviders, globalProvider, dictionaryMode, selectionMode, fallbackProvider) {
+  if (mode && modeProviders?.[mode]) return modeProviders[mode];
+  if (mode === dictionaryMode && modeProviders?.[selectionMode]) return modeProviders[selectionMode];
+  return globalProvider || fallbackProvider;
+}
+
+export function getProviderModeValidationError(providerId, mode, settings = {}) {
+  const provider = findProviderById(providerId);
+  if (!provider) {
+    const error = new Error(`Unknown translation provider: ${providerId || '(empty)'}`);
+    error.type = ErrorTypes.VALIDATION;
+    return error;
+  }
+
+  const feature = requiredFeatures.get(mode);
+  if (feature && !provider.features?.includes(feature)) {
+    const error = new Error(`${provider.displayName} does not support ${feature} for ${mode}`);
+    error.type = ErrorTypes.VALIDATION;
+    return error;
+  }
+
+  const missingSetting = getFirstMissingSetting(providerId, settings);
+  if (missingSetting) {
+    const type = missingSetting.toLowerCase().includes('key')
+      ? ErrorTypes.API_KEY_MISSING
+      : missingSetting.toLowerCase().includes('url')
+        ? ErrorTypes.API_URL_MISSING
+        : missingSetting.toLowerCase().includes('model')
+          ? ErrorTypes.MODEL_MISSING
+          : ErrorTypes.API_CONFIG_INVALID;
+    const error = new Error(type);
+    error.type = type;
+    error.providerName = provider.displayName;
+    return error;
+  }
+  return null;
+}

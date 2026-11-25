@@ -5,7 +5,7 @@ import browser from 'webextension-polyfill';
 import useSettingsStore from './settings.js';
 import { storageManager } from '@/shared/storage/core/StorageCore.js';
 import secureStorage from '@/shared/storage/core/SecureStorage.js';
-import { SelectionTranslationMode, CONFIG, TranslationMode } from '@/shared/config/config.js';
+import { SelectionTranslationMode, CONFIG, TranslationMode, getEffectiveProviderAsync } from '@/shared/config/config.js';
 import { PROMPT_REGISTRY } from '@/shared/config/PromptRegistry.js';
 import { getPersistedDefaultSettings } from '@/shared/config/settingsDefaults.js';
 import { runSettingsMigrations } from '@/shared/config/settingsMigrations.js';
@@ -101,6 +101,28 @@ describe('Settings Store', () => {
     }));
   });
 
+  it('keeps reactive and async provider resolution in parity, including dictionary null inheritance', async () => {
+    const store = useSettingsStore();
+    const modeProviders = {
+      [TranslationMode.Dictionary_Translation]: null,
+      [TranslationMode.Selection]: 'gemini',
+      [TranslationMode.Page]: 'google',
+    };
+    store.settings.MODE_PROVIDERS = modeProviders;
+    store.settings.TRANSLATION_API = 'edge';
+    storageManager.get.mockImplementation(async defaults => ({
+      ...defaults,
+      MODE_PROVIDERS: modeProviders,
+      TRANSLATION_API: 'edge',
+    }));
+
+    for (const mode of [TranslationMode.Dictionary_Translation, TranslationMode.Page, TranslationMode.PDF]) {
+      expect(await getEffectiveProviderAsync(mode)).toBe(store.getEffectiveProvider(mode));
+    }
+    expect(store.getEffectiveProvider(TranslationMode.Dictionary_Translation)).toBe('gemini');
+    expect(store.getEffectiveProvider(TranslationMode.Page)).toBe('google');
+  });
+
   const getStorageChangeListener = async (store) => {
     await store.loadSettings();
     return storageManager.on.mock.calls.at(-1)?.[1];
@@ -187,6 +209,7 @@ describe('Settings Store', () => {
       const onChange = await getStorageChangeListener(store);
       store.updateSettingLocally('OPENAI_API_KEY', 'draft-key');
       await store.resetSettings();
+      expect(store.settings.MODE_PROVIDERS[TranslationMode.Dictionary_Translation]).toBe('googlev2');
       onChange({ key: 'OPENAI_API_KEY', newValue: 'external-key', oldValue: '' });
       expect(store.settings.OPENAI_API_KEY).toBe('external-key');
 

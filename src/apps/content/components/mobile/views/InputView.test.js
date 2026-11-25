@@ -89,7 +89,8 @@ vi.mock('@/components/shared/LanguageSelector.vue', () => ({
 vi.mock('@/components/shared/ProviderSelector.vue', () => ({
   default: {
     name: 'ProviderSelector',
-    template: '<div class="provider-selector-stub" />'
+    props: ['modelValue'],
+    template: '<button class="provider-selector-stub" @click="$emit(\'update:modelValue\', \'edge\')" />'
   }
 }))
 
@@ -385,5 +386,22 @@ describe('InputView', () => {
       expect.any(Error),
       'mobile-input'
     )
+  })
+
+  it('marks only a deliberately selected provider as explicit in requests', async () => {
+    const wrapper = mount(InputView)
+    await translate(wrapper)
+    expect(mocks.createMessage.mock.calls[0][1]).toMatchObject({
+      provider: 'google',
+      isExplicitProvider: false
+    })
+
+    mocks.createMessage.mockClear()
+    await wrapper.get('.provider-selector-stub').trigger('click')
+    await translate(wrapper)
+    expect(mocks.createMessage.mock.calls[0][1]).toMatchObject({
+      provider: 'edge',
+      isExplicitProvider: true
+    })
   })
 })

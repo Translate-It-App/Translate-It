@@ -45,7 +45,7 @@ function resolveFailureError(payload) {
 /**
  * useUnifiedTranslation - Unified composable for translation features
  */
-export function useUnifiedTranslation(context = 'popup', { provider = null } = {}) {
+export function useUnifiedTranslation(context = 'popup', { provider = null, isExplicitProvider = null } = {}) {
   // Validate context
   const validContexts = ['popup', 'sidepanel'];
   if (!validContexts.includes(context)) {
@@ -160,6 +160,7 @@ export function useUnifiedTranslation(context = 'popup', { provider = null } = {
       sourceLanguage: sourceLanguage.value,
       targetLanguage: targetLanguage.value,
       provider: getSessionProvider(),
+      isExplicitProvider: isExplicitProvider?.value ?? false,
       revision: ++sessionRevision,
       completedTranslation: canRestoreCompletedTranslation ? {
         source: translation.source,
@@ -203,7 +204,17 @@ export function useUnifiedTranslation(context = 'popup', { provider = null } = {
       sourceLanguage.value = snapshot.sourceLanguage || sourceLanguage.value;
       targetLanguage.value = snapshot.targetLanguage || targetLanguage.value;
     }
-    if (provider && snapshot.provider) provider.value = snapshot.provider;
+    if (provider && snapshot.provider) {
+      const hasExplicitIntent = snapshot.isExplicitProvider !== undefined;
+      const isExplicit = snapshot.isExplicitProvider
+        ?? snapshot.provider !== (settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API);
+      provider.value = hasExplicitIntent && !isExplicit
+        ? settingsStore.settings.TRANSLATION_API || CONFIG.TRANSLATION_API
+        : snapshot.provider;
+      if (isExplicitProvider) {
+        isExplicitProvider.value = isExplicit;
+      }
+    }
 
     const completed = snapshot.completedTranslation;
     if (completed?.source === snapshot.draftSource) {
@@ -310,6 +321,11 @@ export function useUnifiedTranslation(context = 'popup', { provider = null } = {
       void persistSessionState();
     });
   }
+  if (isExplicitProvider) {
+    watch(isExplicitProvider, () => {
+      void persistSessionState();
+    });
+  }
 
   // Watch for store changes to update local targetLanguage (for cross-component sync)
   watch(() => translationStore.uiTargetLanguage, (newVal) => {
@@ -345,7 +361,7 @@ export function useUnifiedTranslation(context = 'popup', { provider = null } = {
         sourceLanguage: sourceLang || sourceLanguage.value,
         targetLanguage: targetLang || targetLanguage.value,
         mode: mode,
-        isExplicitProvider: true,
+        isExplicitProvider: isExplicitProvider?.value ?? false,
         options: {}
       }
     };

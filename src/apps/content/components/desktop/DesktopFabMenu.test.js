@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => {
   return {
     mobileStore: null,
     settingsStore: null,
+    effectiveProvider: 'google',
     pageEventBus: {
       emit: vi.fn(),
       subscriptions: new Set(),
@@ -214,7 +215,7 @@ vi.mock('@/shared/config/config.js', () => ({
 }));
 
 vi.mock('@/features/translation/providers/ProviderManifest.js', () => ({
-  findProviderById: () => ({ features: ['bulk'] }),
+  findProviderById: (id) => ({ features: id === 'vajehyab' ? ['dictionary'] : ['bulk'] }),
 }));
 
 vi.mock('@/utils/browser/compatibility.js', () => ({
@@ -261,6 +262,7 @@ vi.mock('@/shared/logging/logger.js', () => ({
 
 /** Shared component/store/transport state for every DesktopFabMenu mount. */
 const setupBaseMocks = () => {
+  mocks.effectiveProvider = 'google';
   vi.clearAllMocks();
   mocks.tracker.timers.forEach((id) => clearTimeout(id));
   mocks.tracker.timers.clear();
@@ -298,7 +300,7 @@ const setupBaseMocks = () => {
       SHOW_DESKTOP_FAB: true,
       selectionTranslationMode: 'immediate',
     },
-    getEffectiveProvider: () => 'google',
+    getEffectiveProvider: () => mocks.effectiveProvider,
     updateSettingLocally: vi.fn(),
   });
   mocks.supportedHideScopes = new Set(['page', 'site']);
@@ -339,6 +341,14 @@ describe('DesktopFabMenu page command transport', () => {
       MessageActions.PAGE_TRANSLATE,
       expect.anything(),
     );
+  });
+
+  it('disables page and select-element actions when the resolved provider lacks bulk support', async () => {
+    mocks.effectiveProvider = 'vajehyab';
+    const wrapper = mount(DesktopFabMenu);
+
+    expect(wrapper.vm.menuItems.find(item => item.id === 'translate_page').disabled).toBe(true);
+    expect(wrapper.vm.menuItems.find(item => item.id === 'select_element').disabled).toBe(true);
   });
 
   it.each([

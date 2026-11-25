@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CONFIG } from './config.js';
+import { CONFIG, TranslationMode } from './config.js';
 import { PROMPT_REGISTRY } from './PromptRegistry.js';
 import { getPersistedDefaultSettings } from './settingsDefaults.js';
 
@@ -21,6 +21,8 @@ describe('getPersistedDefaultSettings', () => {
   it('contains persisted settings and excludes runtime-only CONFIG keys', () => {
     const defaults = getPersistedDefaultSettings();
 
+    expect(defaults.TRANSLATION_API).toBe('edge');
+    expect(defaults.MODE_PROVIDERS[TranslationMode.Dictionary_Translation]).toBe('googlev2');
     expect(defaults.THEME).toBe(CONFIG.THEME);
     expect(defaults.TIMEOUT).toBe(CONFIG.TIMEOUT);
     expect(CONFIG.LIVE_DUBBING_PROVIDER).toBe('gemini');

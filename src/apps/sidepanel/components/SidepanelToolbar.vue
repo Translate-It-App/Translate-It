@@ -209,7 +209,7 @@ import { useErrorHandler } from '@/composables/shared/useErrorHandler.js';
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js';
 import { useSettingsStore } from '@/features/settings/stores/settings.js';
 import { CONFIG, TranslationMode } from '@/shared/config/config.js';
-import { findProviderById } from '@/features/translation/providers/ProviderManifest.js';
+import { getProviderModeValidationError } from '@/features/translation/utils/providerSelection.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { sendMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
 import { openExtensionApp } from '@/core/ExtensionAppLauncher.js';
@@ -292,8 +292,7 @@ const getEffectiveProvider = (mode) => {
  */
 const supportsBulk = (mode) => {
   const providerId = getEffectiveProvider(mode)
-  const provider = findProviderById(providerId)
-  return provider?.features?.includes('bulk') ?? true
+  return !getProviderModeValidationError(providerId, mode, settingsStore.settings)
 }
 
 const isSelectElementSupported = computed(() => supportsBulk(TranslationMode.Select_Element))

@@ -78,20 +78,19 @@ vi.mock('./UnifiedModeCoordinator.js', () => ({
   })
 }));
 
-vi.mock('../../../features/translation/utils/translationModeHelper.js', () => ({
-  isEligibleForDictionaryUpgrade: vi.fn().mockResolvedValue(false)
-}));
-
 vi.mock('../../../shared/config/config.js', () => ({
   TranslationMode: {
     Field: 'field',
     Selection: 'selection',
+    Dictionary_Translation: 'dictionary',
     Select_Element: 'select-element',
     Page: 'page',
     PDF: 'pdf-translation'
   },
   getModeProvidersAsync: vi.fn().mockResolvedValue({}),
   getTranslationApiAsync: vi.fn().mockResolvedValue('google'),
+  getProviderSettingsAsync: vi.fn().mockResolvedValue({ OPENAI_API_KEY: 'test-key' }),
+  getEnableDictionaryAsync: vi.fn().mockResolvedValue(true),
   getPopupMaxCharsAsync: vi.fn().mockResolvedValue(5000),
   getSidepanelMaxCharsAsync: vi.fn().mockResolvedValue(10000),
   getSelectionMaxCharsAsync: vi.fn().mockResolvedValue(5000),
@@ -187,7 +186,6 @@ import { ActionReasons } from '../../../shared/messaging/core/MessagingCore.js';
 import { statsManager } from '../../../features/translation/core/TranslationStatsManager.js';
 import { translationSessionManager } from '../../../features/translation/core/TranslationSessionManager.js';
 import * as configuration from '../../../shared/config/config.js';
-import { isEligibleForDictionaryUpgrade } from '../../../features/translation/utils/translationModeHelper.js';
 
 describe('UnifiedTranslationService', () => {
   let service;
@@ -198,11 +196,12 @@ describe('UnifiedTranslationService', () => {
     vi.clearAllMocks();
     configuration.getModeProvidersAsync.mockReset().mockResolvedValue({});
     configuration.getTranslationApiAsync.mockReset().mockResolvedValue('google');
+    configuration.getProviderSettingsAsync.mockReset().mockResolvedValue({ OPENAI_API_KEY: 'test-key' });
+    configuration.getEnableDictionaryAsync.mockReset().mockResolvedValue(true);
     configuration.getPopupMaxCharsAsync.mockReset().mockResolvedValue(5000);
     configuration.getSidepanelMaxCharsAsync.mockReset().mockResolvedValue(10000);
     configuration.getSelectionMaxCharsAsync.mockReset().mockResolvedValue(5000);
     configuration.getSelectElementMaxCharsAsync.mockReset().mockResolvedValue(20000);
-    isEligibleForDictionaryUpgrade.mockReset().mockResolvedValue(false);
     backgroundLeaseMock.state.activeOperationCount = 0;
     backgroundLeaseMock.withBackgroundOperationLease
       .mockReset()
@@ -230,6 +229,188 @@ describe('UnifiedTranslationService', () => {
   });
 
   describe('handleTranslationRequest', () => {
+    it('uses the configured Dictionary provider for auto-eligible Selection and explicit Dictionary', async () => {
+      const { TranslationMode, getModeProvidersAsync, getTranslationApiAsync } = await import('../../../shared/config/config.js');
+      getTranslationApiAsync.mockResolvedValue('edge');
+      getModeProvidersAsync.mockResolvedValue({
+        [TranslationMode.Dictionary_Translation]: 'googlev2',
+      });
+
+      const selectionData = { text: 'hello', mode: TranslationMode.Selection };
+      const selectionRequest = { messageId: 'single-word-selection', data: { ...selectionData }, mode: selectionData.mode };
+      translationRequestTracker.createRequest.mockReturnValueOnce(selectionRequest);
+      service.modeCoordinator.processRequest.mockResolvedValueOnce({ success: true });
+
+      await service.handleTranslationRequest({
+        messageId: selectionRequest.messageId,
+        data: selectionData,
+        context: 'content',
+      });
+
+      expect(selectionRequest.data.provider).toBe('googlev2');
+      expect(selectionRequest.data.mode).toBe(TranslationMode.Selection);
+
+      const dictionaryData = { text: 'hello', mode: TranslationMode.Dictionary_Translation };
+      const dictionaryRequest = { messageId: 'explicit-dictionary', data: { ...dictionaryData }, mode: dictionaryData.mode };
+      translationRequestTracker.createRequest.mockReturnValueOnce(dictionaryRequest);
+      service.modeCoordinator.processRequest.mockResolvedValueOnce({ success: true });
+
+      await service.handleTranslationRequest({
+        messageId: dictionaryRequest.messageId,
+        data: dictionaryData,
+        context: 'dictionary',
+      });
+
+      expect(dictionaryRequest.data.provider).toBe('googlev2');
+    });
+
+    it('inherits Selection provider for an explicitly null Dictionary mode before UI fallback', async () => {
+      const { TranslationMode, getModeProvidersAsync, getTranslationApiAsync } = await import('../../../shared/config/config.js');
+      getTranslationApiAsync.mockResolvedValue('edge');
+      getModeProvidersAsync.mockResolvedValue({
+        [TranslationMode.Dictionary_Translation]: null,
+        [TranslationMode.Selection]: 'gemini',
+      });
+      configuration.getProviderSettingsAsync.mockResolvedValue({ GEMINI_API_KEY: 'test-key' });
+      const data = {
+        text: 'word',
+        mode: TranslationMode.Dictionary_Translation,
+        provider: 'openai',
+      };
+      const request = { messageId: 'dictionary-inherit-selection', data: { ...data }, mode: data.mode };
+      translationRequestTracker.createRequest.mockReturnValue(request);
+      service.modeCoordinator.processRequest.mockResolvedValue({ success: true });
+
+      await service.handleTranslationRequest({
+        messageId: request.messageId,
+        data,
+        context: 'popup',
+      });
+
+      expect(request.data.provider).toBe('gemini');
+    });
+
+    it('keeps an explicit UI override above Dictionary Selection inheritance', async () => {
+      const { TranslationMode, getModeProvidersAsync } = await import('../../../shared/config/config.js');
+      getModeProvidersAsync.mockResolvedValue({
+        [TranslationMode.Dictionary_Translation]: null,
+        [TranslationMode.Selection]: 'gemini',
+      });
+      const data = {
+        text: 'word',
+        mode: TranslationMode.Dictionary_Translation,
+        provider: 'edge',
+        isExplicitProvider: true,
+      };
+      const request = { messageId: 'dictionary-explicit-override', data: { ...data }, mode: data.mode };
+      translationRequestTracker.createRequest.mockReturnValue(request);
+      service.modeCoordinator.processRequest.mockResolvedValue({ success: true });
+
+      await service.handleTranslationRequest({
+        messageId: request.messageId,
+        data,
+        context: 'popup',
+      });
+
+      expect(request.data.provider).toBe('edge');
+    });
+
+    it.each([
+      ['unsupported page', 'vajehyab', 'page-translation-batch', {}, /does not support bulk/],
+      ['unsupported PDF', 'vajehyab', 'pdf-translation', {}, /does not support bulk/],
+      ['unsupported Select Element', 'vajehyab', 'select-element', {}, /does not support bulk/],
+      ['unsupported Subtitle', 'vajehyab', 'subtitle-translation', {}, /does not support subtitle/],
+      ['unconfigured', 'gemini', 'selection-manager', { GEMINI_API_KEY: '' }],
+      ['unknown', 'not-a-provider', 'selection-manager', {}, /Unknown translation provider/],
+    ])('rejects %s selected providers during preparation without substitution', async (_case, provider, mode, settings, expectedMessage) => {
+      const message = {
+        messageId: `provider-validation-${_case}`,
+        data: { text: 'source', mode, provider, isExplicitProvider: true },
+        context: mode,
+      };
+      translationRequestTracker.createRequest.mockReturnValue({
+        messageId: message.messageId,
+        data: message.data,
+        mode,
+      });
+      configuration.getProviderSettingsAsync.mockResolvedValue(settings);
+
+      const result = await service.handleTranslationRequest(message);
+
+      expect(result.success).toBe(false);
+      expect(translationRequestTracker.failRequest.mock.calls[0][1]).toMatchObject({
+        type: _case === 'unconfigured' ? ErrorTypes.API_KEY_MISSING : ErrorTypes.VALIDATION,
+      });
+      if (_case !== 'unconfigured') {
+        expect(translationRequestTracker.failRequest.mock.calls[0][1].message).toMatch(expectedMessage);
+      }
+      expect(service.modeCoordinator.processRequest).not.toHaveBeenCalled();
+      expect(translationRequestTracker.failRequest).toHaveBeenCalled();
+    });
+
+    it('requires bulk capability for Text Field mode', async () => {
+      const message = {
+        messageId: 'field-text-capability',
+        data: { text: 'source', mode: 'content', provider: 'vajehyab', isExplicitProvider: true },
+        context: 'content',
+      };
+      translationRequestTracker.createRequest.mockReturnValue({
+        messageId: message.messageId,
+        data: message.data,
+        mode: message.data.mode,
+      });
+      service.modeCoordinator.processRequest.mockResolvedValue({ success: true });
+
+      const result = await service.handleTranslationRequest(message);
+
+      expect(result.success).toBe(false);
+      expect(translationRequestTracker.failRequest).toHaveBeenCalledWith(
+        message.messageId,
+        expect.objectContaining({ type: ErrorTypes.VALIDATION }),
+      );
+      expect(service.modeCoordinator.processRequest).not.toHaveBeenCalled();
+    });
+
+    it('does not validate or mutate a request cancelled during provider settings lookup', async () => {
+      let resolveSettings;
+      const settingsPending = new Promise((resolve) => { resolveSettings = resolve; });
+      const data = { text: 'source phrase', mode: 'selection', provider: 'gemini' };
+      const request = { messageId: 'cancel-settings-lookup', data: { ...data }, metadata: {}, mode: data.mode };
+      translationRequestTracker.createRequest.mockReturnValue(request);
+      translationRequestTracker.getRequest.mockReturnValue(null);
+      translationRequestTracker.isRequestActive.mockReturnValue(true);
+      const { getModeProvidersAsync } = await import('../../../shared/config/config.js');
+      getModeProvidersAsync.mockResolvedValue({});
+      configuration.getProviderSettingsAsync.mockReturnValue(settingsPending);
+      const pending = service.handleTranslationRequest({
+        messageId: request.messageId,
+        data,
+        context: 'selection-manager',
+      });
+      await vi.waitFor(() => expect(configuration.getProviderSettingsAsync).toHaveBeenCalled());
+
+      translationRequestTracker.getRequest.mockReturnValue(request);
+      translationRequestTracker.cancelRequest.mockImplementation(() => {
+        translationRequestTracker.isRequestActive.mockReturnValue(false);
+        translationRequestTracker.getRequest.mockReturnValue(request);
+        request.status = 'cancelled';
+        return { accepted: true, status: 'cancelled' };
+      });
+      await service.cancelRequest(request.messageId);
+      resolveSettings({ GEMINI_API_KEY: '' });
+
+      const result = await pending;
+      expect(result).toMatchObject({
+        success: false,
+        cancelled: true,
+        error: { type: ErrorTypes.USER_CANCELLED },
+      });
+      expect(request.data.provider).toBe('gemini');
+      expect(request.metadata.provider).toBeUndefined();
+      expect(translationRequestTracker.failRequest).not.toHaveBeenCalled();
+      expect(service.modeCoordinator.processRequest).not.toHaveBeenCalled();
+    });
+
     it('wraps complete requests in a background operation lease', async () => {
       const message = {
         messageId: 'lease-request',
@@ -974,14 +1155,10 @@ describe('UnifiedTranslationService', () => {
       expect(service.modeCoordinator.processRequest).not.toHaveBeenCalled();
     });
 
-    it('registers the request and operation before the first eligibility await', async () => {
-      let releaseEligibility;
-      let enteredEligibility;
-      const eligibilityStarted = new Promise(resolve => { enteredEligibility = resolve; });
-      isEligibleForDictionaryUpgrade.mockImplementationOnce(() => {
-        enteredEligibility();
-        return new Promise(resolve => { releaseEligibility = resolve; });
-      });
+    it('registers the request and operation before provider resolution awaits', async () => {
+      let releaseProvider;
+      let enteredProvider;
+      const providerStarted = new Promise(resolve => { enteredProvider = resolve; });
       const message = { messageId: 'first-await-cancel', data: { text: 'hello', mode: 'selection' }, context: 'content' };
       const request = { messageId: message.messageId, data: message.data, mode: 'selection', status: 'pending' };
       let terminalStatus = null;
@@ -994,16 +1171,20 @@ describe('UnifiedTranslationService', () => {
         return { accepted: true, status: terminalStatus, request };
       });
       const providerResolution = vi.spyOn(service, '_resolveEffectiveProvider');
+      providerResolution.mockImplementationOnce(() => {
+        enteredProvider();
+        return new Promise(resolve => { releaseProvider = resolve; });
+      });
 
       const pending = service.handleTranslationRequest(message);
-      await eligibilityStarted;
+      await providerStarted;
       expect(translationRequestTracker.createRequest).toHaveBeenCalledTimes(1);
       expect(service._getOperation(request)).not.toBeNull();
       await service.cancelRequest(message.messageId);
-      releaseEligibility(false);
+      releaseProvider('edge');
 
       await expect(pending).resolves.toMatchObject({ success: false, cancelled: true });
-      expect(providerResolution).not.toHaveBeenCalled();
+      expect(providerResolution).toHaveBeenCalledOnce();
       expect(configuration.getModeProvidersAsync).not.toHaveBeenCalled();
       expect(service.modeCoordinator.processRequest).not.toHaveBeenCalled();
       expect(finalizeTranslationOperation).toHaveBeenCalledTimes(1);
@@ -1039,7 +1220,7 @@ describe('UnifiedTranslationService', () => {
 
     it('copies resolved provider to the input, tracked data and metadata before execution', async () => {
       const { getModeProvidersAsync } = await import('../../../shared/config/config.js');
-      getModeProvidersAsync.mockResolvedValueOnce({ selection: 'resolved-provider' });
+      getModeProvidersAsync.mockResolvedValueOnce({ selection: 'google' });
       const data = { text: 'hello', mode: 'selection' };
       const request = { messageId: 'provider-copy', data: { ...data }, metadata: {}, mode: 'selection' };
       translationRequestTracker.createRequest.mockReturnValue(request);
@@ -1047,9 +1228,9 @@ describe('UnifiedTranslationService', () => {
 
       await service.handleTranslationRequest({ messageId: request.messageId, data, context: 'content' });
 
-      expect(data.provider).toBe('resolved-provider');
-      expect(request.data.provider).toBe('resolved-provider');
-      expect(request.metadata.provider).toBe('resolved-provider');
+      expect(data.provider).toBe('google');
+      expect(request.data.provider).toBe('google');
+      expect(request.metadata.provider).toBe('google');
     });
 
     it('does not replace or finalize an admitted request on a duplicate during preparation', async () => {
@@ -1550,6 +1731,25 @@ describe('UnifiedTranslationService', () => {
   });
 
   describe('_resolveEffectiveProvider', () => {
+    it('preserves explicit override, mode setting, ephemeral UI provider, and global precedence', async () => {
+      const { getModeProvidersAsync, getTranslationApiAsync } = await import('../../../shared/config/config.js');
+      getModeProvidersAsync.mockResolvedValue({ selection: 'mode-provider' });
+      getTranslationApiAsync.mockResolvedValue('global-provider');
+
+      await expect(service._resolveEffectiveProvider({
+        mode: 'selection', provider: 'explicit-provider', isExplicitProvider: true,
+      }, 'popup')).resolves.toBe('explicit-provider');
+      await expect(service._resolveEffectiveProvider({
+        mode: 'selection', provider: 'ephemeral-provider',
+      }, 'popup')).resolves.toBe('mode-provider');
+
+      getModeProvidersAsync.mockResolvedValue({});
+      await expect(service._resolveEffectiveProvider({
+        mode: 'selection', provider: 'ephemeral-provider',
+      }, 'popup')).resolves.toBe('ephemeral-provider');
+      await expect(service._resolveEffectiveProvider({ mode: 'selection' }, 'content')).resolves.toBe('global-provider');
+    });
+
     it('should use provider from data if in UI context', async () => {
       const provider = await service._resolveEffectiveProvider({ provider: 'p1' }, 'popup');
       expect(provider).toBe('p1');

@@ -9,6 +9,7 @@ import {
   getDebugModeAsync, 
   getTargetLanguageAsync,
   getEffectiveProviderAsync,
+  getProviderSettingsAsync,
   TranslationMode,
   CONFIG 
 } from '@/shared/config/config.js';
@@ -16,6 +17,7 @@ import { ProviderRegistryIds } from '@/features/translation/providers/ProviderCo
 import { providerRegistry } from '@/features/translation/providers/ProviderRegistry.js';
 import { findProviderById, PROVIDER_MANIFEST } from '@/features/translation/providers/ProviderManifest.js';
 import { isProviderConfigured } from '@/features/translation/utils/providerValidator.js';
+import { getProviderModeValidationError } from '@/features/translation/utils/providerSelection.js';
 import { handleActivateSelectElementModeLazy } from '@/core/background/handlers/lazy/handleElementSelectionLazy.js';
 import { utilsFactory } from '@/utils/UtilsFactory.js';
 // Element selection handler will be loaded lazily when needed
@@ -79,13 +81,6 @@ const CONTEXT_MENU_SETTING_KEYS = [
   'WEBAI_API_URL',
   'WEBAI_API_MODEL'
 ];
-
-// Match PageTranslationSettingsLoader's configured provider selection.
-// Whole Page does not use getEffectiveProviderAsync's capability fallback.
-function getConfiguredPageProvider(settings) {
-  return settings.MODE_PROVIDERS?.[TranslationMode.Page]
-    || (settings.TRANSLATION_API ?? CONFIG.TRANSLATION_API);
-}
 
 // --- Get API Providers from Registry ---
 async function getApiProviders(settings = {}) {
@@ -448,16 +443,15 @@ export class ContextMenuManager extends ResourceTracker {
       const settings = await storageManager.get(CONTEXT_MENU_SETTING_KEYS, false);
       const isExtensionEnabled = settings.EXTENSION_ENABLED !== false;
       const selectElementApi = await getEffectiveProviderAsync(TranslationMode.Select_Element);
-      const pageApi = getConfiguredPageProvider(settings);
-      const provider = findProviderById(selectElementApi);
-      const isBulkSupported = provider?.features?.includes('bulk') ?? false;
+      const pageApi = await getEffectiveProviderAsync(TranslationMode.Page);
+      const isBulkSupported = !getProviderModeValidationError(selectElementApi, TranslationMode.Select_Element, settings);
       const isSelectElementEnabled = isExtensionEnabled &&
                                    (settings.TRANSLATE_WITH_SELECT_ELEMENT !== false) &&
                                    isBulkSupported;
       const isScreenCaptureEnabled = isExtensionEnabled && (settings.ENABLE_SCREEN_CAPTURE !== false);
       const isPageTranslationEnabled = isExtensionEnabled &&
                                       (settings.WHOLE_PAGE_TRANSLATION_ENABLED !== false) &&
-                                      (findProviderById(pageApi)?.features?.includes('bulk') ?? false);
+                                       !getProviderModeValidationError(pageApi, TranslationMode.Page, settings);
       const visibility = settings.CONTEXT_MENU_VISIBILITY || CONFIG.CONTEXT_MENU_VISIBILITY;
       const isPageMenuVisible = isExtensionEnabled && visibility.PAGE_CONTEXT_PAGE_TRANSLATION !== false;
       const commands = await browser.commands.getAll();
@@ -919,8 +913,9 @@ export class ContextMenuManager extends ResourceTracker {
 
     if (action === MessageActions.PAGE_TRANSLATE) {
       if (settings.WHOLE_PAGE_TRANSLATION_ENABLED === false) return;
-      const provider = getConfiguredPageProvider(settings);
-      if (!findProviderById(provider)?.features?.includes('bulk')) return;
+      const provider = await getEffectiveProviderAsync(TranslationMode.Page);
+      const providerSettings = await getProviderSettingsAsync(findProviderById(provider)?.requiredSettings || []);
+      if (getProviderModeValidationError(provider, TranslationMode.Page, providerSettings)) return;
     }
 
     const { handlePageTranslation } = await import('@/core/background/handlers/page-translation/handlePageTranslation.js');

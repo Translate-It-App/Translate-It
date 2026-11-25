@@ -457,7 +457,7 @@ import ExclusionChecker from "@/features/exclusion/core/ExclusionChecker.js";
 import PageTranslationStatus from "@/components/shared/PageTranslationStatus.vue";
 import { deviceDetector } from "@/utils/browser/compatibility.js";
 import { getLanguageNameFromCode } from "@/shared/config/languageConstants.js";
-import { findProviderById } from "@/features/translation/providers/ProviderManifest.js";
+import { getProviderModeValidationError } from "@/features/translation/utils/providerSelection.js";
 import { useAutoTranslateRules } from "@/features/page-translation/composables/useAutoTranslateRules.js";
 import {
   addDesktopFabExclusion,
@@ -708,8 +708,7 @@ const handleMouseLeave = () => {
  */
 const supportsBulk = (mode) => {
   const providerId = settingsStore.getEffectiveProvider(mode);
-  const provider = findProviderById(providerId);
-  return provider?.features?.includes("bulk") ?? true;
+  return !getProviderModeValidationError(providerId, mode, settingsStore.settings);
 };
 
 const isSelectElementSupported = computed(() =>

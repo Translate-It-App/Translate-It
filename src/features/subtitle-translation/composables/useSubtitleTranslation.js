@@ -128,6 +128,10 @@ export function useSubtitleTranslation() {
     errorAction.value = presentation.kind === 'display' ? presentation.action ?? null : null;
   };
 
+  const presentError = (error) => applyTranslationError({
+    errorDetails: MessageFormat.serializeTranslationError(error),
+  });
+
   const startTranslation = async (fileContent, filename, config) => {
     presentationVersion++;
     status.value = 'translating';
@@ -209,6 +213,7 @@ export function useSubtitleTranslation() {
     cues,
     translatedContent,
     startTranslation,
+    presentError,
     cancelTranslation,
     downloadResult,
     cleanup: unsubscribe

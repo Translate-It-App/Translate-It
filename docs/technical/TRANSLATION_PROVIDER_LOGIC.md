@@ -4,20 +4,40 @@ This document defines the logic used by the system to determine which translatio
 
 ## Core Architecture
 
-The system uses a **Hierarchical Provider Selection** mechanism combined with an **Execution Strategy** layer. Decisions are resolved centrally in `UnifiedTranslationService.js` and executed through the `ProviderCoordinator.js`.
+The system uses hierarchical provider selection combined with an execution strategy layer. `UnifiedTranslationService.js` owns execution-time provider selection and `ProviderCoordinator.js` executes the selected provider. Settings/config resolvers provide the same mode/global precedence for UI capability checks; they do not replace an incompatible provider.
 
-### 1. Decision Hierarchy (The "Waterfall" Logic)
+### 1. Decision Hierarchy
 
-When a translation request is initiated, the provider is resolved based on this priority:
+For mode-based settings and capability checks:
 
-1.  **Direct UI Override (Highest Priority):** If the request explicitly carries a `provider` field (e.g., from Popup/Sidepanel direct translation).
-2.  **Ephemeral Sync (Smart Overrides):** 
-    - **Sync Page**: When enabled, Whole Page Translation bypasses settings and uses the UI's active provider.
-    - **Sync Element**: When enabled, Select Element mode uses the UI's active provider.
-3.  **Feature-Specific Setting (`MODE_PROVIDERS`):** Configured in Options (e.g., `select-element`, `page-translation-batch`).
-4.  **Global Default (`TRANSLATION_API`):** The fallback system-wide provider.
+1. **Feature-specific setting (`MODE_PROVIDERS`)**, when non-null.
+2. **Dictionary inheritance from Selection**, when Dictionary is explicitly null.
+3. **Global provider (`TRANSLATION_API`)**.
 
-### 2. Execution Orchestration (New)
+Dictionary defaults to Google Translate V2 on fresh/reset settings. A stored
+`null` remains intentional inheritance and is not migrated over. Microsoft
+Translator remains the global default.
+Automatically eligible single-word requests resolve the Dictionary provider
+before execution, so they honor this setting (including null inheritance).
+Explicitly marked UI provider overrides still take precedence.
+
+At execution time, explicitly marked request overrides and provider values
+supplied by UI/ephemeral synchronization retain their existing precedence.
+Capability checks and execution must use the same effective selection.
+
+### 2. Capability and Configuration Validation
+
+Provider selection never silently substitutes another provider.
+`UnifiedTranslationService` validates the resolved provider against its manifest
+before execution: unknown IDs, missing required settings, and providers lacking
+the mode's required bulk/Subtitle capability return a typed validation failure
+through request preparation. UI checks use that same provider/capability rule
+to disable incompatible actions. A user who
+intentionally selects a provider without Dictionary support retains the
+existing Dictionary-to-normal-translation behavior. API errors do not trigger
+cross-provider failover.
+
+### 3. Execution Orchestration
 
 Once a provider is selected, the **ProviderCoordinator** determines the technical strategy:
 - **Language Normalization**: Maps standard codes to provider-specific ones.
@@ -186,7 +206,7 @@ as generic queue retry or cross-provider fallback.
 *   **Logic:** 
     - **Manual Override:** Persistent per-window lifecycle.
     - **Smart Prompting**: The selection mode passes extra context (Headings, Page Title) to AI providers to improve accuracy.
-    - **Dictionary Fallback**: Uses `MODE_PROVIDERS['dictionary-translation']` for single words.
+    - Single-word requests use the configured Dictionary provider (Google Translate V2 by default); a selected provider without Dictionary support keeps the established normal-translation behavior.
 
 ---
 

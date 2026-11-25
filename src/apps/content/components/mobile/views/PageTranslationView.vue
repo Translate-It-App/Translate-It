@@ -234,7 +234,7 @@ import { useMobileStore } from "@/store/modules/mobile.js";
 import { useSettingsStore } from "@/features/settings/stores/settings.js";
 import { useErrorHandler } from "@/composables/shared/useErrorHandler.js";
 import { ErrorTypes } from "@/shared/error-management/ErrorTypes.js";
-import { findProviderById } from "@/features/translation/providers/ProviderManifest.js";
+import { getProviderModeValidationError } from "@/features/translation/utils/providerSelection.js";
 import { TranslationMode } from "@/shared/config/config.js";
 import { pageEventBus } from "@/core/PageEventBus.js";
 import { MessageActions } from "@/shared/messaging/core/MessageActions.js";
@@ -296,8 +296,11 @@ const pageProvider = computed(() => {
 });
 
 const isBulkSupported = computed(() => {
-  const provider = findProviderById(pageProvider.value);
-  return provider?.features?.includes("bulk") ?? false;
+  return !getProviderModeValidationError(
+    pageProvider.value,
+    TranslationMode.Page,
+    settingsStore.settings,
+  );
 });
 
 const handleBulkNotSupported = async () => {
@@ -422,7 +425,7 @@ const toggleAutoClose = async () => {
 
 const startTranslation = () => {
   const provider = pageProvider.value;
-  if (!findProviderById(provider)?.features?.includes("bulk")) {
+  if (getProviderModeValidationError(provider, TranslationMode.Page, settingsStore.settings)) {
     handleBulkNotSupported();
     return;
   }

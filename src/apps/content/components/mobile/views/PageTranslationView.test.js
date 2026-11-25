@@ -30,7 +30,7 @@ vi.mock('@/composables/shared/useErrorHandler.js', () => ({
 }))
 
 vi.mock('@/features/translation/providers/ProviderManifest.js', () => ({
-  findProviderById: () => ({ features: ['bulk'] }),
+  findProviderById: (id) => ({ features: id === 'vajehyab' ? ['dictionary'] : ['bulk'] }),
 }))
 
 vi.mock('@/features/page-translation/composables/useAutoTranslateRules.js', () => ({
@@ -83,7 +83,7 @@ describe('PageTranslationView page action', () => {
     settingsStore = reactive({
       isDarkTheme: false,
       settings: { MOBILE_PAGE_TRANSLATION_AUTO_CLOSE: false },
-      getEffectiveProvider: () => 'google',
+      getEffectiveProvider: () => settingsStore.effectiveProvider || 'google',
     })
     autoRules = {
       normalizedPageUrl: ref('https://example.com/page'), siteRule: ref(null),
@@ -128,6 +128,13 @@ describe('PageTranslationView page action', () => {
     const wrapper = mount(PageTranslationView)
 
     expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Start Translation')
+  })
+
+  it('disables page translation for a resolved provider without bulk support', () => {
+    settingsStore.effectiveProvider = 'vajehyab'
+    const wrapper = mount(PageTranslationView)
+
+    expect(wrapper.get('.ti-m-header-primary-btn').classes()).toContain('is-disabled')
   })
 
   it('resets terminal error and starts a fresh PAGE_TRANSLATE session', async () => {
