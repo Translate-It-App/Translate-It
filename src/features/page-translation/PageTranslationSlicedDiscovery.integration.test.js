@@ -138,6 +138,26 @@ describe('Page Translation sliced discovery integration', () => {
     expect(shadow.firstChild.nodeValue).toBe('Direct shadow-root text');
   });
 
+  it.each([
+    ['single-slice', 1],
+    ['multi-slice', 40],
+  ])('signals successful initial discovery exactly once after a %s drain', async (_label, count) => {
+    const fixture = document.createDocumentFragment();
+    for (let index = 0; index < count; index++) appendElement(fixture, 'p', `Initial ${index}`);
+    setBody(...Array.from(fixture.childNodes));
+    const admitted = [];
+    const onInitialDiscoveryDrained = vi.fn();
+
+    await start((text) => {
+      admitted.push(text);
+      return Promise.resolve(acceptedTranslation(text));
+    }, { callbacks: { onInitialDiscoveryDrained } });
+
+    await vi.waitFor(() => expect(onInitialDiscoveryDrained).toHaveBeenCalledTimes(1));
+    expect(admitted).toHaveLength(count);
+    expect(onInitialDiscoveryDrained).toHaveBeenCalledTimes(1);
+  });
+
   it('matches the actual legacy traversal on the same fixture, including target identities and restore', async () => {
     const fixture = document.createDocumentFragment();
     const paragraph = appendElement(fixture, 'p', 'First text', { title: 'First title' });
@@ -225,10 +245,14 @@ describe('Page Translation sliced discovery integration', () => {
     appendElement(document.body, 'p', 'Never admitted');
     const pending = [];
     const states = [];
+    const onInitialDiscoveryDrained = vi.fn();
     const translate = vi.fn((text, _context, _score, node) => new Promise(resolve => {
       pending.push({ text, node, resolve });
     }));
-    await start(translate, { callbacks: { onDiscoveryStateChange: value => states.push(value) } });
+    await start(translate, { callbacks: {
+      onDiscoveryStateChange: value => states.push(value),
+      onInitialDiscoveryDrained,
+    } });
 
     bridge.restore(document.body);
     await new Promise(resolve => setTimeout(resolve, 10));
@@ -236,13 +260,18 @@ describe('Page Translation sliced discovery integration', () => {
     expect(document.body.textContent).toBe('FirstNever admitted');
     expect(translate).not.toHaveBeenCalled();
     expect(states).toEqual([true, false]);
+    expect(onInitialDiscoveryDrained).not.toHaveBeenCalled();
   });
 
   it('cancels queued admission when persistence stops', async () => {
     setBody(appendElement(document.createDocumentFragment(), 'p', 'Never admitted'));
     const states = [];
+    const onInitialDiscoveryDrained = vi.fn();
     const translate = vi.fn((text) => Promise.resolve(acceptedTranslation(text)));
-    await start(translate, { callbacks: { onDiscoveryStateChange: pending => states.push(pending) } });
+    await start(translate, { callbacks: {
+      onDiscoveryStateChange: pending => states.push(pending),
+      onInitialDiscoveryDrained,
+    } });
 
     bridge.stopPersistence();
     await new Promise(resolve => setTimeout(resolve, 10));
@@ -250,6 +279,7 @@ describe('Page Translation sliced discovery integration', () => {
     expect(translate).not.toHaveBeenCalled();
     expect(states).toEqual([true, false]);
     expect(document.body.textContent).toBe('Never admitted');
+    expect(onInitialDiscoveryDrained).not.toHaveBeenCalled();
   });
 
   it('retires queued dynamic-subtree discovery when that subtree is removed', async () => {

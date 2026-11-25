@@ -73,6 +73,7 @@ vi.mock('./PageTranslationHelper.js', () => ({
           }
         });
         this.setDiscoveryPending = vi.fn((pending) => { this.discoveryPending = pending; return true; });
+        this.releaseFirstBatchAfterDiscovery = vi.fn(() => true);
         this.enqueue = vi.fn();
         this.recordRetainedTranslation = vi.fn(() => {
           this.totalTasks++;
@@ -855,25 +856,53 @@ describe('PageTranslationManager', () => {
     });
 
     it('passes attempt-owned discovery callbacks and ignores callbacks after session replacement', async () => {
+      PageTranslationSettingsLoader.load.mockResolvedValue({
+        ...acceptedSettings,
+        lazyLoading: false,
+        autoTranslateOnDOMChanges: false,
+        translateAfterScrollStop: false,
+      });
       await manager.translatePage();
       const options = manager.bridge.initialize.mock.calls[0][3];
       expect(options.onDiscoveryStateChange).toEqual(expect.any(Function));
+      expect(options.onInitialDiscoveryDrained).toEqual(expect.any(Function));
       expect(options.onDiscoveryError).toEqual(expect.any(Function));
       const oldContext = manager.sessionContext;
       options.onDiscoveryStateChange(true);
       expect(manager.scheduler.setDiscoveryPending).toHaveBeenCalledWith(true, oldContext);
+      options.onInitialDiscoveryDrained();
+      expect(manager.scheduler.releaseFirstBatchAfterDiscovery).toHaveBeenCalledWith(
+        manager.translationMessageId,
+        oldContext
+      );
       const controller = manager.abortController;
 
       manager.sessionContext = Symbol('replacement');
       manager.scheduler.sessionContext = manager.sessionContext;
       const calls = manager.scheduler.setDiscoveryPending.mock.calls.length;
       options.onDiscoveryStateChange(false);
+      options.onInitialDiscoveryDrained();
       options.onDiscoveryError(new Error('stale discovery'));
       expect(manager.scheduler.setDiscoveryPending).toHaveBeenCalledTimes(calls);
+      expect(manager.scheduler.releaseFirstBatchAfterDiscovery).toHaveBeenCalledTimes(1);
       expect(manager.scheduler.discoveryPending).toBe(true);
       expect(manager.abortController).toBe(controller);
       expect(manager.bridge.stopPersistence).not.toHaveBeenCalled();
       expect(pageEventBus.emit).not.toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_ERROR, expect.objectContaining({ error: 'stale discovery' }));
+    });
+
+    it.each([
+      { lazyLoading: true, autoTranslateOnDOMChanges: false, translateAfterScrollStop: false },
+      { lazyLoading: false, autoTranslateOnDOMChanges: true, translateAfterScrollStop: false },
+      { lazyLoading: false, autoTranslateOnDOMChanges: false, translateAfterScrollStop: true },
+    ])('does not request an early first flush for an ineligible discovery mode: %o', async settings => {
+      PageTranslationSettingsLoader.load.mockResolvedValue({ ...acceptedSettings, ...settings });
+      await manager.translatePage();
+      const options = manager.bridge.initialize.mock.calls.at(-1)[3];
+
+      options.onInitialDiscoveryDrained();
+
+      expect(manager.scheduler.releaseFirstBatchAfterDiscovery).not.toHaveBeenCalled();
     });
 
     it('settles empty initial discovery once after the queued drain callback', async () => {

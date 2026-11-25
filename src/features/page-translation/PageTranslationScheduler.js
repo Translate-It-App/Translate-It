@@ -156,6 +156,26 @@ export class PageTranslationScheduler extends ResourceTracker {
     return true;
   }
 
+  releaseFirstBatchAfterDiscovery(sessionId, sessionContext) {
+    if (!this._ownsFlushSession(sessionId, sessionContext)
+        || this.discoveryPending
+        || this.settings.lazyLoading !== false
+        || this.settings.autoTranslateOnDOMChanges !== false
+        || this.settings.translateAfterScrollStop === true
+        || !this.isFirstBatch
+        || !this.batchTimer
+        || this.isVisibilityRetryTimer
+        || this.isAdaptiveBatchTimer
+        || this._batchTimerDeadline === null
+        || this.batchTimerDelay !== PAGE_TRANSLATION_TIMING.FIRST_BATCH_DELAY
+        || this.queue.length === 0
+        || this.activeFlushes > 0) return false;
+
+    this._clearBatchTimer();
+    void this.flush();
+    return true;
+  }
+
   reset() {
     this.stop();
     this.translatedCount = 0;
