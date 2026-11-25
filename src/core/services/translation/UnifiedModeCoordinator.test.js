@@ -546,8 +546,10 @@ describe('UnifiedModeCoordinator', () => {
 
         const first = coordinator.processRequest(pageBatchRequest({ sessionId: 'session-a', messageId: 'sa' }), { translationEngine: mockEngine });
         const second = coordinator.processRequest(pageBatchRequest({ sessionId: 'session-b', messageId: 'sb' }), { translationEngine: mockEngine });
-        await flush();
-        await flush();
+        await vi.waitFor(() => {
+          expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(2);
+          expect(providers.map(provider => provider.sources)).toEqual([['en'], ['sv']]);
+        });
 
         expect(resolveOperationSourceLanguage).toHaveBeenCalledTimes(2);
         expect(providers.map(provider => provider.sources)).toEqual([['en'], ['sv']]);
