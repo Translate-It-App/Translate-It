@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createApp, nextTick, ref } from 'vue';
+import { createApp, h, nextTick, ref } from 'vue';
 import { getActivePinia, createPinia, setActivePinia, defineStore } from 'pinia';
 import { useUnifiedTranslation } from './useUnifiedTranslation.js';
 
@@ -16,6 +16,14 @@ const contentIntegrationMocks = vi.hoisted(() => ({
   handleMessage: vi.fn(() => false),
 }));
 
+const popupInputMocks = vi.hoisted(() => ({
+  onTtsClicked: vi.fn(),
+}));
+
+const browserI18nMocks = vi.hoisted(() => ({
+  detectLanguage: vi.fn(),
+}));
+
 vi.mock("webextension-polyfill", () => ({
   default: {
     runtime: {
@@ -23,6 +31,10 @@ vi.mock("webextension-polyfill", () => ({
         addListener: vi.fn(),
         removeListener: vi.fn(),
       },
+    },
+    i18n: {
+      detectLanguage: browserI18nMocks.detectLanguage,
+      getUILanguage: vi.fn(() => 'en-US'),
     },
   },
 }));
@@ -114,6 +126,7 @@ vi.mock("@/shared/config/config.js", () => ({
   getSidepanelMaxCharsAsync: vi.fn().mockResolvedValue(10000),
   getSourceLanguage: vi.fn().mockReturnValue("auto"),
   getTargetLanguage: vi.fn().mockReturnValue("en"),
+  getLanguageDetectionPreferencesAsync: vi.fn().mockResolvedValue({ 'latin-script': 'none' }),
   TranslationMode: {
     Popup_Translate: "popup_translate",
     Sidepanel_Translate: "sidepanel_translate",
@@ -134,18 +147,43 @@ vi.mock("@/utils/UtilsFactory.js", () => ({
   },
 }));
 
-function withSetup(composable) {
+vi.mock('vue-i18n', () => ({
+  useI18n: () => ({ t: (key) => key }),
+}));
+
+vi.mock('@/composables/shared/useFont.js', () => ({
+  useFont: () => ({ fontStyles: {}, cssVariables: {} }),
+}));
+
+vi.mock('@/components/shared/TTSButton.vue', () => ({
+  default: {
+    props: ['language', 'text'],
+    setup(props) {
+      return () => {
+        return h('button', {
+          'data-testid': 'source-tts',
+          onClick: () => popupInputMocks.onTtsClicked(props.language),
+        });
+      };
+    },
+  },
+}));
+
+vi.mock('@/features/text-actions/components/CopyButton.vue', () => ({ default: { template: '<span />' } }));
+vi.mock('@/features/text-actions/components/PasteButton.vue', () => ({ default: { template: '<span />' } }));
+
+function withSetup(composable, render = () => null) {
   let result;
   const app = createApp({
     setup() {
       result = composable();
-      return () => {};
+      return () => render(result);
     },
   });
   app.use(getActivePinia());
   const host = document.createElement("div");
   app.mount(host);
-  return [result, app];
+  return [result, app, host];
 }
 
 describe("useUnifiedTranslation", () => {
@@ -192,6 +230,60 @@ describe("useUnifiedTranslation", () => {
     await resultPromise;
     expect(composable.translatedText.value).toBe("سلام دنیا");
     expect(composable.isTranslating.value).toBe(false);
+  });
+
+  it('keeps rejected Chinese detection out of Popup metadata, label, and source TTS handoff', async () => {
+    const { default: TranslationInputField } = await import('@/components/shared/TranslationInputField.vue');
+    const { sendMessage } = await import('@/shared/messaging/core/UnifiedMessaging.js');
+    const { LanguageDetectionService } = await import('@/shared/services/LanguageDetectionService.js');
+    browserI18nMocks.detectLanguage.mockResolvedValueOnce({
+      isReliable: false,
+      languages: [{ language: 'zh', percentage: 100 }],
+    });
+    sendMessage.mockImplementationOnce(async (request) => {
+      const detectedLanguage = await LanguageDetectionService.detect(request.data.text);
+      return {
+        success: true,
+        translatedText: 'پلی‌ورایت',
+        originalText: request.data.text,
+        sourceLanguage: detectedLanguage || request.data.sourceLanguage,
+        targetLanguage: request.data.targetLanguage,
+        provider: 'google_v2',
+      };
+    });
+
+    const [composable, app, host] = withSetup(
+      () => useUnifiedTranslation('popup'),
+      (state) => h(TranslationInputField, {
+        modelValue: state.sourceText.value,
+        language: state.actualSourceLanguage.value,
+        detectedSourceLanguage: state.actualSourceLanguage.value,
+        lastTranslation: state.lastTranslation.value,
+        'onUpdate:modelValue': (value) => { state.sourceText.value = value; },
+      }),
+    );
+
+    composable.sourceText.value = 'playwright';
+    await composable.triggerTranslation(null, 'fa');
+    await nextTick();
+
+    expect(browserI18nMocks.detectLanguage).toHaveBeenCalledWith('playwright');
+    expect(sendMessage.mock.calls[0][0].data.sourceLanguage).toBe('auto');
+    expect(sendMessage.mock.calls[0][0].data.targetLanguage).toBe('fa');
+    expect(composable.sourceLanguage.value).toBe('auto');
+    expect(composable.actualSourceLanguage.value).toBe('auto');
+    expect(composable.translatedText.value).toBe('پلی‌ورایت');
+    expect(composable.lastTranslation.value).toMatchObject({
+      source: 'playwright',
+      sourceLanguage: 'auto',
+      targetLanguage: 'fa',
+    });
+    expect(host.querySelector('.ti-language-label')).toBeNull();
+    host.querySelector('[data-testid="source-tts"]').click();
+    expect(popupInputMocks.onTtsClicked).toHaveBeenCalledOnce();
+    expect(popupInputMocks.onTtsClicked).toHaveBeenCalledWith('auto');
+
+    app.unmount();
   });
 
   it("should handle translation error", async () => {

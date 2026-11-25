@@ -8,9 +8,9 @@ import {
   isCjkScriptText,
   isDevanagariScriptText,
   isLatinScriptText,
-  isChineseScriptText,
   shouldApplyRtl,
   ARABIC_SCRIPT_LANGUAGES,
+  CHINESE_SCRIPT_LANGUAGES,
   LATIN_SCRIPT_PRIORITY_LANGUAGES
 } from "@/shared/utils/text/textAnalysis.js";
 import { getLanguageDetectionPreferencesAsync } from "@/shared/config/config.js";
@@ -347,7 +347,7 @@ export class LanguageDetectionService {
               // Prevention of common false positives: Validate script consistency
               if (lang === 'ko' && !/[가-힯]/.test(sample)) return null;
               if (lang === 'ja' && !/[぀-ゟ゠-ヿ一-鿿]/.test(sample)) return null;
-              if (lang === 'zh' && !isChineseScriptText(sample)) return null;
+              if (CHINESE_SCRIPT_LANGUAGES.includes(lang) && !/\p{Script=Han}/u.test(sample)) return null;
 
               // FA/AR validation: Only reject if detected as FA/AR but text has no Arabic script characters
               if ((lang === 'fa' || lang === 'ar') && !isTextArabic) {
