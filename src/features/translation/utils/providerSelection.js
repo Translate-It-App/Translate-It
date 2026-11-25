@@ -15,7 +15,9 @@ export function getProviderModeValidationMessage(error, t) {
   }
 
   const { messageKey } = mapCanonicalTranslationError(error);
-  return t(messageKey, messageKey);
+  if (messageKey !== 'ERRORS_INVALID_INPUT') return t(messageKey, messageKey);
+
+  return t('ERRORS_API_CONFIG_INVALID', 'Invalid provider configuration');
 }
 
 const requiredFeatures = new Map([

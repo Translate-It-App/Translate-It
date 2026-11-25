@@ -230,7 +230,7 @@
           :class="{ 'ti-active': isSelectModeActive }"
           :title="selectElementTitle"
           :aria-label="t('popup_select_element_alt_icon') || 'Select Element'"
-          :disabled="!isSelectElementSupported"
+          :disabled="!isSelectModeActive && !isSelectElementSupported"
           :aria-pressed="isSelectModeActive"
           @click="handleSelectElement"
         >
@@ -402,7 +402,7 @@ const pageTranslationDisabledReason = computed(() =>
  * The accessible name is always the stable action label (see template),
  * independent of support state.
  */
-const selectElementTitle = computed(() => !isSelectElementSupported.value
+const selectElementTitle = computed(() => !isSelectModeActive.value && !isSelectElementSupported.value
   ? getProviderModeValidationMessage(selectElementValidationError.value, t)
   : t(
     'popup_select_element_title_icon',
@@ -431,7 +431,7 @@ const handleOpenExtensionApp = async (appName) => {
 }
 
 const handleSelectElement = async () => {
-  if (!isSelectElementSupported.value) return
+  if (!isSelectModeActive.value && !isSelectElementSupported.value) return
 
   logger.debug('Select Element button clicked!')
   

@@ -17,9 +17,9 @@
           id="selectElementBtn"
           type="button"
           class="toolbar-button"
-          :title="!isSelectElementSupported ? getProviderModeValidationMessage(selectElementValidationError, t) : t('SIDEPANEL_SELECT_ELEMENT_TOOLTIP')"
+          :title="!isSelectModeActive && !isSelectElementSupported ? getProviderModeValidationMessage(selectElementValidationError, t) : t('SIDEPANEL_SELECT_ELEMENT_TOOLTIP')"
           :aria-label="t('SIDEPANEL_SELECT_ELEMENT_TOOLTIP')"
-          :disabled="isActivating || !isSelectElementSupported"
+          :disabled="isActivating || (!isSelectModeActive && !isSelectElementSupported)"
           :aria-pressed="isSelectModeActive"
           :class="{ 'ti-active': isSelectModeActive }"
           @click="handleSelectElement"
@@ -684,7 +684,7 @@ onUnmounted(() => {
 })
 
 const handleSelectElement = async () => {
-  if (!isSelectElementSupported.value) return
+  if (isActivating.value || (!isSelectModeActive.value && !isSelectElementSupported.value)) return
 
   getLogger().debug('Select Element button clicked! Mode:', isSelectModeActive.value ? 'Deactivating' : 'Activating')
 

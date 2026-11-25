@@ -71,6 +71,23 @@ describe('provider selection', () => {
     expect(getProviderModeValidationMessage(missingUrl, t)).toBe('ERRORS_API_URL_MISSING');
   });
 
+  it.each([
+    ['en', 'Invalid provider configuration'],
+    ['fa', 'پیکربندی ارائه‌دهنده نامعتبر است'],
+    ['ja', 'プロバイダーの設定が無効です'],
+  ])('uses a localized configuration fallback for unknown providers (%s)', (locale, translated) => {
+    const unknown = getProviderModeValidationError('missing-provider', TranslationMode.Selection);
+    const messages = {
+      en: { ERRORS_API_CONFIG_INVALID: 'Invalid provider configuration' },
+      fa: { ERRORS_API_CONFIG_INVALID: 'پیکربندی ارائه‌دهنده نامعتبر است' },
+      ja: { ERRORS_API_CONFIG_INVALID: 'プロバイダーの設定が無効です' },
+    };
+    const t = (key, fallback) => messages[locale][key] || fallback || key;
+
+    expect(getProviderModeValidationMessage(unknown, t)).toBe(translated);
+    expect(getProviderModeValidationMessage(unknown, t)).not.toContain('ERRORS_');
+  });
+
   it('does not impose dictionary capability validation that would prevent the established downgrade', () => {
     expect(getProviderModeValidationError('vajehyab', TranslationMode.Dictionary_Translation)).toBeNull();
   });

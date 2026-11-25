@@ -196,6 +196,21 @@ describe('DashboardView page command transport', () => {
     );
   });
 
+  it('opens existing page controls when provider validation becomes invalid during translation', async () => {
+    mocks.mobileStore.pageTranslationData.isTranslating = true;
+    const wrapper = mount(DashboardView);
+    const pageButton = wrapper.findAll('.ti-m-action-btn')[0];
+
+    mocks.settingsStore.settings.MODE_PROVIDERS.page = 'vajehyab';
+    await wrapper.vm.$nextTick();
+    expect(pageButton.classes()).not.toContain('is-disabled');
+    await pageButton.trigger('click');
+
+    expect(mocks.mobileStore.navigate).toHaveBeenCalledWith('page-translation');
+    expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+    expect(mocks.handleError).not.toHaveBeenCalled();
+  });
+
   it('uses the missing-key configuration error instead of the unsupported-capability error', async () => {
     mocks.settingsStore.settings.MODE_PROVIDERS.page = 'gemini';
     const wrapper = mount(DashboardView);

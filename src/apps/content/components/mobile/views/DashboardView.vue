@@ -8,7 +8,7 @@
       <button
         v-if="allowedFeatures.pageTranslation"
         class="ti-m-action-btn"
-        :class="{ 'is-disabled': !isPageTranslationSupported }"
+        :class="{ 'is-disabled': !canOpenPageTranslation }"
         @click="translatePage"
       >
         <div class="ti-m-icon-container ti-m-icon-translate-page">
@@ -282,6 +282,12 @@ const isPageTranslationSupported = computed(() =>
 const isSelectElementSupported = computed(() =>
   checkBulkSupport(selectElementProvider.value, TranslationMode.Select_Element),
 );
+const canOpenPageTranslation = computed(() =>
+  isPageTranslationSupported.value ||
+  mobileStore.pageTranslationData.isTranslating ||
+  mobileStore.pageTranslationData.isAutoTranslating ||
+  mobileStore.pageTranslationData.isTranslated,
+);
 
 const handleBulkNotSupported = async (error) => {
   mobileStore.closeSheet();
@@ -339,27 +345,31 @@ const isTTSVisible = computed(
 
 const translatePage = (event) => {
   try {
-    const provider = pageProvider.value;
-    const validationError = getModeValidationError(provider, TranslationMode.Page);
-    if (validationError) {
-      handleBulkNotSupported(validationError);
-      return;
-    }
-    if (event) {
-      event.preventDefault();
-      event.stopPropagation();
-    }
-    logger.info("Page translation requested from Mobile Dashboard", {
-      provider,
-    });
     const isCurrentlyTranslating =
       mobileStore.pageTranslationData.isTranslating ||
       mobileStore.pageTranslationData.isAutoTranslating ||
       mobileStore.pageTranslationData.isTranslated;
 
     if (isCurrentlyTranslating) {
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
       mobileStore.navigate(MOBILE_CONSTANTS.VIEWS.PAGE_TRANSLATION);
     } else {
+      const provider = pageProvider.value;
+      const validationError = getModeValidationError(provider, TranslationMode.Page);
+      if (validationError) {
+        handleBulkNotSupported(validationError);
+        return;
+      }
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      logger.info("Page translation requested from Mobile Dashboard", {
+        provider,
+      });
       sendPageCommand({
         action: MessageActions.PAGE_TRANSLATE,
         data: { provider },
