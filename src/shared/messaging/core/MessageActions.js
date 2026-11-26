@@ -46,6 +46,9 @@ export class MessageActions {
   // Whole Page Translation (NEW)
   static PAGE_TRANSLATE = 'page-translate';
   static PAGE_TRANSLATE_ADMIT = 'page-translate-admit';
+  static PAGE_TRANSLATE_FRAME_READY = 'page-translate-frame-ready';
+  static PAGE_TRANSLATE_FRAME_PROBE = 'page-translate-frame-probe';
+  static PAGE_TRANSLATE_FRAME_START = 'page-translate-frame-start';
   static PAGE_TRANSLATE_BATCH = 'page-translate-batch'; // For actual translation request
   static PAGE_TRANSLATE_START = 'page-translate-start';
   static PAGE_TRANSLATE_PROGRESS = 'page-translate-progress';

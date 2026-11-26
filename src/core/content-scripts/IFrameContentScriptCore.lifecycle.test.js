@@ -7,10 +7,13 @@ const mocks = vi.hoisted(() => {
     fmInitialized: false,
     policyCbs: new Set(),
     requestedFeatures: new Set(),
+    messageHandlers: new Map(),
+    checkForUrlChange: vi.fn().mockResolvedValue(undefined),
     interactionInit: vi.fn().mockResolvedValue(undefined),
     getRelay: vi.fn(),
     loadFeature: vi.fn().mockResolvedValue({}),
     frameReady: vi.fn().mockResolvedValue({ success: true }),
+    runtimeMessageListener: vi.fn(),
     injectStyles: vi.fn(),
   };
   m.onPolicyChanged = vi.fn((cb) => {
@@ -21,7 +24,11 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock('webextension-polyfill', () => ({
-  default: { runtime: { getURL: (p) => `moz-extension://test/${p}`, sendMessage: mocks.frameReady } },
+  default: { runtime: {
+    getURL: (p) => `moz-extension://test/${p}`,
+    sendMessage: mocks.frameReady,
+    onMessage: { addListener: mocks.runtimeMessageListener },
+  } },
 }));
 
 vi.mock('@/features/exclusion/utils/exclusion-utils.js', () => ({
@@ -42,7 +49,12 @@ vi.mock('@/shared/logging/logger.js', () => ({
 vi.mock('@/shared/logging/logConstants.js', () => ({ LOG_COMPONENTS: { CONTENT: 'content' } }));
 vi.mock('@/core/extensionContext.js', () => ({ default: { isValidSync: () => true } }));
 vi.mock('@/shared/messaging/core/MessageHandler.js', () => ({
-  createMessageHandler: () => ({ isListenerActive: false, listen: vi.fn(), registerHandler: vi.fn(), stopListening: vi.fn() }),
+  createMessageHandler: () => ({
+    isListenerActive: false,
+    listen: vi.fn(),
+    registerHandler: (action, callback) => mocks.messageHandlers.set(action, callback),
+    stopListening: vi.fn(),
+  }),
 }));
 vi.mock('@/shared/error-management/windowErrorHandlers.js', () => ({
   setupWindowErrorHandlers: vi.fn(),
@@ -51,7 +63,13 @@ vi.mock('@/shared/messaging/core/ContentScriptIntegration.js', () => ({
   initializeContentScriptIntegration: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('@/shared/messaging/core/MessageActions.js', () => ({
-  MessageActions: { SELECT_ELEMENT_FRAME_READY: 'selectElementFrameReady' },
+  MessageActions: {
+    SELECT_ELEMENT_FRAME_READY: 'selectElementFrameReady',
+    PAGE_TRANSLATE_FRAME_PROBE: 'page-translate-frame-probe',
+    PAGE_TRANSLATE_FRAME_READY: 'page-translate-frame-ready',
+    PAGE_TRANSLATE_FRAME_START: 'page-translate-frame-start',
+    SPA_NAVIGATION: 'spaNavigation',
+  },
 }));
 vi.mock('./InteractionCoordinator.js', () => ({
   interactionCoordinator: { initialize: mocks.interactionInit },
@@ -64,7 +82,8 @@ vi.mock('@/core/managers/content/FeatureManager.js', () => ({
     getInstance: () => ({
       get initialized() { return mocks.fmInitialized; },
       set initialized(v) { mocks.fmInitialized = v; },
-      initialize: mocks.fmInit,
+       initialize: mocks.fmInit,
+       checkForUrlChange: mocks.checkForUrlChange,
       onPolicyChanged: mocks.onPolicyChanged,
       requestedFeatures: mocks.requestedFeatures,
       getFeatureHandler: vi.fn(),
@@ -89,6 +108,8 @@ describe('IFrameContentScriptCore lifecycle', () => {
     vi.clearAllMocks();
     mocks.check.mockResolvedValue(false);
     mocks.requestedFeatures.clear();
+    mocks.messageHandlers.clear();
+    mocks.checkForUrlChange.mockReset().mockResolvedValue(undefined);
     mocks.policyCbs.clear();
     mocks.fmInitialized = false;
     mocks.loadFeature.mockResolvedValue({});
@@ -99,6 +120,8 @@ describe('IFrameContentScriptCore lifecycle', () => {
     delete window.getGlobalPageTranslationStatus;
     delete window.translateItContentScriptLoaded;
     delete window._translateItBootstrapPromise;
+    delete window.__translateItPageDocumentToken;
+    delete window.__translateItFrameStartedToken;
     window.translateItContentScriptInitializing = false;
     window.translateItContentCore = undefined;
     window.translateItContentScriptCore = undefined;
@@ -110,7 +133,11 @@ describe('IFrameContentScriptCore lifecycle', () => {
       value: { href: 'https://example.com/frame.html', protocol: 'https:', host: 'example.com' },
     });
     document.documentElement.classList.remove('translate-it-ui-frame');
-    globalThis.browser = { runtime: { getURL: (p) => `moz-extension://test/${p}`, sendMessage: mocks.frameReady } };
+    globalThis.browser = { runtime: {
+      getURL: (p) => `moz-extension://test/${p}`,
+      sendMessage: mocks.frameReady,
+      onMessage: { addListener: mocks.runtimeMessageListener },
+    } };
     window.browser = globalThis.browser;
     globalThis.chrome = { runtime: { sendMessage: mocks.frameReady } };
     mocks.injectStyles = vi.fn();
@@ -173,10 +200,143 @@ describe('IFrameContentScriptCore lifecycle', () => {
     expect(mocks.loadFeature).toHaveBeenCalledWith('mouseHover');
     // FRAME_READY sent after
     expect(mocks.frameReady).toHaveBeenCalledWith({ action: 'selectElementFrameReady', data: {} });
+    expect(mocks.frameReady).toHaveBeenCalledWith({
+      action: 'page-translate-frame-ready', data: { documentToken: window.__translateItPageDocumentToken },
+    });
+    expect(mocks.runtimeMessageListener).toHaveBeenCalledOnce();
     expect(mocks.frameReady.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.loadFeature.mock.invocationCallOrder[2]);
     // message listener installed once
     const messageCalls = addEventListenerSpy.mock.calls.filter(([ev]) => ev === 'message');
     expect(messageCalls.length).toBe(1);
+  });
+
+  it('answers document probes with its own nonce and starts only the returned ticket once', async () => {
+    mocks.check.mockResolvedValue(false);
+    mocks.frameReady
+      .mockResolvedValueOnce({ success: true })
+      .mockResolvedValueOnce({ success: true, start: true, manualContinuityGeneration: 1 })
+      .mockResolvedValue({ success: true });
+    const { IFrameContentScriptCore } = await import('./IFrameContentScriptCore.js');
+    const core = new IFrameContentScriptCore();
+    await core.initializeBase();
+    await core.initializeCritical();
+    const listener = mocks.runtimeMessageListener.mock.calls[0][0];
+    const probeResponse = await new Promise(resolve => {
+      const keepAlive = listener({ action: 'page-translate-frame-probe' }, {}, resolve);
+      expect(keepAlive).toBe(true);
+    });
+    expect(probeResponse).toEqual({
+      documentToken: window.__translateItPageDocumentToken,
+    });
+    await vi.waitFor(() => expect(mocks.frameReady).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'page-translate-frame-start',
+      data: expect.objectContaining({ documentToken: window.__translateItPageDocumentToken }),
+    })));
+  });
+
+  it('retries one explicit START failure through READY and START without changing document identity', async () => {
+    const { IFrameContentScriptCore } = await import('./IFrameContentScriptCore.js');
+    const core = new IFrameContentScriptCore();
+    await core.initializeBase();
+    mocks.frameReady.mockImplementation(async message => {
+      if (message.action === 'selectElementFrameReady') return { success: true };
+      if (message.action === 'page-translate-frame-ready') {
+        return { success: true, start: true, manualContinuityGeneration: 1 };
+      }
+      if (message.action === 'page-translate-frame-start') {
+        return { success: false, reason: 'rejected' };
+      }
+      return { success: true };
+    });
+
+    await core.ensureAllowedRuntime();
+    const token = window.__translateItPageDocumentToken;
+    await vi.waitFor(() => expect(mocks.frameReady.mock.calls.filter(
+      ([message]) => message.action === 'page-translate-frame-start'
+    )).toHaveLength(2));
+
+    expect(window.__translateItPageDocumentToken).toBe(token);
+    expect(mocks.frameReady.mock.calls.filter(
+      ([message]) => message.action === 'page-translate-frame-ready'
+    )).toHaveLength(2);
+    expect(mocks.frameReady.mock.calls.filter(
+      ([message]) => message.action === 'page-translate-frame-start'
+    )).toHaveLength(2);
+    expect(window.__translateItFrameStartedToken).toBeUndefined();
+  });
+
+  it('retries one explicit READY rejection, then stops after the retry is rejected', async () => {
+    const { IFrameContentScriptCore } = await import('./IFrameContentScriptCore.js');
+    const core = new IFrameContentScriptCore();
+    await core.initializeBase();
+    let readyCount = 0;
+    mocks.frameReady.mockImplementation(async message => {
+      if (message.action === 'selectElementFrameReady') return { success: true };
+      if (message.action === 'page-translate-frame-ready') {
+        readyCount += 1;
+        return { success: false, reason: 'not-admitted' };
+      }
+      return { success: true };
+    });
+
+    await core.ensureAllowedRuntime();
+    await vi.waitFor(() => expect(readyCount).toBe(2));
+    expect(mocks.frameReady.mock.calls.filter(
+      ([message]) => message.action === 'page-translate-frame-ready'
+    )).toHaveLength(2);
+    expect(mocks.frameReady.mock.calls.some(
+      ([message]) => message.action === 'page-translate-frame-start'
+    )).toBe(false);
+  });
+
+  it('does not retry an uncertain START delivery', async () => {
+    const { IFrameContentScriptCore } = await import('./IFrameContentScriptCore.js');
+    const core = new IFrameContentScriptCore();
+    await core.initializeBase();
+    mocks.frameReady.mockImplementation(async message => {
+      if (message.action === 'selectElementFrameReady') return { success: true };
+      if (message.action === 'page-translate-frame-ready') {
+        return { success: true, start: true, manualContinuityGeneration: 1 };
+      }
+      if (message.action === 'page-translate-frame-start') {
+        return { success: false, isTransportFailure: true };
+      }
+      return { success: true };
+    });
+
+    await core.ensureAllowedRuntime();
+    await vi.waitFor(() => expect(mocks.frameReady.mock.calls.some(
+      ([message]) => message.action === 'page-translate-frame-start'
+    )).toBe(true));
+
+    expect(mocks.frameReady.mock.calls.filter(
+      ([message]) => message.action === 'page-translate-frame-ready'
+    )).toHaveLength(1);
+    expect(mocks.frameReady.mock.calls.filter(
+      ([message]) => message.action === 'page-translate-frame-start'
+    )).toHaveLength(1);
+    expect(window.__translateItFrameStartedToken).toBe(window.__translateItPageDocumentToken);
+  });
+
+  it('forwards restartFence through its registered SPA_NAVIGATION handler', async () => {
+    const { IFrameContentScriptCore } = await import('./IFrameContentScriptCore.js');
+    const core = new IFrameContentScriptCore();
+    await core.initializeBase();
+    await core.initializeCritical();
+    const spaNavigationHandler = mocks.messageHandlers.get('spaNavigation');
+    const navigationCursor = { documentEpoch: 3, routeRevision: 2, url: window.location.href };
+    const restartFence = 'trusted-restart-fence';
+    const navigationUnavailable = true;
+
+    await expect(spaNavigationHandler({
+      data: { navigationCursor, navigationUnavailable, restartFence },
+    })).resolves.toEqual({ success: true });
+
+    expect(mocks.checkForUrlChange).toHaveBeenCalledWith({
+      navigationCursor,
+      navigationUnavailable,
+      restartFence,
+    });
   });
 
   it('I3 concurrent ensureAllowedRuntime dedupes styles/listener/runtime', async () => {
@@ -212,7 +372,7 @@ describe('IFrameContentScriptCore lifecycle', () => {
     // message listener once
     const messageCalls = addEventListenerSpy.mock.calls.filter(([ev]) => ev === 'message');
     expect(messageCalls.length).toBe(1);
-    expect(mocks.frameReady).toHaveBeenCalledTimes(1);
+    expect(mocks.frameReady).toHaveBeenCalledTimes(2);
   });
 
   it('injects only supplied feature styles and deduplicates their stylesheet ID', async () => {
@@ -258,7 +418,7 @@ describe('IFrameContentScriptCore lifecycle', () => {
     expect(core._allowedRuntimeStarted).toBe(true);
     expect(core._allowedRuntimePromise).toBeNull();
     expect(injectStyles).not.toHaveBeenCalled();
-    expect(mocks.frameReady).toHaveBeenCalledTimes(1);
+    expect(mocks.frameReady).toHaveBeenCalledTimes(2);
     messageCalls = addEventListenerSpy.mock.calls.filter(([ev]) => ev === 'message');
     expect(messageCalls.length).toBe(1);
 
@@ -268,7 +428,7 @@ describe('IFrameContentScriptCore lifecycle', () => {
     await Promise.all([p1, p2]);
     messageCalls = addEventListenerSpy.mock.calls.filter(([ev]) => ev === 'message');
     expect(messageCalls.length).toBe(1);
-    expect(mocks.frameReady).toHaveBeenCalledTimes(1);
+    expect(mocks.frameReady).toHaveBeenCalledTimes(2);
   });
 
   it('I5 initial allowed failure is retryable via initializeCritical', async () => {
@@ -294,7 +454,7 @@ describe('IFrameContentScriptCore lifecycle', () => {
     expect(core.initialized).toBe(true);
     expect(core._allowedRuntimeStarted).toBe(true);
     expect(core._allowedRuntimePromise).toBeNull();
-    expect(mocks.frameReady).toHaveBeenCalledTimes(1);
+    expect(mocks.frameReady).toHaveBeenCalledTimes(2);
     messageCalls = addEventListenerSpy.mock.calls.filter(([ev]) => ev === 'message');
     expect(messageCalls.length).toBe(1);
   });

@@ -53,6 +53,7 @@ export class PageTranslationManager extends ResourceTracker {
     this.hasManualContinuity = false;
     this.manualContinuityGeneration = null;
     this.manualContinuityTopDocumentEpoch = null;
+    this.manualContinuityTopDocumentToken = null;
     this.currentSessionIsAuto = false;
     this.currentUrl = null;
     this.currentNavigationCursor = null;
@@ -264,6 +265,7 @@ export class PageTranslationManager extends ResourceTracker {
         this.hasManualContinuity = true;
         this.manualContinuityGeneration = options.manualContinuityGeneration;
         this.manualContinuityTopDocumentEpoch = options.topDocumentEpoch ?? options.navigationCursor?.documentEpoch ?? null;
+        this.manualContinuityTopDocumentToken = options.topDocumentToken ?? null;
         this.scheduler.manualContinuityAuthorization = {
           generation: options.manualContinuityGeneration,
           topDocumentEpoch: this.manualContinuityTopDocumentEpoch,
@@ -655,6 +657,7 @@ export class PageTranslationManager extends ResourceTracker {
       this.userRestoredOverride = true;
       this.userRestoredOverrideUrl = window.location.href;
       this.hasManualContinuity = false;
+      this.manualContinuityTopDocumentToken = null;
       if (Number.isSafeInteger(options.manualContinuityGeneration)) {
         this.manualContinuityGeneration = options.manualContinuityGeneration;
       }
@@ -749,7 +752,10 @@ export class PageTranslationManager extends ResourceTracker {
       this.userRestoredOverride = true;
       this.userRestoredOverrideUrl = window.location.href;
     }
-    if (clearManualContinuity) this.hasManualContinuity = false;
+    if (clearManualContinuity) {
+      this.hasManualContinuity = false;
+      this.manualContinuityTopDocumentToken = null;
+    }
     if (Number.isSafeInteger(manualContinuityGeneration)) this.manualContinuityGeneration = manualContinuityGeneration;
     // Lazy nodes can still own a live session after presentation becomes idle.
     if (!this.isAutoTranslating && !this.isTranslating
@@ -803,6 +809,7 @@ export class PageTranslationManager extends ResourceTracker {
       this.userRestoredOverride = true;
       this.userRestoredOverrideUrl = window.location.href;
       this.hasManualContinuity = false;
+      this.manualContinuityTopDocumentToken = null;
       if (Number.isSafeInteger(options.manualContinuityGeneration)) {
         this.manualContinuityGeneration = options.manualContinuityGeneration;
       }
@@ -1225,6 +1232,7 @@ export class PageTranslationManager extends ResourceTracker {
     if (this.isTranslated) await this.restorePage();
     this.isAutoTranslating = false;
     this.hasManualContinuity = false;
+    this.manualContinuityTopDocumentToken = null;
     if (hadManualContinuity && window === window.top) {
       void sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,

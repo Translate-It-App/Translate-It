@@ -977,6 +977,34 @@ export class ContentMessageHandler extends ResourceTracker {
   }
 
   async handlePageTranslate(message) {
+    if (message.data?.origin !== 'manual-frame') return this._handlePageTranslate(message);
+    const documentToken = message.data.documentToken;
+    if (typeof documentToken !== 'string' || !documentToken
+        || window.__translateItPageDocumentToken !== documentToken) {
+      return { success: false, reason: 'obsolete_navigation' };
+    }
+    const cursor = message.data.navigationCursor || {};
+    const key = `${documentToken}:${message.data.manualContinuityGeneration}:${cursor.documentEpoch}:${cursor.routeRevision}`;
+    if (this._manualFrameStartAcceptedKey === key) {
+      return { success: true, skipped: true, reason: 'duplicate_manual_frame_start' };
+    }
+    this._manualFrameStartInFlight ||= new Set();
+    if (this._manualFrameStartInFlight.has(key)) {
+      return { success: false, skipped: true, reason: 'manual_frame_start_in_progress' };
+    }
+    this._manualFrameStartInFlight.add(key);
+    try {
+      const result = await this._handlePageTranslate(message);
+      if (result?.success === true && window.__translateItPageDocumentToken === documentToken) {
+        this._manualFrameStartAcceptedKey = key;
+      }
+      return result;
+    } finally {
+      this._manualFrameStartInFlight.delete(key);
+    }
+  }
+
+  async _handlePageTranslate(message) {
     this.logger.info('Page translation request received');
     const continuityGeneration = message.data?.manualContinuityGeneration;
     if (Number.isSafeInteger(continuityGeneration)
@@ -991,7 +1019,9 @@ export class ContentMessageHandler extends ResourceTracker {
     const boundNavigation = message.data?.restartFence || hasManualGrant ? {
       ...message.data,
       origin: hasManualGrant
-        ? (message.data?.restartFence ? 'manual-spa' : 'manual-start')
+        ? (message.data?.origin === 'manual-frame'
+          ? 'manual-frame'
+          : (message.data?.restartFence ? 'manual-spa' : 'manual-start'))
         : 'auto',
       localRevision: this._pageRestartRevision,
     } : null;
@@ -1006,7 +1036,9 @@ export class ContentMessageHandler extends ResourceTracker {
           restartFence: boundNavigation.restartFence,
           manualContinuityGeneration: boundNavigation.manualContinuityGeneration,
           topDocumentEpoch: boundNavigation.topDocumentEpoch,
+          topDocumentToken: boundNavigation.topDocumentToken,
           navigationCursor: boundNavigation.navigationCursor,
+          documentToken: boundNavigation.documentToken,
           topNavigationCursor: boundNavigation.topNavigationCursor,
         },
       }, { returnFailureResponse: true });
@@ -1084,6 +1116,16 @@ export class ContentMessageHandler extends ResourceTracker {
       if (message.data?.isAuto === true && message.data?.preserveAcceptedTranslations
           && this.pageTranslationManager.hasManualContinuity) {
         return { success: true, skipped: true, reason: 'manual_continuity_owns_route' };
+      }
+
+      if (message.data?.origin === 'manual-frame') {
+        if (window.__translateItPageDocumentToken !== message.data.documentToken) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+        if (!await navigationIsCurrent()) return { success: false, reason: 'obsolete_navigation' };
+        if (window.__translateItPageDocumentToken !== message.data.documentToken) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
       }
 
       // Execute page translation - PASS message.data to support options like { isAuto: true }

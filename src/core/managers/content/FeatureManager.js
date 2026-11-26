@@ -967,6 +967,7 @@ export class FeatureManager extends ResourceTracker {
               restartFence: navigationIdentity.restartFence,
               manualContinuityGeneration: manager.manualContinuityGeneration,
               topDocumentEpoch: manager.manualContinuityTopDocumentEpoch,
+              topDocumentToken: manager.manualContinuityTopDocumentToken,
               navigationCursor: navigationIdentity.navigationCursor,
             },
           }, { returnFailureResponse: true });
@@ -981,6 +982,7 @@ export class FeatureManager extends ResourceTracker {
           hasManualContinuity: true,
           manualContinuityGeneration: manager.manualContinuityGeneration,
           topDocumentEpoch: manager.manualContinuityTopDocumentEpoch,
+          topDocumentToken: manager.manualContinuityTopDocumentToken,
           navigationCursor: navigationIdentity.navigationCursor,
           restartFence: navigationIdentity.restartFence,
           validateNavigation: manualNavigationIsCurrent,

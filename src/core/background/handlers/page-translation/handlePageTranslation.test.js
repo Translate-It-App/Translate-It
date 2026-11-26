@@ -87,6 +87,9 @@ function setupFrames(frameResults, { activeTabId = 42 } = {}) {
     url: frameId === 0 ? 'https://example.com' : `https://frame-${frameId}.example`,
   }));
   browser.tabs.sendMessage.mockImplementation((_tabId, _message, { frameId }) => {
+    if (_message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE) {
+      return Promise.resolve({ documentToken: frameId === 0 ? 'top-document-token' : `frame-${frameId}-document-token` });
+    }
     const frame = frameResults.find(candidate => candidate.frameId === frameId);
     if (frame?.error) return Promise.reject(frame.error);
     return Promise.resolve(frame?.response);
@@ -126,6 +129,377 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
     browser.storage.session.set.mockImplementation(async value => { navigationStore.saved = structuredClone(value); });
   });
 
+  it('admits and starts a ready replacement child once under the same armed manual grant', async () => {
+    tabPermissionChecker.checkTabAccess.mockResolvedValue({ isAccessible: true });
+    await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+      provider: 'deepL', targetLanguage: 'fr', isExplicitProvider: true,
+    });
+    await pageNavigationTracker.armManualContinuity(42, grant.generation);
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+      url: frameId === 0 ? 'https://example.com' : 'https://child.example/',
+    }));
+    browser.tabs.sendMessage.mockImplementation(async (_tabId, message, { frameId }) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE
+        ? { documentToken: frameId === 0 ? 'top-document-token' : 'child-document-token' }
+        : { success: true }
+    ));
+
+    const child = { ...sender, frameId: 7 };
+    const ticket = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'child-document-token' },
+    }, child);
+    expect(ticket).toMatchObject({
+      success: true, start: true, manualContinuityGeneration: grant.generation,
+      provider: 'deepL', targetLanguage: 'fr', isExplicitProvider: true,
+      navigationCursor: { url: 'https://child.example/' },
+    });
+
+    const duplicate = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'child-document-token' },
+    }, child);
+    expect(duplicate).toMatchObject({ success: true, start: true });
+    await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: { ...ticket, documentToken: 'child-document-token' },
+    }, child);
+    await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: { ...ticket, documentToken: 'child-document-token' },
+    }, child);
+    const initialFrameStarts = browser.tabs.sendMessage.mock.calls.filter(([, message]) => message.action === MessageActions.PAGE_TRANSLATE);
+    expect(initialFrameStarts).toHaveLength(1);
+    expect(initialFrameStarts[0][1].data).toMatchObject({ provider: 'deepL', targetLanguage: 'fr' });
+    expect((await pageNavigationTracker.getManualContinuity(42)).generation).toBe(grant.generation);
+
+    const previousEpoch = ticket.navigationCursor.documentEpoch;
+    await pageNavigationTracker.committed(42, 7, 'https://child.example/');
+    browser.tabs.sendMessage.mockImplementation(async (_tabId, message, { frameId }) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE
+        ? { documentToken: frameId === 0 ? 'top-document-token' : 'replacement-document-token' }
+        : { success: true }
+    ));
+    const replacement = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'replacement-document-token' },
+    }, child);
+    expect(replacement).toMatchObject({
+      success: true, start: true,
+      manualContinuityGeneration: grant.generation,
+      provider: 'deepL', targetLanguage: 'fr',
+    });
+    expect(replacement.navigationCursor.documentEpoch).toBeGreaterThan(previousEpoch);
+    await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: { ...replacement, documentToken: 'replacement-document-token' },
+    }, child);
+    const allFrameStarts = browser.tabs.sendMessage.mock.calls.filter(([, message]) => message.action === MessageActions.PAGE_TRANSLATE);
+    expect(allFrameStarts).toHaveLength(2);
+    expect(allFrameStarts[1][1].data).toMatchObject({ provider: 'deepL', targetLanguage: 'fr' });
+  });
+
+  it('persists accepted starts only after a positive response and releases rejected claims for retry', async () => {
+    tabPermissionChecker.checkTabAccess.mockResolvedValue({ isAccessible: true });
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://example.com' },
+      { frameId: 7, url: 'https://frame-7.example' },
+    ]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    await pageNavigationTracker.armManualContinuity(42, grant.generation);
+    const admission = await pageNavigationTracker.admitManualFrame(
+      42, 7, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken,
+      'https://frame-7.example', 'child-document-token',
+    );
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+      url: frameId === 0 ? 'https://example.com' : 'https://frame-7.example',
+    }));
+    let rejectFirst = true;
+    browser.tabs.sendMessage.mockImplementation(async (_tabId, message, { frameId }) => {
+      if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE) {
+        return { documentToken: frameId === 0 ? 'top-document-token' : 'child-document-token' };
+      }
+      if (message.action === MessageActions.PAGE_TRANSLATE && rejectFirst) {
+        rejectFirst = false;
+        throw new Error('receiver unavailable');
+      }
+      return { success: true };
+    });
+    const child = { ...sender, frameId: 7 };
+    const request = {
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: {
+        documentToken: 'child-document-token',
+        manualContinuityGeneration: grant.generation,
+        topDocumentEpoch: grant.topDocumentEpoch,
+        navigationCursor: admission.cursor,
+      },
+    };
+
+    await expect(handlePageTranslation(request, child)).resolves.toMatchObject({ success: false, error: 'receiver unavailable' });
+    expect((await pageNavigationTracker.getManualContinuity(42)).startedDocuments).toBeUndefined();
+    await expect(handlePageTranslation(request, child)).resolves.toMatchObject({ success: true });
+    expect((await pageNavigationTracker.getManualContinuity(42)).startedDocuments).toEqual({ 7: 'child-document-token' });
+    await expect(handlePageTranslation(request, child)).resolves.toMatchObject({ success: true, skipped: true });
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message]) => message.action === MessageActions.PAGE_TRANSLATE))
+      .toHaveLength(2);
+  });
+
+  it('coalesces concurrent child START deliveries while the first receiver response is pending', async () => {
+    tabPermissionChecker.checkTabAccess.mockResolvedValue({ isAccessible: true });
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://example.com' },
+      { frameId: 7, url: 'https://frame-7.example' },
+    ]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    await pageNavigationTracker.armManualContinuity(42, grant.generation);
+    const admission = await pageNavigationTracker.admitManualFrame(
+      42, 7, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken,
+      'https://frame-7.example', 'child-document-token',
+    );
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+      url: frameId === 0 ? 'https://example.com' : 'https://frame-7.example',
+    }));
+    let releaseStart;
+    browser.tabs.sendMessage.mockImplementation(async (_tabId, message, { frameId }) => {
+      if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE) {
+        return { documentToken: frameId === 0 ? 'top-document-token' : 'child-document-token' };
+      }
+      return new Promise(resolve => { releaseStart = resolve; });
+    });
+    const child = { ...sender, frameId: 7 };
+    const request = {
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: {
+        documentToken: 'child-document-token',
+        manualContinuityGeneration: grant.generation,
+        topDocumentEpoch: grant.topDocumentEpoch,
+        navigationCursor: admission.cursor,
+      },
+    };
+    const first = handlePageTranslation(request, child);
+    await vi.waitFor(() => expect(releaseStart).toBeTypeOf('function'));
+    await expect(handlePageTranslation(request, child)).resolves.toMatchObject({ success: true, skipped: true });
+    releaseStart({ success: true });
+    await expect(first).resolves.toMatchObject({ success: true });
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message]) => message.action === MessageActions.PAGE_TRANSLATE))
+      .toHaveLength(1);
+  });
+
+  it('defers READY during the provisional start and admits the child only after original START acceptance', async () => {
+    tabPermissionChecker.checkTabAccess.mockResolvedValue({ isAccessible: true });
+    await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+    const provisional = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    setupFrames([{ frameId: 0, response: { success: true } }]);
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+      url: frameId === 0 ? 'https://example.com' : 'https://late-child.example/',
+    }));
+    const child = { ...sender, frameId: 7 };
+
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-document-token' },
+    }, child)).resolves.toMatchObject({ success: true, pending: true });
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options?.frameId === 7
+    ))).toBe(false);
+    expect((await pageNavigationTracker.getManualContinuity(42)).armed).toBe(false);
+
+    await expect(handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender))
+      .resolves.toMatchObject({ success: true });
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options?.frameId === 7
+    ))).toBe(true));
+    expect((await pageNavigationTracker.getManualContinuity(42)).generation).toBe(provisional.generation);
+    expect((await pageNavigationTracker.getManualContinuity(42)).armed).toBe(true);
+  });
+
+  it('rejects a stale document challenge and excluded ad frames before admission', async () => {
+    tabPermissionChecker.checkTabAccess.mockResolvedValue({ isAccessible: true });
+    await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, { topDocumentToken: 'top-document-token' });
+    await pageNavigationTracker.armManualContinuity(42, grant.generation);
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+      url: frameId === 7 ? 'https://child.example/' : 'https://example.com',
+    }));
+    browser.tabs.sendMessage.mockResolvedValue({ documentToken: 'different-document' });
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'stale-document' },
+    }, { ...sender, frameId: 7 })).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+    browser.webNavigation.getFrame.mockResolvedValue({ url: 'https://googleads.example/frame' });
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'different-document' },
+    }, { ...sender, frameId: 8 })).resolves.toMatchObject({ success: false, reason: 'ineligible_frame' });
+    expect(await pageNavigationTracker.getManualContinuity(42)).toMatchObject({ generation: grant.generation });
+  });
+
+  it('rejects readiness when a top-document replacement wins the challenge race', async () => {
+    tabPermissionChecker.checkTabAccess.mockResolvedValue({ isAccessible: true });
+    await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, { topDocumentToken: 'top-document-token' });
+    await pageNavigationTracker.armManualContinuity(42, grant.generation);
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+      url: frameId === 0 ? 'https://example.com' : 'https://child.example/',
+    }));
+    let releaseTopProbe;
+    browser.tabs.sendMessage.mockImplementation((_tabId, _message, { frameId }) => (
+      frameId === 0
+        ? new Promise(resolve => { releaseTopProbe = resolve; })
+        : Promise.resolve({ documentToken: 'child-document' })
+    ));
+    const ready = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'child-document' },
+    }, { ...sender, frameId: 7 });
+    await vi.waitFor(() => expect(releaseTopProbe).toBeTypeOf('function'));
+    await pageNavigationTracker.committed(42, 0, 'https://example.com/replaced');
+    releaseTopProbe({ documentToken: 'top-document-token' });
+    await expect(ready).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+  });
+
+  it('fails the initial manual start closed when the top document cannot answer its identity probe', async () => {
+    setupFrames([{ frameId: 0, response: { success: true } }]);
+    browser.tabs.sendMessage.mockImplementation(async (_tabId, message) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE ? undefined : { success: true }
+    ));
+
+    await expect(handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender))
+      .resolves.toMatchObject({ success: false, reason: 'manual_continuity_top_identity_unavailable' });
+    expect((await pageNavigationTracker.getManualContinuity(42))).toBeNull();
+  });
+
+  it('rejects READY and START after worker restart when a same-URL top document has a different nonce', async () => {
+    tabPermissionChecker.checkTabAccess.mockResolvedValue({ isAccessible: true });
+    await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'original-top-document',
+    });
+    await pageNavigationTracker.armManualContinuity(42, grant.generation);
+    const admission = await pageNavigationTracker.admitManualFrame(
+      42, 7, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken,
+      'https://child.example/', 'child-document',
+    );
+    pageNavigationTracker.state = null;
+    pageNavigationTracker.durableState = null;
+    pageNavigationTracker.pending = Promise.resolve();
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+      url: frameId === 0 ? 'https://example.com' : 'https://child.example/',
+    }));
+    browser.tabs.sendMessage.mockImplementation(async (_tabId, _message, { frameId }) => ({
+      documentToken: frameId === 0 ? 'replacement-top-document' : 'child-document',
+    }));
+    const child = { ...sender, frameId: 7 };
+
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'child-document' },
+    }, child)).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: {
+        documentToken: 'child-document',
+        manualContinuityGeneration: grant.generation,
+        topDocumentEpoch: grant.topDocumentEpoch,
+        navigationCursor: admission.cursor,
+      },
+    }, child)).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message]) => message.action === MessageActions.PAGE_TRANSLATE))
+      .toHaveLength(0);
+  });
+
+  it.each([MessageActions.PAGE_RESTORE, MessageActions.PAGE_TRANSLATE_STOP_AUTO])(
+    'does not send a child START when %s invalidates during the final identity probe', async invalidationAction => {
+      setupFrames([
+        { frameId: 0, response: { success: true } },
+        { frameId: 7, response: { success: true } },
+      ]);
+      await pageNavigationTracker.seed(42, [
+        { frameId: 0, url: 'https://example.com' },
+        { frameId: 7, url: 'https://frame-7.example' },
+      ]);
+      const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+        topDocumentToken: 'top-document-token',
+      });
+      await pageNavigationTracker.armManualContinuity(42, grant.generation);
+      const admission = await pageNavigationTracker.admitManualFrame(
+        42, 7, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken,
+        'https://frame-7.example', 'child-document-token',
+      );
+      let topProbeCount = 0;
+      let releaseFinalProbe;
+      browser.tabs.sendMessage.mockImplementation(async (_tabId, message, { frameId }) => {
+        if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE) {
+          if (frameId === 0 && ++topProbeCount === 2) {
+            return new Promise(resolve => { releaseFinalProbe = resolve; });
+          }
+          return { documentToken: frameId === 0 ? 'top-document-token' : 'child-document-token' };
+        }
+        return { success: true };
+      });
+      const child = { ...sender, frameId: 7 };
+      const start = handlePageTranslation({
+        action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+        data: {
+          documentToken: 'child-document-token',
+          manualContinuityGeneration: grant.generation,
+          topDocumentEpoch: grant.topDocumentEpoch,
+          navigationCursor: admission.cursor,
+        },
+      }, child);
+      await vi.waitFor(() => expect(releaseFinalProbe).toBeTypeOf('function'));
+      await handlePageTranslation({ action: invalidationAction, data: {} }, sender);
+      releaseFinalProbe({ documentToken: 'top-document-token' });
+
+      await expect(start).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+      expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => message.action === MessageActions.PAGE_TRANSLATE))
+        .toBe(false);
+    }
+  );
+
+  it('rejects a READY ticket when the child SPA route advances during its identity challenge', async () => {
+    tabPermissionChecker.checkTabAccess.mockResolvedValue({ isAccessible: true });
+    const oldUrl = 'https://child.example/route-a';
+    let childUrl = oldUrl;
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://example.com' },
+      { frameId: 7, url: oldUrl },
+    ]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    await pageNavigationTracker.armManualContinuity(42, grant.generation);
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
+      url: frameId === 0 ? 'https://example.com' : childUrl,
+    }));
+    let releaseChildProbe;
+    browser.tabs.sendMessage.mockImplementation(async (_tabId, _message, { frameId }) => (
+      frameId === 7
+        ? new Promise(resolve => { releaseChildProbe = resolve; })
+        : { documentToken: 'top-document-token' }
+    ));
+    const ready = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'child-document-token' },
+    }, { ...sender, frameId: 7 });
+    await vi.waitFor(() => expect(releaseChildProbe).toBeTypeOf('function'));
+    childUrl = 'https://child.example/route-b';
+    await pageNavigationTracker.capture(42, 7, childUrl);
+    releaseChildProbe({ documentToken: 'child-document-token' });
+
+    await expect(ready).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+    expect((await pageNavigationTracker.getCursor(42, 7)).url).toBe(childUrl);
+  });
+
   it('seeds participating frames and attaches a distinct current document cursor to each command', async () => {
     setupFrames([{ frameId: 0, response: { success: true } }, { frameId: 7, response: { success: true } }]);
     await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: { isAuto: true } }, sender);
@@ -162,7 +536,7 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
       data: { isAuto: true, preserveAcceptedTranslations: true, navigationCursor: topCursor, restartFence: staleFence },
     }, sender);
     expect(rejected).toMatchObject({ success: false, reason: 'obsolete_navigation' });
-    expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => message.action === MessageActions.PAGE_TRANSLATE)).toBe(false);
   });
 
   it('rejects a bound restart when top identity changes during frame preparation', async () => {
@@ -264,7 +638,8 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
     });
     browser.webNavigation.getFrame.mockResolvedValue({ url: 'https://example.com/new' });
     await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
-    expect(browser.tabs.sendMessage.mock.calls[0][1].data.navigationCursor.url).toBe('https://example.com/new');
+    expect(browser.tabs.sendMessage.mock.calls.find(([, message]) => message.action === MessageActions.PAGE_TRANSLATE)[1].data.navigationCursor.url)
+      .toBe('https://example.com/new');
     expect(browser.webNavigation.getFrame).toHaveBeenCalledWith({ tabId: 42, frameId: 0 });
   });
 
@@ -277,7 +652,8 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
     });
     browser.webNavigation.getFrame.mockResolvedValue({ url: 'https://example.com/new' });
     await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
-    expect(browser.tabs.sendMessage.mock.calls[0][1].data.navigationCursor).toMatchObject({ routeRevision: 1, url: 'https://example.com/new' });
+    expect(browser.tabs.sendMessage.mock.calls.find(([, message]) => message.action === MessageActions.PAGE_TRANSLATE)[1].data.navigationCursor)
+      .toMatchObject({ routeRevision: 1, url: 'https://example.com/new' });
   });
 
   it('reads the current cursor at frame dispatch after a route changes during preparation', async () => {
@@ -290,7 +666,8 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
     browser.webNavigation.getFrame.mockResolvedValue({ url: 'https://example.com/later' });
     try {
       await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
-      expect(browser.tabs.sendMessage.mock.calls[0][1].data.navigationCursor).toMatchObject({ routeRevision: 1, url: 'https://example.com/later' });
+      expect(browser.tabs.sendMessage.mock.calls.find(([, message]) => message.action === MessageActions.PAGE_TRANSLATE)[1].data.navigationCursor)
+        .toMatchObject({ routeRevision: 1, url: 'https://example.com/later' });
     } finally { spy.mockRestore(); }
   });
 
@@ -333,7 +710,8 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
       if (frame === 'rejected') browser.webNavigation.getFrame.mockRejectedValueOnce(new Error('frame unavailable'));
       else browser.webNavigation.getFrame.mockResolvedValueOnce(frame);
       await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
-      expect(browser.tabs.sendMessage.mock.calls[0][1].data).toMatchObject({ navigationUnavailable: true });
+      expect(browser.tabs.sendMessage.mock.calls.find(([, message]) => message.action === MessageActions.PAGE_TRANSLATE)[1].data)
+        .toMatchObject({ navigationUnavailable: true });
     }
   );
 
@@ -388,7 +766,9 @@ describe('manual SPA continuity grant and revocation', () => {
     const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
 
     expect(result).toMatchObject({ success: false, reason: ActionReasons.BUSY_OR_DONE });
-    expect(await pageNavigationTracker.getManualContinuity(42)).toEqual(grant);
+    expect(await pageNavigationTracker.getManualContinuity(42)).toMatchObject({
+      generation: grant.generation, armed: true, frames: { 0: grant.frames[0] },
+    });
     const cursor = await pageNavigationTracker.getCursor(42, 0);
     expect(await pageNavigationTracker.validateManualContinuityBatch(
       42, 0, grant.generation, grant.topDocumentEpoch, cursor
@@ -405,7 +785,7 @@ describe('manual SPA continuity grant and revocation', () => {
       action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
     }, sender);
     expect(revoke.manualContinuityGeneration).toBe(oldGrant.generation + 1);
-    const newGrant = await pageNavigationTracker.grantManualContinuity(42);
+    const newGrant = await pageNavigationTracker.grantManualContinuity(42, undefined, { topDocumentToken: 'top-document-token' });
 
     await expect(handlePageTranslation({
       action: MessageActions.PAGE_TRANSLATE_ADMIT,
@@ -624,6 +1004,7 @@ describe('manual SPA continuity grant and revocation', () => {
         restartFence,
         manualContinuityGeneration: grant.generation,
         topDocumentEpoch: grant.topDocumentEpoch,
+        topDocumentToken: grant.topDocumentToken,
         navigationCursor,
       },
     }, { ...sender, frameId });
@@ -1486,7 +1867,10 @@ describe('bounded frame command response deadline', () => {
     browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
       url: `https://frame-${frameId === 0 ? 0 : frameId / 7}.example`,
     }));
-    browser.tabs.sendMessage.mockImplementation((_tabId, _message, { frameId }) => {
+    browser.tabs.sendMessage.mockImplementation((_tabId, message, { frameId }) => {
+      if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE) {
+        return Promise.resolve({ documentToken: frameId === 0 ? 'top-document-token' : `frame-${frameId}-token` });
+      }
       const handler = frameHandlers.find(candidate => candidate.frameId === frameId);
       return handler ? handler.run() : Promise.resolve({ success: true });
     });
@@ -1586,10 +1970,10 @@ describe('bounded frame command response deadline', () => {
       const result = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
       await vi.advanceTimersByTimeAsync(RESPONSE_TIMEOUT_MS + 100);
       expect(await result).toMatchObject({ success: false, isTransportFailure: true, reason: 'frame_command_response_timeout' });
-      expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+      expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => message.action === MessageActions.PAGE_TRANSLATE)).toBe(false);
       cursorRead.resolve({ documentEpoch: 1, routeRevision: 0, url: 'https://frame-0.example' });
       await vi.advanceTimersByTimeAsync(0);
-      expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+      expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => message.action === MessageActions.PAGE_TRANSLATE)).toBe(false);
     } finally { spy.mockRestore(); }
   });
 
@@ -1605,7 +1989,7 @@ describe('bounded frame command response deadline', () => {
     expect(await result).toMatchObject({ success: false, reason: 'frame_command_response_timeout', isTransportFailure: true });
     frameRead.resolve({ url: 'https://frame-0.example' });
     await vi.advanceTimersByTimeAsync(0);
-    expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => message.action === MessageActions.PAGE_TRANSLATE)).toBe(false);
     expect((await pageNavigationTracker.getCursor(42, 0)).url).toBe('https://frame-0.example/new');
   });
 

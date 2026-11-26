@@ -4,13 +4,21 @@ const STORAGE_KEY = 'pageTranslationNavigation';
 const validCursor = value => Number.isSafeInteger(value?.documentEpoch) && value.documentEpoch > 0
   && Number.isSafeInteger(value.routeRevision) && value.routeRevision >= 0
   && typeof value.url === 'string' && value.url.length > 0;
-const validManualGrant = grant => Number.isSafeInteger(grant?.generation) && grant.generation >= 0
-  && typeof grant.revoked === 'boolean'
-  && (grant.revoked || (Number.isSafeInteger(grant.topDocumentEpoch) && grant.topDocumentEpoch > 0
+const validTokenMap = value => value === undefined || (value && typeof value === 'object'
+  && !Array.isArray(value) && Object.entries(value).every(([frameId, token]) => (
+    /^\d+$/.test(frameId) && typeof token === 'string' && token.length > 0
+  )));
+const validManualGrant = grant => {
+  if (!Number.isSafeInteger(grant?.generation) || grant.generation < 0 || typeof grant.revoked !== 'boolean') return false;
+  if (grant.revoked) return true;
+  return Number.isSafeInteger(grant.topDocumentEpoch) && grant.topDocumentEpoch > 0
+    && (grant.topDocumentToken === undefined || (typeof grant.topDocumentToken === 'string' && grant.topDocumentToken.length > 0))
     && grant.frames && typeof grant.frames === 'object' && !Array.isArray(grant.frames)
     && Object.entries(grant.frames).every(([frameId, epoch]) => (
       /^\d+$/.test(frameId) && Number.isSafeInteger(epoch) && epoch > 0
-    ))));
+    ))
+    && validTokenMap(grant.documents) && validTokenMap(grant.startedDocuments);
+};
 
 export class PageNavigationTracker {
   constructor(storage = browser.storage?.session) {
@@ -22,6 +30,7 @@ export class PageNavigationTracker {
     this.restartFences = new Map();
     this.blockedManualContinuity = new Map();
     this.manualContinuityRevision = new Map();
+    this.manualFrameStartClaims = new Set();
   }
 
   mintRestartFence(tabId) {
@@ -63,6 +72,12 @@ export class PageNavigationTracker {
         )) throw new Error('Invalid Page navigation storage');
         this.state = saved || { nextDocumentEpoch: 0, frames: {}, manualContinuity: {} };
         this.state.manualContinuity ||= {};
+        for (const [tabId, grant] of Object.entries(this.state.manualContinuity)) {
+          if (!grant.revoked && !grant.topDocumentToken) {
+            this.state.manualContinuity[tabId] = { generation: grant.generation + 1, revoked: true };
+            this.dirty = true;
+          }
+        }
         this.durableState = structuredClone(this.state);
       }
       const result = await update(this.state);
@@ -103,7 +118,10 @@ export class PageNavigationTracker {
     return revision;
   }
 
-  async grantManualContinuity(tabId, operationRevision = this.reserveManualContinuityStart(tabId)) {
+  async grantManualContinuity(tabId, operationRevision = this.reserveManualContinuityStart(tabId), options = {}) {
+    if (typeof options.topDocumentToken !== 'string' || !options.topDocumentToken) {
+      throw new Error('Top document identity is unavailable');
+    }
     return this._run(async state => {
       if (this.manualContinuityRevision.get(tabId) !== operationRevision) throw new Error('Manual continuity start superseded');
       const top = state.frames[`${tabId}:0`];
@@ -111,6 +129,7 @@ export class PageNavigationTracker {
       const previous = state.manualContinuity[tabId];
       const block = this.blockedManualContinuity.get(tabId);
       if (previous && !previous.revoked && previous.topDocumentEpoch === top.documentEpoch
+          && previous.topDocumentToken === options.topDocumentToken
           && !(block && (block.generation == null || block.generation === previous.generation))) {
         return { grant: previous, reused: true };
       }
@@ -120,7 +139,13 @@ export class PageNavigationTracker {
       for (const [key, cursor] of Object.entries(state.frames)) {
         if (key.startsWith(`${tabId}:`)) frames[key.slice(`${tabId}:`.length)] = cursor.documentEpoch;
       }
-      const grant = { generation, revoked: false, topDocumentEpoch: top.documentEpoch, frames };
+      const grant = {
+        generation, revoked: false, armed: false, topDocumentEpoch: top.documentEpoch, frames,
+        topDocumentToken: options.topDocumentToken,
+        ...(typeof options.provider === 'string' && { provider: options.provider }),
+        ...(typeof options.targetLanguage === 'string' && { targetLanguage: options.targetLanguage }),
+        ...(typeof options.isExplicitProvider === 'boolean' && { isExplicitProvider: options.isExplicitProvider }),
+      };
       state.manualContinuity[tabId] = grant;
       this.dirty = true;
       return { grant, reused: false };
@@ -132,6 +157,133 @@ export class PageNavigationTracker {
       Object.defineProperty(durable, 'reused', { value: reused });
       return durable;
     });
+  }
+
+  async armManualContinuity(tabId, generation) {
+    return this._run(state => {
+      const grant = state.manualContinuity[tabId];
+      const top = state.frames[`${tabId}:0`];
+      const block = this.blockedManualContinuity.get(tabId);
+      if (!grant || grant.revoked || grant.generation !== generation
+          || grant.topDocumentEpoch !== top?.documentEpoch
+          || (block && (block.generation == null || block.generation === generation))) return false;
+      if (!grant.armed) {
+        grant.armed = true;
+        this.dirty = true;
+      }
+      return true;
+    });
+  }
+
+  async admitManualFrame(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, url, documentToken) {
+    if (!Number.isInteger(frameId) || frameId <= 0 || typeof url !== 'string' || !url
+        || typeof documentToken !== 'string' || !documentToken) return null;
+    return this._run(state => {
+      const grant = state.manualContinuity[tabId];
+      const top = state.frames[`${tabId}:0`];
+      const block = this.blockedManualContinuity.get(tabId);
+      if (!grant || grant.revoked || !grant.armed || grant.generation !== generation
+          || grant.topDocumentEpoch !== topDocumentEpoch || top?.documentEpoch !== topDocumentEpoch
+          || grant.topDocumentToken !== topDocumentToken
+          || (block && (block.generation == null || block.generation === generation))) return null;
+      const key = `${tabId}:${frameId}`;
+      let cursor = state.frames[key];
+      if (!cursor) {
+        cursor = state.frames[key] = this._newDocument(state, url);
+      } else if (grant.documents?.[frameId] && grant.documents[frameId] !== documentToken
+          && grant.frames?.[frameId] === cursor.documentEpoch) {
+        cursor = state.frames[key] = this._newDocument(state, url);
+      } else if (cursor.url !== url) {
+        cursor = this._capture(cursor, url);
+      }
+      const alreadyAdmitted = grant.frames[frameId] === cursor.documentEpoch
+        && grant.documents?.[frameId] === documentToken;
+      grant.frames[frameId] = cursor.documentEpoch;
+      grant.documents ||= {};
+      grant.documents[frameId] = documentToken;
+      if (!alreadyAdmitted) this.dirty = true;
+      return { cursor, grant, alreadyAdmitted };
+    }).then(result => result && ({
+      cursor: { ...result.cursor }, grant: structuredClone(result.grant), alreadyAdmitted: result.alreadyAdmitted,
+    }));
+  }
+
+  async claimManualFrameStart(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, frameCursor, documentToken) {
+    return this._run(state => {
+      const grant = state.manualContinuity[tabId];
+      const frame = state.frames[`${tabId}:${frameId}`];
+      const top = state.frames[`${tabId}:0`];
+      const block = this.blockedManualContinuity.get(tabId);
+      if (!grant || grant.revoked || !grant.armed || grant.generation !== generation
+          || grant.topDocumentEpoch !== topDocumentEpoch || top?.documentEpoch !== topDocumentEpoch
+          || grant.topDocumentToken !== topDocumentToken
+          || grant.frames?.[frameId] !== frameCursor?.documentEpoch
+          || grant.documents?.[frameId] !== documentToken
+          || frame?.documentEpoch !== frameCursor?.documentEpoch
+          || frame?.routeRevision !== frameCursor?.routeRevision || frame?.url !== frameCursor?.url
+          || (block && (block.generation == null || block.generation === generation))) return false;
+      const claimKey = `${tabId}:${frameId}:${generation}:${documentToken}`;
+      if (grant.startedDocuments?.[frameId] === documentToken || this.manualFrameStartClaims.has(claimKey)) return false;
+      this.manualFrameStartClaims.add(claimKey);
+      return true;
+    });
+  }
+
+  async completeManualFrameStart(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, frameCursor, documentToken, accepted) {
+    const claimKey = `${tabId}:${frameId}:${generation}:${documentToken}`;
+    try {
+      return await this._run(state => {
+        const grant = state.manualContinuity[tabId];
+        const frame = state.frames[`${tabId}:${frameId}`];
+        const top = state.frames[`${tabId}:0`];
+        const block = this.blockedManualContinuity.get(tabId);
+        const current = grant && !grant.revoked && grant.armed && grant.generation === generation
+          && grant.topDocumentEpoch === topDocumentEpoch && grant.topDocumentToken === topDocumentToken
+          && top?.documentEpoch === topDocumentEpoch && grant.frames?.[frameId] === frameCursor?.documentEpoch
+          && grant.documents?.[frameId] === documentToken
+          && frame?.documentEpoch === frameCursor?.documentEpoch
+          && frame?.routeRevision === frameCursor?.routeRevision && frame?.url === frameCursor?.url
+          && this.manualFrameStartClaims.has(claimKey)
+          && !(block && (block.generation == null || block.generation === generation));
+        if (!accepted || !current) return false;
+        grant.startedDocuments ||= {};
+        if (grant.startedDocuments[frameId] !== documentToken) {
+          grant.startedDocuments[frameId] = documentToken;
+          this.dirty = true;
+        }
+        return true;
+      });
+    } finally {
+      this.manualFrameStartClaims.delete(claimKey);
+    }
+  }
+
+  isManualFrameStartCurrent(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, frameCursor, documentToken) {
+    const currentGrant = this.state?.manualContinuity?.[tabId];
+    const durableGrant = this.durableState?.manualContinuity?.[tabId];
+    const currentFrame = this.state?.frames?.[`${tabId}:${frameId}`];
+    const durableFrame = this.durableState?.frames?.[`${tabId}:${frameId}`];
+    const top = this.state?.frames?.[`${tabId}:0`];
+    const block = this.blockedManualContinuity.get(tabId);
+    return Boolean(currentGrant && durableGrant && !currentGrant.revoked && !durableGrant.revoked
+      && currentGrant.armed && durableGrant.armed
+      && currentGrant.generation === generation && durableGrant.generation === generation
+      && currentGrant.topDocumentEpoch === topDocumentEpoch && durableGrant.topDocumentEpoch === topDocumentEpoch
+      && currentGrant.topDocumentToken === topDocumentToken && durableGrant.topDocumentToken === topDocumentToken
+      && top?.documentEpoch === topDocumentEpoch
+      && currentGrant.frames?.[frameId] === frameCursor?.documentEpoch
+      && durableGrant.frames?.[frameId] === frameCursor?.documentEpoch
+      && currentGrant.documents?.[frameId] === documentToken
+      && durableGrant.documents?.[frameId] === documentToken
+      && currentGrant.startedDocuments?.[frameId] !== documentToken
+      && durableGrant.startedDocuments?.[frameId] !== documentToken
+      && currentFrame?.documentEpoch === frameCursor?.documentEpoch
+      && durableFrame?.documentEpoch === frameCursor?.documentEpoch
+      && currentFrame?.routeRevision === frameCursor?.routeRevision
+      && durableFrame?.routeRevision === frameCursor?.routeRevision
+      && currentFrame?.url === frameCursor?.url && durableFrame?.url === frameCursor?.url
+      && this.manualFrameStartClaims.has(`${tabId}:${frameId}:${generation}:${documentToken}`)
+      && !(block && (block.generation == null || block.generation === generation)));
   }
 
   blockManualContinuity(tabId, expectedGeneration = null) {
@@ -245,6 +397,13 @@ export class PageNavigationTracker {
         if (key.startsWith(`${tabId}:`) && !live.has(key)) {
           this.dirty = true;
           delete state.frames[key];
+          const frameId = key.slice(`${tabId}:`.length);
+          const grant = state.manualContinuity[tabId];
+          if (grant && !grant.revoked) {
+            delete grant.frames[frameId];
+            delete grant.documents?.[frameId];
+            delete grant.startedDocuments?.[frameId];
+          }
         }
       }
       for (const frame of frames) {
@@ -309,6 +468,20 @@ export class PageNavigationTracker {
       if (tracked) {
         if (typeof url !== 'string' || !url) throw new Error('Missing committed Page URL');
         state.frames[key] = this._newDocument(state, url);
+        if (frameId > 0) {
+          const grant = state.manualContinuity[tabId];
+          if (grant && !grant.revoked) {
+            delete grant.frames[frameId];
+            delete grant.documents?.[frameId];
+            delete grant.startedDocuments?.[frameId];
+            this.dirty = true;
+          }
+        }
+      } else if (frameId > 0 && typeof url === 'string' && url) {
+        const grant = state.manualContinuity[tabId];
+        if (grant && !grant.revoked && grant.armed) {
+          state.frames[key] = this._newDocument(state, url);
+        }
       }
     });
   }
@@ -322,6 +495,9 @@ export class PageNavigationTracker {
       }
       this.blockedManualContinuity.delete(tabId);
       this.manualContinuityRevision.delete(tabId);
+      for (const claim of this.manualFrameStartClaims) {
+        if (claim.startsWith(`${tabId}:`)) this.manualFrameStartClaims.delete(claim);
+      }
       let removedFrame = false;
       for (const key of Object.keys(state.frames)) {
         if (key.startsWith(`${tabId}:`)) {

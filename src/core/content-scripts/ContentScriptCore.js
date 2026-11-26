@@ -122,6 +122,8 @@ export function ContentScriptCore() {
       if (!fm.initialized) {
         await fm.initialize();
       }
+      const { installPageTranslationDocumentProbe } = await import('./PageTranslationDocumentIdentity.js');
+      installPageTranslationDocumentProbe(typeof browser !== 'undefined' ? browser : globalThis.chrome);
 
       const [{ MainFrameAggregator }, { MainFrameCoordinator }, { MainFeatureLoader }, { MessageActions }] = await Promise.all([
         import('./main/MainFrameAggregator.js'),

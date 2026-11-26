@@ -9,6 +9,9 @@ describe('Page navigation producer cursor', () => {
   let storage;
   let tracker;
   const frames = [{ frameId: 0, url: 'https://example.com/a' }, { frameId: 7, url: 'https://frame.example/a' }];
+  const grantManual = (operationRevision, options = {}) => tracker.grantManualContinuity(
+    42, operationRevision, { topDocumentToken: 'top-document-token', ...options },
+  );
 
   beforeEach(() => {
     browser.webNavigation.getFrame.mockReset().mockResolvedValue({ url: frames[0].url });
@@ -172,7 +175,7 @@ describe('Page navigation producer cursor', () => {
 
   it('persists a document-scoped manual grant and restores it after worker restart', async () => {
     await tracker.seed(42, frames);
-    const grant = await tracker.grantManualContinuity(42);
+    const grant = await grantManual();
     expect(grant).toMatchObject({
       generation: 1,
       revoked: false,
@@ -190,26 +193,117 @@ describe('Page navigation producer cursor', () => {
 
   it('reuses an accepted manual grant for a duplicate start instead of rotating its generation', async () => {
     await tracker.seed(42, frames);
-    const first = await tracker.grantManualContinuity(42);
-    const duplicate = await tracker.grantManualContinuity(42);
+    const first = await grantManual();
+    const duplicate = await grantManual();
 
     expect(duplicate).toEqual(first);
     expect(saved.pageTranslationNavigation.manualContinuity[42]).toEqual(first);
   });
 
+  it('durably arms an accepted grant and enrolls a new child without changing generation', async () => {
+    await tracker.seed(42, [{ frameId: 0, url: frames[0].url }]);
+    const grant = await grantManual(undefined, { provider: 'deepL', targetLanguage: 'fr', isExplicitProvider: true });
+    expect(await tracker.admitManualFrame(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, 'https://nested.example/', 'token'
+    ))
+      .toBeNull();
+    expect(await tracker.armManualContinuity(42, grant.generation)).toBe(true);
+    const admission = await tracker.admitManualFrame(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, 'https://nested.example/', 'token'
+    );
+    expect(admission).toMatchObject({
+      alreadyAdmitted: false,
+      grant: { generation: grant.generation, provider: 'deepL', targetLanguage: 'fr', isExplicitProvider: true },
+      cursor: { url: 'https://nested.example/' },
+    });
+    expect((await tracker.admitManualFrame(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, 'https://nested.example/', 'token'
+    )).alreadyAdmitted).toBe(true);
+    expect(await tracker.getManualContinuity(42)).toMatchObject({ generation: grant.generation, armed: true });
+  });
+
+  it('fails closed when Stop races with a pending child admission', async () => {
+    await tracker.seed(42, [{ frameId: 0, url: frames[0].url }]);
+    const grant = await grantManual();
+    await tracker.armManualContinuity(42, grant.generation);
+    const revision = tracker.blockManualContinuity(42);
+    expect(await tracker.admitManualFrame(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, 'https://nested.example/', 'token'
+    )).toBeNull();
+    await tracker.revokeManualContinuity(42, grant.generation, revision);
+    expect(await tracker.getManualContinuity(42)).toBeNull();
+  });
+
+  it('rehydrates an armed grant and its exact child-document ticket across worker restart', async () => {
+    await tracker.seed(42, [{ frameId: 0, url: frames[0].url }]);
+    const grant = await grantManual();
+    await tracker.armManualContinuity(42, grant.generation);
+    const admission = await tracker.admitManualFrame(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, 'https://nested.example/', 'doc-1'
+    );
+    tracker = new PageNavigationTracker(storage);
+    expect(await tracker.getManualContinuity(42)).toMatchObject({ armed: true, generation: grant.generation });
+    expect(await tracker.claimManualFrameStart(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, admission.cursor, 'doc-1'
+    )).toBe(true);
+    expect((await tracker.getManualContinuity(42)).startedDocuments).toBeUndefined();
+    expect(await tracker.completeManualFrameStart(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, admission.cursor, 'doc-1', true
+    )).toBe(true);
+    expect(await tracker.claimManualFrameStart(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, admission.cursor, 'doc-1'
+    )).toBe(false);
+    expect((await tracker.getManualContinuity(42)).startedDocuments).toEqual({ 9: 'doc-1' });
+  });
+
+  it('releases a rejected start claim so the same document can retry', async () => {
+    await tracker.seed(42, [{ frameId: 0, url: frames[0].url }]);
+    const grant = await grantManual();
+    await tracker.armManualContinuity(42, grant.generation);
+    const admission = await tracker.admitManualFrame(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, 'https://nested.example/', 'doc-1'
+    );
+    const claim = () => tracker.claimManualFrameStart(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, admission.cursor, 'doc-1'
+    );
+    expect(await claim()).toBe(true);
+    expect(await tracker.completeManualFrameStart(
+      42, 9, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, admission.cursor, 'doc-1', false
+    )).toBe(false);
+    expect((await tracker.getManualContinuity(42)).startedDocuments).toBeUndefined();
+    expect(await claim()).toBe(true);
+  });
+
+  it('tracks a committed untracked nested child for admission without rotating the parent grant', async () => {
+    await tracker.seed(42, [{ frameId: 0, url: frames[0].url }]);
+    const grant = await grantManual();
+    await tracker.armManualContinuity(42, grant.generation);
+    await tracker.committed(42, 19, 'https://nested.example/');
+    const committed = await tracker.getCursor(42, 19);
+    expect(committed).toBeTruthy();
+    const admission = await tracker.admitManualFrame(
+      42, 19, grant.generation, grant.topDocumentEpoch, grant.topDocumentToken, committed.url, 'nested-token'
+    );
+    expect(admission.cursor).toEqual(committed);
+    expect(admission.grant.generation).toBe(grant.generation);
+    await tracker.committed(42, 0, 'https://example.com/replaced');
+    expect(await tracker.getManualContinuity(42)).toBeNull();
+  });
+
   it.each(['reload', 'removal'])('retains an active grant across child %s while frame authorization stays scoped', async change => {
     await tracker.seed(42, frames);
-    const grant = await tracker.grantManualContinuity(42);
+    const grant = await grantManual();
     const topCursor = await tracker.getCursor(42, 0);
     const oldChildCursor = await tracker.getCursor(42, 7);
     if (change === 'reload') await tracker.committed(42, 7, 'https://frame.example/reloaded');
     else await tracker.seed(42, [frames[0]]);
 
-    const duplicate = await tracker.grantManualContinuity(42);
+    const duplicate = await grantManual();
     const changedChildCursor = await tracker.getCursor(42, 7) || oldChildCursor;
 
     expect(duplicate.generation).toBe(grant.generation);
-    expect(duplicate).toEqual(grant);
+    expect(duplicate.generation).toBe(grant.generation);
+    expect(duplicate.frames[7]).toBeUndefined();
     expect(await tracker.validateManualContinuityBatch(
       42, 0, grant.generation, grant.topDocumentEpoch, topCursor
     )).toBe(true);
@@ -220,7 +314,7 @@ describe('Page navigation producer cursor', () => {
 
   it('keeps another tab batch-valid while its unrelated storage mutation is dirty', async () => {
     await tracker.seed(42, frames);
-    const grant = await tracker.grantManualContinuity(42);
+    const grant = await grantManual();
     const cursor = await tracker.getCursor(42, 0);
     await tracker.seed(43, frames);
     let releaseWrite;
@@ -251,7 +345,7 @@ describe('Page navigation producer cursor', () => {
 
   it('keeps revocation closed on storage failure in-worker and documents the uncommitted restart boundary', async () => {
     await tracker.seed(42, frames);
-    const grant = await tracker.grantManualContinuity(42);
+    const grant = await grantManual();
     const revision = tracker.blockManualContinuity(42);
     storage.set.mockRejectedValueOnce(new Error('write rejected'));
     await expect(tracker.revokeManualContinuity(42, grant.generation, revision)).rejects.toThrow('write rejected');
@@ -267,9 +361,9 @@ describe('Page navigation producer cursor', () => {
 
   it('does not let an old-generation internal revoke block a newer manual grant', async () => {
     await tracker.seed(42, frames);
-    const oldGrant = await tracker.grantManualContinuity(42);
+    const oldGrant = await grantManual();
     tracker.blockManualContinuity(42, oldGrant.generation);
-    const newGrant = await tracker.grantManualContinuity(42);
+    const newGrant = await grantManual();
     expect(newGrant.generation).toBeGreaterThan(oldGrant.generation);
     expect(await tracker.revokeManualContinuity(42, oldGrant.generation)).toBeNull();
     expect(await tracker.getManualContinuity(42)).toEqual(newGrant);
@@ -277,7 +371,7 @@ describe('Page navigation producer cursor', () => {
 
   it('durably revokes a restored grant when its operation revision is uninitialized', async () => {
     await tracker.seed(42, frames);
-    const grant = await tracker.grantManualContinuity(42);
+    const grant = await grantManual();
     const restartedTracker = new PageNavigationTracker(storage);
     const revision = restartedTracker.blockManualContinuity(42, grant.generation);
 
@@ -297,15 +391,15 @@ describe('Page navigation producer cursor', () => {
     await tracker.seed(42, frames);
     const olderStart = tracker.reserveManualContinuityStart(42);
     const newerStart = tracker.reserveManualContinuityStart(42);
-    const grant = await tracker.grantManualContinuity(42, newerStart);
+    const grant = await grantManual(newerStart);
 
-    await expect(tracker.grantManualContinuity(42, olderStart)).rejects.toThrow('Manual continuity start superseded');
+    await expect(grantManual(olderStart)).rejects.toThrow('Manual continuity start superseded');
     expect(await tracker.getManualContinuity(42)).toEqual(grant);
   });
 
   it('rejects a manual grant after a top document commit and after a child document replacement', async () => {
     await tracker.seed(42, frames);
-    const grant = await tracker.grantManualContinuity(42);
+    const grant = await grantManual();
     await tracker.committed(42, 7, 'https://frame.example/new-document');
     const newChildCursor = await tracker.getCursor(42, 7);
     expect(await tracker.validateManualContinuity(42, 7, grant.generation, grant.topDocumentEpoch, newChildCursor)).toBe(false);
@@ -327,6 +421,20 @@ describe('Page navigation producer cursor', () => {
     };
     tracker = new PageNavigationTracker(storage);
     await expect(tracker.getManualContinuity(42)).rejects.toThrow('Invalid Page navigation storage');
+  });
+
+  it('revokes legacy grants that cannot prove the bound top-document identity', async () => {
+    saved = {
+      pageTranslationNavigation: {
+        nextDocumentEpoch: 1,
+        frames: { '42:0': { documentEpoch: 1, routeRevision: 0, url: frames[0].url } },
+        manualContinuity: { 42: { generation: 4, revoked: false, topDocumentEpoch: 1, frames: { 0: 1 } } },
+      },
+    };
+    tracker = new PageNavigationTracker(storage);
+
+    expect(await tracker.getManualContinuity(42)).toBeNull();
+    expect(saved.pageTranslationNavigation.manualContinuity[42]).toEqual({ generation: 5, revoked: true });
   });
 
   it('resets only the committed child document and keeps other frame records', async () => {

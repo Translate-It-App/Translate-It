@@ -769,6 +769,132 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
     expect(handler.pageTranslationManager.translatePage).toHaveBeenCalledWith({});
   });
 
+  it('deduplicates a document-bound iframe start before mutating navigation revision', async () => {
+    const previousDocumentToken = window.__translateItPageDocumentToken;
+    window.__translateItPageDocumentToken = 'child-document';
+    const translatePage = vi.fn().mockResolvedValue({ success: true });
+    handler.setPageTranslationManager({ isActive: true, translatePage });
+    const admission = vi.spyOn(UnifiedMessaging, 'sendRegularMessage').mockResolvedValue({ success: true });
+    const message = {
+      data: {
+        origin: 'manual-frame',
+        documentToken: 'child-document',
+        hasManualContinuity: true,
+        manualContinuityGeneration: 3,
+        topDocumentEpoch: 1,
+        navigationCursor: { documentEpoch: 4, routeRevision: 0, url: window.location.href },
+      },
+    };
+    try {
+      await expect(handler.handlePageTranslate(message)).resolves.toEqual({ success: true });
+      const admissionCount = admission.mock.calls.length;
+      await expect(handler.handlePageTranslate(message)).resolves.toMatchObject({
+        success: true, skipped: true, reason: 'duplicate_manual_frame_start',
+      });
+      expect(translatePage).toHaveBeenCalledOnce();
+      expect(handler._pageRestartRevision).toBe(1);
+      expect(admission).toHaveBeenCalledTimes(admissionCount);
+    } finally {
+      admission.mockRestore();
+      if (previousDocumentToken === undefined) delete window.__translateItPageDocumentToken;
+      else window.__translateItPageDocumentToken = previousDocumentToken;
+    }
+  });
+
+  it('rejects missing or stale local iframe identity before mutating start state', async () => {
+    const translatePage = vi.fn().mockResolvedValue({ success: true });
+    handler.setPageTranslationManager({ isActive: true, translatePage });
+    const admission = vi.spyOn(UnifiedMessaging, 'sendRegularMessage').mockResolvedValue({ success: true });
+    const message = {
+      data: {
+        origin: 'manual-frame', documentToken: 'not-this-document',
+        hasManualContinuity: true, manualContinuityGeneration: 3, topDocumentEpoch: 1,
+        navigationCursor: { documentEpoch: 4, routeRevision: 0, url: window.location.href },
+      },
+    };
+    try {
+      window.__translateItPageDocumentToken = 'actual-document';
+      await expect(handler.handlePageTranslate(message)).resolves.toMatchObject({ success: false });
+      expect(handler._pageRestartRevision).toBe(0);
+      expect(handler._manualContinuityGeneration).toBeNull();
+      expect(admission).not.toHaveBeenCalled();
+      expect(translatePage).not.toHaveBeenCalled();
+
+      delete window.__translateItPageDocumentToken;
+      await expect(handler.handlePageTranslate({
+        ...message, data: { ...message.data, documentToken: 'actual-document' },
+      })).resolves.toMatchObject({ success: false });
+      expect(handler._pageRestartRevision).toBe(0);
+      expect(translatePage).not.toHaveBeenCalled();
+    } finally {
+      admission.mockRestore();
+      delete window.__translateItPageDocumentToken;
+    }
+  });
+
+  it('releases failed iframe starts for retry and remembers only a positively accepted start', async () => {
+    const previousDocumentToken = window.__translateItPageDocumentToken;
+    window.__translateItPageDocumentToken = 'child-document';
+    const translatePage = vi.fn()
+      .mockResolvedValueOnce({ success: false, reason: ActionReasons.BUSY_OR_DONE })
+      .mockResolvedValueOnce({ success: true });
+    handler.setPageTranslationManager({ isActive: true, translatePage });
+    const admission = vi.spyOn(UnifiedMessaging, 'sendRegularMessage').mockResolvedValue({ success: true });
+    const message = {
+      data: {
+        origin: 'manual-frame', documentToken: 'child-document',
+        hasManualContinuity: true, manualContinuityGeneration: 3, topDocumentEpoch: 1,
+        navigationCursor: { documentEpoch: 4, routeRevision: 0, url: window.location.href },
+      },
+    };
+    try {
+      await expect(handler.handlePageTranslate(message)).resolves.toMatchObject({ success: false });
+      await expect(handler.handlePageTranslate(message)).resolves.toEqual({ success: true });
+      await expect(handler.handlePageTranslate(message)).resolves.toMatchObject({
+        success: true, skipped: true, reason: 'duplicate_manual_frame_start',
+      });
+      expect(translatePage).toHaveBeenCalledTimes(2);
+    } finally {
+      admission.mockRestore();
+      if (previousDocumentToken === undefined) delete window.__translateItPageDocumentToken;
+      else window.__translateItPageDocumentToken = previousDocumentToken;
+    }
+  });
+
+  it('rejects an iframe start when its local document identity changes during async admission', async () => {
+    const previousDocumentToken = window.__translateItPageDocumentToken;
+    window.__translateItPageDocumentToken = 'child-document';
+    const translatePage = vi.fn().mockResolvedValue({ success: true });
+    handler.setPageTranslationManager({ isActive: true, translatePage });
+    const admission = vi.spyOn(UnifiedMessaging, 'sendRegularMessage');
+    let releaseFinalAdmission;
+    admission.mockImplementation(async () => {
+      if (admission.mock.calls.length === 4) {
+        return new Promise(resolve => { releaseFinalAdmission = resolve; });
+      }
+      return { success: true };
+    });
+    const message = {
+      data: {
+        origin: 'manual-frame', documentToken: 'child-document',
+        hasManualContinuity: true, manualContinuityGeneration: 3, topDocumentEpoch: 1,
+        navigationCursor: { documentEpoch: 4, routeRevision: 0, url: window.location.href },
+      },
+    };
+    try {
+      const pending = handler.handlePageTranslate(message);
+      await vi.waitFor(() => expect(releaseFinalAdmission).toBeTypeOf('function'));
+      window.__translateItPageDocumentToken = 'replacement-document';
+      releaseFinalAdmission({ success: true });
+      await expect(pending).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+      expect(translatePage).not.toHaveBeenCalled();
+    } finally {
+      admission.mockRestore();
+      if (previousDocumentToken === undefined) delete window.__translateItPageDocumentToken;
+      else window.__translateItPageDocumentToken = previousDocumentToken;
+    }
+  });
+
   it('reacquires the current Page instance after its cached instance was deactivated', async () => {
     const retired = {
       isActive: false,

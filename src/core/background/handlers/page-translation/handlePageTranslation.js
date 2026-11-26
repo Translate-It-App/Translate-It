@@ -15,9 +15,38 @@ const logger = getScopedLogger(LOG_COMPONENTS.PAGE_TRANSLATION, 'handlePageTrans
 // Map<tabId, { targetLanguage: string, settings: object }>
 const autoTranslateRegistry = new Map();
 const pendingFrameRetirements = new Map();
+const pendingManualFrameReadiness = new Map();
 
 function getFrameKey(tabId, frameId) {
   return `${tabId}:${frameId}`;
+}
+
+function clearPendingManualFrameReadiness(tabId, frameId = null) {
+  for (const [key, pending] of pendingManualFrameReadiness) {
+    if (pending.tabId === tabId && (frameId == null || pending.frameId === frameId)) {
+      pendingManualFrameReadiness.delete(key);
+    }
+  }
+}
+
+function resumePendingManualFrameReadiness(tabId) {
+  for (const [key, pending] of pendingManualFrameReadiness) {
+    if (pending.tabId !== tabId) continue;
+    pendingManualFrameReadiness.delete(key);
+    void (async () => {
+      const childSender = { tab: { id: tabId }, frameId: pending.frameId };
+      const ticket = await handlePageTranslation({
+        action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+        data: { documentToken: pending.documentToken },
+      }, childSender);
+      if (ticket?.success && ticket.start) {
+        await handlePageTranslation({
+          action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+          data: { ...ticket, documentToken: pending.documentToken },
+        }, childSender);
+      }
+    })().catch(error => logger.debug('Deferred iframe admission failed:', error?.message));
+  }
 }
 
 function scheduleFrameRetirement(tabId, frameId) {
@@ -85,6 +114,15 @@ const PRE_FANOUT_COMMAND_TIMEOUT_REASON = 'pre_fanout_command_timeout';
 // UnifiedMessaging applies an 8s default outer deadline. 250ms leaves 250ms
 // scheduling margin after the 1.5s preparation and 6s fallback deadlines.
 const STATUS_AGGREGATE_PROBE_TIMEOUT_MS = 250;
+const FRAME_AD_DOMAINS = ['doubleclick.net', 'googleads', 'adnxs.com', 'pubmatic.com', 'rubiconproject.com', 'openx.net', 'advertising.com'];
+
+function isEligibleManualFrameUrl(url) {
+  return /^https?:\/\//i.test(url || '') && !FRAME_AD_DOMAINS.some(domain => url.includes(domain));
+}
+
+async function probeFrameDocument(tabId, frameId) {
+  return browser.tabs.sendMessage(tabId, { action: MessageActions.PAGE_TRANSLATE_FRAME_PROBE }, { frameId });
+}
 
 /**
  * Sends a Whole Page command to a single frame with a bounded response wait.
@@ -270,11 +308,7 @@ async function runPreFanoutPreparation(message, sender, discoverFrames = true, o
     allFrames = allFrames.filter(frame => {
       if (frame.frameId === 0) return true;
       if (!frame.url || frame.url.startsWith('about:') || frame.url.startsWith('javascript:') || frame.url.startsWith('chrome-extension:')) return false;
-
-      const adDomains = ['doubleclick.net', 'googleads', 'adnxs.com', 'pubmatic.com', 'rubiconproject.com', 'openx.net', 'advertising.com'];
-      if (adDomains.some(domain => frame.url.includes(domain))) return false;
-
-      return true;
+      return !FRAME_AD_DOMAINS.some(domain => frame.url.includes(domain));
     });
 
     let navigationUnavailable = false;
@@ -311,6 +345,152 @@ async function runPreFanoutPreparation(message, sender, discoverFrames = true, o
 export async function handlePageTranslation(message, sender) {
   try {
     const senderTabId = sender?.tab?.id;
+    if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_READY
+        || message.action === MessageActions.PAGE_TRANSLATE_FRAME_START) {
+      const frameId = sender?.frameId;
+      const data = message.data || {};
+      if (!Number.isInteger(senderTabId) || !Number.isInteger(frameId) || frameId <= 0
+          || typeof data.documentToken !== 'string' || !data.documentToken) {
+        return { success: false, reason: 'ineligible_frame' };
+      }
+      const access = await tabPermissionChecker.checkTabAccess(senderTabId);
+      if (!access.isAccessible) return { success: false, reason: 'ineligible_frame' };
+      const [grant, frame] = await Promise.all([
+        pageNavigationTracker.getManualContinuity(senderTabId),
+        browser.webNavigation.getFrame({ tabId: senderTabId, frameId }),
+      ]);
+      if (!grant || !frame || !isEligibleManualFrameUrl(frame.url)) {
+        return { success: false, reason: 'ineligible_frame' };
+      }
+      const [{ documentToken: currentToken }, { documentToken: currentTopToken }, topCursor] = await Promise.all([
+        probeFrameDocument(senderTabId, frameId),
+        probeFrameDocument(senderTabId, 0),
+        pageNavigationTracker.getAdmissionCursor(senderTabId, 0),
+      ]);
+      if (currentToken !== data.documentToken || !topCursor
+          || currentTopToken !== grant.topDocumentToken || topCursor.documentEpoch !== grant.topDocumentEpoch) {
+        return { success: false, reason: 'obsolete_navigation' };
+      }
+      const { checkUrlExclusionAsync } = await import('@/features/exclusion/utils/exclusion-utils.js');
+      if (await checkUrlExclusionAsync(frame.url)) return { success: false, reason: 'ineligible_frame' };
+
+      if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_READY) {
+        if (!grant.armed) {
+          pendingManualFrameReadiness.set(`${senderTabId}:${frameId}:${data.documentToken}`, {
+            tabId: senderTabId, frameId, documentToken: data.documentToken,
+          });
+          return { success: true, pending: true };
+        }
+        const admission = await pageNavigationTracker.admitManualFrame(
+          senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
+          currentTopToken, frame.url, data.documentToken
+        );
+        if (!admission) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+        const isCurrent = await pageNavigationTracker.validateManualContinuity(
+          senderTabId, frameId, grant.generation, grant.topDocumentEpoch, admission.cursor
+        );
+        if (!isCurrent) return { success: false, reason: 'obsolete_navigation' };
+        return {
+          success: true,
+          start: admission.grant.startedDocuments?.[frameId] !== data.documentToken,
+          documentToken: data.documentToken,
+          manualContinuityGeneration: grant.generation,
+          topDocumentEpoch: grant.topDocumentEpoch,
+          navigationCursor: admission.cursor,
+          provider: grant.provider,
+          targetLanguage: grant.targetLanguage,
+          isExplicitProvider: grant.isExplicitProvider,
+        };
+      }
+
+      const { navigationCursor, manualContinuityGeneration, topDocumentEpoch } = data;
+      if (manualContinuityGeneration !== grant.generation || topDocumentEpoch !== grant.topDocumentEpoch
+          || !sameCursor(navigationCursor, await pageNavigationTracker.getAdmissionCursor(senderTabId, frameId))
+          || !await pageNavigationTracker.validateManualContinuity(
+            senderTabId, frameId, grant.generation, grant.topDocumentEpoch, navigationCursor
+          )) return { success: false, reason: 'obsolete_navigation' };
+      const claimed = await pageNavigationTracker.claimManualFrameStart(
+        senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
+        grant.topDocumentToken, navigationCursor, data.documentToken
+      );
+      if (!claimed) return { success: true, skipped: true, reason: 'duplicate_or_revoked_admission' };
+      let sendInvoked = false;
+      let timeoutId;
+      try {
+        const [finalAccess, liveFrame] = await Promise.all([
+          tabPermissionChecker.checkTabAccess(senderTabId),
+          browser.webNavigation.getFrame({ tabId: senderTabId, frameId }),
+        ]);
+        const { checkUrlExclusionAsync: checkCurrentUrlExcluded } = await import('@/features/exclusion/utils/exclusion-utils.js');
+        if (!finalAccess.isAccessible || !isEligibleManualFrameUrl(liveFrame?.url)
+            || liveFrame.url !== navigationCursor.url || await checkCurrentUrlExcluded(liveFrame.url)
+            || !await pageNavigationTracker.validateManualContinuity(
+              senderTabId, frameId, grant.generation, grant.topDocumentEpoch, navigationCursor
+            )) return { success: false, reason: 'obsolete_navigation' };
+        const [startProbe, topProbe] = await Promise.all([
+          probeFrameDocument(senderTabId, frameId),
+          probeFrameDocument(senderTabId, 0),
+        ]);
+        if (startProbe?.documentToken !== data.documentToken || topProbe?.documentToken !== grant.topDocumentToken) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+        if (!pageNavigationTracker.isManualFrameStartCurrent(
+          senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
+          grant.topDocumentToken, navigationCursor, data.documentToken
+        )) return { success: false, reason: 'obsolete_navigation' };
+        const pendingDelivery = browser.tabs.sendMessage(senderTabId, {
+          action: MessageActions.PAGE_TRANSLATE,
+          data: {
+            isAuto: false,
+            hasManualContinuity: true,
+            manualContinuityGeneration: grant.generation,
+            topDocumentEpoch: grant.topDocumentEpoch,
+            topDocumentToken: grant.topDocumentToken,
+            navigationCursor,
+            origin: 'manual-frame',
+            documentToken: data.documentToken,
+            ...(typeof grant.provider === 'string' && { provider: grant.provider }),
+            ...(typeof grant.targetLanguage === 'string' && { targetLanguage: grant.targetLanguage }),
+            ...(typeof grant.isExplicitProvider === 'boolean' && { isExplicitProvider: grant.isExplicitProvider }),
+          },
+        }, { frameId });
+        sendInvoked = true;
+        const delivery = pendingDelivery.then(async response => {
+          await pageNavigationTracker.completeManualFrameStart(
+            senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
+            grant.topDocumentToken, navigationCursor, data.documentToken, response?.success === true
+          ).catch(error => logger.debug('Could not persist iframe START acceptance:', error?.message));
+          return { response };
+        }, async error => {
+          await pageNavigationTracker.completeManualFrameStart(
+            senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
+            grant.topDocumentToken, navigationCursor, data.documentToken, false
+          ).catch(() => {});
+          return { error };
+        });
+        const timedOut = new Promise(resolve => {
+          timeoutId = setTimeout(() => resolve({ timedOut: true }), FRAME_COMMAND_RESPONSE_TIMEOUT_MS);
+        });
+        const result = await Promise.race([delivery, timedOut]);
+        if (result.timedOut) {
+          // The browser may still deliver the command. Keep the volatile claim
+          // until the underlying send settles; the receiver deduplicates retries.
+          return { success: false, reason: FRAME_COMMAND_RESPONSE_TIMEOUT_REASON, isTransportFailure: true };
+        }
+        if (result.error) return { success: false, error: result.error.message };
+        return result.response;
+      } finally {
+        clearTimeout(timeoutId);
+        if (!sendInvoked) {
+          await pageNavigationTracker.completeManualFrameStart(
+            senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
+            grant.topDocumentToken, navigationCursor, data.documentToken, false
+          ).catch(() => {});
+        }
+      }
+    }
     let manualStopRevision = null;
     let manualStopCutoffGeneration = null;
     let manualStartRevision = null;
@@ -336,6 +516,7 @@ export async function handlePageTranslation(message, sender) {
     );
     if (Number.isInteger(senderTabId) && explicitInvalidation) {
       pageNavigationTracker.revokeRestartFence(senderTabId);
+      if (isManualRevocation) clearPendingManualFrameReadiness(senderTabId);
       if (isManualRevocation && !(
         message.action === MessageActions.CANCEL_TRANSLATION
         && message.data?.context === MessageContexts.PAGE_TRANSLATION_BATCH
@@ -370,7 +551,7 @@ export async function handlePageTranslation(message, sender) {
           return { success: false, reason: 'manual_continuity_status_unavailable' };
         }
       }
-      if (data.origin === 'manual-spa' || data.origin === 'manual-start') {
+      if (data.origin === 'manual-spa' || data.origin === 'manual-start' || data.origin === 'manual-frame') {
         if (!Number.isInteger(senderTabId) || !Number.isInteger(frameId) || frameId < 0
             || !/^https?:\/\//i.test(data.navigationCursor?.url || '')
             || (data.origin === 'manual-spa' && (typeof data.restartFence !== 'string' || !data.restartFence
@@ -380,6 +561,25 @@ export async function handlePageTranslation(message, sender) {
         try {
           const access = await tabPermissionChecker.checkTabAccess(senderTabId);
           if (!access.isAccessible) return { success: false, reason: 'ineligible_frame' };
+          const grant = await pageNavigationTracker.getManualContinuity(senderTabId);
+          if (!grant || data.topDocumentToken !== grant.topDocumentToken) {
+            return { success: false, reason: 'obsolete_navigation' };
+          }
+          const { documentToken: currentTopToken } = await probeFrameDocument(senderTabId, 0);
+          if (currentTopToken !== grant.topDocumentToken) return { success: false, reason: 'obsolete_navigation' };
+          if (data.origin === 'manual-frame') {
+            const frame = await browser.webNavigation.getFrame({ tabId: senderTabId, frameId });
+            if (!grant?.armed || grant.documents?.[frameId] !== data.documentToken
+                || !isEligibleManualFrameUrl(frame?.url)) return { success: false, reason: 'obsolete_navigation' };
+            const [{ documentToken }, { checkUrlExclusionAsync }] = await Promise.all([
+              probeFrameDocument(senderTabId, frameId),
+              import('@/features/exclusion/utils/exclusion-utils.js'),
+            ]);
+            if (documentToken !== data.documentToken
+                || await checkUrlExclusionAsync(frame.url)) {
+              return { success: false, reason: 'obsolete_navigation' };
+            }
+          }
           const valid = await pageNavigationTracker.validateManualContinuity(
             senderTabId, frameId, data.manualContinuityGeneration,
             data.topDocumentEpoch, data.navigationCursor
@@ -679,7 +879,16 @@ export async function handlePageTranslation(message, sender) {
       }
       if (isManualStart && !navigationUnavailable && !navigationAdmissionInvalid) {
         try {
-          manualGrant = await pageNavigationTracker.grantManualContinuity(targetTabId, manualStartRevision);
+          const topProbe = await probeFrameDocument(targetTabId, 0).catch(() => null);
+          if (typeof topProbe?.documentToken !== 'string' || !topProbe.documentToken) {
+            return { success: false, reason: 'manual_continuity_top_identity_unavailable' };
+          }
+          manualGrant = await pageNavigationTracker.grantManualContinuity(targetTabId, manualStartRevision, {
+            topDocumentToken: topProbe.documentToken,
+            provider: message.data?.provider,
+            targetLanguage: message.data?.targetLanguage,
+            isExplicitProvider: message.data?.isExplicitProvider,
+          });
         } catch (error) {
           return { success: false, reason: 'manual_continuity_not_durable', error: error.message };
         }
@@ -746,6 +955,7 @@ export async function handlePageTranslation(message, sender) {
           hasManualContinuity: true,
           manualContinuityGeneration: manualGrant.generation,
           topDocumentEpoch: manualGrant.topDocumentEpoch,
+          topDocumentToken: manualGrant.topDocumentToken,
         } }
         : revocationGeneration != null || (isManualRevocation && revocationError)
           ? { ...message, data: {
@@ -770,6 +980,15 @@ export async function handlePageTranslation(message, sender) {
         .filter(response => response != null);
       const frames = frameResults.map(projectFrameDelivery);
       const success = responses.some(response => response.success);
+      if (manualGrant && success) {
+        try {
+          if (await pageNavigationTracker.armManualContinuity(targetTabId, manualGrant.generation)) {
+            resumePendingManualFrameReadiness(targetTabId);
+          }
+        } catch (error) {
+          logger.warn('Failed to arm an accepted manual Page start', error);
+        }
+      }
       if (message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
           && responses.some(response => response.reason === 'manual_continuity_status_unavailable')) {
         return {
@@ -782,6 +1001,7 @@ export async function handlePageTranslation(message, sender) {
         };
       }
       if (manualGrant && !manualGrant.reused && !success) {
+        clearPendingManualFrameReadiness(targetTabId);
         pageNavigationTracker.blockManualContinuity(targetTabId, manualGrant.generation);
         try {
           await pageNavigationTracker.revokeManualContinuity(targetTabId, manualGrant.generation);
@@ -884,10 +1104,12 @@ export async function handlePageTranslation(message, sender) {
 if (typeof browser !== 'undefined' && browser.webNavigation) {
   browser.webNavigation.onCommitted.addListener((details) => {
     if (details.frameId !== 0) {
+      clearPendingManualFrameReadiness(details.tabId, details.frameId);
       return scheduleFrameRetirement(details.tabId, details.frameId);
     }
 
     const tabId = details.tabId;
+    clearPendingManualFrameReadiness(tabId);
     const transitionType = details.transitionType;
     const restartFence = pageNavigationTracker.mintRestartFence(tabId);
 
@@ -930,6 +1152,7 @@ if (typeof browser !== 'undefined' && browser.webNavigation) {
 
   // Cleanup on tab closure
   browser.tabs.onRemoved.addListener((tabId) => {
+    clearPendingManualFrameReadiness(tabId);
     autoTranslateRegistry.delete(tabId);
     pageNavigationTracker.revokeRestartFence(tabId);
     const tabKeyPrefix = `${tabId}:`;
