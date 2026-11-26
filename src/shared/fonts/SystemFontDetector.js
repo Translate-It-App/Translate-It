@@ -293,6 +293,33 @@ class SystemFontDetector {
   }
 
   /**
+   * Resolve display metadata for a font value without running font detection.
+   * Uses detected fonts when cached, then the predefined fonts, then the known
+   * system-font catalog. Catalog and unknown fonts are not marked as system
+   * fonts because their availability has not been verified.
+   * @param {string} fontValue - Saved font value
+   * @returns {Object|null} Font metadata ({ name, value, category, isSystemFont? })
+   */
+  getFontMetadata(fontValue) {
+    if (!fontValue) return null
+
+    const knownFont = this.cachedFonts?.find(f => f.value === fontValue) ||
+      this.fallbackFonts.find(f => f.value === fontValue)
+    if (knownFont) return knownFont
+
+    const catalogFont = this.testFonts.find(name => this._sanitizeFontValue(name) === fontValue)
+    if (catalogFont) {
+      return {
+        name: catalogFont,
+        value: fontValue,
+        category: this._categorizeFontName(catalogFont)
+      }
+    }
+
+    return { name: fontValue, value: fontValue, category: '' }
+  }
+
+  /**
    * Get font CSS family string
    * @param {string} fontValue - Font value
    * @returns {string} CSS font-family string
