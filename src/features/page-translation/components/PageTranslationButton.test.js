@@ -39,6 +39,7 @@ const mockUsePageTranslation = {
   isTranslating: ref(false),
   isTranslated: ref(false),
   isAutoTranslating: ref(false),
+  hasManualContinuity: ref(false),
   progress: ref(0),
   message: ref(""),
   canTranslate: ref(true),
@@ -750,5 +751,17 @@ describe("PageTranslationButton.vue", () => {
         "ERRORS_API_URL_MISSING",
       );
     });
+  });
+});
+
+describe("manual continuity controls", () => {
+  it("shows Stop and keeps Restore available for retained content between passes", () => {
+    mockUsePageTranslation.hasManualContinuity.value = true;
+    mockUsePageTranslation.isTranslated.value = true;
+    mockUsePageTranslation.canRestore.value = true;
+    const wrapper = mount(PageTranslationButton);
+
+    expect(wrapper.text()).toContain("page_translation_btn_stop");
+    expect(wrapper.text()).toContain("page_translation_btn_restore");
   });
 });

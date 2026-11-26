@@ -1,6 +1,7 @@
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
+import { MessageContexts } from '@/shared/messaging/core/MessagingCore.js';
 import browser from 'webextension-polyfill';
 import ExtensionContextManager from '@/core/extensionContext.js';
 import { unifiedTranslationService } from '@/core/services/translation/UnifiedTranslationService.js';
@@ -165,6 +166,45 @@ function sameCursor(a, b) {
     && a.routeRevision === b.routeRevision && a.url === b.url);
 }
 
+async function withManualContinuityStatus(tabId, status) {
+  try {
+    return { ...status, ...(await pageNavigationTracker.getManualContinuityStatus(tabId)) };
+  } catch {
+    return {
+      ...status,
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
+      manualContinuityStatusUnavailable: true,
+    };
+  }
+}
+
+async function revokeManualContinuity(tabId, expectedGeneration, revision) {
+  let cutoffGeneration = expectedGeneration;
+  try {
+    if (cutoffGeneration == null) {
+      cutoffGeneration = (await pageNavigationTracker.getManualContinuityStatus(tabId)).manualContinuityGeneration;
+    }
+    const generation = await pageNavigationTracker.revokeManualContinuity(tabId, expectedGeneration, revision);
+    return { generation, cutoffGeneration };
+  } catch (error) {
+    return { error, cutoffGeneration };
+  }
+}
+
+async function waitForManualRevocation(operation) {
+  if (!operation) return null;
+  let timeoutId;
+  return Promise.race([
+    operation,
+    new Promise(resolve => {
+      timeoutId = setTimeout(() => resolve({
+        error: new Error('Manual continuity revocation durability uncertain'),
+      }), PRE_FANOUT_COMMAND_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timeoutId));
+}
+
 /**
  * Projects a bounded frame send result into an additive per-frame delivery
  * record. `success` reflects delivery-level acknowledgement; application
@@ -271,6 +311,20 @@ async function runPreFanoutPreparation(message, sender, discoverFrames = true, o
 export async function handlePageTranslation(message, sender) {
   try {
     const senderTabId = sender?.tab?.id;
+    let manualStopRevision = null;
+    let manualStopCutoffGeneration = null;
+    let manualStartRevision = null;
+    let manualRevokePromise = null;
+    let stopTargetTabId = senderTabId;
+    const isManualStart = message.action === MessageActions.PAGE_TRANSLATE
+      && message.data?.isAuto !== true && message.data?.cancel !== true;
+    const isManualRevocation = message.action === MessageActions.PAGE_RESTORE
+      || message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
+      || message.action === MessageActions.CANCEL_TRANSLATION
+      || (message.action === MessageActions.PAGE_TRANSLATE && message.data?.cancel === true);
+    if (isManualStart && Number.isInteger(senderTabId)) {
+      manualStartRevision = pageNavigationTracker.reserveManualContinuityStart(senderTabId);
+    }
     const explicitInvalidation = [
       MessageActions.PAGE_RESTORE,
       MessageActions.PAGE_TRANSLATE_STOP_AUTO,
@@ -282,11 +336,62 @@ export async function handlePageTranslation(message, sender) {
     );
     if (Number.isInteger(senderTabId) && explicitInvalidation) {
       pageNavigationTracker.revokeRestartFence(senderTabId);
+      if (isManualRevocation && !(
+        message.action === MessageActions.CANCEL_TRANSLATION
+        && message.data?.context === MessageContexts.PAGE_TRANSLATION_BATCH
+        && message.data?.reason === 'operation-abort'
+      )) {
+        manualStopRevision = pageNavigationTracker.blockManualContinuity(
+          senderTabId, message.data?.expectedManualContinuityGeneration ?? null
+        );
+        manualStopCutoffGeneration = pageNavigationTracker.getManualContinuityCutoff(senderTabId);
+        manualRevokePromise = revokeManualContinuity(
+          senderTabId, message.data?.expectedManualContinuityGeneration, manualStopRevision
+        );
+      }
     }
 
     if (message.action === MessageActions.PAGE_TRANSLATE_ADMIT) {
       const data = message.data || {};
       const frameId = sender?.frameId;
+      if (data.origin === 'manual-stop') {
+        if (!Number.isInteger(senderTabId) || !Number.isInteger(frameId) || frameId < 0
+            || !Number.isSafeInteger(data.manualContinuityGeneration)) {
+          return { success: false, reason: 'manual_continuity_status_unavailable' };
+        }
+        try {
+          const status = await pageNavigationTracker.getManualContinuityStatus(senderTabId);
+          return {
+            success: true,
+            authorized: status.manualContinuityGeneration == null
+              || status.manualContinuityGeneration <= data.manualContinuityGeneration,
+          };
+        } catch {
+          return { success: false, reason: 'manual_continuity_status_unavailable' };
+        }
+      }
+      if (data.origin === 'manual-spa' || data.origin === 'manual-start') {
+        if (!Number.isInteger(senderTabId) || !Number.isInteger(frameId) || frameId < 0
+            || !/^https?:\/\//i.test(data.navigationCursor?.url || '')
+            || (data.origin === 'manual-spa' && (typeof data.restartFence !== 'string' || !data.restartFence
+              || pageNavigationTracker.getRestartFence(senderTabId) !== data.restartFence))) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+        try {
+          const access = await tabPermissionChecker.checkTabAccess(senderTabId);
+          if (!access.isAccessible) return { success: false, reason: 'ineligible_frame' };
+          const valid = await pageNavigationTracker.validateManualContinuity(
+            senderTabId, frameId, data.manualContinuityGeneration,
+            data.topDocumentEpoch, data.navigationCursor
+          );
+          return valid && (data.origin !== 'manual-spa'
+            || pageNavigationTracker.getRestartFence(senderTabId) === data.restartFence)
+            ? { success: true }
+            : { success: false, reason: 'obsolete_navigation' };
+        } catch {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+      }
       if (!Number.isInteger(senderTabId) || !Number.isInteger(frameId) || frameId < 0
           || typeof data.restartFence !== 'string' || data.restartFence.length === 0
           || pageNavigationTracker.getRestartFence(senderTabId) !== data.restartFence) {
@@ -353,11 +458,22 @@ export async function handlePageTranslation(message, sender) {
 
     // Handle batch translation request via UnifiedTranslationService
     if (message.action === MessageActions.PAGE_TRANSLATE_BATCH) {
+      const authorization = message.data?.manualContinuity;
+      if (authorization) {
+        if (!Number.isInteger(senderTabId) || !Number.isInteger(sender?.frameId)) {
+          return { success: false, reason: 'manual_continuity_revoked' };
+        }
+        if (!(await pageNavigationTracker.validateManualContinuityBatch(
+          senderTabId, sender.frameId, authorization.generation,
+          authorization.topDocumentEpoch, authorization.navigationCursor
+        ))) return { success: false, reason: 'manual_continuity_revoked' };
+      }
       return await unifiedTranslationService.handleTranslationRequest(message, sender);
     }
 
     // Capture state change: Start Auto-Translation
-    if (message.action === MessageActions.PAGE_TRANSLATE_COMPLETE && message.data?.isAutoTranslating) {
+    if (message.action === MessageActions.PAGE_TRANSLATE_COMPLETE
+        && message.data?.isAutoTranslating && message.data?.translationOrigin !== 'manual') {
       if (senderTabId) {
         autoTranslateRegistry.set(senderTabId, { 
           active: true, 
@@ -488,17 +604,56 @@ export async function handlePageTranslation(message, sender) {
         );
         if (response?.success && response.isAggregated === true) {
           logger.debug('Returning aggregated translation status from main frame');
-          return response;
+          return withManualContinuityStatus(fastPathPreparation.targetTabId, response);
         }
       }
     }
 
     preparation = await runPreFanoutPreparation(message, sender, true, targetTabId => {
+      stopTargetTabId = targetTabId;
+      if (isManualStart && manualStartRevision == null) {
+        manualStartRevision = pageNavigationTracker.reserveManualContinuityStart(targetTabId);
+      }
       if (!Number.isInteger(senderTabId) && explicitInvalidation) {
         pageNavigationTracker.revokeRestartFence(targetTabId);
+        if (isManualRevocation) {
+          manualStopRevision = pageNavigationTracker.blockManualContinuity(
+            targetTabId, message.data?.expectedManualContinuityGeneration ?? null
+          );
+          manualStopCutoffGeneration = pageNavigationTracker.getManualContinuityCutoff(targetTabId);
+          manualRevokePromise = revokeManualContinuity(
+            targetTabId, message.data?.expectedManualContinuityGeneration, manualStopRevision
+          );
+        }
       }
     });
-    if (preparation.error) return preparation.error;
+    if (preparation.error) {
+      const revokeResult = await waitForManualRevocation(manualRevokePromise);
+      if (isManualRevocation && Number.isInteger(stopTargetTabId)) {
+        await sendFrameCommandWithResponseDeadline(stopTargetTabId, {
+            action: message.action === MessageActions.PAGE_RESTORE
+              ? MessageActions.PAGE_RESTORE : MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+            data: {
+              hasManualContinuity: false,
+              ...((revokeResult?.generation ?? revokeResult?.cutoffGeneration ?? manualStopCutoffGeneration) != null
+                && { manualContinuityGeneration: revokeResult.generation ?? revokeResult?.cutoffGeneration ?? manualStopCutoffGeneration }),
+              ...(revokeResult?.error && { revocationCommitted: false }),
+            },
+          }, Number.isInteger(sender?.frameId) ? sender.frameId : 0);
+      }
+      return {
+        ...preparation.error,
+        ...(isManualRevocation && {
+          success: false,
+          reason: revokeResult?.error ? 'manual_continuity_revocation_uncertain' : preparation.error.reason,
+          ...(revokeResult?.error && { error: revokeResult.error.message }),
+        }),
+        ...(!revokeResult?.error && revokeResult?.generation != null && {
+          hasManualContinuity: false,
+          manualContinuityGeneration: revokeResult.generation,
+        }),
+      };
+    }
 
     const { targetTabId, access, allFrames, navigationUnavailable, navigationAdmissionInvalid } = preparation;
     if (navigationUnavailable) message = { ...message, data: { ...message.data, navigationUnavailable: true } };
@@ -515,6 +670,20 @@ export async function handlePageTranslation(message, sender) {
 
     try {
       let boundNavigation = null;
+      let manualGrant = null;
+      const revocationResult = await waitForManualRevocation(manualRevokePromise);
+      const revocationGeneration = revocationResult?.generation ?? null;
+      const revocationError = revocationResult?.error ?? null;
+      if (isManualRevocation && !revocationError && revocationGeneration == null) {
+        return { success: false, reason: 'manual_continuity_stop_superseded' };
+      }
+      if (isManualStart && !navigationUnavailable && !navigationAdmissionInvalid) {
+        try {
+          manualGrant = await pageNavigationTracker.grantManualContinuity(targetTabId, manualStartRevision);
+        } catch (error) {
+          return { success: false, reason: 'manual_continuity_not_durable', error: error.message };
+        }
+      }
       if (isNavigationAutoRestart) {
         const { navigationCursor: topCursor, restartFence } = message.data;
         if (navigationAdmissionInvalid || navigationUnavailable) {
@@ -535,7 +704,7 @@ export async function handlePageTranslation(message, sender) {
         const aggregatedResponse = statusResponses.find(r => r && r.success && r.isAggregated);
         if (aggregatedResponse) {
           logger.debug('Returning aggregated translation status from main frame');
-          return aggregatedResponse;
+          return withManualContinuityStatus(targetTabId, aggregatedResponse);
         }
 
         // Response timeouts leave status unknown. Never report
@@ -545,11 +714,11 @@ export async function handlePageTranslation(message, sender) {
           !statusResponses.some(response => response != null)
           && statusResults.some(({ isResponseTimeout }) => isResponseTimeout)
         ) {
-          return {
+          return withManualContinuityStatus(targetTabId, {
             success: false,
             reason: FRAME_COMMAND_RESPONSE_TIMEOUT_REASON,
             isTransportFailure: true,
-          };
+          });
         }
 
         // 2. Fallback: Aggregate manually if no aggregated response was found
@@ -565,16 +734,33 @@ export async function handlePageTranslation(message, sender) {
           bestResponse.isAutoTranslating = anyAutoTranslating;
         }
         
-        return bestResponse;
+        return withManualContinuityStatus(targetTabId, bestResponse);
       }
 
       // Forward TRANSLATE, RESTORE and STOP to all frames with a bounded
       // per-frame response deadline so one stalled frame cannot hang the
       // whole fan-out.
+      const outboundMessage = manualGrant
+        ? { ...message, data: {
+          ...message.data,
+          hasManualContinuity: true,
+          manualContinuityGeneration: manualGrant.generation,
+          topDocumentEpoch: manualGrant.topDocumentEpoch,
+        } }
+        : revocationGeneration != null || (isManualRevocation && revocationError)
+          ? { ...message, data: {
+            ...message.data,
+          hasManualContinuity: false,
+          manualContinuityGeneration: revocationGeneration
+            ?? revocationResult?.cutoffGeneration
+            ?? manualStopCutoffGeneration,
+            ...(revocationError && { revocationCommitted: false }),
+          } }
+          : message;
       const frameResults = await Promise.all(
         allFrames.map(frame =>
           sendFrameCommandWithResponseDeadline(
-            targetTabId, message, frame.frameId, FRAME_COMMAND_RESPONSE_TIMEOUT_MS, boundNavigation
+            targetTabId, outboundMessage, frame.frameId, FRAME_COMMAND_RESPONSE_TIMEOUT_MS, boundNavigation
           )
         )
       );
@@ -584,6 +770,49 @@ export async function handlePageTranslation(message, sender) {
         .filter(response => response != null);
       const frames = frameResults.map(projectFrameDelivery);
       const success = responses.some(response => response.success);
+      if (message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
+          && responses.some(response => response.reason === 'manual_continuity_status_unavailable')) {
+        return {
+          success: false,
+          reason: 'manual_continuity_stop_authority_uncertain',
+          isTransportFailure: true,
+          responses,
+          frames,
+          targetTabId,
+        };
+      }
+      if (manualGrant && !manualGrant.reused && !success) {
+        pageNavigationTracker.blockManualContinuity(targetTabId, manualGrant.generation);
+        try {
+          await pageNavigationTracker.revokeManualContinuity(targetTabId, manualGrant.generation);
+        } catch (error) {
+          logger.warn('Failed to revoke an unaccepted manual start', error);
+        }
+      }
+      if (revocationError) {
+        return {
+          success: false,
+          reason: 'manual_continuity_revocation_uncertain',
+          error: revocationError.message,
+          revocationGeneration,
+          responses,
+          frames: frameResults.map(projectFrameDelivery),
+          targetTabId,
+        };
+      }
+      if (isManualRevocation && frameResults.some(({ response }) => response == null)) {
+        return {
+          success: false,
+          reason: 'manual_continuity_stop_delivery_uncertain',
+          isTransportFailure: true,
+          revocationGeneration,
+          hasManualContinuity: false,
+          manualContinuityGeneration: revocationGeneration,
+          responses,
+          frames,
+          targetTabId,
+        };
+      }
 
       // Every frame timed out without a single acknowledged response: return
       // an uncertainty result. For PAGE_TRANSLATE this does NOT prove the
@@ -600,7 +829,16 @@ export async function handlePageTranslation(message, sender) {
       }
 
       if (message.action !== MessageActions.PAGE_TRANSLATE || success) {
-        return { success, responses, frames, targetTabId };
+        return {
+          success,
+          responses,
+          frames,
+          targetTabId,
+          ...(isManualRevocation && revocationGeneration != null && {
+            hasManualContinuity: false,
+            manualContinuityGeneration: revocationGeneration,
+          }),
+        };
       }
 
       const canonicalFailure = frameResults.find(({ frameId, response }) => (

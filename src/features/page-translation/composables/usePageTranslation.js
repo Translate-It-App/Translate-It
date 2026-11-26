@@ -36,6 +36,8 @@ export function usePageTranslation() {
   const isTranslating = ref(false);
   const isTranslated = ref(false);
   const isAutoTranslating = ref(false); // Persistent state (NEW)
+  const hasManualContinuity = ref(false);
+  const manualContinuityGeneration = ref(-1);
   const translatedCount = ref(0);
   const failedCount = ref(0);
   const totalNodes = ref(0);
@@ -96,6 +98,14 @@ export function usePageTranslation() {
   let lifecycleStateRevision = 0;
   let refreshAfterTabResolution = false;
 
+  function applyManualContinuity(data) {
+    const generation = data?.manualContinuityGeneration;
+    if (!Number.isSafeInteger(generation) || generation < 0 || generation < manualContinuityGeneration.value) return;
+    if (data.hasManualContinuity !== true && data.hasManualContinuity !== false) return;
+    manualContinuityGeneration.value = generation;
+    hasManualContinuity.value = data.hasManualContinuity;
+  }
+
   // Aggregate revisions are ordered independently for each tab and document.
   const aggregateStreamsByTab = new Map();
   const pendingDocumentTransitions = new Map();
@@ -105,6 +115,7 @@ export function usePageTranslation() {
 
   function applyStartEvent(data) {
     errorPresentationRevision++;
+    applyManualContinuity(data);
     isTranslating.value = true;
     if (data?.isAggregated) {
       if (data.isTranslated !== undefined) isTranslated.value = !!data.isTranslated;
@@ -161,6 +172,10 @@ export function usePageTranslation() {
     translateRequestOwnership++;
     clearEarlyDocumentEvents();
     if (Number.isInteger(activeInfo?.tabId)) {
+      if (activeInfo.tabId !== activeTabId) {
+        hasManualContinuity.value = false;
+        manualContinuityGeneration.value = -1;
+      }
       activeTabId = activeInfo.tabId;
       activeTabVersion++;
       const transition = pendingDocumentTransitions.get(activeInfo.tabId);
@@ -296,6 +311,9 @@ export function usePageTranslation() {
               pendingDocumentTransitions.delete(tabId);
             }
           }
+        }
+        if (!result.isAggregated || hasValidAggregateRevision(result)) {
+          applyManualContinuity(result);
         }
         isTranslated.value = result.isTranslated || false;
         isTranslating.value = result.isTranslating || false;
@@ -697,7 +715,26 @@ export function usePageTranslation() {
         return;
       }
 
-      if (result.success) {
+      const revokedGeneration = result?.manualContinuityGeneration;
+      const hasCommittedRevoke = result?.hasManualContinuity === false
+        && Number.isSafeInteger(revokedGeneration)
+        && revokedGeneration >= 0
+        && revokedGeneration >= manualContinuityGeneration.value;
+      if (hasCommittedRevoke) {
+        applyManualContinuity(result);
+      } else if (result?.success !== true || revokedGeneration !== undefined || hasManualContinuity.value) {
+        error.value = 'Unable to confirm that auto-translation was stopped';
+        message.value = error.value;
+        return;
+      }
+
+      if (result?.success === false && hasCommittedRevoke) {
+        error.value = 'Stop committed, but cancellation delivery was incomplete';
+        message.value = error.value;
+        return;
+      }
+
+      if (result?.success === true) {
         const frames = Array.isArray(result.responses) ? result.responses : [];
         const deliveryComplete = !Array.isArray(result.frames)
           || (result.frames.length > 0 && result.frames.every((frame) => frame?.success === true));
@@ -710,8 +747,6 @@ export function usePageTranslation() {
         const frameTranslated = frames.some((frame) => frame.isTranslated === true)
           || frames.some((frame) => typeof frame.translatedCount === 'number' && frame.translatedCount > 0);
         const hasFrameTranslationState = deliveryComplete && frames.some((frame => frame.isTranslated !== undefined || frame.translatedCount !== undefined));
-        isAutoTranslating.value = false;
-        isTranslating.value = false;
         const translated = aggregateValue('translatedCount');
         const failed = aggregateValue('failedCount');
         const reportedTranslation = result.isTranslated ?? (hasFrameTranslationState ? frameTranslated : undefined);
@@ -719,12 +754,22 @@ export function usePageTranslation() {
         if (isStillTranslated !== undefined) isTranslated.value = !!isStillTranslated;
         if (translated !== undefined) translatedCount.value = translated;
         if (failed !== undefined) failedCount.value = failed;
-        message.value = 'Auto-translation stopped';
+        if (deliveryComplete) {
+          isAutoTranslating.value = false;
+          isTranslating.value = false;
+          message.value = 'Auto-translation stopped';
+        } else {
+          error.value = 'Stop committed, but cancellation delivery was incomplete';
+          message.value = error.value;
+        }
+      } else {
+        error.value = 'Unable to confirm that auto-translation was stopped';
+        message.value = error.value;
       }
     } catch {
       if (stopOwnership !== translateRequestOwnership || lifecycleRevision !== lifecycleStateRevision) return;
-      isAutoTranslating.value = false;
-      isTranslating.value = false;
+      error.value = 'Unable to confirm that auto-translation was stopped';
+      message.value = error.value;
     }
   }
 
@@ -767,6 +812,7 @@ export function usePageTranslation() {
    * Update progress
    */
   function updateProgress(data) {
+    applyManualContinuity(data);
     // A newer accepted lifecycle update supersedes a pending error presentation.
     // Internal state-sync updates belong to the current error flow and must not
     // suppress their own error.
@@ -824,6 +870,7 @@ export function usePageTranslation() {
    * Handle translation complete
    */
   function handleComplete(data) {
+    applyManualContinuity(data);
     errorPresentationRevision++;
     const isActiveAggregate = data?.isAggregated === true && (
       data.isTranslating === true || data.isAutoTranslating === true
@@ -897,6 +944,7 @@ export function usePageTranslation() {
    * Handle translation error
    */
   async function handleError(data) {
+    applyManualContinuity(data);
     const revision = ++errorPresentationRevision;
     const sessionId = typeof data?.sessionId === 'string'
       ? data.sessionId
@@ -961,6 +1009,8 @@ export function usePageTranslation() {
    */
   function handleRestoreComplete(data) {
     errorPresentationRevision++;
+    hasManualContinuity.value = false;
+    manualContinuityGeneration.value = -1;
     translateRequestOwnership++;
     supersedeCompletedSessions();
     if (typeof data?.sessionId === 'string') suppressSession(data.sessionId);
@@ -977,6 +1027,7 @@ export function usePageTranslation() {
    * Handle auto-restore complete (just stopped auto-translation)
    */
   function handleAutoRestoreComplete(data) {
+    applyManualContinuity(data);
     const followsFatalError = data?.fatalErrorAutoRestore === true;
     if (!followsFatalError) errorPresentationRevision++;
     if (!followsFatalError && typeof data?.sessionId === 'string') suppressSession(data.sessionId);
@@ -1038,6 +1089,7 @@ export function usePageTranslation() {
    * Handle translation cancelled
    */
   function handleCancelled(data) {
+    applyManualContinuity(data);
     errorPresentationRevision++;
     translateRequestOwnership++;
     supersedeCompletedSessions();
@@ -1606,6 +1658,8 @@ export function usePageTranslation() {
     isTranslating,
     isTranslated,
     isAutoTranslating,
+    hasManualContinuity,
+    manualContinuityGeneration,
     progress,
     translatedCount,
     failedCount,
@@ -1624,7 +1678,7 @@ export function usePageTranslation() {
     canTranslate: computed(() => !isTranslating.value && !isAutoTranslating.value),
     canRestore: computed(() => isTranslated.value && !isTranslating.value),
     canCancel: computed(() => isTranslating.value),
-    canStopAuto: computed(() => isAutoTranslating.value),
+    canStopAuto: computed(() => isAutoTranslating.value || hasManualContinuity.value),
     hasError: computed(() => error.value !== null),
 
     // Status

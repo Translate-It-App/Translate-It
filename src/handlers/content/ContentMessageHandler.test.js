@@ -9,6 +9,7 @@ import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import browser from 'webextension-polyfill';
 import { loadFeature } from '@/core/content-scripts/chunks/lazy-features.js';
 import { getScopedLogger } from '@/shared/logging/logger.js';
+import * as UnifiedMessaging from '@/shared/messaging/core/UnifiedMessaging.js';
 import { LIVE_DUBBING_ACTIONS } from '@/features/live-dubbing/constants.js';
 import {
   getLiveDubbingTranscriptSnapshot,
@@ -873,6 +874,59 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
 
     expect(restorePage).toHaveBeenCalledTimes(1);
     expect(stopAutoTranslation).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores an old Stop when a newer durable grant exists before its START reaches this frame', async () => {
+    const stopAutoTranslation = vi.fn().mockResolvedValue({ success: true });
+    handler.setPageTranslationManager({ stopAutoTranslation });
+    handler._manualContinuityGeneration = 4;
+    const durableGeneration = 6; // newer grant committed, but local START delivery is still pending
+    const restartRevision = handler._pageRestartRevision;
+    const authorityCheck = vi.spyOn(UnifiedMessaging, 'sendRegularMessage')
+      .mockImplementation(async message => ({
+        success: true,
+        authorized: durableGeneration <= message.data.manualContinuityGeneration,
+      }));
+
+    try {
+      await expect(handler.handlePageStopAuto({
+        data: { hasManualContinuity: false, manualContinuityGeneration: 2 },
+      })).resolves.toEqual({ success: true, ignored: true });
+
+      expect(authorityCheck).toHaveBeenCalledWith({
+        action: MessageActions.PAGE_TRANSLATE_ADMIT,
+        data: { origin: 'manual-stop', manualContinuityGeneration: 2 },
+      }, { returnFailureResponse: true });
+      expect(stopAutoTranslation).not.toHaveBeenCalled();
+      expect(handler._pageRestartRevision).toBe(restartRevision);
+      expect(handler._manualContinuityGeneration).toBe(4);
+    } finally {
+      authorityCheck.mockRestore();
+    }
+  });
+
+  it('does not report Stop as successful when manual authority is unavailable', async () => {
+    const stopAutoTranslation = vi.fn().mockResolvedValue({ success: true });
+    handler.setPageTranslationManager({ stopAutoTranslation });
+    handler._manualContinuityGeneration = 4;
+    const restartRevision = handler._pageRestartRevision;
+    const authorityCheck = vi.spyOn(UnifiedMessaging, 'sendRegularMessage')
+      .mockResolvedValue({ success: false, error: 'background unavailable' });
+
+    try {
+      await expect(handler.handlePageStopAuto({
+        data: { hasManualContinuity: false, manualContinuityGeneration: 4 },
+      })).resolves.toEqual({
+        success: false,
+        reason: 'manual_continuity_status_unavailable',
+        isTransportFailure: true,
+      });
+      expect(stopAutoTranslation).not.toHaveBeenCalled();
+      expect(handler._pageRestartRevision).toBe(restartRevision);
+      expect(handler._manualContinuityGeneration).toBe(4);
+    } finally {
+      authorityCheck.mockRestore();
+    }
   });
 
   it('keeps cancellation on trusted runtime translation handling', async () => {

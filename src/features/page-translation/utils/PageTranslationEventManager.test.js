@@ -9,6 +9,11 @@ import { pageEventBus } from '@/core/PageEventBus.js';
 import { TranslationMode } from '@/config.js';
 import { ApiKeyManager } from '@/features/translation/providers/ApiKeyManager.js';
 import ResourceTracker from '@/core/memory/ResourceTracker.js';
+import { sendRegularMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
+
+vi.mock('@/shared/messaging/core/UnifiedMessaging.js', () => ({
+  sendRegularMessage: vi.fn().mockResolvedValue({ success: true }),
+}));
 
 // Mock storageManager
 vi.mock('@/shared/storage/core/StorageCore.js', () => ({
@@ -172,13 +177,37 @@ describe('PageTranslationEventManager', () => {
     });
 
     it('should reset error when TRANSLATION_API changes', () => {
+      mockManager.hasManualContinuity = false;
+      mockManager.manualContinuityGeneration = null;
       mockManager.settings.usesGlobalProvider = true;
       mockManager.settings.translationApi = 'google';
       const callback = storageManager.on.mock.calls.find(c => c[0] === 'change:TRANSLATION_API')[1];
       callback({ newValue: 'gemini', oldValue: 'google' });
       expect(mockManager.resetError).toHaveBeenCalled();
-      expect(mockManager.stopAutoTranslation).toHaveBeenCalledWith({ cancellationReason: 'operation-abort' });
+      expect(mockManager.stopAutoTranslation).toHaveBeenCalledWith({
+        cancellationReason: 'operation-abort',
+        clearManualContinuity: true,
+      });
       expect(mockManager.translationSettingsRevision).toBe(1);
+      expect(sendRegularMessage).not.toHaveBeenCalled();
+    });
+
+    it('durably revokes only an owned manual continuity grant on settings invalidation', () => {
+      mockManager.hasManualContinuity = true;
+      mockManager.manualContinuityGeneration = 12;
+      mockManager.settings.usesGlobalProvider = true;
+      mockManager.settings.translationApi = 'google';
+      const callback = storageManager.on.mock.calls.find(c => c[0] === 'change:TRANSLATION_API')[1];
+
+      callback({ newValue: 'gemini', oldValue: 'google' });
+
+      expect(sendRegularMessage).toHaveBeenCalledWith({
+        action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+        data: {
+          settingsInvalidation: true,
+          expectedManualContinuityGeneration: 12,
+        },
+      }, { returnFailureResponse: true });
     });
 
     it.each(['custom', 'google'])('keeps a Page provider %s running when only the global provider changes', (provider) => {
@@ -294,7 +323,10 @@ describe('PageTranslationEventManager', () => {
       globalChange({ oldValue: 'google', newValue: 'gemini' });
       if (order === 'global-first') modeChange(change);
 
-      expect(mockManager.stopAutoTranslation).toHaveBeenCalledExactlyOnceWith({ cancellationReason: 'operation-abort' });
+      expect(mockManager.stopAutoTranslation).toHaveBeenCalledExactlyOnceWith({
+        cancellationReason: 'operation-abort',
+        clearManualContinuity: true,
+      });
       expect(mockManager.translationSettingsRevision).toBe(1);
     });
 
@@ -309,7 +341,10 @@ describe('PageTranslationEventManager', () => {
       const callback = storageManager.on.mock.calls.find(c => c[0] === 'change')[1];
       callback({ key, oldValue: 'previous-value', newValue: 'replacement-value' });
 
-      expect(mockManager.stopAutoTranslation).toHaveBeenCalledWith({ cancellationReason: 'operation-abort' });
+      expect(mockManager.stopAutoTranslation).toHaveBeenCalledWith({
+        cancellationReason: 'operation-abort',
+        clearManualContinuity: true,
+      });
       expect(mockManager.resetError).toHaveBeenCalledOnce();
       expect(JSON.stringify(mockManager.logger.info.mock.calls)).not.toContain('replacement-value');
       expect(JSON.stringify(mockManager.logger.debug.mock.calls)).not.toContain('replacement-value');

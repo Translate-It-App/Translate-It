@@ -76,6 +76,9 @@ describe('usePageTranslation Composable', () => {
       if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) {
         return Promise.resolve({ success: false });
       }
+      if (action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) {
+        return Promise.resolve({ success: true, hasManualContinuity: false, manualContinuityGeneration: 0 });
+      }
       return Promise.resolve({ success: true, targetTabId: 1, messageId: 'session-new' });
     });
   });
@@ -131,6 +134,7 @@ describe('usePageTranslation Composable', () => {
     sendRegularMessage.mockImplementation(({ action }) => {
       if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
       if (action === MessageActions.PAGE_TRANSLATE) return translateResponse;
+      if (action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) return Promise.resolve({ success: true, hasManualContinuity: false, manualContinuityGeneration: 0 });
       return Promise.resolve({ success: true, restoredCount: 2 });
     });
     return resolveTranslate;
@@ -146,6 +150,7 @@ describe('usePageTranslation Composable', () => {
     sendRegularMessage.mockImplementation(({ action }) => {
       if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
       if (action === MessageActions.PAGE_TRANSLATE) { resolveSent(); return translateResponse; }
+      if (action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) return Promise.resolve({ success: true, hasManualContinuity: false, manualContinuityGeneration: 0 });
       return Promise.resolve({ success: true, restoredCount: 2 });
     });
     return { resolveTranslate, sentGate };
@@ -168,7 +173,7 @@ describe('usePageTranslation Composable', () => {
     it('retains per-frame translation state when Stop returns a fanout response', async () => {
       sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
         ? Promise.resolve({ success: false })
-        : Promise.resolve({ success: true, responses: [
+        : Promise.resolve({ success: true, hasManualContinuity: false, manualContinuityGeneration: 1, responses: [
           { success: true, isTranslated: true, translatedCount: 3, failedCount: 1 },
           { success: true, isTranslated: true, translatedCount: 2, failedCount: 0 },
         ] }));
@@ -185,7 +190,7 @@ describe('usePageTranslation Composable', () => {
     it('keeps Restore available when Stop reports owned originals not yet counted', async () => {
       sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
         ? Promise.resolve({ success: false })
-        : Promise.resolve({ success: true, responses: [
+        : Promise.resolve({ success: true, hasManualContinuity: false, manualContinuityGeneration: 1, responses: [
           { success: true, isTranslated: true, translatedCount: 0 },
         ] }));
       const pageTranslation = await createPageTranslation();
@@ -199,7 +204,7 @@ describe('usePageTranslation Composable', () => {
     it('preserves known translation state when Stop fanout delivery is incomplete', async () => {
       sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
         ? Promise.resolve({ success: false })
-        : Promise.resolve({ success: true, responses: [
+        : Promise.resolve({ success: true, hasManualContinuity: false, manualContinuityGeneration: 1, responses: [
           { success: true, isTranslated: false, translatedCount: 0 },
         ], frames: [
           { frameId: 0, success: true },
@@ -226,7 +231,7 @@ describe('usePageTranslation Composable', () => {
         { isAggregated: true, tabId: 1, aggregateScope: 'doc', aggregateRevision: 1,
           isTranslated: true, translatedCount: 7, failedCount: 2 },
       );
-      resolveStop({ success: true, responses: [{ success: true, isTranslated: false, translatedCount: 0 }] });
+      resolveStop({ success: true, hasManualContinuity: false, manualContinuityGeneration: 1, responses: [{ success: true, isTranslated: false, translatedCount: 0 }] });
       await pending;
 
       expect(pageTranslation.isTranslated.value).toBe(true);
@@ -250,6 +255,83 @@ describe('usePageTranslation Composable', () => {
       }));
       expect(isTranslated.value).toBe(true);
       expect(translatedCount.value).toBe(10);
+    });
+
+    it('uses manual continuity status and only clears it after a committed revoke generation', async () => {
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: true, hasManualContinuity: true, manualContinuityGeneration: 4 })
+        : Promise.resolve({ success: true, hasManualContinuity: false, manualContinuityGeneration: 5 }));
+      const pageTranslation = await createPageTranslation();
+
+      await pageTranslation.refreshStatus();
+      expect(pageTranslation.hasManualContinuity.value).toBe(true);
+      expect(pageTranslation.canStopAuto.value).toBe(true);
+      expect(pageTranslation.status.value).toBe('idle');
+
+      await pageTranslation.stopAutoTranslation();
+      expect(pageTranslation.hasManualContinuity.value).toBe(false);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(5);
+    });
+
+    it('resets the tab-local continuity high-water mark before refreshing another tab', async () => {
+      let status = { success: true, hasManualContinuity: true, manualContinuityGeneration: 10 };
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve(status)
+        : Promise.resolve({ success: true, hasManualContinuity: false, manualContinuityGeneration: 0 }));
+      const pageTranslation = await createPageTranslation();
+      const onActivated = browser.tabs.onActivated.addListener.mock.calls.at(-1)[0];
+
+      onActivated({ tabId: 1, windowId: 10 });
+      await pageTranslation.refreshStatus();
+      expect(pageTranslation.hasManualContinuity.value).toBe(true);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(10);
+
+      status = { success: true, hasManualContinuity: false, manualContinuityGeneration: 1 };
+      onActivated({ tabId: 2, windowId: 10 });
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+
+      expect(pageTranslation.hasManualContinuity.value).toBe(false);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(1);
+    });
+
+    it('preserves manual continuity when Stop cannot confirm a committed revoke', async () => {
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: true, hasManualContinuity: true, manualContinuityGeneration: 4 })
+        : Promise.resolve({ success: true }));
+      const pageTranslation = await createPageTranslation();
+      await pageTranslation.refreshStatus();
+
+      await pageTranslation.stopAutoTranslation();
+
+      expect(pageTranslation.hasManualContinuity.value).toBe(true);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(4);
+      expect(pageTranslation.message.value).toMatch(/Unable to confirm/);
+    });
+
+    it('applies a durable revoke carried by a partial Stop acknowledgement without clearing active progress', async () => {
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: true, hasManualContinuity: true, manualContinuityGeneration: 4 })
+        : Promise.resolve({
+          success: false,
+          reason: 'manual_continuity_stop_delivery_uncertain',
+          hasManualContinuity: false,
+          manualContinuityGeneration: 5,
+          frames: [{ success: true }, { success: false }],
+        }));
+      const pageTranslation = await createPageTranslation();
+      await pageTranslation.refreshStatus();
+      pageTranslation.isTranslating.value = true;
+      pageTranslation.isAutoTranslating.value = true;
+      pageTranslation.translatedCount.value = 3;
+
+      await pageTranslation.stopAutoTranslation();
+
+      expect(pageTranslation.hasManualContinuity.value).toBe(false);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(5);
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isAutoTranslating.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(3);
+      expect(pageTranslation.message.value).toMatch(/cancellation delivery was incomplete/);
     });
 
     it('translatePage should send intent without changing lifecycle state', async () => {
@@ -1141,7 +1223,7 @@ describe('usePageTranslation Composable', () => {
       const pendingStop = pageTranslation.stopAutoTranslation();
       resolveQuery([{ id: 1 }]);
       await pendingTabUpdate;
-      resolveStop({ success: true, isTranslated: true, translatedCount: 4, failedCount: 1 });
+      resolveStop({ success: true, hasManualContinuity: false, manualContinuityGeneration: 1, isTranslated: true, translatedCount: 4, failedCount: 1 });
       await pendingStop;
 
       expect(pageTranslation.isTranslating.value).toBe(false);
@@ -2225,7 +2307,7 @@ describe('usePageTranslation Composable', () => {
       const sentGate = new Promise((resolve) => { markSent = resolve; });
       sendRegularMessage.mockImplementation(({ action }) => {
         if (action === MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: false });
-        if (action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) return Promise.resolve({ success: true });
+        if (action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) return Promise.resolve({ success: true, hasManualContinuity: false, manualContinuityGeneration: 0 });
         if (action === MessageActions.PAGE_TRANSLATE) {
           markSent();
           return new Promise((_, reject) => { rejectTranslate = reject; });

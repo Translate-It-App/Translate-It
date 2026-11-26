@@ -1005,7 +1005,13 @@ describe('PageTranslationManager', () => {
     });
 
     it('publishes aggregate lifecycle through trusted runtime transport', async () => {
-      const data = { translatedCount: 2, totalCount: 3, frameUrl: 'fake' };
+      const data = {
+        translatedCount: 2,
+        totalCount: 3,
+        frameUrl: 'fake',
+        translationOrigin: 'manual',
+        hasManualContinuity: false,
+      };
 
       await manager._broadcastEvent(MessageActions.PAGE_TRANSLATE_PROGRESS, data);
 
@@ -1622,6 +1628,26 @@ describe('PageTranslationManager', () => {
       expect(pageEventBus.emit).toHaveBeenCalledWith(
         MessageActions.PAGE_RESTORE_COMPLETE,
         expect.objectContaining({ sessionId: 'stop-session' })
+      );
+    });
+
+    it('acknowledges idle continuity Stop and emits the committed false generation', async () => {
+      manager.hasManualContinuity = true;
+      manager.manualContinuityGeneration = 8;
+
+      const result = await manager.stopAutoTranslation({ manualContinuityGeneration: 9 });
+
+      expect(result.success).toBe(true);
+      expect(result.isAutoTranslating).toBe(false);
+      expect(result.hasManualContinuity).toBe(false);
+      expect(result.manualContinuityGeneration).toBe(9);
+      expect(pageEventBus.emit).toHaveBeenCalledWith(
+        MessageActions.PAGE_AUTO_RESTORE_COMPLETE,
+        expect.objectContaining({
+          hasManualContinuity: false,
+          manualContinuityGeneration: 9,
+          translatedCount: 0,
+        })
       );
     });
 

@@ -845,7 +845,7 @@ export class FeatureManager extends ResourceTracker {
 
   _stopPageForNavigation() {
     this._navigationRevision += 1;
-    this.featureHandlers.get('pageTranslation')?.stopAutoTranslation({ cancellationReason: 'operation-abort' }).catch(() => {
+    this._navigationStopPromise = this.featureHandlers.get('pageTranslation')?.stopAutoTranslation({ cancellationReason: 'operation-abort' }).catch(() => {
       logger.warn('Stopping obsolete page translation on navigation failed');
     });
   }
@@ -910,6 +910,81 @@ export class FeatureManager extends ResourceTracker {
       this._notifyPolicyChanged('url-change');
       if (isStale()) {
         logger.debug('Stale navigation after reevaluation, aborting', { newUrl });
+        return;
+      }
+
+      const currentPageManager = this.featureHandlers.get('pageTranslation');
+      if (currentPageManager?.hasManualContinuity) {
+        // A manual grant owns this admitted frame independently of Auto Rules.
+        // Even a stale/rejected manual admission must not fall through to a
+        // second automatic start for the same route.
+        if (!navigationIdentity?.navigationCursor || !navigationIdentity?.restartFence) return;
+        const settingsManager = (await import('@/shared/managers/SettingsManager.js')).default;
+        if (isStale()) return;
+        if (!settingsManager.get('WHOLE_PAGE_TRANSLATION_ENABLED', true) || !settingsManager.isExtensionEnabled()) {
+          const { MessageActions } = await import('@/shared/messaging/core/MessageActions.js');
+          const { sendRegularMessage } = await import('@/shared/messaging/core/UnifiedMessaging.js');
+          void sendRegularMessage({
+            action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+            data: { expectedManualContinuityGeneration: currentPageManager.manualContinuityGeneration },
+          }, { returnFailureResponse: true }).catch(() => {});
+          await currentPageManager.stopAutoTranslation({
+            cancellationReason: 'operation-abort',
+            clearManualContinuity: true,
+          });
+          return;
+        }
+        const isAllowed = await this.exclusionChecker.isFeatureAllowed('pageTranslation');
+        if (isStale()) return;
+        if (!isAllowed) {
+          const { MessageActions } = await import('@/shared/messaging/core/MessageActions.js');
+          const { sendRegularMessage } = await import('@/shared/messaging/core/UnifiedMessaging.js');
+          void sendRegularMessage({
+            action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+            data: { expectedManualContinuityGeneration: currentPageManager.manualContinuityGeneration },
+          }, { returnFailureResponse: true }).catch(() => {});
+          await currentPageManager.stopAutoTranslation({
+            cancellationReason: 'operation-abort',
+            clearManualContinuity: true,
+          });
+          return;
+        }
+        const { loadFeature } = await import('@/core/content-scripts/chunks/lazy-features.js');
+        if (isStale()) return;
+        const manager = await loadFeature('pageTranslation');
+        if (isStale() || !manager) return;
+        if (!manager.isActive && !(await manager.activate())) return;
+        if (isStale()) return;
+        await this._navigationStopPromise;
+        if (isStale() || !manager.hasManualContinuity) return;
+        const { MessageActions } = await import('@/shared/messaging/core/MessageActions.js');
+        const { sendRegularMessage } = await import('@/shared/messaging/core/UnifiedMessaging.js');
+        const manualNavigationIsCurrent = async () => {
+          const admission = await sendRegularMessage({
+            action: MessageActions.PAGE_TRANSLATE_ADMIT,
+            data: {
+              origin: 'manual-spa',
+              restartFence: navigationIdentity.restartFence,
+              manualContinuityGeneration: manager.manualContinuityGeneration,
+              topDocumentEpoch: manager.manualContinuityTopDocumentEpoch,
+              navigationCursor: navigationIdentity.navigationCursor,
+            },
+          }, { returnFailureResponse: true });
+          return !isStale() && admission?.success === true;
+        };
+        await manager.translatePage({
+          manualSpa: true,
+          isAuto: false,
+          preserveAcceptedTranslations: true,
+          ...(manager.settings?.isExplicitProvider && { provider: manager.settings.translationApi }),
+          targetLanguage: manager.settings?.targetLanguage,
+          hasManualContinuity: true,
+          manualContinuityGeneration: manager.manualContinuityGeneration,
+          topDocumentEpoch: manager.manualContinuityTopDocumentEpoch,
+          navigationCursor: navigationIdentity.navigationCursor,
+          restartFence: navigationIdentity.restartFence,
+          validateNavigation: manualNavigationIsCurrent,
+        });
         return;
       }
 

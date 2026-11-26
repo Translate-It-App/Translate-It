@@ -91,4 +91,52 @@ describe('SPA navigation behavioral deterministic', () => {
       window.history.replaceState({}, '', originalUrl);
     }
   });
+
+  it('continues a manual grant locally across A→B→A without an Auto Rule duplicate', async () => {
+    const originalUrl = window.location.href;
+    const pageManager = {
+      hasManualContinuity: true,
+      manualContinuityGeneration: 7,
+      manualContinuityTopDocumentEpoch: 3,
+      isActive: true,
+      settings: { isExplicitProvider: true, translationApi: 'explicit-provider', targetLanguage: 'fr' },
+      stopAutoTranslation: vi.fn().mockResolvedValue({ success: true }),
+      translatePage: vi.fn().mockResolvedValue({ success: true }),
+      activate: vi.fn().mockResolvedValue(true),
+    };
+    manager.featureHandlers.set('pageTranslation', pageManager);
+    mocks.loadFeature.mockResolvedValue(pageManager);
+
+    const navigate = async (path, routeRevision) => {
+      window.history.replaceState({}, '', path);
+      await manager.checkForUrlChange({
+        navigationCursor: { documentEpoch: 3, routeRevision, url: window.location.href },
+        restartFence: 'shared-fence',
+      });
+    };
+    try {
+      await navigate('/a', 1);
+      await navigate('/b', 2);
+      await navigate('/a', 3);
+      await navigate('/a', 3); // duplicate notification is a no-op
+
+      expect(pageManager.translatePage).toHaveBeenCalledTimes(3);
+      for (const [options] of pageManager.translatePage.mock.calls) {
+        expect(options).toMatchObject({
+          manualSpa: true,
+          isAuto: false,
+          preserveAcceptedTranslations: true,
+          provider: 'explicit-provider',
+          targetLanguage: 'fr',
+          manualContinuityGeneration: 7,
+          topDocumentEpoch: 3,
+          restartFence: 'shared-fence',
+        });
+        expect(options.validateNavigation).toEqual(expect.any(Function));
+      }
+      expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState({}, '', originalUrl);
+    }
+  });
 });

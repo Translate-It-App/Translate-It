@@ -17,6 +17,7 @@ export class MainFrameAggregator {
     this.terminalCauseSequence = 0;
     this.aggregateScope = globalThis.crypto?.randomUUID?.() || `${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
     this.aggregateRevision = 0;
+    this.manualContinuityGeneration = null;
     
     // Bind methods to ensure correct 'this' context
     this.updateFrameData = this.updateFrameData.bind(this);
@@ -31,7 +32,18 @@ export class MainFrameAggregator {
    */
   updateFrameData(frameId, newData) {
     const existing = this.frameProgressMap.get(frameId) || {};
-    this.frameProgressMap.set(frameId, { ...existing, ...newData });
+    const { manualContinuityGeneration: generation, hasManualContinuity, ...progress } = newData;
+    const isGeneration = Number.isSafeInteger(generation) && generation >= 0;
+    if (isGeneration && (this.manualContinuityGeneration === null || generation > this.manualContinuityGeneration)) {
+      this.manualContinuityGeneration = generation;
+    }
+    this.frameProgressMap.set(frameId, {
+      ...existing,
+      ...progress,
+      ...(isGeneration && generation === this.manualContinuityGeneration && { manualContinuityGeneration: generation }),
+      ...(typeof hasManualContinuity === 'boolean'
+        && (isGeneration ? generation === this.manualContinuityGeneration : !hasManualContinuity) && { hasManualContinuity }),
+    });
   }
 
   removeFrame(frameId) {
@@ -44,6 +56,7 @@ export class MainFrameAggregator {
   clearAll() {
     this.frameProgressMap.clear();
     this.terminalCauseSequence = 0;
+    this.manualContinuityGeneration = null;
   }
 
   recordTerminalCause(frameId, errorDetails) {
@@ -82,6 +95,7 @@ export class MainFrameAggregator {
     let grandTotalFailed = 0;
     let grandTotalCount = 0;
     let anyAutoTranslating = false;
+    let hasManualContinuity = false;
     let anyActiveTranslating = false;
     let isTranslated = false;
     
@@ -91,6 +105,10 @@ export class MainFrameAggregator {
       grandTotalCount += progress.totalCount || 0;
       
       if (progress.isAutoTranslating) anyAutoTranslating = true;
+      if (progress.hasManualContinuity === true
+          && progress.manualContinuityGeneration === this.manualContinuityGeneration) {
+        hasManualContinuity = true;
+      }
       if (progress.isTranslated || progress.translatedCount > 0) isTranslated = true;
       
       // A frame is actively translating if it hasn't signaled 'idle' and has remaining tasks
@@ -103,10 +121,14 @@ export class MainFrameAggregator {
     
     return {
       success: true,
-      isActive: isTranslated || anyActiveTranslating || anyAutoTranslating,
+      isActive: isTranslated || anyActiveTranslating || anyAutoTranslating || hasManualContinuity,
       isTranslating: anyActiveTranslating,
       isTranslated: isTranslated,
       isAutoTranslating: anyAutoTranslating,
+      hasManualContinuity,
+      ...(this.manualContinuityGeneration !== null && {
+        manualContinuityGeneration: this.manualContinuityGeneration,
+      }),
       translatedCount: grandTotalTranslated,
       failedCount: grandTotalFailed,
       totalCount: grandTotalCount,
@@ -137,6 +159,8 @@ export class MainFrameAggregator {
         totalCount: status.totalCount,
         isTranslated: status.isTranslated,
         isAutoTranslating: status.isAutoTranslating,
+        hasManualContinuity: status.hasManualContinuity,
+        manualContinuityGeneration: status.manualContinuityGeneration,
         isTranslating: status.isTranslating,
         status: status.isTranslating ? 'translating' : 'idle',
         aggregateScope: this.aggregateScope,
@@ -166,6 +190,7 @@ export class MainFrameAggregator {
         payload.isTranslated = false;
         payload.isTranslating = false;
         payload.isAutoTranslating = false;
+        payload.hasManualContinuity = false;
         payload.translatedCount = 0;
         payload.failedCount = 0;
         payload.totalCount = 0;

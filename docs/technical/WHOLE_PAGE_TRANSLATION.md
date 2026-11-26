@@ -108,6 +108,11 @@ Page translation batches have an authoritative **5-minute execution deadline** i
 ### 2. Smart Abort
 When the user clicks "Stop" or "Restore" in the page translation UI, a cancellation signal is sent to the background to immediately abort any pending batches, saving API costs and local resources.
 
+### Manual SPA Continuity
+An explicit Page Translation start can continue on trusted same-document route changes, independently of DOM watching. Each affected, previously admitted frame starts its own session; new or reloaded frames are not automatically enrolled. Compatible accepted translations and their originals remain available to Restore between passes. Stop is available even when no pass is active.
+
+The background keeps minimal grant state in `browser.storage.session` and verifies it against the top-level document and the affected frame before reuse. Receiving Stop closes admission in the current worker; only a confirmed storage commit makes the revocation survive a worker restart. If that commit cannot be confirmed, frame cancellation is best effort and the command reports failure or uncertainty. A worker interrupted before commit may see the last committed grant when it restarts. This adds command- and route-time authorization checks, not DOM observers, polling, or per-node storage I/O.
+
 ### 3. Fault-Tolerant Mapping
 Final `NETWORK_ERROR` and `SERVER_ERROR` batch failures, after the Queue's retries are exhausted, use a bounded soft-failure policy: failed nodes remain original, and other batches continue. The third consecutive eligible failed batch stops the Page session without reverting accepted translations. The streak counts batches, not nodes or retry attempts, in completion order (including concurrent AI batches). A successfully processed batch resets it, even if individual items are skipped; node acceptance and progress counts remain separate. Other nonfatal error types neither increment nor reset it.
 

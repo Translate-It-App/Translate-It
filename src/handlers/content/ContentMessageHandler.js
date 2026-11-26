@@ -77,6 +77,7 @@ export class ContentMessageHandler extends ResourceTracker {
     this._externalMessageHandler = null;
     this._registeredActions = new Set();
     this._pageRestartRevision = 0;
+    this._manualContinuityGeneration = null;
     this.isActive = false;
     this.context = MessagingContexts.CONTENT;
     this.logger = getScopedLogger(LOG_COMPONENTS.MESSAGING, 'MessageHandler');
@@ -977,9 +978,21 @@ export class ContentMessageHandler extends ResourceTracker {
 
   async handlePageTranslate(message) {
     this.logger.info('Page translation request received');
+    const continuityGeneration = message.data?.manualContinuityGeneration;
+    if (Number.isSafeInteger(continuityGeneration)
+        && this._manualContinuityGeneration != null
+        && continuityGeneration < this._manualContinuityGeneration) {
+      return { success: false, reason: 'stale_manual_continuity_generation' };
+    }
+    if (Number.isSafeInteger(continuityGeneration)) this._manualContinuityGeneration = continuityGeneration;
     if (message.data?.cancel === true || message.data?.isAuto !== true) this._pageRestartRevision += 1;
-    const boundNavigation = message.data?.restartFence ? {
+    const hasManualGrant = message.data?.hasManualContinuity === true
+      && Number.isSafeInteger(message.data?.manualContinuityGeneration);
+    const boundNavigation = message.data?.restartFence || hasManualGrant ? {
       ...message.data,
+      origin: hasManualGrant
+        ? (message.data?.restartFence ? 'manual-spa' : 'manual-start')
+        : 'auto',
       localRevision: this._pageRestartRevision,
     } : null;
     const navigationIsCurrent = async () => {
@@ -988,7 +1001,14 @@ export class ContentMessageHandler extends ResourceTracker {
           || window.location.href !== boundNavigation.navigationCursor?.url) return false;
       const admission = await sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE_ADMIT,
-        data: boundNavigation,
+        data: {
+          origin: boundNavigation.origin,
+          restartFence: boundNavigation.restartFence,
+          manualContinuityGeneration: boundNavigation.manualContinuityGeneration,
+          topDocumentEpoch: boundNavigation.topDocumentEpoch,
+          navigationCursor: boundNavigation.navigationCursor,
+          topNavigationCursor: boundNavigation.topNavigationCursor,
+        },
       }, { returnFailureResponse: true });
       return this._pageRestartRevision === boundNavigation.localRevision && admission?.success === true;
     };
@@ -997,9 +1017,11 @@ export class ContentMessageHandler extends ResourceTracker {
     }
 
     // Check for cancel flag
-    if (message.data?.cancel) {
-      if (this.pageTranslationManager) {
-        this.pageTranslationManager.cancelTranslation();
+      if (message.data?.cancel) {
+        if (this.pageTranslationManager) {
+          this.pageTranslationManager.cancelTranslation({
+            manualContinuityGeneration: message.data?.manualContinuityGeneration,
+          });
         return { success: true, cancelled: true };
       }
       return { success: false, error: 'PageTranslationManager not available' };
@@ -1059,6 +1081,11 @@ export class ContentMessageHandler extends ResourceTracker {
         this._ensureChildFrameRetirementListener();
       }
 
+      if (message.data?.isAuto === true && message.data?.preserveAcceptedTranslations
+          && this.pageTranslationManager.hasManualContinuity) {
+        return { success: true, skipped: true, reason: 'manual_continuity_owns_route' };
+      }
+
       // Execute page translation - PASS message.data to support options like { isAuto: true }
       const result = await this.pageTranslationManager.translatePage({
         ...(message.data || {}),
@@ -1107,16 +1134,23 @@ export class ContentMessageHandler extends ResourceTracker {
     }
   }
 
-  async handlePageRestore() {
+  async handlePageRestore(message = {}) {
     this.logger.info('Page restore request received');
+    const generation = message.data?.manualContinuityGeneration;
+    if (Number.isSafeInteger(generation) && this._manualContinuityGeneration != null
+        && generation < this._manualContinuityGeneration) return { success: true, ignored: true };
     this._pageRestartRevision += 1;
+    if (Number.isSafeInteger(generation)) this._manualContinuityGeneration = generation;
 
     if (!this.pageTranslationManager) {
       return { success: false, error: 'PageTranslationManager not available' };
     }
 
     try {
-      const result = await this.pageTranslationManager.restorePage({ manual: true });
+      const result = await this.pageTranslationManager.restorePage({
+        manual: true,
+        manualContinuityGeneration: message.data?.manualContinuityGeneration,
+      });
 
       this.logger.info('Page restore completed', {
         restoredCount: result.restoredCount
@@ -1174,16 +1208,39 @@ export class ContentMessageHandler extends ResourceTracker {
     };
   }
 
-  async handlePageStopAuto() {
+  async handlePageStopAuto(message = {}) {
     this.logger.info('Page stop auto-translation request received');
+    const generation = message.data?.manualContinuityGeneration;
+    if (Number.isSafeInteger(generation)) {
+      const authority = await sendRegularMessage({
+        action: MessageActions.PAGE_TRANSLATE_ADMIT,
+        data: { origin: 'manual-stop', manualContinuityGeneration: generation },
+      }, { returnFailureResponse: true });
+      if (authority?.success === true && authority.authorized === false) {
+        return { success: true, ignored: true };
+      }
+      if (authority?.success !== true || authority.authorized !== true) {
+        return {
+          success: false,
+          reason: 'manual_continuity_status_unavailable',
+          isTransportFailure: true,
+        };
+      }
+    }
+    if (Number.isSafeInteger(generation) && this._manualContinuityGeneration != null
+        && generation < this._manualContinuityGeneration) return { success: true, ignored: true };
     this._pageRestartRevision += 1;
+    if (Number.isSafeInteger(generation)) this._manualContinuityGeneration = generation;
 
     if (!this.pageTranslationManager) {
       return { success: false, error: 'PageTranslationManager not available' };
     }
 
     try {
-      const result = await this.pageTranslationManager.stopAutoTranslation();
+      const result = await this.pageTranslationManager.stopAutoTranslation({
+        manualContinuityGeneration: message.data?.manualContinuityGeneration,
+        clearManualContinuity: message.data?.hasManualContinuity === false,
+      });
       return result;
     } catch (error) {
       this.logger.error('Page stop auto failed:', error);

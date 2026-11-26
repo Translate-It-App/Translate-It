@@ -1,4 +1,5 @@
 import browser from 'webextension-polyfill';
+import { sendRegularMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { storageManager } from '@/shared/storage/core/StorageCore.js';
 import { TranslationMode } from '@/config.js';
@@ -139,10 +140,24 @@ export class PageTranslationEventManager {
   }
 
   _invalidateTranslation() {
+    const manualGeneration = this.manager.hasManualContinuity
+      ? this.manager.manualContinuityGeneration : null;
     this.manager.translationSettingsRevision = (this.manager.translationSettingsRevision || 0) + 1;
-    void this.manager.stopAutoTranslation({ cancellationReason: 'operation-abort' }).catch(() => {
+    void this.manager.stopAutoTranslation({
+      cancellationReason: 'operation-abort',
+      clearManualContinuity: true,
+    }).catch(() => {
       this.logger.warn('Stopping obsolete page translation failed');
     });
+    if (window === window.top && Number.isSafeInteger(manualGeneration)) {
+      void sendRegularMessage({
+        action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+        data: {
+          settingsInvalidation: true,
+          expectedManualContinuityGeneration: manualGeneration,
+        },
+      }, { returnFailureResponse: true }).catch(() => {});
+    }
     this.manager.resetError();
   }
 

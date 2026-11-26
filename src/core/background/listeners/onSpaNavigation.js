@@ -22,7 +22,7 @@ export async function handleSpaNavigation(details) {
 
   // Mint before storage/settings awaits so a subsequently delivered explicit
   // Stop/Restore can revoke this exact queued navigation.
-  const restartFence = frameId === 0 ? pageNavigationTracker.getOrMintRestartFence(tabId) : null;
+  const restartFence = pageNavigationTracker.getOrMintRestartFence(tabId);
   try {
     let data;
     try {
@@ -36,7 +36,7 @@ export async function handleSpaNavigation(details) {
       }
       data = {
         ...(navigationCursor && { navigationCursor }),
-        ...(restartFence && { restartFence }),
+        ...(navigationCursor && restartFence && { restartFence }),
       };
     } catch {
       data = { navigationUnavailable: true };

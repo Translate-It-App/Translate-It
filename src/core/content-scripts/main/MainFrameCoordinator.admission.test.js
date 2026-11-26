@@ -159,6 +159,54 @@ describe('MainFrameCoordinator per-frame admission', () => {
     expect(aggregator.frameProgressMap.has('https://other-frame.example')).toBe(false);
   });
 
+  it('keeps idle manual continuity independent of DOM watching and Restore', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    for (const frameId of [0, 7]) {
+      const sessionId = `manual-${frameId}`;
+      coordinator.handleTrustedPageLifecycle({
+        frameId, action: MessageActions.PAGE_TRANSLATE_START,
+        data: { sessionId, hasManualContinuity: true, manualContinuityGeneration: 1 },
+      });
+      coordinator.handleTrustedPageLifecycle({
+        frameId, action: MessageActions.PAGE_TRANSLATE_IDLE,
+        data: { sessionId, translatedCount: 0, isTranslated: frameId === 7 },
+      });
+    }
+    expect(aggregator.getGlobalPageTranslationStatus()).toMatchObject({
+      hasManualContinuity: true, isAutoTranslating: false, isTranslating: false, isTranslated: true,
+    });
+    for (const frameId of [0, 7]) {
+      coordinator.handleTrustedPageLifecycle({
+        frameId, action: MessageActions.PAGE_AUTO_RESTORE_COMPLETE,
+        data: { sessionId: `manual-${frameId}`, hasManualContinuity: false },
+      });
+      expect(aggregator.getGlobalPageTranslationStatus()).toMatchObject({
+        hasManualContinuity: frameId === 0, isTranslated: true,
+      });
+    }
+  });
+
+  it('does not display continuity from a frame that missed durable Stop', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    for (const frameId of [0, 7]) {
+      coordinator.handleTrustedPageLifecycle({
+        frameId, action: MessageActions.PAGE_TRANSLATE_START,
+        data: { sessionId: `manual-${frameId}`, hasManualContinuity: true, manualContinuityGeneration: 1 },
+      });
+    }
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 0, action: MessageActions.PAGE_AUTO_RESTORE_COMPLETE,
+      data: { sessionId: 'manual-0', hasManualContinuity: false, manualContinuityGeneration: 2 },
+    });
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 7, action: MessageActions.PAGE_TRANSLATE_IDLE,
+      data: { sessionId: 'manual-7', hasManualContinuity: true, manualContinuityGeneration: 1, isTranslated: true },
+    });
+    expect(aggregator.getGlobalPageTranslationStatus()).toMatchObject({
+      hasManualContinuity: false, manualContinuityGeneration: 2, isTranslated: true,
+    });
+  });
+
   it('retires owner and aggregate row on trusted frame retirement', () => {
     const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
     coordinator.handleTrustedPageLifecycle({

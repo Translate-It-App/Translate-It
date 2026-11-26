@@ -59,6 +59,8 @@ export class MainFrameCoordinator {
       isTranslating: true,
       isTranslated: data.isTranslated === true,
       isAutoTranslating: data.isAutoTranslating === true,
+      hasManualContinuity: data.hasManualContinuity === true,
+      manualContinuityGeneration: data.manualContinuityGeneration,
       translatedCount: 0,
       failedCount: 0,
       totalCount: 0,
@@ -380,6 +382,7 @@ export class MainFrameCoordinator {
       });
       this.aggregator.emitAggregateProgress(action, data);
     } else if (action === this.MessageActions.PAGE_RESTORE_COMPLETE) {
+      this.aggregator.updateFrameData(frameId, aggregateData);
       this.frameSessionOwners.delete(frameId);
       this.aggregator.removeFrame(frameId);
       if (this.frameSessionOwners.size === 0) {

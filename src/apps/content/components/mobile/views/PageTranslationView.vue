@@ -45,7 +45,8 @@
           pageTranslationData.status === 'error'
             ? 'error'
             : pageTranslationData.isTranslating ||
-                pageTranslationData.isAutoTranslating
+                pageTranslationData.isAutoTranslating ||
+                pageTranslationData.hasManualContinuity
               ? 'translating'
               : pageTranslationData.isTranslated
                 ? 'translated'
@@ -115,9 +116,19 @@
         }}
       </div>
 
+      <button
+        v-if="showStopAction && pageTranslationData.isTranslated"
+        class="ti-m-progress-settings-row ti-m-auto-translate-row"
+        @click.stop="restorePage"
+      >
+        <span class="ti-m-setting-label">
+          {{ t("mobile_page_restore_btn", "Restore Original Page") }}
+        </span>
+      </button>
+
       <!-- Error Message in Progress Card -->
       <div
-        v-if="pageTranslationData.status === 'error'"
+        v-if="pageTranslationData.errorMessage || pageTranslationData.status === 'error'"
         class="ti-m-error-message"
       >
         {{
@@ -243,6 +254,7 @@ import { pageEventBus } from "@/core/PageEventBus.js";
 import { MessageActions } from "@/shared/messaging/core/MessageActions.js";
 import { sendRegularMessage } from "@/shared/messaging/core/UnifiedMessaging.js";
 import { MOBILE_CONSTANTS } from "@/shared/constants/mobile.js";
+import { TRANSLATION_STATUS } from "@/shared/constants/translation.js";
 import { getScopedLogger } from "@/shared/logging/logger.js";
 import { LOG_COMPONENTS } from "@/shared/logging/logConstants.js";
 import PageTranslationStatus from "@/components/shared/PageTranslationStatus.vue";
@@ -264,11 +276,48 @@ const logger = getScopedLogger(LOG_COMPONENTS.MOBILE, "PageTranslationView");
 const sendPageCommand = (message) => {
   void sendRegularMessage(message, { returnFailureResponse: true })
     .then((response) => {
+      if (message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) {
+        const state = pageTranslationData.value;
+        const generation = response?.manualContinuityGeneration;
+        const committedRevoke = response?.hasManualContinuity === false
+          && Number.isSafeInteger(generation)
+          && generation >= 0
+          && generation >= (state.manualContinuityGeneration ?? -1);
+        const cancellationUncertain = (response?.success !== true && !committedRevoke)
+          || (!committedRevoke && state.hasManualContinuity === true)
+          || (Array.isArray(response?.frames) && response.frames.some((frame) => frame?.success !== true));
+
+        if (committedRevoke) {
+          mobileStore.setPageTranslation({
+            hasManualContinuity: false,
+            manualContinuityGeneration: generation,
+          });
+        }
+        if (cancellationUncertain || (!committedRevoke && state.hasManualContinuity === true)) {
+          mobileStore.setPageTranslation({
+            status: state.isTranslating || state.isAutoTranslating
+              ? state.status
+              : TRANSLATION_STATUS.ERROR,
+            errorMessage: committedRevoke
+              ? "Stop committed, but cancellation delivery was incomplete"
+              : "Unable to confirm that auto-translation was stopped",
+          });
+        }
+      }
       if (response?.success === false) {
-        logger.debug("Page translation command rejected", response);
+        logger.warn("Page translation command was not fully successful", response);
       }
     })
     .catch((error) => {
+      if (message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) {
+        const state = pageTranslationData.value;
+        mobileStore.setPageTranslation({
+          status: state.isTranslating || state.isAutoTranslating
+            ? state.status
+            : TRANSLATION_STATUS.ERROR,
+          errorMessage: "Unable to confirm that auto-translation was stopped",
+        });
+      }
       if (ExtensionContextManager.isContextError(error)) {
         ExtensionContextManager.handleContextError(
           error,
@@ -350,11 +399,15 @@ const isZeroResult = computed(
     pageTranslationData.value.failedCount > 0,
 );
 
-const primaryAction = computed(() => {
-  if (
+const showStopAction = computed(
+  () =>
     pageTranslationData.value.isTranslating ||
-    pageTranslationData.value.isAutoTranslating
-  ) {
+    pageTranslationData.value.isAutoTranslating ||
+    pageTranslationData.value.hasManualContinuity,
+);
+
+const primaryAction = computed(() => {
+  if (showStopAction.value) {
     const isInitialPass = pageTranslationData.value.isTranslating;
     return {
       label: isInitialPass

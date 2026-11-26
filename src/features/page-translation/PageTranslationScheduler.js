@@ -63,6 +63,7 @@ export class PageTranslationScheduler extends ResourceTracker {
     this.isFirstBatch = true;
     this.isTranslated = false;
     this.translationSessionId = null;
+    this.manualContinuityAuthorization = null;
     this.sessionContext = null;
     this.discoveryPending = false;
     this.isScrolling = false;
@@ -927,7 +928,10 @@ export class PageTranslationScheduler extends ResourceTracker {
         mode: TranslationMode.Page,
         contextMetadata: this.settings.aiContextTranslationEnabled ? { pageTitle: document.title } : null,
         options: { rawJsonPayload: true },
-        sessionId: this.translationSessionId 
+        sessionId: this.translationSessionId,
+        ...(this.manualContinuityAuthorization && {
+          manualContinuity: this.manualContinuityAuthorization,
+        })
       },
       MessageContexts.PAGE_TRANSLATION_BATCH
     );

@@ -85,6 +85,40 @@ describe('useContentAppPageTranslation', () => {
     expect(state.isTranslating).toBe(false);
   });
 
+  it('keeps the highest manual continuity generation from aggregate lifecycle updates', () => {
+    const progress = listeners.get(MessageActions.PAGE_TRANSLATE_PROGRESS);
+    progress({
+      isAggregated: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      translatedCount: 1,
+      totalCount: 2,
+    });
+    progress({
+      isAggregated: true,
+      hasManualContinuity: false,
+      manualContinuityGeneration: 7,
+      translatedCount: 1,
+      totalCount: 2,
+    });
+
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+    });
+    progress({
+      isAggregated: true,
+      hasManualContinuity: false,
+      manualContinuityGeneration: 9,
+      translatedCount: 1,
+      totalCount: 2,
+    });
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: false,
+      manualContinuityGeneration: 9,
+    });
+  });
+
   it('preserves translated state after fatal partial output', async () => {
     mobileStore.pageTranslationData.isTranslated = true;
     mobileStore.pageTranslationData.translatedCount = 1;

@@ -21,6 +21,15 @@ const logger = getScopedLogger(LOG_COMPONENTS.CONTENT_APP, 'useContentAppPageTra
  */
 export function useContentAppPageTranslation(mobileStore, tracker) {
   let errorPresentationRevision = 0;
+  let manualContinuityGeneration = -1;
+
+  const manualContinuityPatch = (detail) => {
+    const generation = detail?.manualContinuityGeneration;
+    if (!Number.isSafeInteger(generation) || generation < 0 || generation < manualContinuityGeneration) return {};
+    if (detail.hasManualContinuity !== true && detail.hasManualContinuity !== false) return {};
+    manualContinuityGeneration = generation;
+    return { hasManualContinuity: detail.hasManualContinuity, manualContinuityGeneration: generation };
+  };
 
   onMounted(() => {
     const pageEventBus = window.pageEventBus;
@@ -62,6 +71,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         isTranslating: true,
         isTranslated: detail.isTranslated === true,
         isAutoTranslating: detail.isAutoTranslating || false,
+        ...manualContinuityPatch(detail),
         status: TRANSLATION_STATUS.TRANSLATING,
         translatedCount: 0,
         failedCount: 0,
@@ -106,6 +116,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         totalCount,
         isTranslating: detail.isTranslating !== undefined ? detail.isTranslating : mobileStore.pageTranslationData.isTranslating,
         isAutoTranslating: detail.isAutoTranslating !== undefined ? detail.isAutoTranslating : mobileStore.pageTranslationData.isAutoTranslating,
+        ...manualContinuityPatch(detail),
         status: finalStatus
       });
     });
@@ -131,6 +142,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         totalCount,
         isTranslating: false,
         isAutoTranslating: detail.isAutoTranslating !== undefined ? detail.isAutoTranslating : mobileStore.pageTranslationData.isAutoTranslating,
+        ...manualContinuityPatch(detail),
         isTranslated: detail.isTranslated === true || translatedCount > 0,
         status: TRANSLATION_STATUS.COMPLETED
       });
@@ -161,6 +173,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         isTranslating: false,
         isTranslated: detail.isTranslated === true || translatedCount > 0,
         isAutoTranslating: detail.isAutoTranslating !== undefined ? detail.isAutoTranslating : mobileStore.pageTranslationData.isAutoTranslating,
+        ...manualContinuityPatch(detail),
         status: isZeroResult ? TRANSLATION_STATUS.ERROR : TRANSLATION_STATUS.COMPLETED,
         translatedCount,
         failedCount,
@@ -204,6 +217,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         ...(translatedCount !== null && { translatedCount }),
         status: TRANSLATION_STATUS.ERROR,
         errorMessage: presentation.message,
+        ...manualContinuityPatch(detail),
       });
     });
 
@@ -284,7 +298,8 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
             : TRANSLATION_STATUS.IDLE,
         translatedCount,
         failedCount,
-        totalCount
+        totalCount,
+        ...manualContinuityPatch(detail)
       };
 
       mobileStore.setPageTranslation(baseState);

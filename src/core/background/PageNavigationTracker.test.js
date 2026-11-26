@@ -170,6 +170,165 @@ describe('Page navigation producer cursor', () => {
     expect(await tracker.getCursor(42, 7)).toBeNull();
   });
 
+  it('persists a document-scoped manual grant and restores it after worker restart', async () => {
+    await tracker.seed(42, frames);
+    const grant = await tracker.grantManualContinuity(42);
+    expect(grant).toMatchObject({
+      generation: 1,
+      revoked: false,
+      topDocumentEpoch: (await tracker.getCursor(42, 0)).documentEpoch,
+      frames: { 0: (await tracker.getCursor(42, 0)).documentEpoch, 7: (await tracker.getCursor(42, 7)).documentEpoch },
+    });
+
+    tracker = new PageNavigationTracker(storage);
+    expect(await tracker.getManualContinuity(42)).toEqual(grant);
+    expect(await tracker.getManualContinuityStatus(42)).toMatchObject({
+      hasManualContinuity: true,
+      manualContinuityGeneration: 1,
+    });
+  });
+
+  it('reuses an accepted manual grant for a duplicate start instead of rotating its generation', async () => {
+    await tracker.seed(42, frames);
+    const first = await tracker.grantManualContinuity(42);
+    const duplicate = await tracker.grantManualContinuity(42);
+
+    expect(duplicate).toEqual(first);
+    expect(saved.pageTranslationNavigation.manualContinuity[42]).toEqual(first);
+  });
+
+  it.each(['reload', 'removal'])('retains an active grant across child %s while frame authorization stays scoped', async change => {
+    await tracker.seed(42, frames);
+    const grant = await tracker.grantManualContinuity(42);
+    const topCursor = await tracker.getCursor(42, 0);
+    const oldChildCursor = await tracker.getCursor(42, 7);
+    if (change === 'reload') await tracker.committed(42, 7, 'https://frame.example/reloaded');
+    else await tracker.seed(42, [frames[0]]);
+
+    const duplicate = await tracker.grantManualContinuity(42);
+    const changedChildCursor = await tracker.getCursor(42, 7) || oldChildCursor;
+
+    expect(duplicate.generation).toBe(grant.generation);
+    expect(duplicate).toEqual(grant);
+    expect(await tracker.validateManualContinuityBatch(
+      42, 0, grant.generation, grant.topDocumentEpoch, topCursor
+    )).toBe(true);
+    expect(await tracker.validateManualContinuityBatch(
+      42, 7, grant.generation, grant.topDocumentEpoch, changedChildCursor
+    )).toBe(false);
+  });
+
+  it('keeps another tab batch-valid while its unrelated storage mutation is dirty', async () => {
+    await tracker.seed(42, frames);
+    const grant = await tracker.grantManualContinuity(42);
+    const cursor = await tracker.getCursor(42, 0);
+    await tracker.seed(43, frames);
+    let releaseWrite;
+    storage.set.mockImplementationOnce(value => new Promise(resolve => {
+      releaseWrite = () => {
+        saved = structuredClone(value);
+        resolve();
+      };
+    }));
+
+    const unrelatedMutation = tracker.capture(43, 0, 'https://other.example/route');
+    await vi.waitFor(() => expect(releaseWrite).toBeTypeOf('function'));
+    expect(tracker.dirty).toBe(true);
+    const storageReads = storage.get.mock.calls.length;
+    const storageWrites = storage.set.mock.calls.length;
+    const frameReads = browser.webNavigation.getFrame.mock.calls.length;
+
+    expect(await tracker.validateManualContinuityBatch(
+      42, 0, grant.generation, grant.topDocumentEpoch, cursor
+    )).toBe(true);
+    expect(storage.get).toHaveBeenCalledTimes(storageReads);
+    expect(storage.set).toHaveBeenCalledTimes(storageWrites);
+    expect(browser.webNavigation.getFrame).toHaveBeenCalledTimes(frameReads);
+
+    releaseWrite();
+    await unrelatedMutation;
+  });
+
+  it('keeps revocation closed on storage failure in-worker and documents the uncommitted restart boundary', async () => {
+    await tracker.seed(42, frames);
+    const grant = await tracker.grantManualContinuity(42);
+    const revision = tracker.blockManualContinuity(42);
+    storage.set.mockRejectedValueOnce(new Error('write rejected'));
+    await expect(tracker.revokeManualContinuity(42, grant.generation, revision)).rejects.toThrow('write rejected');
+    expect(await tracker.getManualContinuity(42)).toBeNull();
+    expect(await tracker.getManualContinuityStatus(42)).toMatchObject({
+      hasManualContinuity: true,
+      manualContinuityRevocationPending: true,
+    });
+
+    tracker = new PageNavigationTracker(storage);
+    expect(await tracker.getManualContinuity(42)).toEqual(grant);
+  });
+
+  it('does not let an old-generation internal revoke block a newer manual grant', async () => {
+    await tracker.seed(42, frames);
+    const oldGrant = await tracker.grantManualContinuity(42);
+    tracker.blockManualContinuity(42, oldGrant.generation);
+    const newGrant = await tracker.grantManualContinuity(42);
+    expect(newGrant.generation).toBeGreaterThan(oldGrant.generation);
+    expect(await tracker.revokeManualContinuity(42, oldGrant.generation)).toBeNull();
+    expect(await tracker.getManualContinuity(42)).toEqual(newGrant);
+  });
+
+  it('durably revokes a restored grant when its operation revision is uninitialized', async () => {
+    await tracker.seed(42, frames);
+    const grant = await tracker.grantManualContinuity(42);
+    const restartedTracker = new PageNavigationTracker(storage);
+    const revision = restartedTracker.blockManualContinuity(42, grant.generation);
+
+    expect(revision).toBe(0);
+    await expect(restartedTracker.revokeManualContinuity(42, grant.generation, revision))
+      .resolves.toBe(grant.generation + 1);
+
+    const replacementTracker = new PageNavigationTracker(storage);
+    expect(await replacementTracker.getManualContinuity(42)).toBeNull();
+    expect(await replacementTracker.getManualContinuityStatus(42)).toMatchObject({
+      hasManualContinuity: false,
+      manualContinuityGeneration: grant.generation + 1,
+    });
+  });
+
+  it('does not let an older reserved Manual Start commit after a newer start', async () => {
+    await tracker.seed(42, frames);
+    const olderStart = tracker.reserveManualContinuityStart(42);
+    const newerStart = tracker.reserveManualContinuityStart(42);
+    const grant = await tracker.grantManualContinuity(42, newerStart);
+
+    await expect(tracker.grantManualContinuity(42, olderStart)).rejects.toThrow('Manual continuity start superseded');
+    expect(await tracker.getManualContinuity(42)).toEqual(grant);
+  });
+
+  it('rejects a manual grant after a top document commit and after a child document replacement', async () => {
+    await tracker.seed(42, frames);
+    const grant = await tracker.grantManualContinuity(42);
+    await tracker.committed(42, 7, 'https://frame.example/new-document');
+    const newChildCursor = await tracker.getCursor(42, 7);
+    expect(await tracker.validateManualContinuity(42, 7, grant.generation, grant.topDocumentEpoch, newChildCursor)).toBe(false);
+
+    await tracker.committed(42, 0, 'https://example.com/reloaded');
+    expect(await tracker.getManualContinuity(42)).toBeNull();
+  });
+
+  it('fails closed for a missing or malformed persisted manual grant', async () => {
+    await tracker.seed(42, frames);
+    expect(await tracker.getManualContinuity(42)).toBeNull();
+
+    saved = {
+      pageTranslationNavigation: {
+        nextDocumentEpoch: 1,
+        frames: { '42:0': { documentEpoch: 1, routeRevision: 0, url: frames[0].url } },
+        manualContinuity: { 42: { generation: 1, revoked: false, topDocumentEpoch: 1, frames: { 0: 'bad' } } },
+      },
+    };
+    tracker = new PageNavigationTracker(storage);
+    await expect(tracker.getManualContinuity(42)).rejects.toThrow('Invalid Page navigation storage');
+  });
+
   it('resets only the committed child document and keeps other frame records', async () => {
     await tracker.seed(42, frames);
     const top = await tracker.getCursor(42, 0);

@@ -107,7 +107,7 @@ describe('SPA navigation listener', () => {
     await handleSpaNavigation({ tabId: 42, frameId: 0, url: 'https://example.com/untracked' });
 
     expect(await pageNavigationTracker.getCursor(42, 0)).toBeNull();
-    expect(mocks.sendMessage.mock.calls[0][1].data).toMatchObject({ restartFence: expect.any(String) });
+    expect(mocks.sendMessage.mock.calls[0][1].data).not.toHaveProperty('restartFence');
     expect(mocks.sendMessage.mock.calls[0][1].data).not.toHaveProperty('navigationCursor');
   });
 
@@ -116,7 +116,10 @@ describe('SPA navigation listener', () => {
 
     expect(mocks.sendMessage).toHaveBeenCalledWith(42, {
       action: MessageActions.SPA_NAVIGATION,
-      data: { navigationCursor: { documentEpoch: 2, routeRevision: 1, url: 'https://frame.example/child' } },
+      data: expect.objectContaining({
+        navigationCursor: { documentEpoch: 2, routeRevision: 1, url: 'https://frame.example/child' },
+        restartFence: expect.any(String),
+      }),
     }, {
       frameId: 3,
     });
@@ -127,7 +130,10 @@ describe('SPA navigation listener', () => {
 
     expect(mocks.sendMessage).toHaveBeenCalledWith(42, {
       action: MessageActions.SPA_NAVIGATION,
-      data: { navigationCursor: { documentEpoch: 3, routeRevision: 1, url: 'https://frame.example/nested' } },
+      data: expect.objectContaining({
+        navigationCursor: { documentEpoch: 3, routeRevision: 1, url: 'https://frame.example/nested' },
+        restartFence: expect.any(String),
+      }),
     }, {
       frameId: 27,
     });

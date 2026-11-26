@@ -83,6 +83,7 @@ describe('PageTranslationView page action', () => {
       }),
       closeSheet: vi.fn(),
       navigate: vi.fn(),
+      setPageTranslation: vi.fn((state) => Object.assign(mobileStore.pageTranslationData.value, state)),
     }
     settingsStore = reactive({
       isDarkTheme: false,
@@ -108,7 +109,7 @@ describe('PageTranslationView page action', () => {
   it('uses the normal Start Translation action for zero-result completion', () => {
     mobileStore.pageTranslationData.value = {
       ...mobileStore.pageTranslationData.value,
-      status: 'error',
+      status: 'translating',
       errorMessage: null,
       translatedCount: 0,
       failedCount: 3,
@@ -132,6 +133,41 @@ describe('PageTranslationView page action', () => {
     const wrapper = mount(PageTranslationView)
 
     expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Start Translation')
+  })
+
+  it('keeps Stop available between manual passes, including an idle zero-result state', () => {
+    mobileStore.pageTranslationData.value = {
+      ...mobileStore.pageTranslationData.value,
+      status: 'completed',
+      isTranslating: false,
+      isAutoTranslating: false,
+      hasManualContinuity: true,
+      isTranslated: false,
+      translatedCount: 0,
+      failedCount: 0,
+      totalCount: 0,
+    }
+
+    const wrapper = mount(PageTranslationView)
+
+    expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Stop Auto-Translation')
+  })
+
+  it('keeps Restore available beside Stop when committed content remains', () => {
+    mobileStore.pageTranslationData.value = {
+      ...mobileStore.pageTranslationData.value,
+      status: 'completed',
+      isTranslating: false,
+      isAutoTranslating: false,
+      hasManualContinuity: true,
+      isTranslated: true,
+      translatedCount: 2,
+    }
+
+    const wrapper = mount(PageTranslationView)
+
+    expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Stop Auto-Translation')
+    expect(wrapper.text()).toContain('Restore Original Page')
   })
 
   it('disables page translation for a resolved provider without bulk support', () => {
@@ -186,6 +222,37 @@ describe('PageTranslationView page action', () => {
       action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
     }, { returnFailureResponse: true })
     expect(pageEventBus.emit).not.toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE_STOP_AUTO)
+  })
+
+  it('applies a committed revoke from a partial Stop response but preserves active presentation', async () => {
+    sendRegularMessage.mockResolvedValue({
+      success: false,
+      reason: 'manual_continuity_stop_delivery_uncertain',
+      hasManualContinuity: false,
+      manualContinuityGeneration: 5,
+    })
+    mobileStore.pageTranslationData.value = {
+      ...mobileStore.pageTranslationData.value,
+      status: 'translating',
+      isTranslating: true,
+      isAutoTranslating: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 4,
+      translatedCount: 2,
+    }
+    const wrapper = mount(PageTranslationView)
+
+    await wrapper.get('.ti-m-header-primary-btn').trigger('click')
+    await Promise.resolve()
+
+    expect(mobileStore.pageTranslationData.value).toMatchObject({
+      hasManualContinuity: false,
+      manualContinuityGeneration: 5,
+      status: 'translating',
+      isTranslating: true,
+      isAutoTranslating: true,
+      translatedCount: 2,
+    })
   })
 
   it('sends PAGE_RESTORE through runtime', async () => {

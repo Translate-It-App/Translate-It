@@ -4,7 +4,8 @@ import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { ActionReasons } from '@/shared/messaging/core/MessagingConstants.js';
 import { tabPermissionChecker } from '@/core/tabPermissions.js';
 import { handlePageTranslation } from './handlePageTranslation.js';
-import { pageNavigationTracker } from '@/core/background/PageNavigationTracker.js';
+import { PageNavigationTracker, pageNavigationTracker } from '@/core/background/PageNavigationTracker.js';
+import { unifiedTranslationService } from '@/core/services/translation/UnifiedTranslationService.js';
 
 const navigationStore = vi.hoisted(() => ({ saved: {} }));
 
@@ -102,6 +103,17 @@ async function expectPreFanoutTimeout(resultPromise) {
   expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
 }
+
+beforeEach(() => {
+  navigationStore.saved = {};
+  pageNavigationTracker.state = null;
+  pageNavigationTracker.durableState = null;
+  pageNavigationTracker.dirty = false;
+  pageNavigationTracker.pending = Promise.resolve();
+  pageNavigationTracker.restartFences.clear();
+  pageNavigationTracker.blockedManualContinuity.clear();
+  pageNavigationTracker.manualContinuityRevision.clear();
+});
 
 describe('PAGE_TRANSLATE producer cursor admission', () => {
   beforeEach(() => {
@@ -321,7 +333,7 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
       if (frame === 'rejected') browser.webNavigation.getFrame.mockRejectedValueOnce(new Error('frame unavailable'));
       else browser.webNavigation.getFrame.mockResolvedValueOnce(frame);
       await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
-      expect(browser.tabs.sendMessage.mock.calls[0][1].data).toEqual({ navigationUnavailable: true });
+      expect(browser.tabs.sendMessage.mock.calls[0][1].data).toMatchObject({ navigationUnavailable: true });
     }
   );
 
@@ -347,6 +359,309 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
       expect(browser.tabs.sendMessage.mock.calls.every(([, message]) => message.data.navigationCursor.documentEpoch === 2)).toBe(true);
       await onCommittedListener({ tabId: 42, frameId: 0, transitionType: 'reload' });
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('manual SPA continuity grant and revocation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function startManualPage() {
+    setupFrames([
+      { frameId: 0, response: { success: true } },
+      { frameId: 7, response: { success: true } },
+    ]);
+    const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+    expect(result.success).toBe(true);
+    return pageNavigationTracker.getManualContinuity(42);
+  }
+
+  it('keeps an existing grant when a duplicate manual Start is rejected as busy after child reload', async () => {
+    const grant = await startManualPage();
+    await pageNavigationTracker.committed(42, 7, 'https://frame-7.example/reloaded');
+    setupFrames([
+      { frameId: 0, response: { success: false, reason: ActionReasons.BUSY_OR_DONE } },
+      { frameId: 7, response: { success: false, reason: ActionReasons.BUSY_OR_DONE } },
+    ]);
+
+    const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+
+    expect(result).toMatchObject({ success: false, reason: ActionReasons.BUSY_OR_DONE });
+    expect(await pageNavigationTracker.getManualContinuity(42)).toEqual(grant);
+    const cursor = await pageNavigationTracker.getCursor(42, 0);
+    expect(await pageNavigationTracker.validateManualContinuityBatch(
+      42, 0, grant.generation, grant.topDocumentEpoch, cursor
+    )).toBe(true);
+    const changedChild = await pageNavigationTracker.getCursor(42, 7);
+    expect(await pageNavigationTracker.validateManualContinuityBatch(
+      42, 7, grant.generation, grant.topDocumentEpoch, changedChild
+    )).toBe(false);
+  });
+
+  it('authorizes Stop only through its durable cutoff generation', async () => {
+    const oldGrant = await startManualPage();
+    const revoke = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+    }, sender);
+    expect(revoke.manualContinuityGeneration).toBe(oldGrant.generation + 1);
+    const newGrant = await pageNavigationTracker.grantManualContinuity(42);
+
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_ADMIT,
+      data: { origin: 'manual-stop', manualContinuityGeneration: oldGrant.generation },
+    }, { ...sender, frameId: 0 })).resolves.toEqual({ success: true, authorized: false });
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_ADMIT,
+      data: { origin: 'manual-stop', manualContinuityGeneration: newGrant.generation },
+    }, { ...sender, frameId: 0 })).resolves.toEqual({ success: true, authorized: true });
+  });
+
+  it('blocks a new manual SPA admission immediately when Stop is received, before frame delivery', async () => {
+    const grant = await startManualPage();
+    const topCursor = await pageNavigationTracker.getCursor(42, 0);
+    const previousFence = pageNavigationTracker.getOrMintRestartFence(42);
+    let resolveStopDelivery;
+    const stopDelivery = new Promise(resolve => { resolveStopDelivery = resolve; });
+    const sendMessage = browser.tabs.sendMessage.getMockImplementation();
+    browser.tabs.sendMessage.mockImplementation((tabId, message, options) => (
+      message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
+        ? stopDelivery
+        : sendMessage(tabId, message, options)
+    ));
+
+    const stop = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_STOP_AUTO }, sender);
+    const restartFence = pageNavigationTracker.getRestartFence(42);
+    expect(restartFence).not.toBe(previousFence);
+    let stopAcknowledged = false;
+    void stop.then(() => { stopAcknowledged = true; });
+    await vi.waitFor(() => expect(
+      browser.tabs.sendMessage.mock.calls.some(([, message]) => message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO)
+    ).toBe(true));
+    await Promise.resolve();
+    expect(stopAcknowledged).toBe(false);
+
+    const admission = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_ADMIT,
+      data: {
+        origin: 'manual-spa',
+        restartFence,
+        manualContinuityGeneration: grant.generation,
+        topDocumentEpoch: grant.topDocumentEpoch,
+        navigationCursor: topCursor,
+      },
+    }, { ...sender, frameId: 0 });
+
+    expect(admission).toEqual({ success: false, reason: 'obsolete_navigation' });
+    resolveStopDelivery({ success: true });
+    expect(await stop).toMatchObject({
+      success: true,
+      hasManualContinuity: false,
+      manualContinuityGeneration: grant.generation + 1,
+    });
+    expect(await pageNavigationTracker.getManualContinuity(42)).toBeNull();
+  });
+
+  it('does not let older delayed preparation override a newer Stop then Manual Start', async () => {
+    setupFrames([
+      { frameId: 0, response: { success: true } },
+      { frameId: 7, response: { success: true } },
+    ]);
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://example.com' },
+      { frameId: 7, url: 'https://frame-7.example' },
+    ]);
+    let resolveOldPreparation;
+    const oldPreparation = new Promise(resolve => { resolveOldPreparation = resolve; });
+    browser.webNavigation.getAllFrames.mockImplementationOnce(() => oldPreparation.promise);
+
+    const olderStart = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+    await vi.waitFor(() => expect(browser.webNavigation.getAllFrames).toHaveBeenCalledOnce());
+    expect(pageNavigationTracker.manualContinuityRevision.get(42)).toBe(1);
+
+    const stop = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_STOP_AUTO }, sender);
+    expect(stop.success).toBe(true);
+    const newerStart = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE }, sender);
+    expect(newerStart.success).toBe(true);
+    const sendCountAfterNewerStart = browser.tabs.sendMessage.mock.calls.length;
+
+    resolveOldPreparation([
+      { frameId: 0, url: 'https://example.com' },
+      { frameId: 7, url: 'https://frame-7.example' },
+    ]);
+    await expect(olderStart).resolves.toMatchObject({ success: false });
+    expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(sendCountAfterNewerStart);
+    expect((await pageNavigationTracker.getManualContinuity(42)).generation).toBe(2);
+  });
+
+  it('best-effort cancels frames and reports uncertainty when Stop revocation storage fails', async () => {
+    const grant = await startManualPage();
+    browser.tabs.sendMessage.mockClear();
+    browser.storage.session.set.mockRejectedValueOnce(new Error('session storage unavailable'));
+
+    const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_STOP_AUTO }, sender);
+
+    expect(result).toMatchObject({
+      success: false,
+      reason: 'manual_continuity_revocation_uncertain',
+      responses: [{ success: true }, { success: true }],
+    });
+    expect(result).not.toHaveProperty('hasManualContinuity');
+    expect(result).not.toHaveProperty('manualContinuityGeneration');
+    expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(2);
+    expect(browser.tabs.sendMessage.mock.calls.every(([, message]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
+      && message.data.hasManualContinuity === false
+      && message.data.manualContinuityGeneration === grant.generation
+      && message.data.revocationCommitted === false
+    ))).toBe(true);
+  });
+
+  it('keeps a revocation-timeout fallback scoped to its original grant generation', async () => {
+    vi.useFakeTimers();
+    try {
+      const grant = await startManualPage();
+      browser.tabs.sendMessage.mockClear();
+      let releaseWrite;
+      browser.storage.session.set.mockImplementationOnce(value => new Promise(resolve => {
+        releaseWrite = () => {
+          navigationStore.saved = structuredClone(value);
+          resolve();
+        };
+      }));
+      setupFrames([
+        { frameId: 0, response: { success: true } },
+        { frameId: 7, response: { success: true } },
+      ]);
+
+      const stopPromise = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_STOP_AUTO }, sender);
+      await vi.waitFor(() => expect(releaseWrite).toBeTypeOf('function'));
+      await vi.advanceTimersByTimeAsync(PRE_FANOUT_TIMEOUT_MS);
+      const result = await stopPromise;
+      expect(result).toMatchObject({
+        success: false,
+        reason: 'manual_continuity_revocation_uncertain',
+      });
+      expect(browser.tabs.sendMessage.mock.calls.every(([, message]) => (
+        message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
+        && message.data.manualContinuityGeneration === grant.generation
+        && message.data.revocationCommitted === false
+      ))).toBe(true);
+
+      releaseWrite();
+      await vi.waitFor(async () => {
+        expect(await pageNavigationTracker.getManualContinuity(42)).toBeNull();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports committed false after partial Stop delivery and keeps the grant revoked after worker replacement', async () => {
+    const grant = await startManualPage();
+    setupFrames([
+      { frameId: 0, response: { success: true } },
+      { frameId: 7, error: new Error('child unavailable') },
+    ]);
+
+    const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_STOP_AUTO }, sender);
+
+    expect(result).toMatchObject({
+      success: false,
+      reason: 'manual_continuity_stop_delivery_uncertain',
+      hasManualContinuity: false,
+      manualContinuityGeneration: grant.generation + 1,
+      frames: [{ frameId: 0, success: true }, { frameId: 7, success: false }],
+    });
+    const replacementTracker = new PageNavigationTracker(browser.storage.session);
+    expect(await replacementTracker.getManualContinuity(42)).toBeNull();
+    expect(await replacementTracker.getManualContinuityStatus(42)).toMatchObject({
+      hasManualContinuity: false,
+      manualContinuityGeneration: grant.generation + 1,
+    });
+  });
+
+  it('preserves Stop authority uncertainty when another frame acknowledges cancellation', async () => {
+    await startManualPage();
+    setupFrames([
+      { frameId: 0, response: { success: true } },
+      { frameId: 7, response: {
+        success: false,
+        reason: 'manual_continuity_status_unavailable',
+        isTransportFailure: true,
+      } },
+    ]);
+
+    const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_STOP_AUTO }, sender);
+
+    expect(result).toMatchObject({
+      success: false,
+      reason: 'manual_continuity_stop_authority_uncertain',
+      isTransportFailure: true,
+      responses: [
+        { success: true },
+        { success: false, reason: 'manual_continuity_status_unavailable' },
+      ],
+      frames: [{ frameId: 0, success: true }, { frameId: 7, success: true }],
+    });
+  });
+
+  it('admits concurrent top and child SPA routes using one fence and the original top epoch', async () => {
+    const grant = await startManualPage();
+    const restartFence = pageNavigationTracker.getOrMintRestartFence(42);
+    await pageNavigationTracker.capture(42, 0, 'https://example.com/route-b');
+    browser.webNavigation.getFrame.mockImplementation(({ frameId }) => ({
+      url: frameId === 0 ? 'https://example.com/route-b' : 'https://frame-7.example',
+    }));
+    const [topCursor, childCursor] = await Promise.all([
+      pageNavigationTracker.getCursor(42, 0),
+      pageNavigationTracker.getCursor(42, 7),
+    ]);
+    const admission = (frameId, navigationCursor) => handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_ADMIT,
+      data: {
+        origin: 'manual-spa',
+        restartFence,
+        manualContinuityGeneration: grant.generation,
+        topDocumentEpoch: grant.topDocumentEpoch,
+        navigationCursor,
+      },
+    }, { ...sender, frameId });
+
+    await expect(Promise.all([
+      admission(0, topCursor),
+      admission(7, childCursor),
+    ])).resolves.toEqual([{ success: true }, { success: true }]);
+  });
+
+  it('guards translation batches against a revoked manual grant before service dispatch', async () => {
+    const grant = await startManualPage();
+    const navigationCursor = await pageNavigationTracker.getCursor(42, 0);
+    const authorization = {
+      generation: grant.generation,
+      topDocumentEpoch: grant.topDocumentEpoch,
+      navigationCursor,
+    };
+    const message = {
+      action: MessageActions.PAGE_TRANSLATE_BATCH,
+      data: { manualContinuity: authorization },
+    };
+    const contentSender = { ...sender, frameId: 0 };
+    const frameReadsBeforeBatch = browser.webNavigation.getFrame.mock.calls.length;
+    const storageReadsBeforeBatch = browser.storage.session.get.mock.calls.length;
+
+    await handlePageTranslation(message, contentSender);
+    expect(unifiedTranslationService.handleTranslationRequest).toHaveBeenCalledOnce();
+    expect(browser.webNavigation.getFrame).toHaveBeenCalledTimes(frameReadsBeforeBatch);
+    expect(browser.storage.session.get).toHaveBeenCalledTimes(storageReadsBeforeBatch);
+
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_STOP_AUTO }, sender);
+    unifiedTranslationService.handleTranslationRequest.mockClear();
+    expect(await handlePageTranslation(message, contentSender)).toEqual({
+      success: false,
+      reason: 'manual_continuity_revoked',
+    });
+    expect(unifiedTranslationService.handleTranslationRequest).not.toHaveBeenCalled();
   });
 });
 
@@ -547,7 +862,7 @@ describe('handlePageTranslation response projection', () => {
     expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
   });
 
-  it('keeps restore aggregate response shape unchanged', async () => {
+  it('includes committed continuity revocation state on restore responses', async () => {
     const mainResponse = { success: false, reason: ActionReasons.NOT_SUITABLE };
     setupFrames([{ frameId: 0, response: mainResponse }]);
 
@@ -555,6 +870,8 @@ describe('handlePageTranslation response projection', () => {
 
     expect(result).toEqual({
       success: false,
+      hasManualContinuity: false,
+      manualContinuityGeneration: 1,
       responses: [mainResponse],
       frames: [{ frameId: 0, success: true }],
       targetTabId: 42,
@@ -621,7 +938,12 @@ describe('handlePageTranslation target tab ownership', () => {
       [42, expect.objectContaining({ action: MessageActions.PAGE_TRANSLATE_STOP_AUTO }), { frameId: 2 }],
     ]));
     expect(result).toEqual({
-      success: true,
+      success: false,
+      reason: 'manual_continuity_stop_delivery_uncertain',
+      isTransportFailure: true,
+      revocationGeneration: 1,
+      hasManualContinuity: false,
+      manualContinuityGeneration: 1,
       responses: [{ success: true }, { success: true }],
       frames: [
         { frameId: 0, success: true },
@@ -790,7 +1112,11 @@ describe('handlePageTranslation target tab ownership', () => {
       { tab: { id: 10 } }
     );
 
-    expect(result).toBe(aggregatedResponse);
+    expect(result).toMatchObject({
+      ...aggregatedResponse,
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
+    });
     expect(browser.tabs.query).not.toHaveBeenCalled();
     expect(tabPermissionChecker.checkTabAccess).toHaveBeenCalledWith(10);
     expect(browser.webNavigation.getAllFrames).not.toHaveBeenCalled();
@@ -854,7 +1180,11 @@ describe('PAGE_TRANSLATE_GET_STATUS aggregated fast path', () => {
 
     const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_GET_STATUS }, sender);
 
-    expect(result).toBe(aggregate);
+    expect(result).toMatchObject({
+      ...aggregate,
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
+    });
     expect(browser.webNavigation.getAllFrames).not.toHaveBeenCalled();
     expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(1);
     expect(browser.tabs.sendMessage).toHaveBeenCalledWith(42, expect.anything(), { frameId: 0 });
@@ -870,7 +1200,11 @@ describe('PAGE_TRANSLATE_GET_STATUS aggregated fast path', () => {
 
     const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_GET_STATUS }, sender);
 
-    expect(result).toBe(aggregate);
+    expect(result).toMatchObject({
+      ...aggregate,
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
+    });
     expect(browser.webNavigation.getAllFrames).toHaveBeenCalledWith({ tabId: 42 });
     expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(3);
   });
@@ -885,7 +1219,11 @@ describe('PAGE_TRANSLATE_GET_STATUS aggregated fast path', () => {
 
     const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_GET_STATUS }, sender);
 
-    expect(result).toBe(aggregate);
+    expect(result).toMatchObject({
+      ...aggregate,
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
+    });
     expect(browser.webNavigation.getAllFrames).toHaveBeenCalledWith({ tabId: 42 });
     expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(3);
   });
@@ -1177,7 +1515,10 @@ describe('bounded frame command response deadline', () => {
     await vi.advanceTimersByTimeAsync(RESPONSE_TIMEOUT_MS + 100);
     const result = await resultPromise;
 
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(action === MessageActions.PAGE_TRANSLATE);
+    if (action !== MessageActions.PAGE_TRANSLATE) {
+      expect(result.reason).toBe('manual_continuity_stop_delivery_uncertain');
+    }
     expect(result.responses).toEqual([
       { success: true, messageId: 'main' },
       { success: true, messageId: 'child' },
@@ -1228,7 +1569,8 @@ describe('bounded frame command response deadline', () => {
 
     const result = await handlePageTranslation({ action: MessageActions.PAGE_RESTORE }, sender);
 
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe('manual_continuity_stop_delivery_uncertain');
     expect(result.frames).toEqual([
       { frameId: 0, success: true },
       { frameId: 7, success: false },
@@ -1277,10 +1619,11 @@ describe('bounded frame command response deadline', () => {
     await vi.advanceTimersByTimeAsync(RESPONSE_TIMEOUT_MS + 100);
     const result = await resultPromise;
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       success: false,
-      reason: 'frame_command_response_timeout',
+      reason: 'manual_continuity_stop_delivery_uncertain',
       isTransportFailure: true,
+      revocationGeneration: 1,
       responses: [],
       frames: [
         { frameId: 0, success: false, isResponseTimeout: true, reason: 'frame_command_response_timeout' },
@@ -1316,7 +1659,11 @@ describe('bounded frame command response deadline', () => {
 
     const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_GET_STATUS }, sender);
 
-    expect(result).toBe(aggregatedResponse);
+    expect(result).toMatchObject({
+      ...aggregatedResponse,
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
+    });
     expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(1);
     expect(browser.webNavigation.getAllFrames).not.toHaveBeenCalled();
   });
@@ -1352,7 +1699,11 @@ describe('bounded frame command response deadline', () => {
       + FALLBACK_AGGREGATE_DELAY_MS
     );
 
-    await expect(Promise.race([resultPromise, outerTimeout])).resolves.toBe(aggregatedResponse);
+    await expect(Promise.race([resultPromise, outerTimeout])).resolves.toMatchObject({
+      ...aggregatedResponse,
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
+    });
     expect(browser.webNavigation.getAllFrames).toHaveBeenCalledWith({ tabId: 42 });
     expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(3);
   });
@@ -1367,10 +1718,12 @@ describe('bounded frame command response deadline', () => {
     await vi.advanceTimersByTimeAsync((RESPONSE_TIMEOUT_MS * 2) + 100);
     const result = await resultPromise;
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       success: false,
       reason: 'frame_command_response_timeout',
       isTransportFailure: true,
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
     });
     expect(result.error).not.toBe('No active translation found');
   });
@@ -1385,10 +1738,12 @@ describe('bounded frame command response deadline', () => {
     await vi.advanceTimersByTimeAsync(RESPONSE_TIMEOUT_MS + 100);
     const result = await resultPromise;
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       success: false,
       reason: 'frame_command_response_timeout',
       isTransportFailure: true,
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
     });
   });
 
@@ -1400,9 +1755,11 @@ describe('bounded frame command response deadline', () => {
 
     const result = await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE_GET_STATUS }, sender);
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       success: false,
       error: 'No active translation found',
+      hasManualContinuity: false,
+      manualContinuityGeneration: null,
     });
     expect(result.isResponseTimeout).toBeUndefined();
     expect(result.reason).toBeUndefined();

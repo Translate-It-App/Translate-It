@@ -289,6 +289,7 @@ const setupBaseMocks = () => {
       failedCount: 0,
       totalCount: 0,
     },
+    setPageTranslation: (state) => Object.assign(mocks.mobileStore.pageTranslationData, state),
   });
   mocks.settingsStore = reactive({
     isDarkTheme: false,
@@ -368,6 +369,41 @@ describe('DesktopFabMenu page command transport', () => {
 
     expect(mocks.sendRegularMessage).toHaveBeenCalledWith({ action }, { returnFailureResponse: true });
     expect(mocks.pageEventBus.emit).not.toHaveBeenCalledWith(action);
+  });
+
+  it('applies a committed revoke from partial Stop delivery without clearing active state', async () => {
+    mocks.mobileStore.pageTranslationData = {
+      ...mocks.mobileStore.pageTranslationData,
+      status: 'translating',
+      isTranslating: true,
+      isAutoTranslating: true,
+      isTranslated: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 4,
+      translatedCount: 3,
+    };
+    mocks.sendRegularMessage.mockResolvedValue({
+      success: false,
+      reason: 'manual_continuity_stop_delivery_uncertain',
+      hasManualContinuity: false,
+      manualContinuityGeneration: 5,
+      frames: [{ success: true }, { success: false }],
+    });
+    const wrapper = mount(DesktopFabMenu);
+    const stop = wrapper.vm.menuItems.find((item) => item.id === 'page_translating_stop');
+
+    stop.action();
+    await Promise.resolve();
+
+    expect(mocks.mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: false,
+      manualContinuityGeneration: 5,
+      status: 'translating',
+      isTranslating: true,
+      isAutoTranslating: true,
+      isTranslated: true,
+      translatedCount: 3,
+    });
   });
 
   it('opens scope choices from the page secondary action and routes toggles', async () => {
