@@ -338,6 +338,26 @@ class SystemFontDetector {
   }
 
   /**
+   * Get display metadata for a font value without running font detection
+   * @param {string} fontValue - Font value
+   * @returns {Object|null} Font metadata, or null when no font value is set
+   */
+  getFontMetadata(fontValue) {
+    if (!fontValue) return null
+
+    const knownFont = this.cachedFonts?.find(f => f.value === fontValue) ||
+      this.fallbackFonts.find(f => f.value === fontValue)
+    if (knownFont) return knownFont
+
+    const catalogFont = this.testFonts.find(name => this._sanitizeFontValue(name) === fontValue)
+    if (catalogFont) {
+      return { name: catalogFont, value: fontValue, category: this._categorizeFontName(catalogFont) }
+    }
+
+    return { name: fontValue, value: fontValue, category: '' }
+  }
+
+  /**
    * Get fallback fonts by category
    * @param {string} category - Font category
    * @returns {string} Fallback font stack

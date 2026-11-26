@@ -206,7 +206,8 @@ const fontSizeOptions = computed(() => CONFIG.FONT_SIZE_OPTIONS || [])
 
 // Computed properties
 const selectedFont = computed(() => {
-  return availableFonts.value.find(f => f.value === localFontFamily.value)
+  return availableFonts.value.find(f => f.value === localFontFamily.value) ||
+    systemFontDetector.getFontMetadata(localFontFamily.value)
 })
 
 const selectedFontName = computed(() => {
