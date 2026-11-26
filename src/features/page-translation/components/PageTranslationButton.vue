@@ -114,7 +114,7 @@
     </template>
 
     <!-- State: Translated -->
-    <template v-if="isTranslated && !isTranslating">
+    <template v-if="isTranslated && !isTranslating && !isAutoTranslating && !hasManualContinuity">
       <div
         v-if="textOnly"
         class="ti-text-status-wrapper"

@@ -106,6 +106,7 @@ describe("PageTranslationButton.vue", () => {
     mockUsePageTranslation.isTranslating.value = false;
     mockUsePageTranslation.isTranslated.value = false;
     mockUsePageTranslation.isAutoTranslating.value = false;
+    mockUsePageTranslation.hasManualContinuity.value = false;
     mockUsePageTranslation.progress.value = 0;
     mockUsePageTranslation.canTranslate.value = true;
     mockUsePageTranslation.canRestore.value = false;
@@ -755,13 +756,29 @@ describe("PageTranslationButton.vue", () => {
 });
 
 describe("manual continuity controls", () => {
-  it("shows Stop and keeps Restore available for retained content between passes", () => {
+  it("shows only Stop for retained content between manual passes", () => {
     mockUsePageTranslation.hasManualContinuity.value = true;
     mockUsePageTranslation.isTranslated.value = true;
     mockUsePageTranslation.canRestore.value = true;
     const wrapper = mount(PageTranslationButton);
 
     expect(wrapper.text()).toContain("page_translation_btn_stop");
-    expect(wrapper.text()).toContain("page_translation_btn_restore");
+    expect(wrapper.text()).not.toContain("page_translation_btn_restore");
+  });
+
+  it("shows Restore after continuity stops and Translate after content is restored", () => {
+    mockUsePageTranslation.isTranslating.value = false;
+    mockUsePageTranslation.isAutoTranslating.value = false;
+    mockUsePageTranslation.hasManualContinuity.value = false;
+    mockUsePageTranslation.isTranslated.value = true;
+    mockUsePageTranslation.canRestore.value = true;
+    const restored = mount(PageTranslationButton);
+    expect(restored.text()).toContain("page_translation_btn_restore");
+    expect(restored.text()).not.toContain("page_translation_btn_stop");
+
+    mockUsePageTranslation.isTranslated.value = false;
+    mockUsePageTranslation.canRestore.value = false;
+    const idle = mount(PageTranslationButton);
+    expect(idle.text()).toContain("page_translation_btn_translate");
   });
 });

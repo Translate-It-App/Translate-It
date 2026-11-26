@@ -1173,17 +1173,6 @@ const menuItems = computed(() => {
     });
   }
 
-  if ((status.isAuto || status.isTranslating || status.hasManualContinuity) && status.isTranslated) {
-    items.push({
-      id: "restore_page",
-      label: t("desktop_fab_restore_original_label"),
-      icon: IconRestore,
-      closeMenu: true,
-      action: () => sendPageCommand({ action: MessageActions.PAGE_RESTORE }),
-      secondaryAction: pageSecondaryAction,
-    });
-  }
-
   return items;
 });
 

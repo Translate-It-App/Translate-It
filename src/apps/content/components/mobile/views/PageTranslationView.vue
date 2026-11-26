@@ -116,16 +116,6 @@
         }}
       </div>
 
-      <button
-        v-if="showStopAction && pageTranslationData.isTranslated"
-        class="ti-m-progress-settings-row ti-m-auto-translate-row"
-        @click.stop="restorePage"
-      >
-        <span class="ti-m-setting-label">
-          {{ t("mobile_page_restore_btn", "Restore Original Page") }}
-        </span>
-      </button>
-
       <!-- Error Message in Progress Card -->
       <div
         v-if="pageTranslationData.errorMessage || pageTranslationData.status === 'error'"

@@ -404,6 +404,26 @@ describe('DesktopFabMenu page command transport', () => {
       isTranslated: true,
       translatedCount: 3,
     });
+    expect(wrapper.vm.menuItems.map((item) => item.id)).toContain('page_translating_stop');
+    expect(wrapper.vm.menuItems.map((item) => item.id)).not.toContain('restore_page');
+  });
+
+  it('shows Restore only after Stop and Translate after Restore', () => {
+    mocks.mobileStore.pageTranslationData = {
+      ...mocks.mobileStore.pageTranslationData,
+      status: 'completed',
+      isTranslated: true,
+    };
+    const wrapper = mount(DesktopFabMenu);
+    expect(wrapper.vm.menuItems.map((item) => item.id)).toContain('restore_page');
+    expect(wrapper.vm.menuItems.map((item) => item.id)).not.toContain('page_translating_stop');
+
+    mocks.mobileStore.pageTranslationData = {
+      ...mocks.mobileStore.pageTranslationData,
+      status: 'idle',
+      isTranslated: false,
+    };
+    expect(wrapper.vm.menuItems.map((item) => item.id)).toContain('translate_page');
   });
 
   it('opens scope choices from the page secondary action and routes toggles', async () => {

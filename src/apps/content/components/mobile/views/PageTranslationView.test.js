@@ -153,7 +153,7 @@ describe('PageTranslationView page action', () => {
     expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Stop Auto-Translation')
   })
 
-  it('keeps Restore available beside Stop when committed content remains', () => {
+  it('shows only Stop when committed content remains during manual continuity', () => {
     mobileStore.pageTranslationData.value = {
       ...mobileStore.pageTranslationData.value,
       status: 'completed',
@@ -167,7 +167,7 @@ describe('PageTranslationView page action', () => {
     const wrapper = mount(PageTranslationView)
 
     expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Stop Auto-Translation')
-    expect(wrapper.text()).toContain('Restore Original Page')
+    expect(wrapper.text()).not.toContain('Restore Original Page')
   })
 
   it('disables page translation for a resolved provider without bulk support', () => {
@@ -284,6 +284,21 @@ describe('PageTranslationView page action', () => {
     expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Restore Original Page')
     expect(wrapper.text()).not.toContain('Retry Translation')
     expect(pageEventBus.emit).not.toHaveBeenCalledWith(MessageActions.PAGE_TRANSLATE, expect.anything())
+  })
+
+  it('shows Translate after restored content is cleared', () => {
+    mobileStore.pageTranslationData.value = {
+      ...mobileStore.pageTranslationData.value,
+      status: 'idle',
+      hasManualContinuity: false,
+      isTranslated: false,
+      translatedCount: 0,
+      failedCount: 0,
+      totalCount: 0,
+    }
+    const wrapper = mount(PageTranslationView)
+
+    expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Start Translation')
   })
 
   it('shows passive wording for partial completion', () => {
