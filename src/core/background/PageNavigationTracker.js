@@ -73,7 +73,7 @@ export class PageNavigationTracker {
         this.state = saved || { nextDocumentEpoch: 0, frames: {}, manualContinuity: {} };
         this.state.manualContinuity ||= {};
         for (const [tabId, grant] of Object.entries(this.state.manualContinuity)) {
-          if (!grant.revoked && !grant.topDocumentToken) {
+          if (!grant.revoked && (!grant.armed || !grant.topDocumentToken)) {
             this.state.manualContinuity[tabId] = { generation: grant.generation + 1, revoked: true };
             this.dirty = true;
           }
@@ -128,7 +128,7 @@ export class PageNavigationTracker {
       if (!top) throw new Error('Top document is not admitted');
       const previous = state.manualContinuity[tabId];
       const block = this.blockedManualContinuity.get(tabId);
-      if (previous && !previous.revoked && previous.topDocumentEpoch === top.documentEpoch
+      if (previous && !previous.revoked && previous.armed && previous.topDocumentEpoch === top.documentEpoch
           && previous.topDocumentToken === options.topDocumentToken
           && !(block && (block.generation == null || block.generation === previous.generation))) {
         return { grant: previous, reused: true };
@@ -159,12 +159,13 @@ export class PageNavigationTracker {
     });
   }
 
-  async armManualContinuity(tabId, generation) {
+  async armManualContinuity(tabId, generation, expectedRevision = this.manualContinuityRevision.get(tabId) ?? 0) {
     return this._run(state => {
       const grant = state.manualContinuity[tabId];
       const top = state.frames[`${tabId}:0`];
       const block = this.blockedManualContinuity.get(tabId);
-      if (!grant || grant.revoked || grant.generation !== generation
+      if ((this.manualContinuityRevision.get(tabId) ?? 0) !== expectedRevision
+          || !grant || grant.revoked || grant.generation !== generation
           || grant.topDocumentEpoch !== top?.documentEpoch
           || (block && (block.generation == null || block.generation === generation))) return false;
       if (!grant.armed) {
@@ -286,7 +287,10 @@ export class PageNavigationTracker {
       && !(block && (block.generation == null || block.generation === generation)));
   }
 
-  blockManualContinuity(tabId, expectedGeneration = null) {
+  blockManualContinuity(tabId, expectedGeneration = null, expectedRevision = null) {
+    if (expectedRevision != null && (this.manualContinuityRevision.get(tabId) ?? 0) !== expectedRevision) {
+      return false;
+    }
     const previous = this.blockedManualContinuity.get(tabId);
     const revision = this.manualContinuityRevision.get(tabId) ?? 0;
     const cutoffGeneration = expectedGeneration

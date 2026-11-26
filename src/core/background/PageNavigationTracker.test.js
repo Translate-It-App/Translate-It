@@ -176,6 +176,8 @@ describe('Page navigation producer cursor', () => {
   it('persists a document-scoped manual grant and restores it after worker restart', async () => {
     await tracker.seed(42, frames);
     const grant = await grantManual();
+    await tracker.armManualContinuity(42, grant.generation);
+    const armedGrant = await tracker.getManualContinuity(42);
     expect(grant).toMatchObject({
       generation: 1,
       revoked: false,
@@ -184,20 +186,48 @@ describe('Page navigation producer cursor', () => {
     });
 
     tracker = new PageNavigationTracker(storage);
-    expect(await tracker.getManualContinuity(42)).toEqual(grant);
+    expect(await tracker.getManualContinuity(42)).toEqual(armedGrant);
     expect(await tracker.getManualContinuityStatus(42)).toMatchObject({
       hasManualContinuity: true,
       manualContinuityGeneration: 1,
     });
   });
 
+  it('revokes an unarmed persisted grant during worker restart hydration', async () => {
+    await tracker.seed(42, frames);
+    const grant = await grantManual();
+    expect(grant).toMatchObject({ generation: 1, armed: false, revoked: false });
+
+    tracker = new PageNavigationTracker(storage);
+    expect(await tracker.getManualContinuity(42)).toBeNull();
+    expect(await tracker.getManualContinuityStatus(42)).toMatchObject({
+      hasManualContinuity: false,
+      manualContinuityGeneration: grant.generation + 1,
+    });
+    expect(saved.pageTranslationNavigation.manualContinuity[42]).toEqual({
+      generation: grant.generation + 1,
+      revoked: true,
+    });
+  });
+
   it('reuses an accepted manual grant for a duplicate start instead of rotating its generation', async () => {
     await tracker.seed(42, frames);
     const first = await grantManual();
+    await tracker.armManualContinuity(42, first.generation);
     const duplicate = await grantManual();
 
-    expect(duplicate).toEqual(first);
-    expect(saved.pageTranslationNavigation.manualContinuity[42]).toEqual(first);
+    expect(duplicate).toMatchObject({ ...first, armed: true });
+    expect(saved.pageTranslationNavigation.manualContinuity[42]).toEqual(duplicate);
+  });
+
+  it('does not reuse an unarmed provisional grant for a new start owner', async () => {
+    await tracker.seed(42, frames);
+    const provisional = await grantManual();
+    const replacement = await grantManual();
+
+    expect(provisional).toMatchObject({ generation: 1, armed: false });
+    expect(replacement).toMatchObject({ generation: 2, armed: false, revoked: false });
+    expect(replacement.generation).toBeGreaterThan(provisional.generation);
   });
 
   it('durably arms an accepted grant and enrolls a new child without changing generation', async () => {
@@ -293,6 +323,7 @@ describe('Page navigation producer cursor', () => {
   it.each(['reload', 'removal'])('retains an active grant across child %s while frame authorization stays scoped', async change => {
     await tracker.seed(42, frames);
     const grant = await grantManual();
+    await tracker.armManualContinuity(42, grant.generation);
     const topCursor = await tracker.getCursor(42, 0);
     const oldChildCursor = await tracker.getCursor(42, 7);
     if (change === 'reload') await tracker.committed(42, 7, 'https://frame.example/reloaded');
@@ -301,7 +332,6 @@ describe('Page navigation producer cursor', () => {
     const duplicate = await grantManual();
     const changedChildCursor = await tracker.getCursor(42, 7) || oldChildCursor;
 
-    expect(duplicate.generation).toBe(grant.generation);
     expect(duplicate.generation).toBe(grant.generation);
     expect(duplicate.frames[7]).toBeUndefined();
     expect(await tracker.validateManualContinuityBatch(
@@ -345,7 +375,9 @@ describe('Page navigation producer cursor', () => {
 
   it('keeps revocation closed on storage failure in-worker and documents the uncommitted restart boundary', async () => {
     await tracker.seed(42, frames);
-    const grant = await grantManual();
+    const provisional = await grantManual();
+    await tracker.armManualContinuity(42, provisional.generation);
+    const grant = await tracker.getManualContinuity(42);
     const revision = tracker.blockManualContinuity(42);
     storage.set.mockRejectedValueOnce(new Error('write rejected'));
     await expect(tracker.revokeManualContinuity(42, grant.generation, revision)).rejects.toThrow('write rejected');
@@ -371,7 +403,9 @@ describe('Page navigation producer cursor', () => {
 
   it('durably revokes a restored grant when its operation revision is uninitialized', async () => {
     await tracker.seed(42, frames);
-    const grant = await grantManual();
+    const provisional = await grantManual();
+    await tracker.armManualContinuity(42, provisional.generation);
+    const grant = await tracker.getManualContinuity(42);
     const restartedTracker = new PageNavigationTracker(storage);
     const revision = restartedTracker.blockManualContinuity(42, grant.generation);
 
