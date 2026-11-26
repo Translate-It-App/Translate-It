@@ -225,6 +225,8 @@ import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { ActionReasons } from '@/shared/messaging/core/MessagingCore.js';
 import { ErrorHandler } from '@/shared/error-management/ErrorHandler.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
+import { MainFrameAggregator } from '@/core/content-scripts/main/MainFrameAggregator.js';
+import { MainFrameCoordinator } from '@/core/content-scripts/main/MainFrameCoordinator.js';
 
 describe('PageTranslationManager', () => {
   let manager;
@@ -309,6 +311,154 @@ describe('PageTranslationManager', () => {
       return { config, handlers: new Map(mockStorageManagerOn.mock.calls) };
     };
 
+    it('lets a manual start supersede automatic work already pending in the manager', async () => {
+      const pendingNavigationValidation = createDeferred();
+      const validationEntered = createDeferred();
+      const settings = {
+        targetLanguage: 'fa', translationApi: 'google', lazyLoading: true,
+        autoTranslateOnDOMChanges: false, showOriginalOnHover: false,
+      };
+      PageTranslationSettingsLoader.load.mockResolvedValue(settings);
+
+      const automatic = manager.translatePage({
+        isAuto: true,
+        validateNavigation: () => {
+          validationEntered.resolve();
+          return pendingNavigationValidation.promise;
+        },
+      });
+      await validationEntered.promise;
+      await vi.waitFor(() => expect(PageTranslationSettingsLoader.load).toHaveBeenCalledOnce());
+      const autoController = manager.abortController;
+
+      const manual = await manager.translatePage({});
+      const manualMessageId = manager.translationMessageId;
+      pendingNavigationValidation.resolve(true);
+
+      expect((await automatic).success).toBe(false);
+      expect(manual.success).toBe(true);
+      expect(autoController.signal.aborted).toBe(true);
+      expect(manager.translationMessageId).toBe(manualMessageId);
+      expect(pageEventBus.emit.mock.calls.filter(([action]) => action === MessageActions.PAGE_TRANSLATE_START))
+        .toHaveLength(1);
+    });
+
+    it('allows manual translation on a new route while prior accepted content remains restorable', async () => {
+      const previousLocation = window.location;
+      vi.unstubAllGlobals();
+      const originalUrl = window.location.href;
+      const settings = {
+        targetLanguage: 'fa', translationApi: 'google', lazyLoading: true,
+        autoTranslateOnDOMChanges: false, showOriginalOnHover: false,
+      };
+      manager.currentUrl = originalUrl;
+      manager.translatedUrl = originalUrl;
+      manager.isTranslated = true;
+      manager.bridge.hasRestorableTranslations = true;
+      PageTranslationSettingsLoader.load.mockResolvedValue(settings);
+
+      try {
+        window.history.replaceState({}, '', '/manual-route');
+        const result = await manager.translatePage({});
+
+        expect(result.success).toBe(true);
+        expect(manager.isTranslated).toBe(true);
+        expect(manager.translatedUrl).toBeNull();
+        expect(manager.bridge.stopPersistence).toHaveBeenCalledOnce();
+      } finally {
+        window.history.replaceState({}, '', originalUrl);
+        vi.stubGlobal('location', previousLocation);
+      }
+    });
+
+    it('keeps delayed progress bound to its route across status reads and allows a manual start on the new route', async () => {
+      const previousLocation = window.location;
+      vi.unstubAllGlobals();
+      const routeA = window.location.href;
+      PageTranslationSettingsLoader.load.mockResolvedValue({
+        targetLanguage: 'fa', translationApi: 'google', lazyLoading: true,
+        autoTranslateOnDOMChanges: false, showOriginalOnHover: false,
+      });
+
+      try {
+        const startedOnA = await manager.translatePage({});
+        expect(startedOnA.success).toBe(true);
+        const sessionA = manager.acceptedLifecycleSessionId;
+        expect(manager.translationSessionUrl).toBe(routeA);
+
+        manager.scheduler.onLifecycleEvent(MessageActions.PAGE_TRANSLATE_COMPLETE, {
+          sessionId: sessionA,
+          translatedCount: 1,
+          totalCount: 1,
+          failedCount: 0,
+        });
+        expect(manager.translatedUrl).toBe(routeA);
+
+        window.history.replaceState({}, '', '/route-b');
+        const routeB = window.location.href;
+        expect(manager.getStatus().currentUrl).toBe(routeB);
+        expect(manager.currentUrl).toBe(routeA);
+
+        manager.scheduler.onLifecycleEvent(MessageActions.PAGE_TRANSLATE_PROGRESS, {
+          sessionId: sessionA,
+          translatedCount: 2,
+          totalCount: 2,
+          failedCount: 0,
+        });
+        expect(manager.translatedUrl).toBe(routeA);
+
+        const startedOnB = await manager.translatePage({});
+        expect(startedOnB.success).toBe(true);
+        expect(manager.acceptedLifecycleSessionId).not.toBe(sessionA);
+        expect(manager.translationSessionUrl).toBe(routeB);
+        expect(manager.translatedUrl).toBeNull();
+      } finally {
+        window.history.replaceState({}, '', routeA);
+        vi.stubGlobal('location', previousLocation);
+      }
+    });
+
+    it('allows a manual retry after replacement START fails with only older originals retained', async () => {
+      const previousLocation = window.location;
+      vi.unstubAllGlobals();
+      const originalUrl = window.location.href;
+      const settings = {
+        targetLanguage: 'fa', translationApi: 'google', lazyLoading: true,
+        autoTranslateOnDOMChanges: false, showOriginalOnHover: false,
+      };
+      manager.currentUrl = originalUrl;
+      manager.translatedUrl = originalUrl;
+      manager.isTranslated = true;
+      manager.bridge.hasRestorableTranslations = true;
+      PageTranslationSettingsLoader.load.mockResolvedValue(settings);
+
+      try {
+        window.history.replaceState({}, '', '/failed-replacement');
+        const replacement = await manager.translatePage({ isAuto: true, preserveAcceptedTranslations: true });
+        expect(replacement.success).toBe(true);
+        expect(manager.translatedUrl).toBeNull();
+
+        const failedAttempt = {
+          controller: manager.abortController,
+          messageId: manager.translationMessageId,
+          sessionContext: manager.sessionContext,
+          url: window.location.href,
+          settingsRevision: manager.translationSettingsRevision,
+        };
+        manager.scheduler.sessionContext = failedAttempt.sessionContext;
+        expect(manager._handleDiscoveryError(failedAttempt, new Error('replacement failed'))).toBe(true);
+        expect(manager.isTranslated).toBe(true);
+        expect(manager.translatedUrl).toBeNull();
+
+        const retry = await manager.translatePage({});
+        expect(retry.success).toBe(true);
+        expect(manager.translatedUrl).toBeNull();
+      } finally {
+        window.history.replaceState({}, '', originalUrl);
+        vi.stubGlobal('location', previousLocation);
+      }
+    });
+
     it('retains accepted originals when another real route supersedes pending settings', async () => {
       const previousLocation = window.location;
       vi.unstubAllGlobals();
@@ -355,6 +505,98 @@ describe('PageTranslationManager', () => {
           autoTranslateOnDOMChanges: false,
         });
       }
+    });
+
+    it('keeps Restore available and restores only owned values after the bridge session is gone', async () => {
+      const previousLocation = window.location;
+      vi.unstubAllGlobals();
+      const originalUrl = window.location.href;
+      const { PageTranslationBridge: ActualBridge } = await vi.importActual('./PageTranslationBridge.js');
+      manager.bridge = new ActualBridge();
+      PageTranslationSettingsLoader.load.mockResolvedValue(acceptedSettings);
+      manager.scheduler.enqueue.mockImplementation(async text => ({
+        __pageTranslationSettlement: true, text: `Translated: ${text}`, state: 'pending',
+        settle(outcome) { this.state = outcome; },
+      }));
+
+      try {
+        document.body.innerHTML = '<p id="owned">Original source</p><p id="edited">Second source</p>';
+        await manager.translatePage({ isAuto: true });
+        await vi.waitFor(() => expect(document.querySelector('#owned').textContent).toContain('Translated:'));
+        await vi.waitFor(() => expect(document.querySelector('#edited').textContent).toContain('Translated:'));
+        manager.scheduler.translatedCount = 2;
+        manager.bridge.cleanup();
+        document.querySelector('#edited').textContent = 'Host edit';
+
+        expect(manager.getStatus()).toMatchObject({ isTranslated: true, translatedCount: 2 });
+        expect(manager.bridge.session).toBeNull();
+        await manager.restorePage({ manual: true });
+
+        expect(document.querySelector('#owned').textContent).toBe('Original source');
+        expect(document.querySelector('#edited').textContent).toBe('Host edit');
+      } finally {
+        window.history.replaceState({}, '', originalUrl);
+        vi.stubGlobal('location', previousLocation);
+      }
+    });
+
+    it('keeps retained Restore ownership through silent settlement when progress count is zero', () => {
+      manager.bridge.hasRestorableTranslations = true;
+      manager.scheduler.translatedCount = 0;
+      manager.isTranslating = true;
+
+      manager._settleSilentPostStart();
+
+      expect(manager.isTranslated).toBe(true);
+      expect(manager.getStatus()).toMatchObject({ isTranslated: true, translatedCount: 0 });
+    });
+
+    it('keeps Restore ownership when resetting or cleaning up a failed pre-start attempt', () => {
+      manager.bridge.hasRestorableTranslations = true;
+      manager.scheduler.translatedCount = 0;
+      manager.resetLocalState();
+      expect(manager.bridge.stopPersistence).toHaveBeenCalledOnce();
+      expect(manager.bridge.cleanup).not.toHaveBeenCalled();
+      expect(manager.isTranslated).toBe(true);
+
+      const controller = new AbortController();
+      const attempt = {
+        controller,
+        messageId: 'failed-pre-start',
+        sessionContext: Symbol('failed-pre-start'),
+        previousState: { isTranslated: false, isTranslating: false, isAutoTranslating: false },
+      };
+      manager.abortController = controller;
+      manager.translationMessageId = attempt.messageId;
+      manager.sessionContext = attempt.sessionContext;
+      manager._cleanupFailedPreStartAttempt(attempt, { restorePreviousState: false });
+
+      expect(manager.isTranslated).toBe(true);
+      expect(manager.getStatus().translatedCount).toBe(0);
+    });
+
+    it('keeps retained Restore ownership after discovery failure with no completed tasks', () => {
+      manager.bridge.hasRestorableTranslations = true;
+      manager.scheduler.translatedCount = 0;
+      manager.isTranslating = true;
+      const controller = new AbortController();
+      const attempt = {
+        controller,
+        messageId: 'failed-discovery',
+        sessionContext: Symbol('failed-discovery'),
+        url: window.location.href,
+        settingsRevision: manager.translationSettingsRevision,
+      };
+      manager.currentUrl = attempt.url;
+      manager.abortController = controller;
+      manager.translationMessageId = attempt.messageId;
+      manager.sessionContext = attempt.sessionContext;
+      manager.scheduler.sessionContext = attempt.sessionContext;
+
+      expect(manager._handleDiscoveryError(attempt, new Error('discovery failed'))).toBe(true);
+
+      expect(manager.isTranslated).toBe(true);
+      expect(manager.getStatus()).toMatchObject({ isTranslated: true, translatedCount: 0 });
     });
 
     it.each(['unchanged', 'edited'])('restores only owned %s text during pending route initialization', async kind => {
@@ -504,6 +746,33 @@ describe('PageTranslationManager', () => {
       expect(pageEventBus.emit.mock.calls.some(([event]) => event === MessageActions.PAGE_TRANSLATE_START)).toBe(false);
     });
 
+    it('revalidates bound navigation immediately before START admission', async () => {
+      const validateNavigation = vi.fn().mockResolvedValue(false);
+
+      const result = await manager.translatePage({ isAuto: true, validateNavigation });
+
+      expect(result.success).toBe(false);
+      expect(validateNavigation).toHaveBeenCalledOnce();
+      expect(pageEventBus.emit.mock.calls.some(([event]) => event === MessageActions.PAGE_TRANSLATE_START)).toBe(false);
+      expect(manager.pendingSettingsAttempt).toBeNull();
+    });
+
+    it('does not clear a replacement pre-start owner when navigation validation resolves late', async () => {
+      const validation = createDeferred();
+      const validateNavigation = vi.fn(() => validation.promise);
+      const obsolete = manager.translatePage({ isAuto: true, validateNavigation });
+      await vi.waitFor(() => expect(validateNavigation).toHaveBeenCalledOnce());
+      await manager.stopAutoTranslation({ cancellationReason: 'operation-abort' });
+      const fresh = await manager.translatePage();
+      const freshController = manager.abortController;
+      validation.resolve(true);
+
+      expect((await obsolete).success).toBe(false);
+      expect((await fresh).success).toBe(true);
+      expect(manager.abortController).toBe(freshController);
+      expect(pageEventBus.emit.mock.calls.filter(([event]) => event === MessageActions.PAGE_TRANSLATE_START)).toHaveLength(1);
+    });
+
     it('shares the FeatureManager-owned page handler with the real lazy loader', async () => {
       const { FeatureManager } = await vi.importActual('@/core/managers/content/FeatureManager.js');
       const lazyFeatures = await vi.importActual('@/core/content-scripts/chunks/lazy-features.js');
@@ -580,8 +849,8 @@ describe('PageTranslationManager', () => {
         await manager.activate();
         document.body.innerHTML = '<p id="accepted">Accepted route B source</p><p id="pending">Pending route B source</p>';
         window.history.replaceState({}, '', new URL('/route-b', oldUrl).href);
-        producerCursor = { ...producerCursor, url: window.location.href };
-        await owner.checkForUrlChange();
+        producerCursor = { ...producerCursor, routeRevision: 1, url: window.location.href };
+        await owner.checkForUrlChange({ navigationCursor: producerCursor, restartFence: 'fence-1' });
         await vi.waitFor(() => expect(pending).toHaveLength(2));
         expect(manager.isAutoTranslating).toBe(true);
         const result = (text) => ({
@@ -604,17 +873,19 @@ describe('PageTranslationManager', () => {
         const admissionOnly = navigation === 'admission history round trip';
         const restarts = roundTrip || navigation === 'next SPA route';
         const controller = manager.abortController;
-        const navigationUrl = roundTrip
-          ? new URL('/intermediate-route', oldUrl).href : window.location.href;
-        const capturedCursor = { documentEpoch: 1, routeRevision: restarts ? 1 : 0, url: navigationUrl };
-        producerCursor = { ...capturedCursor, routeRevision: roundTrip ? 2 : capturedCursor.routeRevision, url: window.location.href };
+        const capturedCursor = {
+          documentEpoch: 1,
+          routeRevision: restarts ? 2 : 1,
+          url: window.location.href,
+        };
+        producerCursor = capturedCursor;
         if (reordered) {
           manager.eventManager.navigationListener({
-            action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: producerCursor },
+            action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: producerCursor, restartFence: 'fence-2' },
           }, { id: browser.runtime.id });
           expect(controller.signal.aborted).toBe(true);
         }
-        const event = { action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: capturedCursor } };
+        const event = { action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: capturedCursor, restartFence: 'fence-2' } };
         if (admissionOnly) {
           await sendRegularMessage({ action: MessageActions.PAGE_TRANSLATE, data: { isAuto: true, preserveAcceptedTranslations: true } });
           const admittedController = manager.abortController;
@@ -647,17 +918,18 @@ describe('PageTranslationManager', () => {
           const heldRequest = pending.at(-1);
           const heldController = manager.abortController;
           const route = window.location.href;
-          window.history.pushState({}, '', navigationUrl);
+          const intermediateUrl = new URL('/intermediate-route', oldUrl).href;
+          window.history.pushState({}, '', intermediateUrl);
           window.history.replaceState({}, '', route);
           producerCursor = { documentEpoch: 1, routeRevision: 4, url: route };
           manager.eventManager.navigationListener({
-            action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: { ...producerCursor, routeRevision: 3, url: navigationUrl } },
+            action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: { ...producerCursor, routeRevision: 3, url: intermediateUrl }, restartFence: 'fence-3' },
           }, { id: browser.runtime.id });
           manager.eventManager.navigationListener({
-            action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: producerCursor },
+            action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: producerCursor, restartFence: 'fence-4' },
           }, { id: browser.runtime.id });
           manager.eventManager.navigationListener({
-            action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: { ...producerCursor, routeRevision: 2 } },
+            action: MessageActions.SPA_NAVIGATION, data: { navigationCursor: { ...producerCursor, routeRevision: 2 }, restartFence: 'fence-2' },
           }, { id: browser.runtime.id });
           expect(heldController.signal.aborted).toBe(true);
           await vi.waitFor(() => expect(pending).toHaveLength(4));
@@ -1353,6 +1625,20 @@ describe('PageTranslationManager', () => {
       );
     });
 
+    it('keeps stopped DOM restorable when discovery counters have reset', async () => {
+      manager.isAutoTranslating = true;
+      manager.isTranslating = true;
+      manager.scheduler.translatedCount = 0;
+      manager.bridge.hasRestorableTranslations = true;
+
+      await manager.stopAutoTranslation({ cancellationReason: 'operation-abort' });
+
+      expect(manager.isTranslated).toBe(true);
+      expect(manager.bridge.restore).not.toHaveBeenCalled();
+      await manager.restorePage({ manual: true });
+      expect(manager.bridge.restore).toHaveBeenCalledOnce();
+    });
+
     it.each(['accepted-stop-session', 'pending-start-session'])(
       'cleans the accepted language-resolution session on stop while current ID is %s', async currentId => {
         manager.isAutoTranslating = true;
@@ -1400,6 +1686,10 @@ describe('PageTranslationManager', () => {
           manager.bridge.translate(document.body);
           const completedElement = document.getElementById('completed');
           const pendingElement = document.getElementById('pending');
+          await vi.waitFor(() => {
+            expect(observer.observe).toHaveBeenCalledWith(completedElement);
+            expect(observer.observe).toHaveBeenCalledWith(pendingElement);
+          });
           observer.callback([
             { target: completedElement, isIntersecting: true },
             { target: pendingElement, isIntersecting: true },
@@ -1450,6 +1740,9 @@ describe('PageTranslationManager', () => {
     });
 
     it('updates completion state through trusted scheduler callback', () => {
+      manager.currentUrl = window.location.href;
+      manager.acceptedLifecycleSessionId = 'scheduler-session';
+      manager.translationSessionUrl = window.location.href;
       manager.isTranslating = true;
       manager.isTranslated = false;
 
@@ -1462,6 +1755,7 @@ describe('PageTranslationManager', () => {
 
       expect(manager.isTranslating).toBe(false);
       expect(manager.isTranslated).toBe(true);
+      expect(manager.translatedUrl).toBe(window.location.href);
       expect(sendRegularMessage).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({
           action: MessageActions.PAGE_TRANSLATE_COMPLETE,
@@ -1470,7 +1764,53 @@ describe('PageTranslationManager', () => {
       }), { silent: true });
     });
 
+    it.each([MessageActions.PAGE_TRANSLATE_COMPLETE, MessageActions.PAGE_TRANSLATE_IDLE])(
+      'carries computed Restore ownership from the manager through aggregation for %s',
+      action => {
+        const sessionId = `retained-${action}`;
+        manager.bridge.hasRestorableTranslations = true;
+        manager.scheduler.translatedCount = 0;
+        const aggregator = new MainFrameAggregator(MessageActions);
+        const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+        coordinator.handleTrustedPageLifecycle({
+          frameId: 0,
+          action: MessageActions.PAGE_TRANSLATE_START,
+          data: { sessionId },
+        });
+
+        manager.scheduler.onLifecycleEvent(action, {
+          sessionId,
+          translatedCount: 0,
+          failedCount: 0,
+          totalCount: 0,
+          isTranslating: false,
+        });
+        const lifecycle = pageEventBus.emit.mock.calls
+          .findLast(([publishedAction]) => publishedAction === action)?.[1];
+        expect(lifecycle).toMatchObject({ isTranslated: true, translatedCount: 0 });
+
+        coordinator.handleTrustedPageLifecycle({
+          frameId: 0,
+          action,
+          data: lifecycle,
+        });
+
+        expect(aggregator.getGlobalPageTranslationStatus()).toMatchObject({
+          isTranslated: true,
+          translatedCount: 0,
+        });
+        expect(pageEventBus.emit).toHaveBeenLastCalledWith(action, expect.objectContaining({
+          isAggregated: true,
+          isTranslated: true,
+          translatedCount: 0,
+        }));
+      }
+    );
+
     it('preserves auto mode while trusted scheduler idle clears active translation', () => {
+      manager.currentUrl = window.location.href;
+      manager.acceptedLifecycleSessionId = 'scheduler-session';
+      manager.translationSessionUrl = window.location.href;
       manager.isTranslating = true;
       manager.isTranslated = false;
       manager.isAutoTranslating = true;
@@ -1486,6 +1826,7 @@ describe('PageTranslationManager', () => {
       expect(manager.isTranslating).toBe(false);
       expect(manager.isTranslated).toBe(true);
       expect(manager.isAutoTranslating).toBe(true);
+      expect(manager.translatedUrl).toBe(window.location.href);
       expect(sendRegularMessage).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({
           action: MessageActions.PAGE_TRANSLATE_IDLE,
@@ -1504,9 +1845,10 @@ describe('PageTranslationManager', () => {
       const callback = initCall[1];
       
       const mockNode = document.createElement('div');
-      await callback('Hello', { id: 'ctx' }, 1, mockNode);
+      const isEligible = vi.fn(() => true);
+      await callback('Hello', { id: 'ctx' }, 1, mockNode, isEligible);
       
-      expect(manager.scheduler.enqueue).toHaveBeenCalledWith('Hello', { id: 'ctx' }, 1, mockNode);
+      expect(manager.scheduler.enqueue).toHaveBeenCalledWith('Hello', { id: 'ctx' }, 1, mockNode, isEligible);
     });
 
     it('settles silently when bridge initialization fails after START', async () => {

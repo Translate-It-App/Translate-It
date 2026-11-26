@@ -863,7 +863,7 @@ export class FeatureManager extends ResourceTracker {
     return true;
   }
 
-  checkForUrlChange({ navigationCursor, navigationUnavailable = false } = {}) {
+  checkForUrlChange({ navigationCursor, navigationUnavailable = false, restartFence } = {}) {
     const newUrl = window.location.href;
     let capturedNavigation = false;
     if (navigationCursor !== undefined) {
@@ -880,10 +880,13 @@ export class FeatureManager extends ResourceTracker {
     this._lastDetectedUrl = newUrl;
     this._stopPageForNavigation();
     if (navigationUnavailable) return false;
-    return this.handleUrlChange(oldUrl, newUrl, this._navigationRevision);
+    return this.handleUrlChange(oldUrl, newUrl, this._navigationRevision, {
+      navigationCursor: capturedNavigation ? { ...navigationCursor } : null,
+      restartFence,
+    });
   }
 
-  async handleUrlChange(oldUrl, newUrl, expectedRevision = null) {
+  async handleUrlChange(oldUrl, newUrl, expectedRevision = null, navigationIdentity = null) {
     if (expectedRevision !== null && this._isNavigationStale(expectedRevision)) return;
     let capturedRevision;
     if (expectedRevision !== null) {
@@ -926,6 +929,9 @@ export class FeatureManager extends ResourceTracker {
       const isMatch = autoRules.some(rule => matchesAutoTranslateRule(newUrl, rule));
       if (!isMatch) return;
       if (isStale()) return;
+      // URL-only history observations can stop obsolete work, but only a
+      // trusted native identity plus its background fence may restart it.
+      if (!navigationIdentity?.navigationCursor || !navigationIdentity?.restartFence) return;
 
       const isAllowed = await this.exclusionChecker.isFeatureAllowed('pageTranslation');
       if (isStale() || !isAllowed) return;
@@ -935,8 +941,10 @@ export class FeatureManager extends ResourceTracker {
       const manager = await loadFeature('pageTranslation');
       if (isStale() || !manager) return;
 
-      if (manager.currentUrl !== newUrl) {
+      const overrideUrl = manager.userRestoredOverrideUrl ?? manager.currentUrl;
+      if (manager.userRestoredOverride && overrideUrl && overrideUrl !== newUrl) {
         manager.userRestoredOverride = false;
+        manager.userRestoredOverrideUrl = null;
       }
       if (isStale()) return;
       if (!manager.isActive) {
@@ -952,7 +960,12 @@ export class FeatureManager extends ResourceTracker {
         if (isStale()) return;
         const response = await sendRegularMessage({
           action: MessageActions.PAGE_TRANSLATE,
-          data: { isAuto: true, preserveAcceptedTranslations: true },
+          data: {
+            isAuto: true,
+            preserveAcceptedTranslations: true,
+            navigationCursor: navigationIdentity.navigationCursor,
+            restartFence: navigationIdentity.restartFence,
+          },
         }, { returnFailureResponse: true });
         if (response?.success === false) {
           logger.debug('SPA auto page translation command rejected', response);

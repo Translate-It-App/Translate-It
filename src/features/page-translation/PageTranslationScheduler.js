@@ -315,8 +315,9 @@ export class PageTranslationScheduler extends ResourceTracker {
    * @param {any} context - Session context validation
    * @param {number} score - Priority score from domtranslator (greater = more important)
    * @param {Node} node - Associated DOM node for visibility check
+   * @param {() => boolean} isEligible - Revalidates DOM eligibility immediately before dispatch
    */
-  async enqueue(text, context = null, score = 0, node = null) {
+  async enqueue(text, context = null, score = 0, node = null, isEligible = null) {
     // 1. Session & State Validation
     if (context && context !== this.sessionContext) return text;
     if (!this.isTranslated || this.fatalErrorOccurred || !text || !text.trim()) return text;
@@ -366,7 +367,8 @@ export class PageTranslationScheduler extends ResourceTracker {
         resolve, 
         reject, 
         context,
-        node
+        node,
+        isEligible: typeof isEligible === 'function' ? isEligible : null,
       });
 
       if (isHighPriority) {
@@ -894,6 +896,24 @@ export class PageTranslationScheduler extends ResourceTracker {
    * Internal method to handle the actual translation request and resolution.
    */
   async _executeBatchRequest(batch, config, flushContext, flushSessionId) {
+    const eligibleBatch = [];
+    for (const item of batch) {
+      let eligible = true;
+      try {
+        if (item.isEligible) eligible = item.isEligible();
+      } catch {
+        eligible = false;
+      }
+      if (eligible) eligibleBatch.push(item);
+      else {
+        this._resolveItem(item, item.text, 'stale');
+      }
+    }
+    if (eligibleBatch.length === 0) {
+      this._checkCompletion();
+      return;
+    }
+    if (eligibleBatch.length !== batch.length) batch = eligibleBatch;
     const textsToTranslate = batch.map(item => ({ id: item.id, text: item.text }));
     
     const batchMessage = MessageFormat.create(

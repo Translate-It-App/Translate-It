@@ -45,6 +45,7 @@ export class MessageActions {
 
   // Whole Page Translation (NEW)
   static PAGE_TRANSLATE = 'page-translate';
+  static PAGE_TRANSLATE_ADMIT = 'page-translate-admit';
   static PAGE_TRANSLATE_BATCH = 'page-translate-batch'; // For actual translation request
   static PAGE_TRANSLATE_START = 'page-translate-start';
   static PAGE_TRANSLATE_PROGRESS = 'page-translate-progress';

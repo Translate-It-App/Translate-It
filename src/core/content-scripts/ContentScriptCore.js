@@ -69,6 +69,7 @@ export function ContentScriptCore() {
       await featureManager.checkForUrlChange({
         navigationCursor: message?.data?.navigationCursor,
         navigationUnavailable: message?.data?.navigationUnavailable,
+        restartFence: message?.data?.restartFence,
       });
       return { success: true };
     });

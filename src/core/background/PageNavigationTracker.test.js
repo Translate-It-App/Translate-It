@@ -32,6 +32,19 @@ describe('Page navigation producer cursor', () => {
     expect(storage.set).not.toHaveBeenCalled();
   });
 
+  it('mints volatile restart fences and bootstraps only the requested top frame cursor', async () => {
+    const firstFence = tracker.mintRestartFence(42);
+    const secondFence = tracker.mintRestartFence(42);
+    expect(firstFence).not.toBe(secondFence);
+    expect(tracker.getRestartFence(42)).toBe(secondFence);
+
+    const cursor = await tracker.captureTopNavigation(42, 'https://example.com/first-rule-route');
+    expect(cursor).toMatchObject({ routeRevision: 0, url: 'https://example.com/first-rule-route' });
+    expect(await tracker.getCursor(42, 7)).toBeNull();
+    tracker.revokeRestartFence(42);
+    expect(tracker.getRestartFence(42)).not.toBe(secondFence);
+  });
+
   it.each(['route', 'round trip', 'commit'])(
     'keeps newer captured %s evidence when a fresh-frame read resolves late', async change => {
       await tracker.seed(42, frames);

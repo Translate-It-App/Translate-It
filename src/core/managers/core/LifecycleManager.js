@@ -296,6 +296,7 @@ class LifecycleManager {
 
       // Page translation handlers
       [MessageActions.PAGE_TRANSLATE]: Handlers.handlePageTranslation,
+      [MessageActions.PAGE_TRANSLATE_ADMIT]: Handlers.handlePageTranslation,
       [MessageActions.PAGE_TRANSLATE_BATCH]: Handlers.handlePageTranslation,
       [MessageActions.PAGE_RESTORE]: Handlers.handlePageTranslation,
       [MessageActions.PAGE_TRANSLATE_GET_STATUS]: Handlers.handlePageTranslation,

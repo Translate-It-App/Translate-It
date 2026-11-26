@@ -351,6 +351,88 @@ describe('MainFrameCoordinator per-frame admission', () => {
     });
   });
 
+  it('keeps Restore available for an interrupted replacement before any retained nodes are counted', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    const emitSpy = vi.spyOn(pageEventBus, 'emit');
+    coordinator.handleTrustedPageLifecycle({ frameId: 0, action: MessageActions.PAGE_TRANSLATE_START, data: { sessionId: 'replacement' } });
+    coordinator.handleTrustedPageLifecycle({ frameId: 1, action: MessageActions.PAGE_TRANSLATE_START, data: { sessionId: 'child' } });
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 0,
+      action: MessageActions.PAGE_AUTO_RESTORE_COMPLETE,
+      data: { sessionId: 'replacement', translatedCount: 0, isTranslated: true, isAutoTranslating: false },
+    });
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 1,
+      action: MessageActions.PAGE_AUTO_RESTORE_COMPLETE,
+      data: { sessionId: 'child', translatedCount: 0, isTranslated: false, isAutoTranslating: false },
+    });
+
+    const aggregate = emitSpy.mock.calls.at(-1);
+    emitSpy.mockRestore();
+    expect(aggregate).toEqual([
+      MessageActions.PAGE_AUTO_RESTORE_COMPLETE,
+      expect.objectContaining({ isTranslated: true, isTranslating: false, translatedCount: 0 }),
+    ]);
+  });
+
+  it.each([
+    ['PAGE_TRANSLATE_COMPLETE', MessageActions.PAGE_TRANSLATE_COMPLETE],
+    ['PAGE_TRANSLATE_IDLE', MessageActions.PAGE_TRANSLATE_IDLE],
+    ['PAGE_TRANSLATE_ERROR', MessageActions.PAGE_TRANSLATE_ERROR],
+    ['PAGE_AUTO_RESTORE_COMPLETE', MessageActions.PAGE_AUTO_RESTORE_COMPLETE],
+  ])('preserves Restore availability through %s when progress is zero', (label, action) => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    const emitAggregate = vi.spyOn(aggregator, 'emitAggregateProgress');
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 0,
+      action: MessageActions.PAGE_TRANSLATE_START,
+      data: { sessionId: `${label}-session` },
+    });
+
+    const data = {
+      sessionId: `${label}-session`,
+      translatedCount: 0,
+      failedCount: 0,
+      totalCount: 0,
+      isTranslated: true,
+      isTranslating: false,
+      isAutoTranslating: false,
+    };
+    coordinator.handleTrustedPageLifecycle({ frameId: 0, action, data });
+
+    expect(aggregator.getGlobalPageTranslationStatus()).toMatchObject({
+      isTranslated: true,
+      translatedCount: 0,
+    });
+    expect(emitAggregate).toHaveBeenLastCalledWith(action, data);
+    expect(emitAggregate.mock.results.at(-1).value).toMatchObject({
+      isTranslated: true,
+      translatedCount: 0,
+    });
+    emitAggregate.mockRestore();
+  });
+
+  it('preserves retained content when a replacement START resets progress counters', () => {
+    const coordinator = new MainFrameCoordinator(aggregator, MessageActions, null);
+    const emitAggregate = vi.spyOn(aggregator, 'emitAggregateProgress');
+
+    coordinator.handleTrustedPageLifecycle({
+      frameId: 0,
+      action: MessageActions.PAGE_TRANSLATE_START,
+      data: { sessionId: 'replacement-start', isTranslated: true },
+    });
+
+    expect(aggregator.getGlobalPageTranslationStatus()).toMatchObject({
+      isTranslated: true,
+      translatedCount: 0,
+    });
+    expect(emitAggregate.mock.results.at(-1).value).toMatchObject({
+      isTranslated: true,
+      translatedCount: 0,
+    });
+    emitAggregate.mockRestore();
+  });
+
   it('preserves iframe state when main frame accepts a new cycle', () => {
     aggregator.updateFrameData(1, {
       isTranslated: true,

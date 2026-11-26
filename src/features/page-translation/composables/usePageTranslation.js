@@ -714,9 +714,8 @@ export function usePageTranslation() {
         isTranslating.value = false;
         const translated = aggregateValue('translatedCount');
         const failed = aggregateValue('failedCount');
-        const isStillTranslated = translated !== undefined
-          ? translated > 0
-          : (result.isTranslated ?? (hasFrameTranslationState ? frameTranslated : undefined));
+        const reportedTranslation = result.isTranslated ?? (hasFrameTranslationState ? frameTranslated : undefined);
+        const isStillTranslated = translated !== undefined ? translated > 0 || reportedTranslation === true : reportedTranslation;
         if (isStillTranslated !== undefined) isTranslated.value = !!isStillTranslated;
         if (translated !== undefined) translatedCount.value = translated;
         if (failed !== undefined) failedCount.value = failed;

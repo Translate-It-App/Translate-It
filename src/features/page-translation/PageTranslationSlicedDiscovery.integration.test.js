@@ -39,6 +39,10 @@ const appendElement = (parent, tagName, text = '', attributes = {}) => {
 };
 
 const setBody = (...elements) => document.body.replaceChildren(...elements);
+const drainMutationObservers = async () => {
+  await new Promise(resolve => queueMicrotask(resolve));
+  await Promise.resolve();
+};
 
 const acceptedTranslation = (text) => ({
   __pageTranslationSettlement: true,
@@ -261,6 +265,142 @@ describe('Page Translation sliced discovery integration', () => {
     expect(translate).not.toHaveBeenCalled();
     expect(states).toEqual([true, false]);
     expect(onInitialDiscoveryDrained).not.toHaveBeenCalled();
+  });
+
+  it('preserves an accepted original across repeated replacement before discovery revisits it', async () => {
+    const first = appendElement(document.createDocumentFragment(), 'p', 'Original first');
+    appendElement(document.body, 'p', 'Later node');
+    setBody(first, ...Array.from(document.body.childNodes));
+    const firstTranslate = vi.fn(text => Promise.resolve(acceptedTranslation(text)));
+    await start(firstTranslate);
+    await vi.waitFor(() => expect(first.textContent).toContain('Translated Original first'));
+
+    const secondTranslate = vi.fn(text => Promise.resolve(acceptedTranslation(text)));
+    await bridge.initialize(settings, secondTranslate, null, { preserveAcceptedTranslations: true });
+    bridge.translate(document.body);
+    const thirdTranslate = vi.fn(text => Promise.resolve(acceptedTranslation(text)));
+    await bridge.initialize(settings, thirdTranslate, null, { preserveAcceptedTranslations: true });
+    bridge.translate(document.body);
+    // Discovery is slice-bounded; Restore can run before any node is revisited.
+    bridge.restore(document.body);
+
+    expect(first.textContent).toBe('Original first');
+    expect(secondTranslate).not.toHaveBeenCalled();
+    expect(thirdTranslate).not.toHaveBeenCalled();
+  });
+
+  it('keeps accepted-node enumeration weak while persistence is stopped and across reinitialization', async () => {
+    const paragraph = appendElement(document.createDocumentFragment(), 'p', 'Retained original');
+    setBody(paragraph);
+    await start();
+    await vi.waitFor(() => expect(paragraph.textContent).toContain('Translated Retained original'));
+
+    const translatedNode = paragraph.firstChild;
+    const [reference] = bridge.acceptedOriginalNodes;
+    expect(reference).toBeInstanceOf(WeakRef);
+    expect(reference.deref()).toBe(translatedNode);
+
+    bridge.stopPersistence();
+    paragraph.remove();
+    await bridge.initialize(settings, text => Promise.resolve(acceptedTranslation(text)), null, {
+      preserveAcceptedTranslations: true,
+    });
+
+    expect(bridge.acceptedOriginalNodes.has(reference)).toBe(true);
+    expect(reference.deref()).toBe(translatedNode);
+    expect(bridge.hasRestorableTranslations).toBe(true);
+  });
+
+  it.each([
+    ['provider', { translationApi: 'replacement-provider' }, 0],
+    ['target language', { targetLanguage: 'fr' }, 0],
+    ['settings revision', {}, 1],
+  ])('restores incompatible accepted text before translating it after a %s change', async (_change, changes, settingsRevision) => {
+    const paragraph = appendElement(document.createDocumentFragment(), 'p', 'Original');
+    setBody(paragraph);
+    await start();
+    await vi.waitFor(() => expect(paragraph.textContent).toContain('Translated Original'));
+
+    const replacement = vi.fn(text => Promise.resolve(acceptedTranslation(text)));
+    await bridge.initialize({
+      ...settings,
+      ...changes,
+      autoTranslateOnDOMChanges: true,
+    }, replacement, null, {
+      preserveAcceptedTranslations: true,
+      settingsRevision,
+    });
+    bridge.translate(document.body);
+    await vi.waitFor(() => expect(replacement.mock.calls.some(([text, , , node]) => (
+      text === 'Original' && node === paragraph.firstChild
+    ))).toBe(true));
+    await vi.waitFor(() => expect(paragraph.textContent).toContain('Translated Original'));
+    await vi.waitFor(() => expect(bridge.session.discovery.pending).toBe(false));
+    expect(replacement).toHaveBeenCalledTimes(1);
+  });
+
+  it('filters mutation updates for editable/excluded nodes in light and open shadow DOM', async () => {
+    const host = appendElement(document.createDocumentFragment(), 'div');
+    const light = appendElement(host, 'p', 'Light original');
+    const excluded = appendElement(host, 'p', 'Excluded original');
+    const shadowHost = appendElement(host, 'div');
+    setBody(host);
+    const shadow = shadowHost.attachShadow({ mode: 'open' });
+    const shadowEditable = appendElement(shadow, 'p', 'Shadow original');
+    const translate = vi.fn(text => Promise.resolve(acceptedTranslation(text)));
+    await start(translate, { settings: { excludedSelectors: ['.excluded'] } });
+    await vi.waitFor(() => expect(translate).toHaveBeenCalledTimes(3));
+    translate.mockClear();
+
+    light.setAttribute('contenteditable', 'true');
+    excluded.className = 'excluded';
+    excluded.firstChild.nodeValue = 'Excluded changed';
+    shadowEditable.setAttribute('contenteditable', 'true');
+    light.firstChild.nodeValue = 'Light changed';
+    excluded.firstChild.nodeValue = 'Excluded changed again';
+    shadowEditable.firstChild.nodeValue = 'Shadow changed';
+    await drainMutationObservers();
+
+    expect(translate).not.toHaveBeenCalled();
+  });
+
+  it('retires accepted ownership before filtering changed text on an excluded node', async () => {
+    const paragraph = appendElement(document.createDocumentFragment(), 'p', 'Accepted source');
+    setBody(paragraph);
+    const translate = vi.fn(text => Promise.resolve(acceptedTranslation(text)));
+    await start(translate, {
+      settings: { autoTranslateOnDOMChanges: true, excludedSelectors: ['.excluded'] },
+    });
+    await vi.waitFor(() => expect(paragraph.textContent).toContain('Translated Accepted source'));
+    expect(bridge.hasRestorableTranslations).toBe(true);
+    const previouslyAcceptedValue = paragraph.textContent;
+
+    paragraph.classList.add('excluded');
+    paragraph.firstChild.nodeValue = 'external edit';
+    await drainMutationObservers();
+    paragraph.firstChild.nodeValue = previouslyAcceptedValue;
+    await drainMutationObservers();
+
+    expect(translate).toHaveBeenCalledTimes(1);
+    bridge.restore(document.body);
+    expect(paragraph.textContent).toBe(previouslyAcceptedValue);
+    expect(bridge.hasRestorableTranslations).toBe(false);
+  });
+
+  it('rechecks eligibility at the guarded write when a target becomes editable after settlement', async () => {
+    const paragraph = appendElement(document.createDocumentFragment(), 'p', 'Pending original');
+    setBody(paragraph);
+    let resolveTranslation;
+    const settlement = acceptedTranslation('Pending original');
+    const translate = vi.fn(() => new Promise(resolve => { resolveTranslation = resolve; }));
+    await start(translate);
+    await vi.waitFor(() => expect(resolveTranslation).toBeTypeOf('function'));
+
+    resolveTranslation(settlement);
+    queueMicrotask(() => paragraph.setAttribute('contenteditable', 'true'));
+    await vi.waitFor(() => expect(settlement.state).toBe('stale'));
+
+    expect(paragraph.textContent).toBe('Pending original');
   });
 
   it('cancels queued admission when persistence stops', async () => {
@@ -504,7 +644,9 @@ describe('Page Translation sliced discovery integration', () => {
         callbacks: { onDiscoveryStateChange: pending => states.push(pending) },
       });
       await vi.waitFor(() => expect(states).toEqual([true, false]));
-      expect(translate).toHaveBeenCalledExactlyOnceWith('Original title', null, expect.any(Number), owner.getAttributeNode('title'));
+      expect(translate).toHaveBeenCalledExactlyOnceWith(
+        'Original title', null, expect.any(Number), owner.getAttributeNode('title'), expect.any(Function)
+      );
       expect(observers[0].observe).toHaveBeenCalledWith(owner);
       expect(observers[0].observe).toHaveBeenCalledWith(untouched);
 

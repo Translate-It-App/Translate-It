@@ -3,6 +3,7 @@ import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import { pageNavigationTracker } from '../PageNavigationTracker.js';
+import settingsManager from '@/shared/managers/SettingsManager.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.BACKGROUND, 'SpaNavigationListener');
 
@@ -19,11 +20,24 @@ export async function handleSpaNavigation(details) {
     return;
   }
 
+  // Mint before storage/settings awaits so a subsequently delivered explicit
+  // Stop/Restore can revoke this exact queued navigation.
+  const restartFence = frameId === 0 ? pageNavigationTracker.getOrMintRestartFence(tabId) : null;
   try {
     let data;
     try {
-      const navigationCursor = await pageNavigationTracker.capture(tabId, frameId, details.url);
-      data = navigationCursor ? { navigationCursor } : {};
+      let navigationCursor;
+      if (frameId === 0) {
+        navigationCursor = await pageNavigationTracker.captureTopNavigation(tabId, details.url, {
+          shouldCreate: async () => (await settingsManager.getAsync('WHOLE_PAGE_AUTO_TRANSLATE_RULES', [])).length > 0,
+        });
+      } else {
+        navigationCursor = await pageNavigationTracker.capture(tabId, frameId, details.url);
+      }
+      data = {
+        ...(navigationCursor && { navigationCursor }),
+        ...(restartFence && { restartFence }),
+      };
     } catch {
       data = { navigationUnavailable: true };
     }

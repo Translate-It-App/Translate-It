@@ -104,7 +104,8 @@ async function sendFrameCommandWithResponseDeadline(
   tabId,
   message,
   frameId,
-  deadlineMs = FRAME_COMMAND_RESPONSE_TIMEOUT_MS
+  deadlineMs = FRAME_COMMAND_RESPONSE_TIMEOUT_MS,
+  boundNavigation = null
 ) {
   let timeoutId;
   let expired = false;
@@ -114,7 +115,18 @@ async function sendFrameCommandWithResponseDeadline(
         let data;
         try {
           const navigationCursor = await pageNavigationTracker.getAdmissionCursor(tabId, frameId);
-          data = navigationCursor ? { navigationCursor } : { navigationUnavailable: true };
+          if (boundNavigation) {
+            const topCursor = await pageNavigationTracker.getAdmissionCursor(tabId, 0);
+            if (!navigationCursor || !sameCursor(topCursor, boundNavigation.topCursor)
+                || pageNavigationTracker.getRestartFence(tabId) !== boundNavigation.restartFence) return null;
+            data = {
+              navigationCursor,
+              topNavigationCursor: boundNavigation.topCursor,
+              restartFence: boundNavigation.restartFence,
+            };
+          } else {
+            data = navigationCursor ? { navigationCursor } : { navigationUnavailable: true };
+          }
         } catch {
           data = { navigationUnavailable: true };
         }
@@ -148,6 +160,11 @@ async function sendFrameCommandWithResponseDeadline(
   }
 }
 
+function sameCursor(a, b) {
+  return Boolean(a && b && a.documentEpoch === b.documentEpoch
+    && a.routeRevision === b.routeRevision && a.url === b.url);
+}
+
 /**
  * Projects a bounded frame send result into an additive per-frame delivery
  * record. `success` reflects delivery-level acknowledgement; application
@@ -169,7 +186,7 @@ function projectFrameDelivery({ frameId, response, isResponseTimeout }) {
  * Immediate preparation failures keep their existing error handling; only a
  * stalled preparation stage is converted to the timeout marker.
  */
-async function runPreFanoutPreparation(message, sender, discoverFrames = true) {
+async function runPreFanoutPreparation(message, sender, discoverFrames = true, onTargetResolved = null) {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
     timeoutId = setTimeout(() => {
@@ -197,6 +214,7 @@ async function runPreFanoutPreparation(message, sender, discoverFrames = true) {
       targetTabId = tabs[0].id;
     }
 
+    onTargetResolved?.(targetTabId);
     const access = await tabPermissionChecker.checkTabAccess(targetTabId);
     if (!access.isAccessible || !discoverFrames) {
       return { targetTabId, access };
@@ -220,6 +238,7 @@ async function runPreFanoutPreparation(message, sender, discoverFrames = true) {
     });
 
     let navigationUnavailable = false;
+    let navigationAdmissionInvalid = false;
     if (message.action === MessageActions.PAGE_TRANSLATE) {
       try { await pageNavigationTracker.seed(targetTabId, allFrames); }
       catch {
@@ -227,7 +246,16 @@ async function runPreFanoutPreparation(message, sender, discoverFrames = true) {
         logger.debug('Page navigation preparation unavailable');
       }
     }
-    return { targetTabId, access, allFrames, navigationUnavailable };
+    if (message.action === MessageActions.PAGE_TRANSLATE && message.data?.restartFence) {
+      try {
+        const topCursor = await pageNavigationTracker.getAdmissionCursor(targetTabId, 0);
+        navigationAdmissionInvalid = pageNavigationTracker.getRestartFence(targetTabId) !== message.data.restartFence
+          || !sameCursor(topCursor, message.data.navigationCursor);
+      } catch {
+        navigationAdmissionInvalid = true;
+      }
+    }
+    return { targetTabId, access, allFrames, navigationUnavailable, navigationAdmissionInvalid };
   })();
 
   try {
@@ -243,6 +271,40 @@ async function runPreFanoutPreparation(message, sender, discoverFrames = true) {
 export async function handlePageTranslation(message, sender) {
   try {
     const senderTabId = sender?.tab?.id;
+    const explicitInvalidation = [
+      MessageActions.PAGE_RESTORE,
+      MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+      MessageActions.CANCEL_TRANSLATION,
+    ].includes(message.action) || (
+      message.action === MessageActions.PAGE_TRANSLATE && message.data?.cancel === true
+    ) || (
+      message.action === MessageActions.PAGE_TRANSLATE && message.data?.isAuto !== true
+    );
+    if (Number.isInteger(senderTabId) && explicitInvalidation) {
+      pageNavigationTracker.revokeRestartFence(senderTabId);
+    }
+
+    if (message.action === MessageActions.PAGE_TRANSLATE_ADMIT) {
+      const data = message.data || {};
+      const frameId = sender?.frameId;
+      if (!Number.isInteger(senderTabId) || !Number.isInteger(frameId) || frameId < 0
+          || typeof data.restartFence !== 'string' || data.restartFence.length === 0
+          || pageNavigationTracker.getRestartFence(senderTabId) !== data.restartFence) {
+        return { success: false, reason: 'obsolete_navigation' };
+      }
+      try {
+        const [topCursor, frameCursor] = await Promise.all([
+          pageNavigationTracker.getAdmissionCursor(senderTabId, 0),
+          pageNavigationTracker.getAdmissionCursor(senderTabId, frameId),
+        ]);
+        const success = sameCursor(topCursor, data.topNavigationCursor)
+            && sameCursor(frameCursor, data.navigationCursor)
+            && pageNavigationTracker.getRestartFence(senderTabId) === data.restartFence;
+        return success ? { success: true } : { success: false, reason: 'obsolete_navigation' };
+      } catch {
+        return { success: false, reason: 'obsolete_navigation' };
+      }
+    }
 
     if (message.action === MessageActions.PAGE_TRANSLATION_FRAME_LIFECYCLE) {
       const senderFrameId = sender?.frameId;
@@ -280,6 +342,13 @@ export async function handlePageTranslation(message, sender) {
         logger.debug('Could not relay page lifecycle to top frame:', error.message);
         return { success: false, error: 'Top frame lifecycle relay failed' };
       }
+    }
+
+    const isNavigationAutoRestart = message.action === MessageActions.PAGE_TRANSLATE
+      && message.data?.isAuto === true && message.data?.restartFence;
+    if (message.action === MessageActions.PAGE_TRANSLATE && message.data?.isAuto
+        && message.data?.preserveAcceptedTranslations && !isNavigationAutoRestart) {
+      return { success: false, reason: 'obsolete_navigation' };
     }
 
     // Handle batch translation request via UnifiedTranslationService
@@ -424,10 +493,14 @@ export async function handlePageTranslation(message, sender) {
       }
     }
 
-    preparation = await runPreFanoutPreparation(message, sender);
+    preparation = await runPreFanoutPreparation(message, sender, true, targetTabId => {
+      if (!Number.isInteger(senderTabId) && explicitInvalidation) {
+        pageNavigationTracker.revokeRestartFence(targetTabId);
+      }
+    });
     if (preparation.error) return preparation.error;
 
-    const { targetTabId, access, allFrames, navigationUnavailable } = preparation;
+    const { targetTabId, access, allFrames, navigationUnavailable, navigationAdmissionInvalid } = preparation;
     if (navigationUnavailable) message = { ...message, data: { ...message.data, navigationUnavailable: true } };
     if (!access.isAccessible) {
       logger.debug(`Page translation blocked on restricted tab ${targetTabId}: ${access.errorMessage}`);
@@ -441,6 +514,14 @@ export async function handlePageTranslation(message, sender) {
     }
 
     try {
+      let boundNavigation = null;
+      if (isNavigationAutoRestart) {
+        const { navigationCursor: topCursor, restartFence } = message.data;
+        if (navigationAdmissionInvalid || navigationUnavailable) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+        boundNavigation = { topCursor, restartFence };
+      }
       if (message.action === MessageActions.PAGE_TRANSLATE_GET_STATUS) {
         const statusResults = await Promise.all(
           allFrames.map(frame =>
@@ -492,7 +573,9 @@ export async function handlePageTranslation(message, sender) {
       // whole fan-out.
       const frameResults = await Promise.all(
         allFrames.map(frame =>
-          sendFrameCommandWithResponseDeadline(targetTabId, message, frame.frameId)
+          sendFrameCommandWithResponseDeadline(
+            targetTabId, message, frame.frameId, FRAME_COMMAND_RESPONSE_TIMEOUT_MS, boundNavigation
+          )
         )
       );
 
@@ -568,6 +651,7 @@ if (typeof browser !== 'undefined' && browser.webNavigation) {
 
     const tabId = details.tabId;
     const transitionType = details.transitionType;
+    const restartFence = pageNavigationTracker.mintRestartFence(tabId);
 
     // Check if this tab was auto-translating
     if (autoTranslateRegistry.has(tabId)) {
@@ -584,18 +668,24 @@ if (typeof browser !== 'undefined' && browser.webNavigation) {
         logger.debug(`Persisting auto-translation for tab ${tabId} on navigation (${transitionType})`);
         
         // Wait for page to load a bit before sending translate message
-        setTimeout(() => {
-          handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: { isAuto: true } }, { tab: { id: tabId } })
+        void pageNavigationTracker.pending.then(() => pageNavigationTracker.getCursor(tabId, 0)).then(navigationCursor => {
+          if (!navigationCursor || navigationCursor.url !== details.url) return;
+          const restart = () => {
+            if (pageNavigationTracker.getRestartFence(tabId) !== restartFence) return Promise.resolve(null);
+            return handlePageTranslation({
+              action: MessageActions.PAGE_TRANSLATE,
+              data: { isAuto: true, navigationCursor, restartFence },
+            }, { tab: { id: tabId } });
+          };
+          setTimeout(() => { void restart()
             .then(result => {
-              if (result.isTransportFailure && !result.reason) throw new Error('Content script not ready');
+              if (result?.isTransportFailure && !result.reason) throw new Error('Content script not ready');
             })
             .catch(() => {
-              // If fails (page not ready), try once more after 2 seconds
-              setTimeout(() => {
-                handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: { isAuto: true } }, { tab: { id: tabId } }).catch(() => {});
-              }, 2000);
-            });
-        }, 1000);
+              // If fails (page not ready), try once more after 2 seconds.
+              setTimeout(() => { void restart().catch(() => {}); }, 2000);
+            }); }, 1000);
+        }).catch(() => {});
       }
     }
   });
@@ -603,6 +693,7 @@ if (typeof browser !== 'undefined' && browser.webNavigation) {
   // Cleanup on tab closure
   browser.tabs.onRemoved.addListener((tabId) => {
     autoTranslateRegistry.delete(tabId);
+    pageNavigationTracker.revokeRestartFence(tabId);
     const tabKeyPrefix = `${tabId}:`;
     for (const key of pendingFrameRetirements.keys()) {
       if (key.startsWith(tabKeyPrefix)) {

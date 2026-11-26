@@ -293,6 +293,32 @@ describe('useContentAppPageTranslation', () => {
     }));
   });
 
+  it.each([
+    [MessageActions.PAGE_TRANSLATE_START, { isAggregated: true }],
+    [MessageActions.PAGE_TRANSLATE_IDLE, { isAggregated: true }],
+    [MessageActions.PAGE_TRANSLATE_COMPLETE, { isAggregated: true }],
+    [MessageActions.PAGE_TRANSLATE_ERROR, {
+      isAggregated: true, isFatal: true,
+      errorDetails: { type: ErrorTypes.NETWORK_ERROR, message: 'partial failure' },
+    }],
+    [MessageActions.PAGE_AUTO_RESTORE_COMPLETE, { isAggregated: true }],
+  ])('preserves Restore availability for %s with zero progress count', async (action, extra) => {
+    await listeners.get(action)({
+      ...extra,
+      translatedCount: 0,
+      failedCount: 0,
+      totalCount: 0,
+      isTranslated: true,
+      isTranslating: false,
+      isAutoTranslating: false,
+    });
+
+    expect(mobileStore.setPageTranslation).toHaveBeenCalledWith(expect.objectContaining({
+      isTranslated: true,
+      translatedCount: 0,
+    }));
+  });
+
   it('ignores raw main auto-restore state', () => {
     mobileStore.pageTranslationData = {
       ...mobileStore.pageTranslationData,

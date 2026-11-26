@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   set: vi.fn(),
   committedAddListener: vi.fn(),
   removedAddListener: vi.fn(),
+  autoRules: [{ pattern: 'example.com/*' }],
 }));
 
 vi.mock('webextension-polyfill', () => ({
@@ -33,16 +34,25 @@ vi.mock('@/shared/logging/logConstants.js', () => ({
   LOG_COMPONENTS: { BACKGROUND: 'background' },
 }));
 
+vi.mock('@/shared/managers/SettingsManager.js', () => ({
+  default: {
+    get: vi.fn((key, fallback) => key === 'WHOLE_PAGE_AUTO_TRANSLATE_RULES' ? mocks.autoRules : fallback),
+    getAsync: vi.fn(async (key, fallback) => key === 'WHOLE_PAGE_AUTO_TRANSLATE_RULES' ? mocks.autoRules : fallback),
+  },
+}));
+
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { handleSpaNavigation } from './onSpaNavigation.js';
 import { pageNavigationTracker } from '../PageNavigationTracker.js';
 
 describe('SPA navigation listener', () => {
   beforeEach(async () => {
+    mocks.autoRules = [{ pattern: 'example.com/*' }];
     mocks.saved = {};
     mocks.set.mockReset().mockImplementation(async value => { mocks.saved = structuredClone(value); });
     pageNavigationTracker.state = null;
     pageNavigationTracker.dirty = false;
+    pageNavigationTracker.restartFences.clear();
     pageNavigationTracker.pending = Promise.resolve();
     await pageNavigationTracker.seed(42, [0, 3, 27].map(frameId => ({ frameId, url: 'https://example.com/route-a' })));
     mocks.sendMessage.mockClear();
@@ -65,10 +75,40 @@ describe('SPA navigation listener', () => {
 
     expect(mocks.sendMessage).toHaveBeenCalledWith(42, {
       action: MessageActions.SPA_NAVIGATION,
-      data: { navigationCursor: { documentEpoch: 1, routeRevision: 1, url: 'https://example.com/route-b' } },
+      data: {
+        navigationCursor: { documentEpoch: 1, routeRevision: 1, url: 'https://example.com/route-b' },
+        restartFence: expect.any(String),
+      },
     }, {
       frameId: 0,
     });
+  });
+
+  it('bootstraps an initially untracked top route when auto rules are configured', async () => {
+    delete pageNavigationTracker.state.frames['42:0'];
+    await handleSpaNavigation({ tabId: 42, frameId: 0, url: 'https://example.com/first-rule-route' });
+
+    expect(mocks.sendMessage).toHaveBeenCalledWith(42, expect.objectContaining({
+      action: MessageActions.SPA_NAVIGATION,
+      data: expect.objectContaining({
+        navigationCursor: expect.objectContaining({
+          documentEpoch: expect.any(Number),
+          routeRevision: 0,
+          url: 'https://example.com/first-rule-route',
+        }),
+        restartFence: expect.any(String),
+      }),
+    }), { frameId: 0 });
+  });
+
+  it('does not enroll an untracked top route when automatic rules are absent', async () => {
+    mocks.autoRules = [];
+    delete pageNavigationTracker.state.frames['42:0'];
+    await handleSpaNavigation({ tabId: 42, frameId: 0, url: 'https://example.com/untracked' });
+
+    expect(await pageNavigationTracker.getCursor(42, 0)).toBeNull();
+    expect(mocks.sendMessage.mock.calls[0][1].data).toMatchObject({ restartFence: expect.any(String) });
+    expect(mocks.sendMessage.mock.calls[0][1].data).not.toHaveProperty('navigationCursor');
   });
 
   it('forwards child-frame navigation to the exact frame', async () => {
@@ -136,7 +176,12 @@ describe('SPA navigation listener', () => {
   it('keeps same-URL state updates at the same captured cursor', async () => {
     await handleSpaNavigation({ tabId: 42, frameId: 0, url: 'https://example.com/b', timeStamp: 10 });
     await handleSpaNavigation({ tabId: 42, frameId: 0, url: 'https://example.com/b', timeStamp: 30 });
-    expect(mocks.sendMessage.mock.calls[0][1].data).toEqual(mocks.sendMessage.mock.calls[1][1].data);
+    expect(mocks.sendMessage.mock.calls[0][1].data.navigationCursor).toEqual(
+      mocks.sendMessage.mock.calls[1][1].data.navigationCursor
+    );
+    expect(mocks.sendMessage.mock.calls[0][1].data.restartFence).toBe(
+      mocks.sendMessage.mock.calls[1][1].data.restartFence
+    );
   });
 
   it('reports persistence failure instead of forwarding an undurable cursor', async () => {

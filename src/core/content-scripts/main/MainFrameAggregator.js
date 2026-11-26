@@ -135,6 +135,7 @@ export class MainFrameAggregator {
         translatedCount: status.translatedCount,
         failedCount: status.failedCount,
         totalCount: status.totalCount,
+        isTranslated: status.isTranslated,
         isAutoTranslating: status.isAutoTranslating,
         isTranslating: status.isTranslating,
         status: status.isTranslating ? 'translating' : 'idle',
@@ -145,7 +146,7 @@ export class MainFrameAggregator {
       // Special handling for completion events
       if (action === this.MessageActions.PAGE_TRANSLATE_COMPLETE ||
           action === this.MessageActions.PAGE_AUTO_RESTORE_COMPLETE) {
-        payload.isTranslated = status.translatedCount > 0;
+        payload.isTranslated = status.isTranslated;
         payload.url = window.location.href;
 
         if (action === this.MessageActions.PAGE_TRANSLATE_COMPLETE) {
@@ -159,7 +160,7 @@ export class MainFrameAggregator {
         // A failing frame must not hide the page-wide translation state: the
         // aggregated error keeps the accepted translations of the other frames
         // so Restore stays available while translated content is retained.
-        payload.isTranslated = status.translatedCount > 0;
+        payload.isTranslated = status.isTranslated;
       } else if (action === this.MessageActions.PAGE_RESTORE_COMPLETE) {
         // For restore complete, force clean state regardless of frame data
         payload.isTranslated = false;

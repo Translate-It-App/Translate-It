@@ -2,6 +2,7 @@ import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { MessageFormat, MessagingContexts, reconstructTranslationError, isStructuredTranslationError } from '@/shared/messaging/core/MessagingCore.js';
 import { TranslationMode } from '@/shared/config/config.js';
 import browser from 'webextension-polyfill';
+import { sendRegularMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import { revertHandler } from './RevertHandler.js';
@@ -75,6 +76,7 @@ export class ContentMessageHandler extends ResourceTracker {
     this._externallyRegistered = false;
     this._externalMessageHandler = null;
     this._registeredActions = new Set();
+    this._pageRestartRevision = 0;
     this.isActive = false;
     this.context = MessagingContexts.CONTENT;
     this.logger = getScopedLogger(LOG_COMPONENTS.MESSAGING, 'MessageHandler');
@@ -975,6 +977,24 @@ export class ContentMessageHandler extends ResourceTracker {
 
   async handlePageTranslate(message) {
     this.logger.info('Page translation request received');
+    if (message.data?.cancel === true || message.data?.isAuto !== true) this._pageRestartRevision += 1;
+    const boundNavigation = message.data?.restartFence ? {
+      ...message.data,
+      localRevision: this._pageRestartRevision,
+    } : null;
+    const navigationIsCurrent = async () => {
+      if (!boundNavigation) return true;
+      if (this._pageRestartRevision !== boundNavigation.localRevision
+          || window.location.href !== boundNavigation.navigationCursor?.url) return false;
+      const admission = await sendRegularMessage({
+        action: MessageActions.PAGE_TRANSLATE_ADMIT,
+        data: boundNavigation,
+      }, { returnFailureResponse: true });
+      return this._pageRestartRevision === boundNavigation.localRevision && admission?.success === true;
+    };
+    if (boundNavigation && !await navigationIsCurrent()) {
+      return { success: false, reason: 'obsolete_navigation' };
+    }
 
     // Check for cancel flag
     if (message.data?.cancel) {
@@ -1006,6 +1026,10 @@ export class ContentMessageHandler extends ResourceTracker {
         this.logger.warn('translateItContentCore not available, UI state sync may not work');
       }
 
+      if (boundNavigation && !await navigationIsCurrent()) {
+        return { success: false, reason: 'obsolete_navigation' };
+      }
+
       // Reacquire inactive instances so commands share the current navigation owner.
       if (!this.pageTranslationManager?.isActive) {
         try {
@@ -1021,6 +1045,9 @@ export class ContentMessageHandler extends ResourceTracker {
           throw new Error(`PageTranslationManager not available: ${loadError.message}`);
         }
       }
+      if (boundNavigation && !await navigationIsCurrent()) {
+        return { success: false, reason: 'obsolete_navigation' };
+      }
 
       // Ensure manager is initialized
       let managerReady = this.pageTranslationManager.isActive;
@@ -1033,7 +1060,10 @@ export class ContentMessageHandler extends ResourceTracker {
       }
 
       // Execute page translation - PASS message.data to support options like { isAuto: true }
-      const result = await this.pageTranslationManager.translatePage(message.data || {});
+      const result = await this.pageTranslationManager.translatePage({
+        ...(message.data || {}),
+        ...(boundNavigation && { validateNavigation: navigationIsCurrent }),
+      });
 
       // Log appropriate message based on whether this is auto-translation (async) or immediate completion
       if (result.isAutoTranslating) {
@@ -1079,6 +1109,7 @@ export class ContentMessageHandler extends ResourceTracker {
 
   async handlePageRestore() {
     this.logger.info('Page restore request received');
+    this._pageRestartRevision += 1;
 
     if (!this.pageTranslationManager) {
       return { success: false, error: 'PageTranslationManager not available' };
@@ -1145,6 +1176,7 @@ export class ContentMessageHandler extends ResourceTracker {
 
   async handlePageStopAuto() {
     this.logger.info('Page stop auto-translation request received');
+    this._pageRestartRevision += 1;
 
     if (!this.pageTranslationManager) {
       return { success: false, error: 'PageTranslationManager not available' };

@@ -108,6 +108,7 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
     vi.clearAllMocks();
     navigationStore.saved = {};
     pageNavigationTracker.state = null;
+    pageNavigationTracker.restartFences.clear();
     pageNavigationTracker.dirty = false;
     pageNavigationTracker.pending = Promise.resolve();
     browser.storage.session.set.mockImplementation(async value => { navigationStore.saved = structuredClone(value); });
@@ -121,6 +122,125 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
     expect(commands[1][1].data.navigationCursor.url).toBe('https://frame-7.example');
     expect(commands[1][1].data.navigationCursor.documentEpoch).toBeGreaterThan(commands[0][1].data.navigationCursor.documentEpoch);
     expect(browser.storage.session.set.mock.invocationCallOrder[0]).toBeLessThan(browser.tabs.sendMessage.mock.invocationCallOrder[0]);
+  });
+
+  it('requires the live top cursor and current fence for bound navigation fan-out', async () => {
+    setupFrames([{ frameId: 0, response: { success: true } }, { frameId: 7, response: { success: true } }]);
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://example.com' },
+      { frameId: 7, url: 'https://frame-7.example' },
+    ]);
+    const topCursor = await pageNavigationTracker.getCursor(42, 0);
+    const restartFence = pageNavigationTracker.mintRestartFence(42);
+    await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE,
+      data: { isAuto: true, preserveAcceptedTranslations: true, navigationCursor: topCursor, restartFence },
+    }, sender);
+    expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(2);
+    expect(browser.tabs.sendMessage.mock.calls[0][1].data).toMatchObject({
+      navigationCursor: topCursor, topNavigationCursor: topCursor, restartFence,
+    });
+    expect(browser.tabs.sendMessage.mock.calls[1][1].data.navigationCursor.url).toBe('https://frame-7.example');
+
+    browser.tabs.sendMessage.mockClear();
+    const staleFence = restartFence;
+    pageNavigationTracker.revokeRestartFence(42);
+    const rejected = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE,
+      data: { isAuto: true, preserveAcceptedTranslations: true, navigationCursor: topCursor, restartFence: staleFence },
+    }, sender);
+    expect(rejected).toMatchObject({ success: false, reason: 'obsolete_navigation' });
+    expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects a bound restart when top identity changes during frame preparation', async () => {
+    setupFrames([{ frameId: 0, response: { success: true } }]);
+    await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+    const navigationCursor = await pageNavigationTracker.getCursor(42, 0);
+    const restartFence = pageNavigationTracker.mintRestartFence(42);
+    browser.webNavigation.getAllFrames.mockImplementationOnce(async () => {
+      await pageNavigationTracker.capture(42, 0, 'https://example.com/new-route');
+      return [{ frameId: 0, url: 'https://example.com/new-route' }];
+    });
+
+    const result = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE,
+      data: { isAuto: true, navigationCursor, restartFence },
+    }, sender);
+
+    expect(result).toMatchObject({ success: false, reason: 'obsolete_navigation' });
+    expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('revalidates the trusted top and actual sender-frame cursors before Page START', async () => {
+    setupFrames([{ frameId: 0, response: { success: true } }, { frameId: 7, response: { success: true } }]);
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://example.com' },
+      { frameId: 7, url: 'https://frame-7.example' },
+    ]);
+    const topNavigationCursor = await pageNavigationTracker.getCursor(42, 0);
+    const navigationCursor = await pageNavigationTracker.getCursor(42, 7);
+    const restartFence = pageNavigationTracker.mintRestartFence(42);
+    const admission = {
+      action: MessageActions.PAGE_TRANSLATE_ADMIT,
+      data: { topNavigationCursor, navigationCursor, restartFence },
+    };
+
+    await expect(handlePageTranslation(admission, { ...sender, frameId: 7 })).resolves.toEqual({ success: true });
+    await pageNavigationTracker.capture(42, 0, 'https://example.com/another-route');
+    await expect(handlePageTranslation(admission, { ...sender, frameId: 7 })).resolves.toEqual({
+      success: false, reason: 'obsolete_navigation',
+    });
+  });
+
+  it.each([null, '', 'unknown-fence'])(
+    'rejects Page START admission with missing or unknown fence %o', async restartFence => {
+      setupFrames([{ frameId: 0, response: { success: true } }]);
+      await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+      const cursor = await pageNavigationTracker.getCursor(42, 0);
+      const validFence = pageNavigationTracker.mintRestartFence(42);
+      const result = await handlePageTranslation({
+        action: MessageActions.PAGE_TRANSLATE_ADMIT,
+        data: { topNavigationCursor: cursor, navigationCursor: cursor, restartFence },
+      }, { ...sender, frameId: 0 });
+
+      expect(validFence).not.toBe(restartFence);
+      expect(result).toEqual({ success: false, reason: 'obsolete_navigation' });
+    }
+  );
+
+  it('revokes the restart fence for the explicit Cancel payload form', async () => {
+    const previous = pageNavigationTracker.mintRestartFence(42);
+    await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE,
+      data: { cancel: true },
+    }, sender);
+
+    expect(pageNavigationTracker.getRestartFence(42)).not.toBe(previous);
+  });
+
+  it('revokes queued navigation restarts when a manual start is dispatched', async () => {
+    setupFrames([{ frameId: 0, response: { success: true } }]);
+    await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+    const navigationCursor = await pageNavigationTracker.getCursor(42, 0);
+    const restartFence = pageNavigationTracker.mintRestartFence(42);
+
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE,
+      data: {},
+    }, sender)).resolves.toMatchObject({ success: true });
+
+    browser.tabs.sendMessage.mockClear();
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE,
+      data: {
+        isAuto: true,
+        preserveAcceptedTranslations: true,
+        navigationCursor,
+        restartFence,
+      },
+    }, sender)).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+    expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
   });
 
   it.each(['history', 'commit'])('refreshes first enrollment after an untracked %s races a stale discovery snapshot', async event => {
@@ -218,7 +338,9 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
       browser.tabs.sendMessage.mockClear();
       if (failure === 'transport failure') browser.tabs.sendMessage.mockRejectedValueOnce(new Error('Content script unavailable'));
       else browser.tabs.sendMessage.mockResolvedValueOnce({ success: false, reason: ActionReasons.USER_CANCELLED });
-      onCommittedListener({ tabId: 42, frameId: 0, transitionType: 'link' });
+      onCommittedListener({ tabId: 42, frameId: 0, transitionType: 'link', url: 'https://example.com' });
+      await Promise.resolve();
+      await Promise.resolve();
       await vi.advanceTimersByTimeAsync(1000);
       await vi.advanceTimersByTimeAsync(2000);
       expect(browser.tabs.sendMessage).toHaveBeenCalledTimes(failure === 'transport failure' ? 2 : 1);
@@ -1064,6 +1186,37 @@ describe('bounded frame command response deadline', () => {
       { frameId: 0, success: true },
       { frameId: 7, success: false, isResponseTimeout: true, reason: 'frame_command_response_timeout' },
       { frameId: 14, success: true },
+    ]);
+  });
+
+  it('bounds a disappearing bound child independently from healthy frames', async () => {
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true, messageId: 'main' }) },
+      { frameId: 7, run: () => Promise.resolve({ success: true, messageId: 'child' }) },
+    ]);
+    pageNavigationTracker.state = null;
+    pageNavigationTracker.pending = Promise.resolve();
+    pageNavigationTracker.restartFences.clear();
+    const frames = [{ frameId: 0, url: 'https://frame-0.example' }, { frameId: 7, url: 'https://frame-1.example' }];
+    await pageNavigationTracker.seed(42, frames);
+    const navigationCursor = await pageNavigationTracker.getCursor(42, 0);
+    const restartFence = pageNavigationTracker.mintRestartFence(42);
+    browser.webNavigation.getFrame.mockImplementation(({ frameId }) => (
+      frameId === 7 ? never() : Promise.resolve({ url: 'https://frame-0.example' })
+    ));
+
+    const resultPromise = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE,
+      data: { isAuto: true, navigationCursor, restartFence },
+    }, sender);
+    await vi.advanceTimersByTimeAsync(RESPONSE_TIMEOUT_MS + 100);
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.responses).toEqual([{ success: true, messageId: 'main' }]);
+    expect(result.frames).toEqual([
+      { frameId: 0, success: true },
+      { frameId: 7, isResponseTimeout: true, reason: 'frame_command_response_timeout', success: false },
     ]);
   });
 

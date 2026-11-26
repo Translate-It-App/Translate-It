@@ -98,14 +98,20 @@ describe('FeatureManager SPA auto page command transport', () => {
     manager.reevaluateFeatures = vi.fn().mockResolvedValue(undefined);
     mocks.loadFeature.mockResolvedValue(pageTranslationManager);
 
-    await manager.handleUrlChange('https://old.example/', 'https://new.example/');
+    await manager.handleUrlChange('https://old.example/', 'https://new.example/', null, {
+      navigationCursor: cursor(1, 'https://new.example/'),
+      restartFence: 'test-fence',
+    });
 
     expect(pageTranslationManager.activate).toHaveBeenCalledOnce();
     expect(pageTranslationManager.userRestoredOverride).toBe(false);
     expect(mocks.sendRegularMessage).toHaveBeenCalledOnce();
     expect(mocks.sendRegularMessage).toHaveBeenCalledWith({
       action: MessageActions.PAGE_TRANSLATE,
-      data: { isAuto: true, preserveAcceptedTranslations: true },
+      data: {
+        isAuto: true, preserveAcceptedTranslations: true,
+        navigationCursor: cursor(1, 'https://new.example/'), restartFence: 'test-fence',
+      },
     }, { returnFailureResponse: true });
   });
 
@@ -150,7 +156,8 @@ describe('FeatureManager SPA auto page command transport', () => {
 
   const cursor = (routeRevision, url = window.location.href, documentEpoch = 1) => ({ documentEpoch, routeRevision, url });
   const historyNotification = (routeRevision = 1) => ({
-    navigationCursor: cursor(routeRevision, new URL('/intermediate-route', window.location.href).href),
+    navigationCursor: cursor(routeRevision),
+    restartFence: `fence-${routeRevision}`,
   });
 
   it('keeps pending work for same-route state updates and untracked notifications', () => {
@@ -257,7 +264,10 @@ describe('FeatureManager SPA auto page command transport', () => {
     await pending;
     expect(mocks.sendRegularMessage).toHaveBeenCalledExactlyOnceWith({
       action: MessageActions.PAGE_TRANSLATE,
-      data: { isAuto: true, preserveAcceptedTranslations: true },
+      data: {
+        isAuto: true, preserveAcceptedTranslations: true,
+        navigationCursor: cursor(1), restartFence: 'fence-1',
+      },
     }, { returnFailureResponse: true });
     expect(owner.checkForUrlChange()).toBe(false);
     expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
@@ -295,12 +305,27 @@ describe('FeatureManager SPA auto page command transport', () => {
     expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
   });
 
+  it('preserves a same-live-URL Stop override when manager URL bookkeeping is behind', async () => {
+    const { owner, page } = configureSameUrlPage();
+    page.currentUrl = 'https://example.com/previous';
+    page.userRestoredOverride = true;
+    page.userRestoredOverrideUrl = window.location.href;
+
+    await owner.checkForUrlChange({
+      navigationCursor: cursor(1),
+      restartFence: 'same-url-stop',
+    });
+
+    expect(page.userRestoredOverride).toBe(true);
+    expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+  });
+
   it('lets only the newest evidenced navigation revision start translation', async () => {
     const { owner } = configureSameUrlPage();
     let release;
     owner.reevaluateFeatures.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
     const obsolete = owner.checkForUrlChange(historyNotification(1));
-    await owner.checkForUrlChange({ navigationCursor: cursor(2, new URL('/another-intermediate-route', window.location.href).href) });
+    await owner.checkForUrlChange({ navigationCursor: cursor(2), restartFence: 'fence-2' });
     release();
     await obsolete;
     expect(mocks.sendRegularMessage).toHaveBeenCalledOnce();
@@ -318,7 +343,9 @@ describe('FeatureManager SPA auto page command transport', () => {
     const firstChange = manager.checkForUrlChange();
     expect(manager._lastDetectedUrl).toBe(newUrl);
     expect(handleUrlChange).toHaveBeenCalledOnce();
-    expect(handleUrlChange).toHaveBeenCalledWith(oldUrl, newUrl, expect.any(Number));
+    expect(handleUrlChange).toHaveBeenCalledWith(oldUrl, newUrl, expect.any(Number), {
+      navigationCursor: null, restartFence: undefined,
+    });
 
     manager.checkForUrlChange();
     expect(handleUrlChange).toHaveBeenCalledOnce();
@@ -338,7 +365,9 @@ describe('FeatureManager SPA auto page command transport', () => {
 
     expect(manager._lastDetectedUrl).toBe(newUrl);
     expect(handleUrlChange).toHaveBeenCalledOnce();
-    expect(handleUrlChange).toHaveBeenCalledWith(oldUrl, newUrl, expect.any(Number));
+    expect(handleUrlChange).toHaveBeenCalledWith(oldUrl, newUrl, expect.any(Number), {
+      navigationCursor: null, restartFence: undefined,
+    });
 
     manager.checkForUrlChange();
 
@@ -359,8 +388,12 @@ describe('FeatureManager SPA auto page command transport', () => {
     window.history.replaceState({}, '', urlC);
     const secondChange = manager.checkForUrlChange();
 
-    expect(handleUrlChange).toHaveBeenNthCalledWith(1, urlA, urlB, expect.any(Number));
-    expect(handleUrlChange).toHaveBeenNthCalledWith(2, urlB, urlC, expect.any(Number));
+    expect(handleUrlChange).toHaveBeenNthCalledWith(1, urlA, urlB, expect.any(Number), {
+      navigationCursor: null, restartFence: undefined,
+    });
+    expect(handleUrlChange).toHaveBeenNthCalledWith(2, urlB, urlC, expect.any(Number), {
+      navigationCursor: null, restartFence: undefined,
+    });
     expect(manager._lastDetectedUrl).toBe(urlC);
     await Promise.all([firstChange, secondChange]);
   });

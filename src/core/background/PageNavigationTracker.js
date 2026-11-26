@@ -11,6 +11,26 @@ export class PageNavigationTracker {
     this.state = null;
     this.dirty = false;
     this.pending = Promise.resolve();
+    this.restartFences = new Map();
+  }
+
+  mintRestartFence(tabId) {
+    if (!Number.isInteger(tabId) || tabId < 0) return null;
+    const fence = crypto.randomUUID();
+    this.restartFences.set(tabId, fence);
+    return fence;
+  }
+
+  getRestartFence(tabId) {
+    return this.restartFences.get(tabId) || null;
+  }
+
+  getOrMintRestartFence(tabId) {
+    return this.getRestartFence(tabId) || this.mintRestartFence(tabId);
+  }
+
+  revokeRestartFence(tabId) {
+    return this.mintRestartFence(tabId);
   }
 
   _run(update) {
@@ -24,7 +44,7 @@ export class PageNavigationTracker {
             )))) throw new Error('Invalid Page navigation storage');
         this.state = saved || { nextDocumentEpoch: 0, frames: {} };
       }
-      const result = update(this.state);
+      const result = await update(this.state);
       if (this.dirty) {
         await this.storage.set({ [STORAGE_KEY]: this.state });
         this.dirty = false;
@@ -82,6 +102,15 @@ export class PageNavigationTracker {
     });
   }
 
+  captureTopNavigation(tabId, url, { shouldCreate = async () => true } = {}) {
+    return this._run(async state => {
+      const key = `${tabId}:0`;
+      if (!state.frames[key] && await shouldCreate()) state.frames[key] = this._newDocument(state, url);
+      if (!state.frames[key]) return null;
+      return this._capture(state.frames[key], url);
+    });
+  }
+
   getCursor(tabId, frameId) {
     return this._run(state => state.frames[`${tabId}:${frameId}`] || null);
   }
@@ -121,6 +150,7 @@ export class PageNavigationTracker {
 
   removeTab(tabId) {
     return this._run(state => {
+      this.restartFences.delete(tabId);
       for (const key of Object.keys(state.frames)) {
         if (key.startsWith(`${tabId}:`)) {
           this.dirty = true;

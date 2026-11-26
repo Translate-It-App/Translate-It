@@ -47,6 +47,8 @@ export class PageTranslationManager extends ResourceTracker {
     this.isActive = false;
     this.isTranslating = false;
     this.isTranslated = false;
+    this.translatedUrl = null;
+    this.translationSessionUrl = null;
     this.isAutoTranslating = false;
     this.currentUrl = null;
     this.abortController = null;
@@ -56,9 +58,11 @@ export class PageTranslationManager extends ResourceTracker {
     this.isFatalErrorHandling = false;
     this._isCancelling = false;
     this.userRestoredOverride = false;
+    this.userRestoredOverrideUrl = null;
     this.autoStartCancelledUrls = new Set();
     this.translationSettingsRevision = 0;
     this.pendingSettingsAttempt = null;
+    this.preStartAttempt = null;
     this._layoutClassOwnership = null;
 
     
@@ -139,10 +143,22 @@ export class PageTranslationManager extends ResourceTracker {
       this.acceptedLifecycleSessionId = null;
       this.sessionContext = null;
       this.currentUrl = window.location.href;
-      this.userRestoredOverride = false;
+      if (this.userRestoredOverrideUrl !== window.location.href) {
+        this.userRestoredOverride = false;
+        this.userRestoredOverrideUrl = null;
+      }
     }
 
-    if (this.isTranslating || (this.isTranslated && !options.isAuto)) return { success: false, reason: ActionReasons.BUSY_OR_DONE };
+    if (!options.isAuto && this.preStartAttempt?.isAuto) {
+      const supersededAttempt = this.preStartAttempt;
+      this._cleanupFailedPreStartAttempt(supersededAttempt);
+      if (this.pendingSettingsAttempt === supersededAttempt) this.pendingSettingsAttempt = null;
+      if (this.preStartAttempt === supersededAttempt) this.preStartAttempt = null;
+    }
+
+    if (this.isTranslating || (this.isTranslated && !options.isAuto && this.translatedUrl === window.location.href)) {
+      return { success: false, reason: ActionReasons.BUSY_OR_DONE };
+    }
     if (!PageTranslationHelper.isSuitableForTranslation(this.logger)) return { success: false, reason: ActionReasons.NOT_SUITABLE };
 
     // Inject layout fixes to the host page
@@ -155,6 +171,7 @@ export class PageTranslationManager extends ResourceTracker {
       messageId: null,
       sessionContext: null,
       url: window.location.href,
+      isAuto: options.isAuto === true,
       explicitProvider: options.provider,
       settingsRevision: this.translationSettingsRevision,
       previousState: {
@@ -172,6 +189,7 @@ export class PageTranslationManager extends ResourceTracker {
 
     try {
       this.pendingSettingsAttempt = attempt;
+      this.preStartAttempt = attempt;
       this._injectLayoutFix();
 
       this.isTranslating = true;
@@ -219,16 +237,30 @@ export class PageTranslationManager extends ResourceTracker {
 
       if (!this._isCurrentPreStartAttempt(attempt)) return this._settleStalePreStartAttempt(attempt);
 
+      if (typeof options.validateNavigation === 'function') {
+        let navigationValid = false;
+        try {
+          navigationValid = await options.validateNavigation();
+        } catch {
+          // Admission uncertainty is fail-closed for navigation-bound starts.
+        }
+        if (!this._isCurrentPreStartAttempt(attempt) || !navigationValid) {
+          return this._settleStalePreStartAttempt(attempt);
+        }
+      }
       this.acceptedLifecycleSessionId = attempt.messageId;
+      this.translationSessionUrl = attempt.url;
+      if (this.preStartAttempt === attempt) this.preStartAttempt = null;
       this._broadcastEvent(MessageActions.PAGE_TRANSLATE_START, { 
         url: this.currentUrl, 
         messageId: attempt.messageId,
         sessionId: attempt.messageId,
+        isTranslated: this.bridge.hasRestorableTranslations === true,
         isAutoTranslating: !!this.settings.autoTranslateOnDOMChanges
       }, attempt.messageId);
       hasAcceptedStart = true;
 
-      this.isTranslated = false;
+      this.isTranslated = this.bridge.hasRestorableTranslations === true;
       this.isTranslating = true;
       this.isAutoTranslating = !!this.settings.autoTranslateOnDOMChanges;
 
@@ -275,7 +307,7 @@ export class PageTranslationManager extends ResourceTracker {
       // Initialize bridge with fresh context and standard callback
       await this.bridge.initialize(
         this.settings, 
-        (text, context, score, node) => {
+        (text, context, score, node, isEligible) => {
           // If we were idle, switch back to translating state
           if (this.isAutoTranslating && !this.isTranslating) {
             this.isTranslating = true;
@@ -290,7 +322,7 @@ export class PageTranslationManager extends ResourceTracker {
           if (this.settings.translateAfterScrollStop) {
             this.scrollTracker.notifyActivity();
           }
-          return this.scheduler.enqueue(text, context, score, node);
+          return this.scheduler.enqueue(text, context, score, node, isEligible);
         },
         attempt.sessionContext,
         {
@@ -346,7 +378,7 @@ export class PageTranslationManager extends ResourceTracker {
         return result;
       }
       
-      this.isTranslated = false;
+      this.isTranslated = this.bridge.hasRestorableTranslations === true;
       this.isTranslating = true;
       this.isAutoTranslating = !!this.settings.autoTranslateOnDOMChanges;
 
@@ -387,6 +419,7 @@ export class PageTranslationManager extends ResourceTracker {
       throw error;
     } finally {
       if (this.pendingSettingsAttempt === attempt) this.pendingSettingsAttempt = null;
+      if (this.preStartAttempt === attempt) this.preStartAttempt = null;
     }
   }
 
@@ -404,8 +437,10 @@ export class PageTranslationManager extends ResourceTracker {
       return;
     }
 
+    if (this.scheduler.translatedCount > 0) this.translatedUrl = attempt.url;
     this.isTranslating = false;
-    this.isTranslated = this.scheduler.translatedCount > 0;
+    this.isTranslated = this.scheduler.translatedCount > 0
+      || this.bridge.hasRestorableTranslations === true;
     this._broadcastEvent(MessageActions.PAGE_TRANSLATE_IDLE, {
       url: this.currentUrl,
       messageId: attempt.messageId,
@@ -433,7 +468,8 @@ export class PageTranslationManager extends ResourceTracker {
         this._cleanupSession(attempt.messageId);
         this.isAutoTranslating = false;
         this.isTranslating = false;
-        this.isTranslated = (this.scheduler.translatedCount || 0) > 0;
+        this.isTranslated = (this.scheduler.translatedCount || 0) > 0
+          || this.bridge.hasRestorableTranslations === true;
         this.sessionContext = null;
         if (!this.isTranslated) this._removeLayoutFix();
         this._broadcastEvent(MessageActions.PAGE_TRANSLATE_IDLE, {
@@ -459,7 +495,8 @@ export class PageTranslationManager extends ResourceTracker {
     this._cleanupSession(attempt.messageId);
     this.isTranslating = false;
     this.isAutoTranslating = false;
-    this.isTranslated = (this.scheduler.translatedCount || 0) > 0;
+    this.isTranslated = (this.scheduler.translatedCount || 0) > 0
+      || this.bridge.hasRestorableTranslations === true;
     this.sessionContext = null;
     if (!this.isTranslated) this._removeLayoutFix();
     this._broadcastEvent(MessageActions.PAGE_TRANSLATE_ERROR, {
@@ -527,19 +564,20 @@ export class PageTranslationManager extends ResourceTracker {
 
     if (ownsAttemptState) {
       if (restorePreviousState) {
-        this.isTranslated = attempt.previousState.isTranslated;
+        this.isTranslated = attempt.previousState.isTranslated || this.bridge.hasRestorableTranslations === true;
         this.isTranslating = attempt.previousState.isTranslating;
         this.isAutoTranslating = attempt.previousState.isAutoTranslating;
         this.abortController = attempt.previousState.abortController;
         this.translationMessageId = attempt.previousState.translationMessageId;
         this.sessionContext = attempt.previousState.sessionContext;
       } else {
-        this.isTranslated = false;
+        this.isTranslated = (this.scheduler.translatedCount || 0) > 0
+          || this.bridge.hasRestorableTranslations === true;
         this.isTranslating = false;
         this.isAutoTranslating = false;
       }
 
-      if (!restorePreviousState || !attempt.previousState.layoutOwnedByAcceptedState) {
+      if (!this.isTranslated && (!restorePreviousState || !attempt.previousState.layoutOwnedByAcceptedState)) {
         this._removeLayoutFix();
       }
     }
@@ -551,8 +589,9 @@ export class PageTranslationManager extends ResourceTracker {
     const translatedCount = this.scheduler.translatedCount || 0;
     const failedCount = this.scheduler.failedCount || 0;
     const totalCount = this.scheduler.totalTasks || 0;
-    const isTranslated = translatedCount > 0;
+    const isTranslated = translatedCount > 0 || this.bridge.hasRestorableTranslations === true;
     const sessionId = this.acceptedLifecycleSessionId ?? this.translationMessageId;
+    if (translatedCount > 0) this.translatedUrl = this.translationSessionUrl;
 
     this.scrollTracker.stop();
     this.bridge.stopPersistence();
@@ -589,6 +628,7 @@ export class PageTranslationManager extends ResourceTracker {
   async restorePage(options = {}) {
     if (options.manual) {
       this.userRestoredOverride = true;
+      this.userRestoredOverrideUrl = window.location.href;
     }
     const cancellationReason = options.cancellationReason
       ?? (options.manual ? ActionReasons.USER_STOPPED_PAGE_TRANSLATION : INTERNAL_CANCELLATION_REASON);
@@ -647,15 +687,18 @@ export class PageTranslationManager extends ResourceTracker {
   }
 
   resetLocalState({ preserveAcceptedTranslations = false } = {}) {
-    this._removeLayoutFix();
-    this.isTranslated = false;
+    const hasRestorableTranslations = this.bridge.hasRestorableTranslations === true;
+    if (!hasRestorableTranslations) this._removeLayoutFix();
+    this.isTranslated = hasRestorableTranslations;
     this.isTranslating = false;
     this.isAutoTranslating = false;
     this.isFatalErrorHandling = false; // Reset flag
     this.sessionContext = null;
+    this.translatedUrl = null;
+    this.translationSessionUrl = null;
     this.scheduler.reset();
     // Keep one stopped restore owner until a replacement session is admitted.
-    if (preserveAcceptedTranslations) this.bridge.stopPersistence();
+    if (preserveAcceptedTranslations || hasRestorableTranslations) this.bridge.stopPersistence();
     else this.bridge.cleanup();
   }
 
@@ -669,7 +712,10 @@ export class PageTranslationManager extends ResourceTracker {
     cancellationReason = ActionReasons.USER_STOPPED_PAGE_TRANSLATION,
     fatalErrorAutoRestore = false,
   } = {}) {
-    if (cancellationReason === ActionReasons.USER_STOPPED_PAGE_TRANSLATION) this.userRestoredOverride = true;
+    if (cancellationReason === ActionReasons.USER_STOPPED_PAGE_TRANSLATION) {
+      this.userRestoredOverride = true;
+      this.userRestoredOverrideUrl = window.location.href;
+    }
     // Lazy nodes can still own a live session after presentation becomes idle.
     if (!this.isAutoTranslating && !this.isTranslating
         && !this.scheduler.isTranslated && !this.bridge.session?.active) {
@@ -687,7 +733,7 @@ export class PageTranslationManager extends ResourceTracker {
       this.sessionContext = null;
       this.isAutoTranslating = false;
       this.isTranslating = false;
-      this.isTranslated = this.scheduler.translatedCount > 0;
+      this.isTranslated = this.scheduler.translatedCount > 0 || this.bridge.hasRestorableTranslations === true;
 
       // Stop the scheduler from processing more batches
       this.scheduler.setTranslationState(false, undefined, undefined, cancellationReason);
@@ -713,6 +759,10 @@ export class PageTranslationManager extends ResourceTracker {
   cancelTranslation(options = {}) {
     if (this._isCancelling) return;
     this._isCancelling = true;
+    if ((options.cancellationReason ?? ActionReasons.USER_STOPPED_PAGE_TRANSLATION) === ActionReasons.USER_STOPPED_PAGE_TRANSLATION) {
+      this.userRestoredOverride = true;
+      this.userRestoredOverrideUrl = window.location.href;
+    }
 
     try {
       const cancellingSessionId = this.acceptedLifecycleSessionId ?? this.translationMessageId;
@@ -825,12 +875,23 @@ export class PageTranslationManager extends ResourceTracker {
   }
 
   _handleSchedulerLifecycle(action, data = {}) {
+    const sessionId = data.sessionId;
+    if (sessionId && this.acceptedLifecycleSessionId
+        && sessionId !== this.acceptedLifecycleSessionId) return;
+    const translationUrl = sessionId && sessionId === this.acceptedLifecycleSessionId
+      ? this.translationSessionUrl
+      : null;
+    if (data.translatedCount > 0 && translationUrl) this.translatedUrl = translationUrl;
     if (
       action === MessageActions.PAGE_TRANSLATE_COMPLETE
       || action === MessageActions.PAGE_TRANSLATE_IDLE
     ) {
       this.isTranslating = false;
-      this.isTranslated = (data.translatedCount || 0) > 0;
+      const translatedCount = data.translatedCount ?? this.scheduler.translatedCount ?? 0;
+      if (translatedCount > 0 && translationUrl) this.translatedUrl = translationUrl;
+      this.isTranslated = translatedCount > 0
+        || this.bridge.hasRestorableTranslations === true;
+      data = { ...data, isTranslated: this.isTranslated };
     }
 
     this._publishLifecycle(action, data, data.sessionId);
@@ -1068,17 +1129,13 @@ export class PageTranslationManager extends ResourceTracker {
   }
 
   getStatus() {
-    if (this.currentUrl && this.currentUrl !== window.location.href) {
-      this.currentUrl = window.location.href;
-    }
-
     return {
       isActive: this.isActive,
       isTranslating: this.isTranslating,
-      isTranslated: this.isTranslated,
+      isTranslated: this.isTranslated || this.bridge.hasRestorableTranslations === true,
       isAutoTranslating: this.isAutoTranslating,
       translatedCount: this.scheduler.translatedCount,
-      currentUrl: this.currentUrl,
+      currentUrl: window.location.href,
       settings: this.settings,
     };
   }

@@ -57,7 +57,7 @@ export class MainFrameCoordinator {
     this.aggregator.updateFrameData(frameId, {
       ...data,
       isTranslating: true,
-      isTranslated: false,
+      isTranslated: data.isTranslated === true,
       isAutoTranslating: data.isAutoTranslating === true,
       translatedCount: 0,
       failedCount: 0,
@@ -360,7 +360,7 @@ export class MainFrameCoordinator {
         errorDetails: terminalErrorDetails,
         isTranslating: false,
         status: 'idle',
-        isTranslated: true,
+        isTranslated: aggregateData.isTranslated === true || aggregateData.translatedCount > 0,
       });
       this.aggregator.recordTerminalCause(frameId, terminalErrorDetails);
       this.aggregator.emitAggregateProgress(action, data);
@@ -369,7 +369,7 @@ export class MainFrameCoordinator {
         ...aggregateData,
         isTranslating: false,
         status: 'idle',
-        isTranslated: (data.translatedCount || 0) > 0,
+        isTranslated: aggregateData.isTranslated === true || aggregateData.translatedCount > 0,
       });
       this.aggregator.emitAggregateProgress(action, data);
     } else if (action === this.MessageActions.PAGE_AUTO_RESTORE_COMPLETE) {

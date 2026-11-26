@@ -182,6 +182,20 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.message.value).toBe('Auto-translation stopped');
     });
 
+    it('keeps Restore available when Stop reports owned originals not yet counted', async () => {
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: false })
+        : Promise.resolve({ success: true, responses: [
+          { success: true, isTranslated: true, translatedCount: 0 },
+        ] }));
+      const pageTranslation = await createPageTranslation();
+
+      await pageTranslation.stopAutoTranslation();
+
+      expect(pageTranslation.isTranslated.value).toBe(true);
+      expect(pageTranslation.translatedCount.value).toBe(0);
+    });
+
     it('preserves known translation state when Stop fanout delivery is incomplete', async () => {
       sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
         ? Promise.resolve({ success: false })

@@ -60,7 +60,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
       errorPresentationRevision++;
       mobileStore.setPageTranslation({
         isTranslating: true,
-        isTranslated: false,
+        isTranslated: detail.isTranslated === true,
         isAutoTranslating: detail.isAutoTranslating || false,
         status: TRANSLATION_STATUS.TRANSLATING,
         translatedCount: 0,
@@ -131,7 +131,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         totalCount,
         isTranslating: false,
         isAutoTranslating: detail.isAutoTranslating !== undefined ? detail.isAutoTranslating : mobileStore.pageTranslationData.isAutoTranslating,
-        isTranslated: translatedCount > 0,
+        isTranslated: detail.isTranslated === true || translatedCount > 0,
         status: TRANSLATION_STATUS.COMPLETED
       });
     });
@@ -159,7 +159,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
 
       mobileStore.setPageTranslation({
         isTranslating: false,
-        isTranslated: translatedCount > 0,
+        isTranslated: detail.isTranslated === true || translatedCount > 0,
         isAutoTranslating: detail.isAutoTranslating !== undefined ? detail.isAutoTranslating : mobileStore.pageTranslationData.isAutoTranslating,
         status: isZeroResult ? TRANSLATION_STATUS.ERROR : TRANSLATION_STATUS.COMPLETED,
         translatedCount,
@@ -185,10 +185,10 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         : typeof detail.committedCount === 'number'
           ? detail.committedCount
           : null;
-      const hasCommittedContent = translatedCount !== null
+      const hasCommittedContent = detail.isTranslated === true || (translatedCount !== null
         ? translatedCount > 0
         : mobileStore.pageTranslationData.isTranslated
-          || mobileStore.pageTranslationData.translatedCount > 0;
+          || mobileStore.pageTranslationData.translatedCount > 0);
       const currentState = mobileStore.pageTranslationData;
       const isTranslating = detail.isTranslating !== undefined
         ? detail.isTranslating
@@ -253,7 +253,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         ? detail.totalCount
         : currentState.totalCount;
       const hasTranslations = detail.isTranslated !== undefined
-        ? detail.isTranslated
+        ? detail.isTranslated || translatedCount > 0
         : translatedCount > 0;
 
       // Skip empty messages if we already have active/valid translation state

@@ -176,6 +176,38 @@ describe('PageTranslationScheduler', () => {
     expect(safeSendMessage).toHaveBeenCalledOnce();
   });
 
+  it('settles nodes that lose eligibility before dispatch as stale without sending a request', async () => {
+    scheduler.setSettings({
+      lazyLoading: false,
+      autoTranslateOnDOMChanges: false,
+      translateAfterScrollStop: false,
+    });
+    vi.spyOn(scheduler, '_getBatchConfig').mockResolvedValue({
+      providerRegistryId: 'google',
+      targetLanguage: 'en',
+      chunkSize: 10,
+      maxChars: 1000,
+      parallelExecution: false,
+      lazyLoading: false,
+    });
+    PageTranslationFluidFilter.process.mockImplementation(queue => ({
+      batchItems: [...queue],
+      remainingItems: [],
+    }));
+    let eligible = true;
+    const result = scheduler.enqueue('queued source', scheduler.sessionContext, 0, {}, () => eligible);
+    await vi.waitFor(() => expect(scheduler.queue).toHaveLength(1));
+    eligible = false;
+    await scheduler.flush();
+
+    await expect(result).resolves.toMatchObject({ text: 'queued source', state: 'stale' });
+    expect(safeSendMessage).not.toHaveBeenCalled();
+    expect(scheduler.totalTasks).toBe(1);
+    expect(scheduler.translatedCount).toBe(0);
+    expect(scheduler.failedCount).toBe(1);
+    expect(scheduler.activeFlushes).toBe(0);
+  });
+
   it.each([
     { lazyLoading: true },
     { autoTranslateOnDOMChanges: true },

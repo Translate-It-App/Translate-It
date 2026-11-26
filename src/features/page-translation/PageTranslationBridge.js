@@ -168,25 +168,47 @@ export class PageTranslationBridge extends ResourceTracker {
     this.logger = getScopedLogger(LOG_COMPONENTS.PAGE_TRANSLATION, 'Bridge');
     this.session = null;
     this.showOriginalOnHover = true; // Initial default
+    this.acceptedOriginals = new WeakMap();
+    this.acceptedOriginalNodes = new Set();
+    this.restorableOriginalCount = 0;
+    this.acceptedOriginalFinalizer = new FinalizationRegistry(reference => {
+      if (this.acceptedOriginalNodes.delete(reference)) {
+        this.restorableOriginalCount = Math.max(0, this.restorableOriginalCount - 1);
+      }
+    });
+  }
+
+  get hasRestorableTranslations() {
+    return this.restorableOriginalCount > 0;
+  }
+
+  _trackAcceptedOriginal(node, retained) {
+    const previous = this.acceptedOriginals.get(node);
+    if (previous) this._forgetAcceptedOriginal(node);
+    const reference = new WeakRef(node);
+    this.acceptedOriginals.set(node, { ...retained, reference });
+    this.acceptedOriginalNodes.add(reference);
+    this.restorableOriginalCount += 1;
+    this.acceptedOriginalFinalizer.register(node, reference, reference);
+  }
+
+  _forgetAcceptedOriginal(node) {
+    const retained = this.acceptedOriginals.get(node);
+    if (!retained) return;
+    this.acceptedOriginals.delete(node);
+    this.acceptedOriginalFinalizer.unregister(retained.reference);
+    if (this.acceptedOriginalNodes.delete(retained.reference)) {
+      this.restorableOriginalCount = Math.max(0, this.restorableOriginalCount - 1);
+    }
   }
 
   async initialize(settings, onTranslateCallback, sessionContext = null, {
     preserveAcceptedTranslations = false, onRetainedTranslation = null, settingsRevision = 0,
     onDiscoveryStateChange = null, onDiscoveryError = null, onInitialDiscoveryDrained = null,
   } = {}) {
-    const previous = preserveAcceptedTranslations && this.session ? {
-      nodeStorage: this.session.nodesTranslator?.nodeStorage,
-      document: this.session.root?.ownerDocument,
-      translationApi: this.session.translationApi,
-      targetLanguage: this.session.targetLanguage,
-      settingsRevision: this.session.settingsRevision,
-    } : null;
-    const previousStorage = preserveAcceptedTranslations
-      && previous?.document === document
-      && previous.targetLanguage === settings.targetLanguage
-      && previous.translationApi === settings.translationApi
-      && previous.settingsRevision === settingsRevision
-      ? previous.nodeStorage : null;
+    const bridge = this;
+    const acceptedOriginals = this.acceptedOriginals;
+    const previousDocument = this.session?.root?.ownerDocument;
     this.cleanup();
     
     // Explicitly set from settings (defaulted to true if undefined)
@@ -275,10 +297,13 @@ export class PageTranslationBridge extends ResourceTracker {
         return false;
       }
 
-      return generation === undefined || targetGenerations.get(node) === generation;
+      return (generation === undefined || targetGenerations.get(node) === generation)
+        && filter(node);
     };
 
-    const recordApplyDecision = (node, generation, outcome, settlement = null, ownsStorage = false) => {
+    const recordApplyDecision = (
+      node, generation, outcome, settlement = null, ownsStorage = false, sourceValue = null
+    ) => {
       if (!node) return;
       let decisions = applyDecisions.get(node);
       if (!decisions) {
@@ -290,6 +315,7 @@ export class PageTranslationBridge extends ResourceTracker {
         outcome,
         settlement,
         ownsStorage,
+        sourceValue,
         session: currentSession,
       });
     };
@@ -377,7 +403,7 @@ export class PageTranslationBridge extends ResourceTracker {
       const ownsStorage = nodesTranslator.currentTaskOwnsStorage === true;
 
       if (!text || !text.trim()) {
-        recordApplyDecision(node, generation, 'accepted-pending', null, ownsStorage);
+        recordApplyDecision(node, generation, 'accepted-pending', null, ownsStorage, sourceValue);
         return text;
       }
 
@@ -390,7 +416,13 @@ export class PageTranslationBridge extends ResourceTracker {
 
       // 2. Request translation for trimmed text
       // We pass the node as the 4th argument
-      const settlement = await onTranslateCallback(trimmedText, sessionContext, score, node);
+      const settlement = await onTranslateCallback(
+        trimmedText,
+        sessionContext,
+        score,
+        node,
+        () => isFreshTarget(node, sourceValue, generation)
+      );
       const hasSettlement = settlement && settlement.__pageTranslationSettlement === true;
       const translated = hasSettlement ? settlement.text : settlement;
 
@@ -398,22 +430,22 @@ export class PageTranslationBridge extends ResourceTracker {
       // protects DOM writes, but cannot correct page-level settlement accounting.
       if (node && (!currentSession.active || this.session !== currentSession)) {
         settlement?.settle?.('cancelled');
-        recordApplyDecision(node, generation, 'cancelled', settlement, ownsStorage);
+        recordApplyDecision(node, generation, 'cancelled', settlement, ownsStorage, sourceValue);
         return getCurrentNodeValue(node);
       }
 
       if (node && hasSettlement && settlement.state !== 'pending') {
-        recordApplyDecision(node, generation, settlement.state, settlement, ownsStorage);
+        recordApplyDecision(node, generation, settlement.state, settlement, ownsStorage, sourceValue);
         return getCurrentNodeValue(node);
       }
 
       if (node && !isFreshTarget(node, sourceValue, generation)) {
         settlement?.settle?.('stale');
-        recordApplyDecision(node, generation, 'stale', settlement, ownsStorage);
+        recordApplyDecision(node, generation, 'stale', settlement, ownsStorage, sourceValue);
         return getCurrentNodeValue(node);
       }
 
-      recordApplyDecision(node, generation, 'accepted-pending', settlement, ownsStorage);
+      recordApplyDecision(node, generation, 'accepted-pending', settlement, ownsStorage, sourceValue);
 
       
       // OPTIMIZATION: Preserve ZWNJ, Tatweel, Dashes and BiDi marks if the provider 
@@ -482,7 +514,7 @@ export class PageTranslationBridge extends ResourceTracker {
           if (canPreserveProviderFailure) {
             const failedSource = getCurrentNodeValue(node);
             actualNodeData.originalText = failedSource;
-            setCurrentNodeValue(node, text);
+            if (failedSource === text) setCurrentNodeValue(node, text);
             if (admissionRecord?.session === currentSession
                 && currentSession.viewportFirstDiscoveryEnabled) {
               actualNodeData.pageTranslationFailure = {
@@ -502,8 +534,7 @@ export class PageTranslationBridge extends ResourceTracker {
 
           const canApply = decision
             && decision.session === currentSession
-            && isActiveTarget(node)
-            && decision.generation === targetGenerations.get(node)
+            && isFreshTarget(node, decision.sourceValue, decision.generation)
             && decision.outcome === 'accepted-pending'
             && (!decision.settlement || decision.settlement.state === 'pending');
 
@@ -543,6 +574,15 @@ export class PageTranslationBridge extends ResourceTracker {
               text: getCurrentNodeValue(node),
               updateId: actualNodeData.updateId,
             };
+            bridge._trackAcceptedOriginal(node, {
+              originalText: actualNodeData.originalText,
+              text: getCurrentNodeValue(node),
+              importanceScore: actualNodeData.importanceScore,
+              document,
+              targetLanguage: settings.targetLanguage,
+              translationApi: settings.translationApi,
+              settingsRevision,
+            });
           } catch (error) {
             if (decision.settlement?.state === 'pending') {
               decision.settlement.settle(
@@ -584,6 +624,18 @@ export class PageTranslationBridge extends ResourceTracker {
 
       restore(node, callback) {
         const nodeData = this.nodeStorage.get(node);
+        const retained = acceptedOriginals.get(node);
+        if (!nodeData && retained) {
+          const isSameOwnedValue = node.ownerDocument === document
+            && getCurrentNodeValue(node) === retained.text
+            && (node.nodeType !== Node.ATTRIBUTE_NODE
+              || node.ownerElement?.getAttributeNode(node.name) === node)
+            && isConnectedTarget(node);
+          if (isSameOwnedValue) setCurrentNodeValue(node, retained.originalText);
+          bridge._forgetAcceptedOriginal(node);
+          callback?.(node);
+          return;
+        }
         const accepted = nodeData?.acceptedTranslation;
         retireAdmission(nodeData?.pageTranslationAdmission, { removeObserver: true });
         if (nodeData?.pageTranslationAdmission) delete nodeData.pageTranslationAdmission;
@@ -601,15 +653,20 @@ export class PageTranslationBridge extends ResourceTracker {
             // Detached targets are retired by active shadow observers; only stopped owners require connectivity.
             || (!currentSession.active && !isConnectedTarget(node))) {
           this.nodeStorage.delete(node);
+          if (accepted) {
+            bridge._forgetAcceptedOriginal(node);
+          }
           callback?.(node);
           return;
         }
         if (node?.nodeType === Node.ATTRIBUTE_NODE && nodeData) {
           if (nodeData.originalText !== null) setCurrentNodeValue(node, nodeData.originalText);
+          bridge._forgetAcceptedOriginal(node);
           this.nodeStorage.delete(node);
           callback?.(node);
           return;
         }
+        bridge._forgetAcceptedOriginal(node);
         super.restore(node);
         callback?.(node);
       }
@@ -617,17 +674,38 @@ export class PageTranslationBridge extends ResourceTracker {
 
     const nodesTranslator = new GuardedNodesTranslator(translateWithContext);
     const retainAcceptedTranslation = (node) => {
-      if (!previousStorage || nodesTranslator.has(node) || !isActiveTarget(node)) return false;
-      const previous = previousStorage.get(node);
-      const accepted = previous?.acceptedTranslation;
-      if (!accepted || previous.updateId !== accepted.updateId
-          || getCurrentNodeValue(node) !== accepted.text) return false;
+      if (nodesTranslator.has(node) || !isActiveTarget(node)) return false;
+      const retained = acceptedOriginals.get(node);
+      if (!retained) return false;
+      if (getCurrentNodeValue(node) !== retained.text) {
+        bridge._forgetAcceptedOriginal(node);
+        return false;
+      }
+      const compatible = preserveAcceptedTranslations
+        && previousDocument === document
+        && retained.document === document
+        && retained.targetLanguage === settings.targetLanguage
+        && retained.translationApi === settings.translationApi
+        && retained.settingsRevision === settingsRevision;
+      if (!compatible) {
+        if (retained.originalText !== retained.text) {
+          const root = getFilterElement(node)?.getRootNode?.();
+          if (isShadowRoot(root)) {
+            if (currentSession.shadowRoots.has(root)) currentSession.shadowMutatedNodes.add(node);
+          } else if (currentSession.persistentTranslator?.observedNodesStorage?.size) {
+            currentSession.persistentTranslator.mutatedNodes.add(node);
+          }
+          setCurrentNodeValue(node, retained.originalText);
+        }
+        bridge._forgetAcceptedOriginal(node);
+        return false;
+      }
       nodesTranslator.nodeStorage.set(node, {
-        id: nodesTranslator.idCounter++, updateId: 1, originalText: accepted.originalText,
-        importanceScore: previous.importanceScore,
-        acceptedTranslation: { ...accepted, updateId: 1 },
+        id: nodesTranslator.idCounter++, updateId: 1, originalText: retained.originalText,
+        importanceScore: retained.importanceScore,
+        acceptedTranslation: { originalText: retained.originalText, text: retained.text, updateId: 1 },
       });
-      if (settings.showOriginalOnHover) hoverPreviewLookup.add(node, accepted.originalText, accepted.text);
+      if (settings.showOriginalOnHover) hoverPreviewLookup.add(node, retained.originalText, retained.text);
       applyTranslationFont(node);
       onRetainedTranslation?.();
       return true;
@@ -1039,10 +1117,27 @@ export class PageTranslationBridge extends ResourceTracker {
       return translateValidatedPrimitive(node, callback);
     };
 
-    if (currentSession.slicedDiscoveryEnabled) {
-      if (currentSession.viewportFirstDiscoveryEnabled) {
-        currentSession.domTranslator.update = (node, callback) => admitPrimitive(node, callback);
+    currentSession.domTranslator.update = (node, callback) => {
+      if (!currentSession.active || this.session !== currentSession) return;
+      const retained = acceptedOriginals.get(node);
+      const nodeData = nodesTranslator.nodeStorage.get(node);
+      const accepted = nodeData?.acceptedTranslation;
+      const currentValue = getCurrentNodeValue(node);
+      if ((retained && currentValue !== retained.text)
+          || (accepted && currentValue !== accepted.text)) {
+        bridge._forgetAcceptedOriginal(node);
       }
+      if (!isActiveTarget(node) || !filter(node)) {
+        if (nodeData && accepted && currentValue !== accepted.text) {
+          delete nodeData.acceptedTranslation;
+        }
+        return;
+      }
+      if (currentSession.viewportFirstDiscoveryEnabled) return admitPrimitive(node, callback);
+      return originalDomUpdate.call(currentSession.domTranslator, node, callback);
+    };
+
+    if (currentSession.slicedDiscoveryEnabled) {
       const discovery = {
         queue: [],
         head: 0,
@@ -1716,7 +1811,30 @@ export class PageTranslationBridge extends ResourceTracker {
   }
 
   restore(element) {
-    if (!this.session) return;
+    if (!this.session) {
+      const ownerDocument = element?.nodeType === Node.DOCUMENT_NODE ? element : element?.ownerDocument;
+      for (const reference of this.acceptedOriginalNodes) {
+        const node = reference.deref();
+        if (!node) continue;
+        const retained = this.acceptedOriginals.get(node);
+        const isSameOwnedValue = retained
+          && retained.document === ownerDocument
+          && (node.nodeType === Node.ATTRIBUTE_NODE
+            ? node.ownerElement?.getAttributeNode(node.name) === node
+              && node.value === retained.text
+              && node.ownerElement?.isConnected
+            : node.nodeValue === retained.text && node.isConnected);
+        if (isSameOwnedValue) {
+          if (node.nodeType === Node.ATTRIBUTE_NODE) node.value = retained.originalText;
+          else node.nodeValue = retained.originalText;
+        }
+        this._forgetAcceptedOriginal(node);
+      }
+      this.acceptedOriginalNodes.clear();
+      this.restorableOriginalCount = 0;
+      this.acceptedOriginals = new WeakMap();
+      return;
+    }
 
     const currentSession = this.session;
     currentSession.cancelDiscovery?.();
@@ -1750,6 +1868,9 @@ export class PageTranslationBridge extends ResourceTracker {
       }
     } finally {
       this.cleanup();
+      this.acceptedOriginalNodes.clear();
+      this.restorableOriginalCount = 0;
+      this.acceptedOriginals = new WeakMap();
     }
   }
 

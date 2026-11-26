@@ -788,6 +788,65 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
     expect(retired.translatePage).not.toHaveBeenCalled();
   });
 
+  it('revokes a delivered navigation restart while async Vue loading is pending', async () => {
+    let finishVueLoad;
+    const previousCore = window.translateItContentCore;
+    window.translateItContentCore = {
+      vueLoaded: false,
+      loadVueApp: vi.fn(() => new Promise(resolve => { finishVueLoad = resolve; })),
+    };
+    const translatePage = vi.fn().mockResolvedValue({ success: true });
+    handler.setPageTranslationManager({ isActive: true, translatePage });
+    const cursor = { documentEpoch: 1, routeRevision: 0, url: window.location.href };
+    const command = handler.handlePageTranslate({
+      data: {
+        isAuto: true, navigationCursor: cursor, topNavigationCursor: cursor,
+        restartFence: 'trusted-fence',
+      },
+    });
+
+    try {
+      await vi.waitFor(() => expect(window.translateItContentCore.loadVueApp).toHaveBeenCalledOnce());
+      await handler.handlePageStopAuto();
+      finishVueLoad();
+      await expect(command).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+      expect(translatePage).not.toHaveBeenCalled();
+    } finally {
+      window.translateItContentCore = previousCore;
+    }
+  });
+
+  it('lets an explicit manual start supersede an in-flight navigation restart', async () => {
+    let finishVueLoad;
+    const previousCore = window.translateItContentCore;
+    window.translateItContentCore = {
+      vueLoaded: false,
+      loadVueApp: vi.fn(() => new Promise(resolve => { finishVueLoad = resolve; })),
+    };
+    const translatePage = vi.fn().mockResolvedValue({ success: true });
+    handler.setPageTranslationManager({ isActive: true, translatePage });
+    const cursor = { documentEpoch: 1, routeRevision: 0, url: window.location.href };
+    const automatic = handler.handlePageTranslate({
+      data: {
+        isAuto: true, navigationCursor: cursor, topNavigationCursor: cursor,
+        restartFence: 'trusted-fence',
+      },
+    });
+
+    try {
+      await vi.waitFor(() => expect(window.translateItContentCore.loadVueApp).toHaveBeenCalledOnce());
+      window.translateItContentCore.vueLoaded = true;
+      await expect(handler.handlePageTranslate({ data: {} })).resolves.toEqual({ success: true });
+      finishVueLoad();
+      await expect(automatic).resolves.toMatchObject({ success: false, reason: 'obsolete_navigation' });
+      expect(translatePage).toHaveBeenCalledOnce();
+      expect(translatePage).toHaveBeenCalledWith({});
+      expect(handler._pageRestartRevision).toBe(1);
+    } finally {
+      window.translateItContentCore = previousCore;
+    }
+  });
+
   it('does not revive a retired Page instance when current feature admission is unavailable', async () => {
     const retired = { isActive: false, activate: vi.fn().mockResolvedValue(true), translatePage: vi.fn() };
     handler.setPageTranslationManager(retired);
@@ -825,6 +884,7 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
       cancelled: true,
     });
 
+    expect(handler._pageRestartRevision).toBe(1);
     expect(cancelTranslation).toHaveBeenCalledTimes(1);
   });
 
