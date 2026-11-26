@@ -34,16 +34,17 @@ export function createFixture(scenario = 'small', { providerLane = false } = {})
     return { scenario, targetCount: 3, targetTexts: targets.slice(0, 3).map(target => target.source), targets: targets.slice(0, 3), shadowTargets: targets,
       visibleIds: targets.slice(0, 3).map(target => target.id), html, viewport: { width: 1280, height: 900 }, scroll: { x: 0, y: 0 }, responseDelayMs: 50 };
   }
-  if (scenario !== 'small' && scenario !== 'dynamic-dom' && scenario !== 'spa-navigation' && scenario !== 'scroll-through' && !largeScenarios.has(scenario)) throw new TypeError(`Unknown benchmark fixture scenario: ${scenario}`);
+  const spaScenario = scenario === 'spa-navigation' || scenario === 'spa-manual-continuity';
+  if (scenario !== 'small' && scenario !== 'dynamic-dom' && !spaScenario && scenario !== 'scroll-through' && !largeScenarios.has(scenario)) throw new TypeError(`Unknown benchmark fixture scenario: ${scenario}`);
 
   const texts = scenario === 'scroll-through' && providerLane
     ? Array.from({ length: largeTargetCount }, (_, index) => `Benchmark target ${String(index + 1).padStart(4, '0')} has stable fixture content.`)
-    : scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' || scenario === 'scroll-through'
+    : scenario === 'small' || scenario === 'dynamic-dom' || spaScenario || scenario === 'scroll-through'
     ? targetTexts
     : Array.from({ length: largeTargetCount }, (_, index) => `Benchmark target ${String(index + 1).padStart(4, '0')} has stable fixture content.`);
   const count = texts.length;
   const visibleIndexes = scenario === 'scroll-through' ? Array.from({ length: providerLane ? 334 : 4 }, (_, index) => index)
-    : scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' ? texts.map((_, index) => index) : visibleTargetIndexes;
+    : scenario === 'small' || scenario === 'dynamic-dom' || spaScenario ? texts.map((_, index) => index) : visibleTargetIndexes;
   let indexes = texts.map((_, index) => index);
   if (scenario === 'early-visible') indexes = [...visibleIndexes, ...indexes.filter(index => !visibleIndexes.includes(index))];
   if (scenario === 'in-window-visible') indexes = [0, 1, ...visibleIndexes, ...indexes.filter(index => index > 1 && !visibleIndexes.includes(index))];
@@ -52,11 +53,11 @@ export function createFixture(scenario = 'small', { providerLane = false } = {})
     id: `target-${index}`,
     source: texts[index],
     visible: visibleIndexes.includes(index),
-    ...(scenario === 'spa-navigation' ? { kind: index < 6 ? 'text' : 'title' } : {}),
+    ...(spaScenario ? { kind: index < 6 ? 'text' : 'title' } : {}),
   }));
   const htmlTargets = targets.map(target => {
     const targetIndex = Number(target.id.slice(7));
-    const position = scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation'
+    const position = scenario === 'small' || scenario === 'dynamic-dom' || spaScenario
       ? ''
       : scenario === 'scroll-through'
         ? `position:absolute;left:20px;top:${scrollBandTops[providerLane ? (targetIndex < 334 ? 0 : targetIndex < 667 ? 1 : 2) : Math.floor(targetIndex / 4)] + (providerLane ? (targetIndex - (targetIndex < 334 ? 0 : targetIndex < 667 ? 334 : 667)) : (targetIndex % 4) * 30)}px;width:900px;height:${providerLane ? 1 : 24}px;`
@@ -66,7 +67,7 @@ export function createFixture(scenario = 'small', { providerLane = false } = {})
       ? `<p data-bench-id="${target.id}" data-bench-kind="title"${style ? ` style="${style}"` : ''} title="${target.source}"></p>`
       : `<p data-bench-id="${target.id}"${target.kind ? ' data-bench-kind="text"' : ''}${style ? ` style="${style}"` : ''}>${target.source}</p>`;
   }).join('');
-  const spaControl = scenario === 'spa-navigation' ? `<button id="spa-navigation-control" type="button" translate="no">Navigate</button><script>
+  const spaControl = spaScenario ? `<button id="spa-navigation-control" type="button" translate="no">Navigate</button><script>
   const bSources = ${JSON.stringify(targetTexts.map((_, index) => `SPA route B sentence ${index + 1} has distinct stable content.`))};
   let changed = false;
   document.addEventListener('translate-it:benchmark-spa-invalidated', () => {
@@ -76,7 +77,7 @@ export function createFixture(scenario = 'small', { providerLane = false } = {})
   }, { once: true });
   document.getElementById('spa-navigation-control').addEventListener('click', () => history.pushState({}, '', '/replacement'));
   </script>` : '';
-  const html = `<!doctype html><meta charset="utf-8"><title>Page translation benchmark</title><main${scenario === 'small' || scenario === 'dynamic-dom' || scenario === 'spa-navigation' ? '' : ` style="position:relative;min-height:${scenario === 'scroll-through' ? 3200 : 12000}px"`}>${htmlTargets}${spaControl}</main>${scenario === 'spa-navigation' ? '<script>document.documentElement.dataset.benchSpaScenario="true"</script>' : ''}`;
+  const html = `<!doctype html><meta charset="utf-8"><title>Page translation benchmark</title><main${scenario === 'small' || scenario === 'dynamic-dom' || spaScenario ? '' : ` style="position:relative;min-height:${scenario === 'scroll-through' ? 3200 : 12000}px"`}>${htmlTargets}${spaControl}</main>${spaScenario ? '<script>document.documentElement.dataset.benchSpaScenario="true"</script>' : ''}`;
   const orderedTexts = targets.map(target => target.source);
   const visibleIds = targets.filter(target => target.visible).map(target => target.id);
   const dynamicCohorts = scenario === 'dynamic-dom' ? [0, 1].map(cohortIndex => ({
@@ -98,7 +99,7 @@ export function createFixture(scenario = 'small', { providerLane = false } = {})
     scroll: { x: 0, y: 0 },
     responseDelayMs: 50,
     ...(dynamicCohorts ? { dynamicCohorts } : {}),
-    ...(scenario === 'spa-navigation' ? { spaChangedIds: ['target-1', 'target-5', 'target-9'], spaSources: targetTexts.map((_, index) => `SPA route B sentence ${index + 1} has distinct stable content.`) } : {}),
+    ...(spaScenario ? { spaChangedIds: ['target-1', 'target-5', 'target-9'], spaSources: targetTexts.map((_, index) => `SPA route B sentence ${index + 1} has distinct stable content.`) } : {}),
     ...(scenario === 'scroll-through' ? { scrollBands: providerLane
       ? [[0, 334], [334, 667], [667, 1000]].map(([start, end], index) => ({ band: index + 1, top: scrollBandTops[index], ids: targets.slice(start, end).map(target => target.id) }))
       : scrollBandTops.map((top, band) => ({ band, top, ids: targets.slice(band * 4, band * 4 + 4).map(target => target.id) })) } : {}),
@@ -198,7 +199,8 @@ export async function startFixture(fixture = createFixture(), { runtimeBridge, r
         ].filter(Boolean)) : new Set();
         if (replacementCollector && replacementPaths.has(url.pathname)
             && await replacementCollector.handle(request, response)) return;
-        const replacementFixture = fixture.scenario === 'page-translation-replacement' || fixture.scenario === 'spa-navigation';
+        const replacementFixture = fixture.scenario === 'page-translation-replacement' || fixture.scenario === 'spa-navigation'
+          || fixture.scenario === 'spa-manual-continuity';
         const isFixtureRoute = url.pathname === '/' || (replacementFixture && url.pathname === '/replacement');
         if (!isFixtureRoute || url.search) { response.writeHead(404).end(); return; }
         response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fixture.html);
@@ -209,7 +211,8 @@ export async function startFixture(fixture = createFixture(), { runtimeBridge, r
       });
       return;
     }
-    if (request.url !== '/' && !(['page-translation-replacement', 'spa-navigation'].includes(fixture.scenario) && request.url === '/replacement')) { response.writeHead(404).end(); return; }
+    if (request.url !== '/' && !(['page-translation-replacement', 'spa-navigation', 'spa-manual-continuity'].includes(fixture.scenario)
+        && request.url === '/replacement')) { response.writeHead(404).end(); return; }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(fixture.html);
   });

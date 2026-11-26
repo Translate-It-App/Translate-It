@@ -947,7 +947,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         || JSON.stringify(trial.measurementStart.visibleIds) !== JSON.stringify(actualGeometry.visibleIds))) {
       throw new Error('MutationObserver target/visible-ID snapshot does not match actual viewport geometry.');
     }
-    if (fixtureConfig.scenario === 'spa-navigation') {
+    if (['spa-navigation', 'spa-manual-continuity'].includes(fixtureConfig.scenario)) {
       trial.spaTrackingStart = await evaluate(chrome, pageSession,
         `window.__pageTranslationBenchmark.enableSpaNavigationTracking(${JSON.stringify({ changedIds: fixtureConfig.spaChangedIds, sources: fixtureConfig.spaSources })})`, contentContext);
       if (trial.spaTrackingStart?.identityCount !== fixtureConfig.targetCount) throw new Error('SPA target identity tracking failed to initialize.');
@@ -971,14 +971,16 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       const enabled = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.enableDynamicDOMTracking()', contentContext);
       if (enabled !== true) throw new Error('Dynamic DOM settlement instrumentation could not be installed.');
     }
+    const startMessage = pageTranslationStartMessage(providerLane?.provider ?? 'edge');
+    if (fixtureConfig.scenario === 'spa-navigation') startMessage.data.isAuto = true;
     const started = await evaluate(chrome, pageSession,
-      `chrome.runtime.sendMessage(${JSON.stringify(pageTranslationStartMessage(providerLane?.provider ?? 'edge'))})`, contentContext);
+      `chrome.runtime.sendMessage(${JSON.stringify(startMessage)})`, contentContext);
     trial.commands.push({ action: 'page-translate', sentAt: trial.timestamps.translationCommand, respondedAt: now(), response: started });
     if (!started?.success) throw new Error(formatCommandFailure('PAGE_TRANSLATE', started));
     const sessionId = sessionIdFromStart(started);
     if (!sessionId) throw new Error('Successful PAGE_TRANSLATE response omitted its session ID.');
     trial.sessionId = sessionId;
-    if (fixtureConfig.scenario === 'spa-navigation') {
+    if (['spa-navigation', 'spa-manual-continuity'].includes(fixtureConfig.scenario)) {
       await evaluate(chrome, pageSession,
         `window.__pageTranslationBenchmark.spaNavigation.sessionA=${JSON.stringify(sessionId)};window.__pageTranslationBenchmark.spaNavigation.cursorA=window.__pageTranslationBenchmark.spaSnapshot().cursor`, contentContext);
     }
@@ -1187,7 +1189,7 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       return trial;
     }
 
-    if (fixtureConfig.scenario === 'spa-navigation') {
+    if (['spa-navigation', 'spa-manual-continuity'].includes(fixtureConfig.scenario)) {
       const ids = fixtureConfig.targets.map(target => target.id);
       const changedIds = fixtureConfig.spaChangedIds;
       const retainedIds = ids.filter(id => !changedIds.includes(id));
@@ -1216,7 +1218,8 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         .map(request => ({ ...request, targetIds: request.batchTexts.map(source => fixtureConfig.targets.find(target => target.source === source)?.id ?? null) }));
       const providerAIds = providerARequests
         .flatMap(request => request.batchTexts ?? []).map(source => fixtureConfig.targets.find(target => target.source === source)?.id ?? null);
-      const providerASettings = completedA.state.managerCalls.find(call => call.isAuto === false)?.settings;
+      const routeAAuto = fixtureConfig.scenario === 'spa-navigation';
+      const providerASettings = completedA.state.managerCalls.find(call => call.isAuto === routeAAuto)?.settings;
       const providerAValidation = validateExactTargetIds('route A provider request', providerAIds, ids);
       if (!providerAValidation.ok) throw new Error(providerAValidation.issues.join('; '));
       const providerARoute = validateSpaProviderRoute({ provider: providerASettings?.provider, requests: providerARequests, expectedIds: ids });
@@ -1237,25 +1240,37 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       trial.spaNavigation.cursorB = invalidation.event.cursor;
       const bStarted = await until(async () => {
         const state = await readSpa();
-        const autoEntry = state.managerCallEvents.find(event => event.isAuto === true);
+        const expectedAuto = fixtureConfig.scenario === 'spa-navigation';
+        const managerCallEntry = state.managerCallEvents.find(event => event.isAuto === expectedAuto
+          && event.performanceAt > trial.spaNavigation.navStartedAt);
         const current = await evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false);
-        return autoEntry && current?.translationSessionId && current.translationSessionId !== sessionId
-          ? { state, current, autoEntry, sessionB: current.translationSessionId } : null;
+        return managerCallEntry && current?.translationSessionId && current.translationSessionId !== sessionId
+          ? { state, current, managerCallEntry, sessionB: current.translationSessionId } : null;
       }, 30_000);
-      if (trial.commands.filter(command => command.action === 'page-translate').length !== 1) throw new Error('SPA route B must be started only by the production auto-rule path.');
+      if (trial.commands.filter(command => command.action === 'page-translate').length !== 1) throw new Error('SPA route B must be started by production auto-rule or manual-continuity handling, not a second command.');
       trial.spaNavigation.sessionB = bStarted.sessionB;
-      const bAccepted = await until(async () => {
-        const [list, state, pageState] = await Promise.all([readEvents(), readSpa(), evaluate(chrome, pageSession,
-          'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false)]);
-        const terminal = translationTerminal(list, bStarted.sessionB, ids, state.acceptedAtById,
-          state.acceptedBySession[bStarted.sessionB] ?? [], changedIds);
-        const translatedDom = state.dom.length === ids.length && ids.every(id => state.dom.find(([targetId]) => targetId === id)?.[1] === expectedTranslation(id, changedIds.includes(id) ? fixtureConfig.spaSources[Number(id.slice(7))] : originalById.get(id)));
-        const acceptedChanged = changedIds.every(id => Number.isFinite(state.acceptedAtById[id]));
-        const idle = pageState?.translationSessionId === bStarted.sessionB && pageState.managerTranslating === false
-          && pageState.activeFlushes === 0 && pageState.queueIds?.length === 0 && pageState.pendingSettlementCount === 0
-          && pageState.discoveryPending === false;
-        return terminal && translatedDom && acceptedChanged && idle ? { terminal, state, pageState } : null;
-      }, 60_000);
+      let bAccepted;
+      try {
+        bAccepted = await until(async () => {
+          const [list, state, pageState] = await Promise.all([readEvents(), readSpa(), evaluate(chrome, pageSession,
+            'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false)]);
+          const terminal = translationTerminal(list, bStarted.sessionB, ids, state.acceptedAtById,
+            state.acceptedBySession[bStarted.sessionB] ?? [], changedIds);
+          const translatedDom = state.dom.length === ids.length && ids.every(id => state.dom.find(([targetId]) => targetId === id)?.[1] === expectedTranslation(id, changedIds.includes(id) ? fixtureConfig.spaSources[Number(id.slice(7))] : originalById.get(id)));
+          const acceptedChanged = changedIds.every(id => Number.isFinite(state.acceptedAtById[id]));
+          const idle = pageState?.translationSessionId === bStarted.sessionB && pageState.managerTranslating === false
+            && pageState.activeFlushes === 0 && pageState.queueIds?.length === 0 && pageState.pendingSettlementCount === 0
+            && pageState.discoveryPending === false;
+          return terminal && translatedDom && acceptedChanged && idle ? { terminal, state, pageState } : null;
+        }, 60_000);
+      } catch (error) {
+        trial.spaNavigation.failureDiagnostics = await Promise.all([
+          readEvents(),
+          readSpa(),
+          evaluate(chrome, pageSession, 'window.__pageTranslationBenchmark.pageSessionSnapshot()', contentContext, false),
+        ]).catch(() => null);
+        throw error;
+      }
       const terminalAt = bAccepted.terminal.performanceAt;
       const beforeRestore = bAccepted.state;
       const logicalBatchEvidenceAtTerminal = providerLane ? await evaluate(chrome, pageSession,
@@ -1273,8 +1288,8 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
           ?? (fixtureConfig.spaSources.includes(source) ? `target-${fixtureConfig.spaSources.indexOf(source)}` : null)),
       }));
       const settingsCalls = beforeRestore.managerCalls;
-      const settingsA = settingsCalls.find(call => call.isAuto === false)?.settings;
-      const settingsB = settingsCalls.find(call => call.isAuto === true)?.settings;
+      const settingsA = settingsCalls.find(call => call.sessionId === sessionId)?.settings;
+      const settingsB = settingsCalls.find(call => call.sessionId === bStarted.sessionB)?.settings;
       const providerRouteValidation = validateSpaProviderRoute({ provider: settingsA?.provider === 'edge' && settingsB?.provider === 'edge' ? 'edge' : null,
         requests: providerRequests, expectedIds: [...ids, ...changedIds] });
       const bEnqueues = beforeRestore.enqueues.filter(item => item.sessionId === bStarted.sessionB).map(item => item.id);
@@ -1282,7 +1297,6 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       const discoveredIds = bAdmissions.map(item => item.id);
       const bBatches = beforeRestore.batches.filter(batch => batch.sessionId === bStarted.sessionB);
       const batchIds = bBatches.flatMap(batch => batch.targetIds ?? []);
-      const bEntries = beforeRestore.managerCallEvents.filter(event => event.isAuto === true);
       const checkedProviderBRoute = validateSpaProviderRoute({ provider: settingsB?.provider, requests: providerBRequests, expectedIds: changedIds });
       const exactChanged = validateExactTargetIds('B accepted write', Object.keys(beforeRestore.acceptedAtById), changedIds);
       const exactBAccepted = validateExactTargetIds('B session acceptance ledger', beforeRestore.acceptedBySession[bStarted.sessionB] ?? [], changedIds);
@@ -1302,12 +1316,12 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
         && bAdmissions.length > 0 && bAdmissions.every(item => item.at > beforeRestore.sourceMutationAt)
         && retainedIds.every(id => !bEnqueues.includes(id) && !requestIds.includes(id))
         && exactBAccepted.ok && retainedIds.every(id => !(beforeRestore.acceptedBySession[bStarted.sessionB] ?? []).includes(id));
-      const sessionValidation = validateSpaSessions({ settingsA, settingsB,
-        autoB: bEntries.length > 0 && bEntries.every(entry => entry.isAuto === true)
-          && settingsCalls.filter(call => call.isAuto === true).length >= 1,
+      const sessionValidation = validateSpaSessions({ settingsA, settingsB, scenario: fixtureConfig.scenario,
+        managerCallEvents: beforeRestore.managerCallEvents, navStartedAt: trial.spaNavigation.navStartedAt,
         sessionA: sessionId, sessionB: bStarted.sessionB });
       const settingsSame = sessionValidation.ok;
-      const autoOnly = sessionValidation.ok;
+      const sessionModesValid = sessionValidation.ok;
+      const manualContinuityOnly = fixtureConfig.scenario === 'spa-manual-continuity' && sessionModesValid;
       const issues = [...exactChanged.issues, ...exactBAccepted.issues, ...exactRequests.issues, ...exactBatches.issues, ...exactAdmissions.issues, ...exactEnqueues.issues,
         ...cursorValidation.issues, ...providerARoute.issues, ...checkedProviderBRoute.issues, ...providerRouteValidation.issues];
       if (!sourceOrdered) issues.push('B sources/admissions violate invalidation-before-discovery ordering or retained-target invariants');
@@ -1315,13 +1329,14 @@ export async function runTrial({ mode, scenario, ordinal, globalRunOrder, phase,
       if (!beforeRestore.identityPreserved) issues.push('Fixture target element identity changed across same-document navigation');
       if (issues.length) throw new Error(issues.join('; '));
 
-      trial.spaNavigation = { ...trial.spaNavigation, sessionB: bStarted.sessionB, autoEntry: bStarted.autoEntry,
+      trial.spaNavigation = { ...trial.spaNavigation, sessionB: bStarted.sessionB, managerCallEntry: bStarted.managerCallEntry,
+        routeBMode: fixtureConfig.scenario === 'spa-navigation' ? 'auto-rule' : 'manual-continuity',
         cursorB: trial.spaNavigation.cursorB, acceptedAtById: beforeRestore.acceptedAtById, BDiscoveryAdmissions: bAdmissions,
         BEnqueues: beforeRestore.enqueues.filter(item => item.sessionId === bStarted.sessionB), BBatches: bBatches,
         BProviderRequestIds: requestIds, duplicateAcceptedIds: beforeRestore.duplicateAcceptedIds,
         providerBRoute: checkedProviderBRoute, providerRouteValidation,
         completion: bAccepted.terminal, completionAt: terminalAt, finalDOM: beforeRestore.dom,
-        validation: { ok: true, issues: [], exactChanged, exactRequests, exactBatches, exactAdmissions, exactEnqueues, sourceOrdered, settingsSame, autoOnly, sessionValidation, cursorValidation } };
+        validation: { ok: true, issues: [], exactChanged, exactRequests, exactBatches, exactAdmissions, exactEnqueues, sourceOrdered, settingsSame, sessionModesValid, manualContinuityOnly, sessionValidation, cursorValidation } };
       trial.spaNavigationTiming = { clock: 'performance.now() in the fixture document', navStartedAt: trial.spaNavigation.navStartedAt,
         firstAcceptedAt: cursorValidation.firstAcceptedAt, terminalAt, navigationToFirstAcceptedMs: cursorValidation.navigationToFirstAcceptedMs,
         navigationToCompletionMs: cursorValidation.navigationToCompletionMs, acceptedAtById: beforeRestore.acceptedAtById };

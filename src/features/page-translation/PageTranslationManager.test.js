@@ -507,6 +507,75 @@ describe('PageTranslationManager', () => {
       }
     });
 
+    it('retains compatible accepted nodes during manual SPA continuation and translates changed or new nodes', async () => {
+      const previousLocation = window.location;
+      vi.unstubAllGlobals();
+      const originalUrl = window.location.href;
+      const { PageTranslationBridge: ActualBridge } = await vi.importActual('./PageTranslationBridge.js');
+      manager.bridge = new ActualBridge();
+      const settings = {
+        targetLanguage: 'fa', translationApi: 'google', lazyLoading: false,
+        autoTranslateOnDOMChanges: false, showOriginalOnHover: false,
+      };
+      PageTranslationSettingsLoader.load.mockResolvedValue(settings);
+      const requests = [];
+      manager.scheduler.reset.mockImplementation(() => {
+        manager.scheduler.totalTasks = 0;
+        manager.scheduler.translatedCount = 0;
+      });
+      manager.scheduler.enqueue.mockImplementation(text => {
+        manager.scheduler.totalTasks++;
+        return new Promise(resolve => requests.push({ text, resolve })).then(settlement => {
+          if (settlement.state === 'accepted') manager.scheduler.translatedCount++;
+          return settlement;
+        });
+      });
+      const accepted = (text) => ({
+        __pageTranslationSettlement: true, text, state: 'pending',
+        settle(outcome) { this.state = outcome; },
+      });
+
+      try {
+        document.body.innerHTML = '<p id="retained">Unchanged source</p><p id="changed">Changed source</p>';
+        expect((await manager.translatePage({})).success).toBe(true);
+        await vi.waitFor(() => expect(requests).toHaveLength(2));
+        requests.find(request => request.text === 'Unchanged source').resolve(accepted('Unchanged translation'));
+        requests.find(request => request.text === 'Changed source').resolve(accepted('Changed translation'));
+        await vi.waitFor(() => expect(document.getElementById('changed').textContent).toContain('Changed translation'));
+
+        document.getElementById('changed').textContent = 'Changed route B source';
+        const added = document.createElement('p');
+        added.id = 'added';
+        added.textContent = 'New route B source';
+        document.body.appendChild(added);
+        window.history.replaceState({}, '', '/manual-spa');
+
+        expect((await manager.translatePage({
+          manualSpa: true, preserveAcceptedTranslations: true,
+        })).success).toBe(true);
+        await vi.waitFor(() => expect(requests).toHaveLength(4));
+        expect(requests.slice(2).map(request => request.text).sort()).toEqual([
+          'Changed route B source', 'New route B source',
+        ]);
+        expect(document.getElementById('retained').textContent).toContain('Unchanged translation');
+        expect(manager.scheduler.recordRetainedTranslation).toHaveBeenCalledOnce();
+        expect(manager.scheduler.totalTasks).toBe(3);
+        expect(manager.scheduler.translatedCount).toBe(1);
+
+        requests.find(request => request.text === 'Changed route B source').resolve(accepted('Changed route B translation'));
+        requests.find(request => request.text === 'New route B source').resolve(accepted('New route B translation'));
+        await vi.waitFor(() => expect(document.getElementById('added').textContent).toContain('New route B translation'));
+
+        await manager.restorePage({ manual: true });
+        expect(document.getElementById('retained').textContent).toBe('Unchanged source');
+        expect(document.getElementById('changed').textContent).toBe('Changed route B source');
+        expect(document.getElementById('added').textContent).toBe('New route B source');
+      } finally {
+        window.history.replaceState({}, '', originalUrl);
+        vi.stubGlobal('location', previousLocation);
+      }
+    });
+
     it('keeps Restore available and restores only owned values after the bridge session is gone', async () => {
       const previousLocation = window.location;
       vi.unstubAllGlobals();
@@ -1316,6 +1385,7 @@ describe('PageTranslationManager', () => {
     it.each([
       { isAuto: true, preserveAcceptedTranslations: true },
       { isAuto: false, preserveAcceptedTranslations: true },
+      { isAuto: false, manualSpa: true, preserveAcceptedTranslations: true },
       { isAuto: true, preserveAcceptedTranslations: false },
     ])('keeps only the stopped Bridge restore owner for %j', async (options) => {
       await manager.activate();
@@ -1336,7 +1406,7 @@ describe('PageTranslationManager', () => {
 
       const bridgeOptions = manager.bridge.initialize.mock.calls[0][3];
       expect(previousController.signal.aborted).toBe(true);
-      const preserve = options.isAuto && options.preserveAcceptedTranslations;
+      const preserve = (options.isAuto || options.manualSpa === true) && options.preserveAcceptedTranslations;
       expect(bridgeOptions.preserveAcceptedTranslations).toBe(preserve);
       expect(manager.bridge.stopPersistence).toHaveBeenCalledTimes(preserve ? 1 : 0);
       expect(manager.bridge.cleanup).toHaveBeenCalledTimes(preserve ? 0 : 1);

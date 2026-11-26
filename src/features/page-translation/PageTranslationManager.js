@@ -138,6 +138,8 @@ export class PageTranslationManager extends ResourceTracker {
     )) return { success: false, reason: ActionReasons.SILENT_ERROR };
     let hasAcceptedStart = false;
     let discoveryLifecycleObserved = false;
+    const preserveAcceptedTranslations = (options.isAuto === true || options.manualSpa === true)
+      && options.preserveAcceptedTranslations === true;
     // 1. Check for URL change - ALWAYS reset for a clean slate in SPAs
     const cursorChanged = cursor && this.currentNavigationCursor && (
       cursor.documentEpoch !== this.currentNavigationCursor.documentEpoch
@@ -145,7 +147,7 @@ export class PageTranslationManager extends ResourceTracker {
       || cursor.url !== this.currentNavigationCursor.url
     );
     if (this.currentUrl !== window.location.href || cursorChanged) {
-      this.resetLocalState({ preserveAcceptedTranslations: (!!options.isAuto || options.manualSpa === true) && !!options.preserveAcceptedTranslations });
+      this.resetLocalState({ preserveAcceptedTranslations });
       if (this.abortController) {
         this.abortController.abort();
         this.abortController = null;
@@ -353,7 +355,7 @@ export class PageTranslationManager extends ResourceTracker {
         },
         attempt.sessionContext,
         {
-          preserveAcceptedTranslations: !!options.isAuto && !!options.preserveAcceptedTranslations,
+          preserveAcceptedTranslations,
           settingsRevision: this.translationSettingsRevision,
           onRetainedTranslation: () => {
             if (this._isCurrentPreStartAttempt(attempt)) {

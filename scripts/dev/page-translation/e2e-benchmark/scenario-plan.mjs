@@ -1,7 +1,7 @@
 import { CUSTOM_FIXTURE_MODEL, CUSTOM_FIXTURE_URL } from './custom-fixture.mjs';
 import { GEMINI_FIXTURE_KEY, GEMINI_FIXTURE_MODEL, GEMINI_FIXTURE_URL } from './gemini-fixture.mjs';
 
-export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'dynamic-dom', 'shadow-dom', 'spa-navigation', 'early-visible', 'in-window-visible', 'late-visible', 'scroll-through']);
+export const SUPPORTED_SCENARIOS = Object.freeze(['small', 'dynamic-dom', 'shadow-dom', 'spa-navigation', 'spa-manual-continuity', 'early-visible', 'in-window-visible', 'late-visible', 'scroll-through']);
 export const SCROLL_SCHEDULING_MODES = Object.freeze(['fluid', 'on-stop']);
 export const COMPARISON_MODES = Object.freeze(['sliced', 'viewport']);
 export const MODE_DISCOVERY_FLAGS = Object.freeze({
@@ -106,14 +106,20 @@ export function validateProviderSchedulerRuntime({ provider, optimizationLevel, 
     : provider === 'custom' ? ({ 1: 50, 3: 25, 5: 10 }[optimizationLevel] ?? null)
     : Math.max(Math.floor(25 * (multipliers[optimizationLevel] ?? 1)), 5);
   const expectedMaxChars = provider === 'custom' ? 5000 : provider === 'gemini' ? 15000 : providerRuntime?.batching?.characterLimit;
+  const configuredPageWorkerCap = providerRuntime?.supportsPageParallelExecution === true
+    && Number.isFinite(providerRuntime?.maxConcurrent)
+    ? Math.max(1, Math.min(4, Math.floor(providerRuntime.maxConcurrent / 2)))
+    : null;
   let expectedMaxConcurrentFlushes = provider === 'googlev2'
     ? Math.max(1, Math.min(4, Math.floor((providerRuntime?.maxConcurrent ?? 0) / 2)))
     : providerRuntime?.maxConcurrent;
+  if (configuredPageWorkerCap !== null) expectedMaxConcurrentFlushes = configuredPageWorkerCap;
   if (pageWorkerCap !== undefined) expectedMaxConcurrentFlushes = pageWorkerCap;
   if (pageBatchSize !== undefined) expectedChunkSize = pageBatchSize;
   const pageWorkerLimit = expectedMaxConcurrentFlushes;
   const parallelExecution = ['custom', 'gemini'].includes(provider)
-    || (provider === 'googlev2' && (optimizationLevel > 1 || pageWorkerCap > 1));
+    || (provider === 'googlev2' && optimizationLevel > 1)
+    || configuredPageWorkerCap > 1 || pageWorkerCap > 1;
   if (!scheduler || typeof scheduler !== 'object') issues.push('effective PageTranslationScheduler batch configuration unavailable');
   else {
     if (scheduler.providerRegistryId !== provider) issues.push(`scheduler provider mismatch: expected ${provider}, got ${scheduler.providerRegistryId ?? 'unavailable'}`);
@@ -340,7 +346,13 @@ export function settingsForScenario(settings, scenario, schedulingMode = null) {
       WHOLE_PAGE_LAZY_LOADING: true,
       WHOLE_PAGE_TRANSLATE_AFTER_SCROLL_STOP: schedulingMode === 'on-stop',
     } : {}),
-    ...(scenario === 'spa-navigation' ? { WHOLE_PAGE_AUTO_TRANSLATE_RULES: ['127.0.0.1/replacement'], TRANSLATION_API: 'edge', TARGET_LANGUAGE: 'fr' } : {}) });
+    ...(scenario === 'spa-navigation' || scenario === 'spa-manual-continuity' ? {
+      EXTENSION_ENABLED: true,
+      WHOLE_PAGE_TRANSLATION_ENABLED: true,
+      WHOLE_PAGE_AUTO_TRANSLATE_RULES: scenario === 'spa-navigation' ? ['127.0.0.1/replacement'] : [],
+      TRANSLATION_API: 'edge',
+      TARGET_LANGUAGE: 'fr',
+    } : {}) });
 }
 
 export function deriveScrollAcceptanceLatency(expectedIds, viewportEntryAtById, acceptedAtById) {
@@ -627,16 +639,23 @@ export function validateSpaNavigation({ cursorA, cursorB, navStartedAt, stopAt, 
     navigationToCompletionMs: terminalAt - navStartedAt };
 }
 
-export function validateSpaSessions({ settingsA, settingsB, autoB, sessionA, sessionB }) {
+export function validateSpaSessions({ settingsA, settingsB, managerCallEvents, navStartedAt, sessionA, sessionB, scenario = 'spa-manual-continuity' }) {
   const issues = [];
+  const bCalls = Array.isArray(managerCallEvents)
+    ? managerCallEvents.filter(event => Number.isFinite(event.performanceAt) && event.performanceAt > navStartedAt)
+    : [];
+  const expectedAuto = scenario === 'spa-navigation';
+  const bModeValid = bCalls.length === 1 && bCalls[0].isAuto === expectedAuto
+    && managerCallEvents?.length === 2
+    && Array.isArray(managerCallEvents) && managerCallEvents.every(event => event.isAuto === expectedAuto);
   if (!settingsA || !settingsB || JSON.stringify(settingsA) !== JSON.stringify(settingsB)
       || settingsA.targetLanguage !== 'fr' || settingsA.lazyLoading !== false
       || settingsA.translateAfterScrollStop !== false || settingsA.autoTranslateOnDOMChanges !== false
       || settingsA.provider !== 'edge' || settingsB.provider !== 'edge') {
     issues.push('Route A/B effective settings differ or do not match the SPA trial configuration');
   }
-  if (autoB !== true || typeof sessionA !== 'string' || !sessionA || typeof sessionB !== 'string' || !sessionB || sessionA === sessionB) {
-    issues.push('Route B was not a distinct production automatic manager session');
+  if (bModeValid !== true || typeof sessionA !== 'string' || !sessionA || typeof sessionB !== 'string' || !sessionB || sessionA === sessionB) {
+    issues.push(`SPA route A/B manager-call modes did not match the ${expectedAuto ? 'auto-rule' : 'manual-continuity'} scenario, or route B was not distinct`);
   }
   return { ok: issues.length === 0, issues };
 }

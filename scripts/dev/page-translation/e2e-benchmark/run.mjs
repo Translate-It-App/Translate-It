@@ -192,13 +192,13 @@ function measureMode(runs) {
       insertionToAllAccepted: intervals(run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.insertedAt,
         run => run.derivedTimings?.dynamicCohorts?.find(cohort => cohort.id === id)?.completionAt),
     }])),
-    ...(runs.every(run => run.scenario === 'spa-navigation') ? (() => {
+    ...(runs.every(run => ['spa-navigation', 'spa-manual-continuity'].includes(run.scenario)) ? (() => {
       const longTaskSamples = runs.map(run => longTasksWithinInterval(run.derivedTimings?.longTasks,
         run.spaNavigationTiming?.navStartedAt, run.spaNavigationTiming?.terminalAt));
       const longTaskSummary = longTaskSamples.some(entries => entries === null)
         ? { ...summarizeLongTasks(null), unavailableReason: 'One or more SPA trials lacked calibrated long-task observations or navigation boundaries.' }
         : { ...summarizeLongTasks(longTaskSamples.flat()), unavailableReason: null };
-      return { spaNavigation: {
+      const spaReport = {
         navigationToFirstAcceptedWrite: summarizeIntervals(runs.map(run => run.spaNavigationTiming?.navStartedAt), runs.map(run => run.spaNavigationTiming?.firstAcceptedAt)),
         navigationToBCompletion: summarizeIntervals(runs.map(run => run.spaNavigationTiming?.navStartedAt), runs.map(run => run.spaNavigationTiming?.terminalAt)),
         longTaskMeasurementBoundary: 'Calibrated fixture-document PerformanceObserver tasks whose full intervals fall between native pushState click start (performance.now) and B-session terminal receipt; excludes route A and Restore.',
@@ -206,7 +206,10 @@ function measureMode(runs) {
         longTaskSummary,
         longTaskCalibration: runs.map(run => run.longTaskCalibration ?? { supported: false, reason: 'calibration was not run' }),
         rawTrials: runs.map(run => run.spaNavigationTiming ?? null),
-      } };
+      };
+      return runs.every(run => run.scenario === 'spa-navigation')
+        ? { spaNavigation: spaReport }
+        : { spaManualContinuity: { ...spaReport, routeBMode: 'manual-continuity' } };
      })() : {}),
    };
 }

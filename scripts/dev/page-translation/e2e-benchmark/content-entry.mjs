@@ -485,6 +485,7 @@ PageTranslationManager.prototype.translatePage = wrapPageTranslationStart(origin
     const options = args[0] ?? {};
     trace.record('manager.translatePage.entry', {
       at,
+      performanceAt: performance.now(),
       isAuto: options.isAuto === true,
       sessionId: _manager.scheduler?.translationSessionId ?? null,
       targetLanguage: options.targetLanguage ?? null,
@@ -507,13 +508,21 @@ if (typeof originalUrlCheck === 'function') {
   FeatureManager.prototype.checkForUrlChange = function (...args) {
     const result = originalUrlCheck.apply(this, args);
     if (document.documentElement?.dataset?.benchSpaScenario === 'true' && location.pathname === '/replacement' && args[0]?.navigationCursor) {
-      const cursor = args[0]?.navigationCursor ?? null;
-      const state = trace.spaNavigation;
-      if (state && state.invalidatedAt === null) {
-        state.invalidatedAt = performance.now();
-        state.cursor = cursor;
-      }
-      trace.record('spa.navigation.invalidated', { cursor, performanceAt: state?.invalidatedAt ?? performance.now() });
+       const cursor = args[0]?.navigationCursor ?? null;
+       const state = trace.spaNavigation;
+       const pageManager = this.getFeatureHandler('pageTranslation');
+       if (state && state.invalidatedAt === null) {
+         state.invalidatedAt = performance.now();
+         state.cursor = cursor;
+       }
+       trace.record('spa.navigation.invalidated', {
+         cursor, restartFence: args[0]?.restartFence ?? null,
+         manualContinuity: pageManager?.hasManualContinuity === true,
+         managerActive: pageManager?.isActive === true,
+         userRestoredOverride: pageManager?.userRestoredOverride === true,
+         autoStartCancelled: pageManager?.autoStartCancelledUrls?.has(location.href) === true,
+         performanceAt: state?.invalidatedAt ?? performance.now(),
+       });
       document.dispatchEvent(new CustomEvent('translate-it:benchmark-spa-invalidated', { detail: { cursor } }));
       if (state && state.sourceMutationAt === null) state.sourceMutationAt = performance.now();
     }

@@ -5,6 +5,7 @@ import { QueueManager, queueManager } from '../../../../src/features/translation
 import { RateLimitManager, rateLimitManager } from '../../../../src/features/translation/core/RateLimitManager.js';
 import { getProviderConfiguration } from '../../../../src/features/translation/core/ProviderConfigurations.js';
 import { registryIdToName } from '../../../../src/features/translation/providers/ProviderConstants.js';
+import { findProviderById } from '../../../../src/features/translation/providers/ProviderManifest.js';
 import { BaseAIProvider } from '../../../../src/features/translation/providers/BaseAIProvider.js';
 import { storageManager } from '../../../../src/shared/storage/core/StorageCore.js';
 import { ProviderRequestEngine } from '../../../../src/features/translation/providers/utils/ProviderRequestEngine.js';
@@ -476,6 +477,7 @@ const marker = {
       optimizationLevel: state.optimizationLevel,
       maxConcurrent: state.config?.maxConcurrent ?? null,
       limiterCapacity: state.config?.maxConcurrent ?? null,
+      supportsPageParallelExecution: findProviderById(provider)?.supportsPageParallelExecution === true,
       configuredMaxConcurrent: configuration?.rateLimit?.maxConcurrent ?? null,
       batching: configuration?.batching ?? null,
       expectedBatching: expectedConfiguration?.batching ?? null,
