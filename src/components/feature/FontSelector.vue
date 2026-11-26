@@ -205,8 +205,11 @@ const closeTimer = ref(null)
 const fontSizeOptions = computed(() => CONFIG.FONT_SIZE_OPTIONS || [])
 
 // Computed properties
+// Fall back to metadata resolved without a full font scan so the saved font is
+// displayed before the dropdown loads the available fonts.
 const selectedFont = computed(() => {
-  return availableFonts.value.find(f => f.value === localFontFamily.value)
+  return availableFonts.value.find(f => f.value === localFontFamily.value) ||
+    systemFontDetector.getFontMetadata(localFontFamily.value)
 })
 
 const selectedFontName = computed(() => {
