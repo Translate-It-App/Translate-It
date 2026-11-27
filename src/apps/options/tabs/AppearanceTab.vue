@@ -15,6 +15,7 @@
           <FontSelector
             ref="fontSelectorRef"
             :font-family="fontFamily"
+            :display-font-family="savedFontFamily"
             :font-size="fontSize"
             :target-language="targetLanguage"
             @update:font-family="fontFamily = $event"
@@ -62,6 +63,8 @@
 import './AppearanceTab.scss'
 import { computed, ref } from 'vue'
 import { useSettingsStore } from '@/features/settings/stores/settings.js'
+import { storageManager } from '@/shared/storage/core/StorageCore.js'
+import { CONFIG } from '@/shared/config/config.js'
 import { useUnifiedI18n } from '@/composables/shared/useUnifiedI18n.js'
 import { useTabSettings } from '../composables/useTabSettings.js'
 import { getScopedLogger } from '@/shared/logging/logger.js'
@@ -86,9 +89,28 @@ const validationError = ref('')
 
 // --- Settings ---
 
-const fontFamily = createSetting('TRANSLATION_FONT_FAMILY', 'auto', {
+const fontFamily = createSetting('TRANSLATION_FONT_FAMILY', CONFIG.TRANSLATION_FONT_FAMILY, {
   onChanged: () => validateFonts()
 })
+const savedFontFamily = ref(CONFIG.TRANSLATION_FONT_FAMILY)
+let savedFontReadId = 0
+let isUnmounted = false
+
+const refreshSavedFontFamily = async () => {
+  const readId = ++savedFontReadId
+  try {
+    const savedSettings = await storageManager.getFresh('TRANSLATION_FONT_FAMILY')
+    if (!isUnmounted && readId === savedFontReadId) {
+      savedFontFamily.value = savedSettings?.TRANSLATION_FONT_FAMILY ?? CONFIG.TRANSLATION_FONT_FAMILY
+    }
+  } catch (error) {
+    logger.warn('Failed to refresh saved translation font:', error)
+  }
+}
+
+const handleSavedFontSet = () => { void refreshSavedFontFamily() }
+
+const handleSavedFontChange = () => { void refreshSavedFontFamily() }
 
 const fontSize = createSetting('TRANSLATION_FONT_SIZE', '14', {
   onChanged: () => validateFonts()
@@ -120,10 +142,18 @@ const handleValidationFeedback = (e) => {
 };
 
 onMounted(() => {
+  isUnmounted = false
+  storageManager.on('set:TRANSLATION_FONT_FAMILY', handleSavedFontSet)
+  storageManager.on('change:TRANSLATION_FONT_FAMILY', handleSavedFontChange)
+  refreshSavedFontFamily()
   window.addEventListener('options-trigger-validation-feedback', handleValidationFeedback);
 })
 
 onUnmounted(() => {
+  isUnmounted = true
+  savedFontReadId++
+  storageManager.off('set:TRANSLATION_FONT_FAMILY', handleSavedFontSet)
+  storageManager.off('change:TRANSLATION_FONT_FAMILY', handleSavedFontChange)
   window.removeEventListener('options-trigger-validation-feedback', handleValidationFeedback);
 })
 </script>
