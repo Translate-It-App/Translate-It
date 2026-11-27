@@ -197,14 +197,82 @@ describe('Page navigation producer cursor', () => {
     const first = await grantManual();
     await tracker.armManualContinuity(42, first.generation);
     const restarted = new PageNavigationTracker(storage);
+    await restarted.getManualContinuity(42);
     const newRevision = restarted.reserveManualContinuityStart(42);
     const next = await restarted.grantManualContinuity(42, newRevision, {
       topDocumentToken: 'top-document-token',
     });
-    expect(newRevision).toBe(first.attemptRevision);
+    expect(newRevision).toBeGreaterThan(first.attemptRevision);
     expect(next.generation).toBe(first.generation);
     expect(next.attemptId).not.toBe(first.attemptId);
     expect(saved.pageTranslationNavigation.manualContinuity[42].attemptId).toBe(first.attemptId);
+  });
+
+  it('promotes a cold-worker Manual Start above persisted attempts without invalidating it', async () => {
+    await tracker.seed(42, [frames[0]]);
+    let persistedRevision;
+    for (let index = 0; index < 8; index += 1) {
+      persistedRevision = tracker.reserveManualContinuityStart(42);
+    }
+    const previous = await grantManual(persistedRevision);
+    await tracker.armManualContinuity(42, previous.generation, persistedRevision);
+
+    const coldTracker = new PageNavigationTracker(storage);
+    const startRevision = coldTracker.reserveManualContinuityStart(42);
+    expect(startRevision).toBe(1);
+    await coldTracker.getManualContinuity(42);
+    const start = await coldTracker.grantManualContinuity(42, startRevision, {
+      topDocumentToken: 'new-top-document-token',
+      attemptId: 'cold-worker-start',
+    });
+
+    expect(start).toMatchObject({
+      generation: previous.generation + 1,
+      attemptRevision: persistedRevision + 1,
+      attemptId: 'cold-worker-start',
+    });
+    expect(coldTracker.reserveManualContinuityStart(42)).toBeGreaterThan(persistedRevision);
+  });
+
+  it('hydrates the revision high-water mark from reused and revoked per-frame attempts', async () => {
+    await tracker.seed(42, [frames[0]]);
+    const grant = await grantManual();
+    await tracker.armManualContinuity(42, grant.generation);
+    const storedGrant = saved.pageTranslationNavigation.manualContinuity[42];
+    Object.assign(storedGrant, {
+      acceptedDocuments: { 7: 'accepted-document' },
+      acceptedAttemptIds: { 7: 'accepted-attempt' },
+      acceptedAttemptRevisions: { 7: '12' },
+      provisionalDocuments: { 8: 'provisional-document' },
+      provisionalAttemptIds: { 8: 'provisional-attempt' },
+      provisionalAttemptRevisions: { 8: '18' },
+      confirmedAttemptId: 'confirmed-attempt',
+      confirmedAttemptRevision: '15',
+    });
+
+    const restarted = new PageNavigationTracker(storage);
+    await expect(restarted.getManualContinuity(42)).resolves.toMatchObject({
+      acceptedAttemptRevisions: { 7: '12' },
+      provisionalAttemptRevisions: { 8: '18' },
+      confirmedAttemptRevision: '15',
+    });
+    const nextRevision = restarted.reserveManualContinuityStart(42);
+    expect(nextRevision).toBe(19);
+    await expect(restarted.grantManualContinuity(42, nextRevision, {
+      topDocumentToken: grant.topDocumentToken,
+      attemptId: 'reused-after-restart',
+    })).resolves.toMatchObject({
+      reused: true,
+      attemptRevision: nextRevision,
+      previousAttemptId: grant.attemptId,
+    });
+
+    const stopIntent = restarted.blockManualContinuity(42, grant.generation);
+    await expect(restarted.revokeManualContinuity(42, grant.generation, stopIntent))
+      .resolves.toBe(grant.generation + 1);
+    const restartedAgain = new PageNavigationTracker(storage);
+    await restartedAgain.getManualContinuityForRevocation(42);
+    expect(restartedAgain.reserveManualContinuityStart(42)).toBe(19);
   });
 
   it('persists a document-scoped manual grant and restores it after worker restart', async () => {
@@ -284,6 +352,20 @@ describe('Page navigation producer cursor', () => {
       .resolves.toBe(grant.generation + 1);
   });
 
+  it('treats a fresh Stop as idempotent when its cutoff is already covered by a tombstone', async () => {
+    await tracker.seed(42, frames);
+    const startRevision = tracker.reserveManualContinuityStart(42);
+    const grant = await grantManual(startRevision);
+    await tracker.armManualContinuity(42, grant.generation, startRevision);
+    const firstIntent = tracker.blockManualContinuity(42);
+    const firstGeneration = await tracker.revokeManualContinuity(42, null, firstIntent);
+    const tombstone = await tracker.getManualContinuityForRevocation(42);
+
+    const repeatedIntent = tracker.blockManualContinuity(42);
+    await expect(tracker.revokeManualContinuity(42, null, repeatedIntent)).resolves.toBe(firstGeneration);
+    expect(await tracker.getManualContinuityForRevocation(42)).toEqual(tombstone);
+  });
+
   it('settles simultaneous same-generation revocations to one durable tombstone', async () => {
     await tracker.seed(42, frames);
     const revision = tracker.reserveManualContinuityStart(42);
@@ -304,6 +386,111 @@ describe('Page navigation producer cursor', () => {
     await expect(Promise.all([first, retry])).resolves.toEqual([
       grant.generation + 1, grant.generation + 1,
     ]);
+  });
+
+  it('does not let an old delayed revocation retry revoke a newer manual grant', async () => {
+    await tracker.seed(42, frames);
+    const oldRevision = tracker.reserveManualContinuityStart(42);
+    const oldGrant = await grantManual(oldRevision);
+    await tracker.armManualContinuity(42, oldGrant.generation, oldRevision);
+    const stopRevision = tracker.blockManualContinuity(42, oldGrant.generation);
+
+    let finishWrite;
+    storage.set.mockImplementationOnce(value => new Promise(resolve => {
+      finishWrite = () => {
+        saved = structuredClone(value);
+        resolve();
+      };
+    }));
+    const oldRevoke = tracker.revokeManualContinuity(42, oldGrant.generation, stopRevision);
+    await vi.waitFor(() => expect(finishWrite).toBeTypeOf('function'));
+    const newRevision = tracker.reserveManualContinuityStart(42);
+    const newGrantPromise = grantManual(newRevision, { attemptId: 'new-start' });
+    finishWrite();
+    await expect(oldRevoke).resolves.toBe(oldGrant.generation + 1);
+    const newGrant = await newGrantPromise;
+    expect(await tracker.armManualContinuity(42, newGrant.generation, newRevision)).toBe(true);
+    await expect(tracker.revokeManualContinuity(42, oldGrant.generation, stopRevision)).resolves.toBeNull();
+    expect(await tracker.getManualContinuity(42)).toMatchObject({
+      generation: newGrant.generation, attemptId: 'new-start', armed: true,
+    });
+    expect(saved.pageTranslationNavigation.manualContinuity[42]).toMatchObject({
+      generation: newGrant.generation, attemptId: 'new-start', armed: true, revoked: false,
+    });
+  });
+
+  it('commits a queued Stop against start A before allowing reserved start B to commit', async () => {
+    await tracker.seed(42, frames);
+    const aRevision = tracker.reserveManualContinuityStart(42);
+    let releaseA;
+    const writes = [];
+    const persist = storage.set.getMockImplementation();
+    let delayedAWrite = true;
+    storage.set.mockImplementation(value => {
+      writes.push(structuredClone(value));
+      if (!delayedAWrite) return persist(value);
+      delayedAWrite = false;
+      return new Promise(resolve => {
+        releaseA = () => { persist(value).then(resolve); };
+      });
+    });
+    const startA = grantManual(aRevision, { attemptId: 'start-a' });
+    await vi.waitFor(() => expect(releaseA).toBeTypeOf('function'));
+
+    const stopIntent = tracker.blockManualContinuity(42);
+    const stop = tracker.revokeManualContinuity(42, null, stopIntent);
+    const bRevision = tracker.reserveManualContinuityStart(42);
+    const startB = grantManual(bRevision, { attemptId: 'start-b' });
+    releaseA();
+
+    await expect(startA).rejects.toThrow('Manual continuity grant not durable');
+    const stopResult = await stop;
+    const grantB = await startB;
+    expect(stopResult == null || stopResult === grantB.generation - 1).toBe(true);
+    expect(writes.some(value => value.pageTranslationNavigation.manualContinuity[42]?.revoked === true
+      && value.pageTranslationNavigation.manualContinuity[42]?.revokedAttemptId === 'start-a')).toBe(true);
+    expect(await tracker.armManualContinuity(42, grantB.generation, bRevision)).toBe(true);
+    await expect(tracker.revokeManualContinuity(42, null, stopIntent)).resolves.toBeNull();
+    expect(await tracker.getManualContinuity(42)).toMatchObject({
+      generation: grantB.generation, attemptId: 'start-b', armed: true,
+    });
+  });
+
+  it('does not roll a cancelled grant snapshot over a revocation tombstone or committed top cursor', async () => {
+    await tracker.seed(42, [frames[0]]);
+    const validRevision = tracker.reserveManualContinuityStart(42);
+    const validGrant = await grantManual(validRevision);
+    await tracker.armManualContinuity(42, validGrant.generation, validRevision);
+    const stopRevision = tracker.blockManualContinuity(42, validGrant.generation);
+    await tracker.revokeManualContinuity(42, validGrant.generation, stopRevision);
+    const tombstone = await tracker.getManualContinuityForRevocation(42);
+
+    const candidateRevision = tracker.reserveManualContinuityStart(42);
+    let finishWrite;
+    storage.set.mockImplementationOnce(value => new Promise(resolve => {
+      finishWrite = () => {
+        saved = structuredClone(value);
+        resolve();
+      };
+    }));
+    const candidate = grantManual(candidateRevision, { attemptId: 'cancelled-start' });
+    await vi.waitFor(() => expect(finishWrite).toBeTypeOf('function'));
+    tracker.cancelManualContinuityStart(42, 'cancelled-start');
+    const navigation = tracker.committed(42, 0, 'https://example.com/after-navigation');
+    finishWrite();
+    await expect(candidate).rejects.toThrow('Manual continuity grant not durable');
+    await navigation;
+    await tracker.pending;
+
+    expect(await tracker.getManualContinuityForRevocation(42)).toMatchObject({
+      generation: tombstone.generation, revoked: true,
+    });
+    expect(await tracker.getCursor(42, 0)).toMatchObject({
+      url: 'https://example.com/after-navigation',
+    });
+    expect(saved.pageTranslationNavigation.manualContinuity[42]).toMatchObject({
+      generation: tombstone.generation, revoked: true,
+    });
   });
 
   it('does not reuse an unarmed provisional grant for a new start owner', async () => {
@@ -738,7 +925,11 @@ describe('Page navigation producer cursor', () => {
     const restartedTracker = new PageNavigationTracker(storage);
     const revision = restartedTracker.blockManualContinuity(42, grant.generation);
 
-    expect(revision).toBe(0);
+    expect(revision).toMatchObject({
+      expectedGeneration: grant.generation,
+      cutoffRevision: 0,
+      cutoffGeneration: grant.generation,
+    });
     await expect(restartedTracker.revokeManualContinuity(42, grant.generation, revision))
       .resolves.toBe(grant.generation + 1);
 
@@ -749,6 +940,37 @@ describe('Page navigation producer cursor', () => {
       manualContinuityGeneration: grant.generation + 1,
     });
   });
+
+  it.each([false, true])(
+    'durably stops a restored armed grant with a comparable cutoff (hydrated=%s)',
+    async hydrated => {
+      await tracker.seed(42, frames);
+      const revision = tracker.reserveManualContinuityStart(42);
+      const grant = await grantManual(revision);
+      await tracker.armManualContinuity(42, grant.generation, revision);
+
+      const restartedTracker = new PageNavigationTracker(storage);
+      if (hydrated) await restartedTracker.getManualContinuity(42);
+      const stopIntent = restartedTracker.blockManualContinuity(42);
+      const cutoffRevisionBeforeRevoke = stopIntent.cutoffRevision;
+      await expect(restartedTracker.revokeManualContinuity(42, null, stopIntent))
+        .resolves.toBe(grant.generation + 1);
+      expect(cutoffRevisionBeforeRevoke === 0 || cutoffRevisionBeforeRevoke === grant.attemptRevision).toBe(true);
+      expect(stopIntent.cutoffRevision).toBe(grant.attemptRevision);
+
+      const newerRevision = restartedTracker.reserveManualContinuityStart(42);
+      expect(newerRevision).toBeGreaterThan(grant.attemptRevision);
+      const newerGrant = await restartedTracker.grantManualContinuity(42, newerRevision, {
+        topDocumentToken: 'top-document-token',
+        attemptId: 'post-restart-start',
+      });
+      expect(await restartedTracker.armManualContinuity(42, newerGrant.generation, newerRevision)).toBe(true);
+      await expect(restartedTracker.revokeManualContinuity(42, null, stopIntent)).resolves.toBeNull();
+      expect(await restartedTracker.getManualContinuity(42)).toMatchObject({
+        generation: newerGrant.generation, attemptId: 'post-restart-start', armed: true,
+      });
+    },
+  );
 
   it('does not let an older reserved Manual Start commit after a newer start', async () => {
     await tracker.seed(42, frames);
@@ -900,7 +1122,11 @@ describe('Page navigation producer cursor', () => {
     await tracker.seed(42, frames);
     await tracker.seed(43, [frames[0]]);
     const other = await tracker.getCursor(43, 0);
+    tracker.manualStartSnapshots.set('42:7', { previous: null });
+    tracker.manualStartSnapshots.set('43:8', { previous: null });
     await tracker.removeTab(42);
+    expect(tracker.manualStartSnapshots.has('42:7')).toBe(false);
+    expect(tracker.manualStartSnapshots.has('43:8')).toBe(true);
     expect(await tracker.getCursor(42, 0)).toBeNull();
     expect(await tracker.getCursor(43, 0)).toEqual(other);
     await tracker.seed(42, [frames[0]]);

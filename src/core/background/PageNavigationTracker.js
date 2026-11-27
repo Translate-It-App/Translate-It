@@ -40,8 +40,18 @@ const validManualGrant = grant => {
         && validTokenMap(grant.acceptedDocuments)
         && validTokenMap(grant.acceptedAttemptIds) && validAttemptRevisionMap(grant.acceptedAttemptRevisions)
         && validTokenMap(grant.provisionalDocuments) && validTokenMap(grant.provisionalAttemptIds)
-        && validAttemptRevisionMap(grant.provisionalAttemptRevisions);
+         && validAttemptRevisionMap(grant.provisionalAttemptRevisions);
 };
+const getManualAttemptRevisionHighWater = grant => [
+  grant?.attemptRevision,
+  grant?.confirmedAttemptRevision,
+  grant?.revokedAttemptRevision,
+  ...Object.values(grant?.acceptedAttemptRevisions || {}),
+  ...Object.values(grant?.provisionalAttemptRevisions || {}),
+  ...Object.values(grant?.revokedAcceptedAttemptRevisions || {}),
+  ...Object.values(grant?.revokedProvisionalAttemptRevisions || {}),
+].reduce((highest, revision) => Math.max(highest, Number(revision) || 0), 0);
+const getManualStartKey = (tabId, operationId) => `${tabId}:attempt:${operationId}`;
 const updateConfirmedManualAttempt = (grant, attemptId, attemptRevision) => {
   if (Number.isSafeInteger(attemptRevision)
       && (!grant.confirmedAttemptRevision || attemptRevision >= Number(grant.confirmedAttemptRevision))) {
@@ -59,8 +69,12 @@ export class PageNavigationTracker {
     this.pending = Promise.resolve();
     this.restartFences = new Map();
     this.blockedManualContinuity = new Map();
+    this.manualRevocationIntents = new Map();
     this.manualContinuityRevision = new Map();
+    this.manualContinuityHighWater = new Map();
+    this.manualStartOperations = new Map();
     this.manualFrameStartClaims = new Set();
+    this.manualStartSnapshots = new Map();
   }
 
   mintRestartFence(tabId) {
@@ -103,6 +117,10 @@ export class PageNavigationTracker {
         this.state = saved || { nextDocumentEpoch: 0, frames: {}, manualContinuity: {} };
         this.state.manualContinuity ||= {};
         for (const [tabId, grant] of Object.entries(this.state.manualContinuity)) {
+          const revision = getManualAttemptRevisionHighWater(grant);
+          this.manualContinuityHighWater.set(Number(tabId), Math.max(
+            this.manualContinuityHighWater.get(Number(tabId)) ?? 0, revision,
+          ));
           if (!grant.revoked && (!grant.armed || !grant.topDocumentToken
               || !Number.isSafeInteger(grant.attemptRevision) || !grant.attemptId)) {
             this.state.manualContinuity[tabId] = { generation: grant.generation + 1, revoked: true };
@@ -149,23 +167,68 @@ export class PageNavigationTracker {
     };
   }
 
-  reserveManualContinuityStart(tabId) {
-    const revision = (this.manualContinuityRevision.get(tabId) || 0) + 1;
+  reserveManualContinuityStart(tabId, operationId = null) {
+    const revision = Math.max(
+      this.manualContinuityRevision.get(tabId) ?? 0,
+      this.manualContinuityHighWater.get(tabId) ?? 0,
+    ) + 1;
+    if (!Number.isSafeInteger(revision)) throw new Error('Manual continuity revision exhausted');
     this.manualContinuityRevision.set(tabId, revision);
+    this.manualContinuityHighWater.set(tabId, revision);
+    this.manualStartOperations.set(tabId, {
+      id: typeof operationId === 'string' ? operationId : null,
+      reservedBeforeHydration: !this.state && !this.durableState,
+    });
     return revision;
+  }
+
+  cancelManualContinuityStart(tabId, operationId) {
+    const operation = this.manualStartOperations.get(tabId);
+    const isCurrent = typeof operationId === 'string' && operation?.id === operationId;
+    const currentRevision = this.manualContinuityRevision.get(tabId) ?? 0;
+    if (isCurrent) {
+      this.manualContinuityRevision.set(tabId, currentRevision + 1);
+      this.manualStartOperations.delete(tabId);
+    }
+    const snapshotKey = typeof operationId === 'string' ? getManualStartKey(tabId, operationId) : null;
+    const snapshot = snapshotKey && this.manualStartSnapshots.get(snapshotKey);
+    if (snapshot) {
+      this.manualStartSnapshots.delete(snapshotKey);
+      void this._run(state => {
+        const grant = state.manualContinuity[tabId];
+        if (grant?.attemptId !== snapshot.attemptId) return false;
+        if (snapshot.previous) state.manualContinuity[tabId] = structuredClone(snapshot.previous);
+        else delete state.manualContinuity[tabId];
+        this.dirty = true;
+        return true;
+      }).catch(() => {});
+    }
+    return isCurrent;
   }
 
   async grantManualContinuity(tabId, operationRevision = this.reserveManualContinuityStart(tabId), options = {}) {
     if (typeof options.topDocumentToken !== 'string' || !options.topDocumentToken) {
       throw new Error('Top document identity is unavailable');
     }
+    const attemptId = options.attemptId || crypto.randomUUID();
+    let committedRevision = operationRevision;
     return this._run(async state => {
       if (this.manualContinuityRevision.get(tabId) !== operationRevision) throw new Error('Manual continuity start superseded');
+      const operation = this.manualStartOperations.get(tabId);
+      if (operation?.id && operation.id !== attemptId) throw new Error('Manual continuity start superseded');
+      const highWater = this.manualContinuityHighWater.get(tabId) ?? 0;
+      const reservedBeforeHydration = operation?.reservedBeforeHydration === true;
+      committedRevision = highWater > operationRevision
+        || (reservedBeforeHydration && highWater >= operationRevision)
+        ? highWater + 1 : operationRevision;
+      if (!Number.isSafeInteger(committedRevision)) throw new Error('Manual continuity revision exhausted');
+      this.manualContinuityRevision.set(tabId, committedRevision);
+      this.manualContinuityHighWater.set(tabId, committedRevision);
+      this.manualStartOperations.set(tabId, { id: attemptId, reservedBeforeHydration: false });
       const top = state.frames[`${tabId}:0`];
       if (!top) throw new Error('Top document is not admitted');
       const previous = state.manualContinuity[tabId];
       const block = this.blockedManualContinuity.get(tabId);
-      const attemptId = options.attemptId || crypto.randomUUID();
       if (previous && !previous.revoked && previous.armed && previous.topDocumentEpoch === top.documentEpoch
           && previous.topDocumentToken === options.topDocumentToken
           && !(block && (block.generation == null || block.generation === previous.generation))) {
@@ -180,25 +243,34 @@ export class PageNavigationTracker {
       const grant = {
         generation, revoked: false, armed: false, topDocumentEpoch: top.documentEpoch, frames,
         topDocumentToken: options.topDocumentToken,
-        attemptRevision: operationRevision,
+        attemptRevision: committedRevision,
         attemptId,
+        ...(options.handlerManaged === true && { handlerManaged: true }),
         ...(typeof options.provider === 'string' && { provider: options.provider }),
         ...(typeof options.targetLanguage === 'string' && { targetLanguage: options.targetLanguage }),
         ...(typeof options.isExplicitProvider === 'boolean' && { isExplicitProvider: options.isExplicitProvider }),
       };
       state.manualContinuity[tabId] = grant;
+      this.manualStartSnapshots.set(getManualStartKey(tabId, attemptId), {
+        previous: previous ? structuredClone(previous) : null,
+        attemptId,
+      });
       this.dirty = true;
       return { grant, reused: false };
     }).then(async ({ grant, reused, pendingAttemptId, previousAttemptId }) => {
       const durable = (await this.storage.get(STORAGE_KEY))[STORAGE_KEY]?.manualContinuity?.[tabId];
-      if (this.manualContinuityRevision.get(tabId) !== operationRevision
+      if (this.manualContinuityRevision.get(tabId) !== committedRevision
           || !durable || durable.revoked || durable.generation !== grant.generation
-          || durable.attemptId !== grant.attemptId) throw new Error('Manual continuity grant not durable');
+          || durable.attemptId !== grant.attemptId) {
+        this.cancelManualContinuityStart(tabId, attemptId);
+        throw new Error('Manual continuity grant not durable');
+      }
+      this.manualStartSnapshots.delete(getManualStartKey(tabId, attemptId));
       this.blockedManualContinuity.delete(tabId);
       if (reused) return {
         ...durable,
         attemptId: pendingAttemptId,
-        attemptRevision: operationRevision,
+        attemptRevision: committedRevision,
         previousAttemptId,
         reused: true,
       };
@@ -574,21 +646,38 @@ export class PageNavigationTracker {
     }
     const previous = this.blockedManualContinuity.get(tabId);
     const revision = this.manualContinuityRevision.get(tabId) ?? 0;
+    const knownGrant = this.state?.manualContinuity?.[tabId] ?? this.durableState?.manualContinuity?.[tabId];
     const cutoffGeneration = expectedGeneration
-      ?? this.durableState?.manualContinuity?.[tabId]?.generation
+      ?? knownGrant?.generation
       ?? 0;
     if (expectedGeneration == null) {
       this.blockedManualContinuity.set(tabId, { generation: null, cutoffGeneration });
     } else if (!previous || (previous.generation != null && previous.generation <= expectedGeneration)) {
       this.blockedManualContinuity.set(tabId, { generation: expectedGeneration, cutoffGeneration });
     }
+    let operationRevision;
     if (expectedGeneration != null) {
       this.manualContinuityRevision.set(tabId, revision);
-      return revision;
+      operationRevision = revision;
+    } else {
+      operationRevision = revision + 1;
+      this.manualContinuityRevision.set(tabId, operationRevision);
     }
-    const nextRevision = revision + 1;
-    this.manualContinuityRevision.set(tabId, nextRevision);
-    return nextRevision;
+    const intent = {
+      tabId,
+      expectedGeneration,
+      cutoffGeneration,
+      cutoffRevision: expectedRevision ?? Math.max(
+        revision, this.manualContinuityHighWater.get(tabId) ?? 0,
+        getManualAttemptRevisionHighWater(knownGrant),
+      ),
+      cutoffCaptured: expectedGeneration != null || Boolean(this.state || this.durableState),
+      operationRevision,
+      committedGeneration: null,
+      revokeGeneration: undefined,
+    };
+    this.manualRevocationIntents.set(tabId, intent);
+    return intent;
   }
 
   getManualContinuityCutoff(tabId) {
@@ -596,13 +685,48 @@ export class PageNavigationTracker {
     return block?.cutoffGeneration ?? this.durableState?.manualContinuity?.[tabId]?.generation ?? 0;
   }
 
-  async revokeManualContinuity(tabId, expectedGeneration, expectedRevision = this.manualContinuityRevision.get(tabId) ?? 0) {
-    const isCurrentRevision = () => (this.manualContinuityRevision.get(tabId) ?? 0) === expectedRevision;
-    return this._run(state => {
-      if (!isCurrentRevision()) return null;
+  async revokeManualContinuity(tabId, expectedGeneration, intent = null) {
+    expectedGeneration ??= null;
+    if (!intent || typeof intent !== 'object' || this.manualRevocationIntents.get(tabId) !== intent
+        || intent.tabId !== tabId
+        || (intent.expectedGeneration != null && intent.expectedGeneration !== expectedGeneration)) return null;
+    if (intent.revokeGeneration === undefined) {
+      if (expectedGeneration != null && expectedGeneration > intent.cutoffGeneration) return null;
+      intent.revokeGeneration = expectedGeneration;
+    } else if (intent.revokeGeneration !== expectedGeneration) {
+      return null;
+    }
+    const revokeGeneration = intent.revokeGeneration;
+    const result = await this._run(state => {
+      if (this.manualRevocationIntents.get(tabId) !== intent) return null;
       const previous = state.manualContinuity[tabId];
-      if (expectedGeneration != null && previous?.generation !== expectedGeneration) return null;
-      const generation = Math.max(previous?.generation || 0, expectedGeneration || 0) + 1;
+      if (intent.expectedGeneration == null && !intent.cutoffCaptured) {
+        intent.cutoffGeneration = Math.max(intent.cutoffGeneration, previous?.generation ?? 0);
+        intent.cutoffRevision = Math.max(
+          intent.cutoffRevision,
+          getManualAttemptRevisionHighWater(previous),
+        );
+        intent.cutoffCaptured = true;
+      }
+      if (intent.committedGeneration != null && previous?.revoked === true
+          && previous.generation === intent.committedGeneration) return intent.committedGeneration;
+      if (revokeGeneration != null && previous?.revoked === true
+          && previous.revokedGeneration === revokeGeneration) return previous.generation;
+      if (revokeGeneration != null && previous?.generation !== revokeGeneration) return null;
+      if (previous?.revoked === true) {
+        const coversCutoff = previous.generation <= intent.cutoffGeneration
+          || (Number.isSafeInteger(previous.revokedGeneration)
+            && previous.revokedGeneration <= intent.cutoffGeneration);
+        if (!coversCutoff) return null;
+        intent.committedGeneration = previous.generation;
+        return previous.generation;
+      }
+      if (previous && !previous.revoked
+          && (previous.generation > intent.cutoffGeneration
+            || (intent.expectedGeneration == null
+              && Number.isSafeInteger(previous.attemptRevision)
+              && previous.attemptRevision > intent.cutoffRevision))) return null;
+      const generation = Math.max(previous?.generation || 0, revokeGeneration || 0) + 1;
       if (!Number.isSafeInteger(generation)) throw new Error('Manual continuity generation exhausted');
       state.manualContinuity[tabId] = {
         generation,
@@ -622,22 +746,23 @@ export class PageNavigationTracker {
            revokedProvisionalAttemptRevisions: structuredClone(previous.provisionalAttemptRevisions || {}),
         }),
       };
+      intent.committedGeneration = generation;
       this.dirty = true;
       return generation;
     }).then(async generation => {
-      if (!isCurrentRevision()) return null;
       const saved = (await this.storage.get(STORAGE_KEY))[STORAGE_KEY];
       const grant = saved?.manualContinuity?.[tabId];
-      if (!isCurrentRevision()) return null;
       if (generation == null) {
-        return expectedGeneration != null && grant?.revoked === true
-          && grant.generation > expectedGeneration ? grant.generation : null;
+        return null;
       }
       if (grant?.generation !== generation || grant.revoked !== true) {
+        if (!grant?.revoked && Number.isSafeInteger(grant?.attemptRevision)
+            && grant.attemptRevision > intent.cutoffRevision) return null;
         throw new Error('Manual continuity revocation not durable');
       }
       return generation;
     });
+    return result;
   }
 
   async validateManualContinuity(tabId, frameId, generation, topDocumentEpoch, frameCursor, attemptId = null) {
@@ -814,12 +939,18 @@ export class PageNavigationTracker {
   removeTab(tabId) {
     return this._run(state => {
       this.restartFences.delete(tabId);
+      this.manualRevocationIntents.delete(tabId);
+      for (const key of this.manualStartSnapshots.keys()) {
+        if (key.startsWith(`${tabId}:`)) this.manualStartSnapshots.delete(key);
+      }
       if (Object.hasOwn(state.manualContinuity, tabId)) {
         delete state.manualContinuity[tabId];
         this.dirty = true;
       }
       this.blockedManualContinuity.delete(tabId);
       this.manualContinuityRevision.delete(tabId);
+      this.manualContinuityHighWater.delete(tabId);
+      this.manualStartOperations.delete(tabId);
       for (const claim of this.manualFrameStartClaims) {
         if (claim.startsWith(`${tabId}:`)) this.manualFrameStartClaims.delete(claim);
       }
