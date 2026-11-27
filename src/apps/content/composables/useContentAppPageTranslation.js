@@ -250,7 +250,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         return;
       }
 
-      mobileStore.resetPageTranslation();
+      mobileStore.dismissPageTranslationError();
     });
 
     tracker.addEventListener(pageEventBus, MessageActions.PAGE_RESTORE_COMPLETE, () => {

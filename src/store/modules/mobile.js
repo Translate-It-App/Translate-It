@@ -149,6 +149,23 @@ export const useMobileStore = defineStore('mobile', () => {
     }
   }
 
+  const dismissPageTranslationError = () => {
+    logger.debug('Dismissing page translation error');
+    const { hasManualContinuity, manualContinuityGeneration } = pageTranslationData.value;
+    pageTranslationData.value = {
+      isTranslating: false,
+      isTranslated: false,
+      isAutoTranslating: false,
+      hasManualContinuity,
+      manualContinuityGeneration: manualContinuityGeneration ?? -1,
+      translatedCount: 0,
+      failedCount: 0,
+      totalCount: 0,
+      status: TRANSLATION_STATUS.IDLE,
+      errorMessage: null
+    }
+  }
+
   const setHasElementTranslations = (value) => {
     hasElementTranslations.value = value
   }
@@ -185,6 +202,7 @@ export const useMobileStore = defineStore('mobile', () => {
     resetSelectionData,
     setPageTranslation,
     resetPageTranslation,
+    dismissPageTranslationError,
     setHasElementTranslations,
     setFullscreen
   }

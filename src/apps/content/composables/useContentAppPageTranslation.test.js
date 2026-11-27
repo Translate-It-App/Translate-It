@@ -64,6 +64,21 @@ describe('useContentAppPageTranslation', () => {
           status: 'idle',
         });
       }),
+      dismissPageTranslationError: vi.fn(() => {
+        const { hasManualContinuity, manualContinuityGeneration } = mobileStore.pageTranslationData;
+        Object.assign(mobileStore.pageTranslationData, {
+          isTranslating: false,
+          isTranslated: false,
+          isAutoTranslating: false,
+          hasManualContinuity,
+          manualContinuityGeneration: manualContinuityGeneration ?? -1,
+          translatedCount: 0,
+          failedCount: 0,
+          totalCount: 0,
+          status: 'idle',
+          errorMessage: null,
+        });
+      }),
       closeSheet: vi.fn(),
       openSheet: vi.fn(),
       setView: vi.fn(),
@@ -140,9 +155,11 @@ describe('useContentAppPageTranslation', () => {
     });
     expect(mobileStore.pageTranslationData.hasManualContinuity).toBe(false);
 
+    mobileStore.pageTranslationData.hasManualContinuity = true;
     listeners.get(MessageActions.PAGE_RESTORE_COMPLETE)();
     expect(mobileStore.resetPageTranslation).toHaveBeenCalled();
     expect(mobileStore.pageTranslationData.manualContinuityGeneration).toBe(5);
+    expect(mobileStore.pageTranslationData.hasManualContinuity).toBe(false);
 
     listeners.get(MessageActions.PAGE_TRANSLATE_PROGRESS)({
       isAggregated: true,
@@ -350,6 +367,8 @@ describe('useContentAppPageTranslation', () => {
       isTranslating: false,
       isAutoTranslating: false,
       isTranslated: false,
+      hasManualContinuity: false,
+      manualContinuityGeneration: 4,
       translatedCount: 0,
       failedCount: 3,
       totalCount: 3,
@@ -359,8 +378,83 @@ describe('useContentAppPageTranslation', () => {
 
     listeners.get(MessageActions.PAGE_TRANSLATE_RESET_ERROR)();
 
-    expect(mobileStore.resetPageTranslation).toHaveBeenCalledOnce();
+    expect(mobileStore.dismissPageTranslationError).toHaveBeenCalledOnce();
+    expect(mobileStore.resetPageTranslation).not.toHaveBeenCalled();
     expect(mobileStore.setPageTranslation).not.toHaveBeenCalled();
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: false,
+      manualContinuityGeneration: 4,
+      status: 'idle',
+      failedCount: 0,
+      errorMessage: null,
+    });
+  });
+
+  it('preserves manual continuity and its generation when dismissing a zero-result error', () => {
+    mobileStore.pageTranslationData = {
+      isTranslating: false,
+      isAutoTranslating: false,
+      isTranslated: false,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      translatedCount: 0,
+      failedCount: 3,
+      totalCount: 3,
+      status: 'error',
+      errorMessage: 'fatal failure',
+    };
+
+    listeners.get(MessageActions.PAGE_TRANSLATE_RESET_ERROR)();
+
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      status: 'idle',
+      errorMessage: null,
+      failedCount: 0,
+      totalCount: 0,
+    });
+
+    listeners.get(MessageActions.PAGE_TRANSLATE_PROGRESS)({
+      isAggregated: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      isTranslating: true,
+      translatedCount: 1,
+      failedCount: 0,
+      totalCount: 4,
+    });
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      isTranslating: true,
+      translatedCount: 1,
+      status: 'translating',
+    });
+
+    listeners.get(MessageActions.PAGE_TRANSLATE_PROGRESS)({
+      isAggregated: true,
+      hasManualContinuity: false,
+      manualContinuityGeneration: 8,
+      isTranslating: false,
+    });
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      isTranslating: false,
+    });
+
+    listeners.get(MessageActions.PAGE_TRANSLATE_PROGRESS)({
+      isAggregated: true,
+      hasManualContinuity: false,
+      manualContinuityGeneration: 7,
+      isTranslating: true,
+    });
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      isTranslating: false,
+    });
   });
 
   it.each(['error', 'completed'])('fully resets state after restore completion from %s state', (status) => {
@@ -368,6 +462,8 @@ describe('useContentAppPageTranslation', () => {
       isTranslating: false,
       isAutoTranslating: false,
       isTranslated: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
       translatedCount: 2,
       failedCount: 1,
       totalCount: 3,
@@ -379,6 +475,10 @@ describe('useContentAppPageTranslation', () => {
 
     expect(mobileStore.resetPageTranslation).toHaveBeenCalledOnce();
     expect(mobileStore.setPageTranslation).not.toHaveBeenCalled();
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: false,
+      manualContinuityGeneration: 8,
+    });
   });
 
   it('marks partial completion without entering error state', async () => {
@@ -572,18 +672,6 @@ describe('useContentAppPageTranslation', () => {
   });
 
   it('keeps duplicate zero-output resets deterministic', () => {
-    mobileStore.resetPageTranslation.mockImplementation(() => {
-      Object.assign(mobileStore.pageTranslationData, {
-        isTranslating: false,
-        isAutoTranslating: false,
-        isTranslated: false,
-        translatedCount: 0,
-        failedCount: 0,
-        totalCount: 0,
-        status: 'idle',
-        errorMessage: null,
-      });
-    });
     mobileStore.pageTranslationData = {
       isTranslating: false,
       isAutoTranslating: false,
@@ -598,7 +686,7 @@ describe('useContentAppPageTranslation', () => {
     listeners.get(MessageActions.PAGE_TRANSLATE_RESET_ERROR)();
     listeners.get(MessageActions.PAGE_TRANSLATE_RESET_ERROR)();
 
-    expect(mobileStore.resetPageTranslation).toHaveBeenCalledOnce();
+    expect(mobileStore.dismissPageTranslationError).toHaveBeenCalledOnce();
     expect(mobileStore.pageTranslationData).toMatchObject({
       status: 'idle',
       isTranslated: false,

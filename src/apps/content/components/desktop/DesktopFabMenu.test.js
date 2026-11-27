@@ -426,6 +426,20 @@ describe('DesktopFabMenu page command transport', () => {
     expect(wrapper.vm.menuItems.map((item) => item.id)).toContain('translate_page');
   });
 
+  it('keeps Stop visible after dismissing a zero-result error with manual continuity', () => {
+    mocks.mobileStore.pageTranslationData = {
+      ...mocks.mobileStore.pageTranslationData,
+      status: 'idle',
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      isTranslated: false,
+    };
+    const wrapper = mount(DesktopFabMenu);
+
+    expect(wrapper.vm.menuItems.map((item) => item.id)).toContain('page_translating_stop');
+    expect(wrapper.vm.menuItems.map((item) => item.id)).not.toContain('restore_page');
+  });
+
   it('opens scope choices from the page secondary action and routes toggles', async () => {
     mocks.autoRules.hasPageRule.value = true;
     const wrapper = mount(DesktopFabMenu, { attachTo: document.body });

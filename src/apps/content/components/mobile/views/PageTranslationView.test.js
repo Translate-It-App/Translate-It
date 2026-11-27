@@ -153,6 +153,25 @@ describe('PageTranslationView page action', () => {
     expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Stop Auto-Translation')
   })
 
+  it('keeps Stop visible after dismissing a zero-result error with manual continuity', () => {
+    mobileStore.pageTranslationData.value = {
+      ...mobileStore.pageTranslationData.value,
+      status: 'idle',
+      errorMessage: null,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      isTranslated: false,
+      translatedCount: 0,
+      failedCount: 0,
+      totalCount: 0,
+    }
+
+    const wrapper = mount(PageTranslationView)
+
+    expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Stop Auto-Translation')
+    expect(wrapper.text()).not.toContain('Restore Original Page')
+  })
+
   it('shows only Stop when committed content remains during manual continuity', () => {
     mobileStore.pageTranslationData.value = {
       ...mobileStore.pageTranslationData.value,
