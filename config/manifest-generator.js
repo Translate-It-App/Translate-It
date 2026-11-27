@@ -189,12 +189,7 @@ function generateFirefoxManifest(baseManifest) {
     description: '__MSG_descriptionFirefox__',
     commands: {
       ...baseManifest.commands,
-      '_execute_action': {
-        suggested_key: {
-          default: 'Alt+Shift+T',
-          mac: 'Alt+Shift+T'
-        }
-      }
+      '_execute_action': {}
     },
     
     // Firefox MV3 background configuration
