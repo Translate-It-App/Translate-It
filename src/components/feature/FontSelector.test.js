@@ -35,9 +35,9 @@ describe('FontSelector', () => {
   const getDescription = (wrapper) => wrapper.get('.font-description').text()
 
   it.each([
-    ['auto', 'Auto (Smart Detection)', 'smart'],
-    ['system', 'System Default', 'system'],
-    ['vazirmatn', 'Vazirmatn (Persian)', 'persian']
+    ['auto', 'Auto (Smart Detection)', 'Auto (Smart Detection)'],
+    ['system', 'System Default', 'System Default'],
+    ['vazirmatn', 'Vazirmatn (Persian)', 'Vazirmatn (Persian)']
   ])('displays the saved %s font before the dropdown is opened', (value, name, description) => {
     const wrapper = mountSelector(value)
 
@@ -51,7 +51,7 @@ describe('FontSelector', () => {
     const wrapper = mountSelector('verdana')
 
     expect(getPlaceholder(wrapper)).toBe('Verdana')
-    expect(getDescription(wrapper)).toBe('other')
+    expect(getDescription(wrapper)).toBe('Verdana')
     expect(getAvailableFontsSpy).not.toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -60,7 +60,7 @@ describe('FontSelector', () => {
     const wrapper = mountSelector('custom-font')
 
     expect(getPlaceholder(wrapper)).toBe('custom-font')
-    expect(getDescription(wrapper)).toBe('')
+    expect(getDescription(wrapper)).toBe('custom-font')
     expect(wrapper.emitted('update:font-family')).toBeUndefined()
     wrapper.unmount()
   })
@@ -74,7 +74,7 @@ describe('FontSelector', () => {
     expect(getAvailableFontsSpy).toHaveBeenCalledTimes(1)
     expect(wrapper.findAll('.font-option').length).toBeGreaterThan(0)
     expect(getPlaceholder(wrapper)).toBe('Verdana')
-    expect(getDescription(wrapper)).toBe('other • System Font')
+    expect(getDescription(wrapper)).toBe('Verdana • System Font')
     expect(wrapper.emitted('update:font-family')).toBeUndefined()
     wrapper.unmount()
   })
@@ -85,8 +85,36 @@ describe('FontSelector', () => {
     await wrapper.setProps({ fontFamily: 'georgia' })
 
     expect(getPlaceholder(wrapper)).toBe('Georgia')
-    expect(getDescription(wrapper)).toBe('serif')
+    expect(getDescription(wrapper)).toBe('Georgia')
     expect(getAvailableFontsSpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps the persisted font description while an unsaved font is selected', async () => {
+    const wrapper = mount(FontSelector, {
+      props: { fontFamily: 'auto', displayFontFamily: 'verdana', fontSize: '14' },
+      attachTo: document.body
+    })
+
+    await wrapper.get('#font-family-search').trigger('focus')
+    await flushPromises()
+    await wrapper.findAll('.font-option')
+      .find(option => option.text().includes('System Default'))
+      .trigger('click')
+
+    expect(wrapper.emitted('update:font-family')?.at(-1)).toEqual(['system'])
+    expect(getDescription(wrapper)).toBe('Verdana • System Font')
+    wrapper.unmount()
+  })
+
+  it('refreshes the description when the persisted font prop changes', async () => {
+    const wrapper = mount(FontSelector, {
+      props: { fontFamily: 'georgia', displayFontFamily: 'auto', fontSize: '14' }
+    })
+
+    expect(getDescription(wrapper)).toBe('Auto (Smart Detection)')
+    await wrapper.setProps({ displayFontFamily: 'georgia' })
+    expect(getDescription(wrapper)).toBe('Georgia')
     wrapper.unmount()
   })
 })

@@ -170,6 +170,10 @@ const props = defineProps({
     type: String,
     default: 'auto'
   },
+  displayFontFamily: {
+    type: String,
+    default: undefined
+  },
   fontSize: {
     type: String,
     default: '14'
@@ -217,10 +221,12 @@ const selectedFontName = computed(() => {
 })
 
 const selectedFontDescription = computed(() => {
-  const font = selectedFont.value
+  const fontFamily = props.displayFontFamily ?? localFontFamily.value
+  const font = availableFonts.value.find(f => f.value === fontFamily) ||
+    systemFontDetector.getFontMetadata(fontFamily)
   if (!font) return ''
   
-  let description = font.category || ''
+  let description = font.name || ''
   if (font.isSystemFont) {
     description += description ? ' • System Font' : 'System Font'
   }
