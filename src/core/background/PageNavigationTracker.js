@@ -8,16 +8,46 @@ const validTokenMap = value => value === undefined || (value && typeof value ===
   && !Array.isArray(value) && Object.entries(value).every(([frameId, token]) => (
     /^\d+$/.test(frameId) && typeof token === 'string' && token.length > 0
   )));
+const validAttemptRevisionMap = value => value === undefined || (value && typeof value === 'object'
+  && !Array.isArray(value) && Object.entries(value).every(([frameId, revision]) => (
+    /^\d+$/.test(frameId) && typeof revision === 'string' && /^[1-9]\d*$/.test(revision)
+    && Number.isSafeInteger(Number(revision))
+  )));
 const validManualGrant = grant => {
   if (!Number.isSafeInteger(grant?.generation) || grant.generation < 0 || typeof grant.revoked !== 'boolean') return false;
-  if (grant.revoked) return true;
+  if (grant.attemptRevision !== undefined && (!Number.isSafeInteger(grant.attemptRevision) || grant.attemptRevision < 0)) return false;
+  if (grant.attemptId !== undefined && (typeof grant.attemptId !== 'string' || !grant.attemptId)) return false;
+  if ((grant.confirmedAttemptId !== undefined || grant.confirmedAttemptRevision !== undefined)
+      && (typeof grant.confirmedAttemptId !== 'string' || !grant.confirmedAttemptId
+        || typeof grant.confirmedAttemptRevision !== 'string'
+        || !/^[1-9]\d*$/.test(grant.confirmedAttemptRevision)
+        || !Number.isSafeInteger(Number(grant.confirmedAttemptRevision)))) return false;
+  if (grant.revoked) {
+    return validTokenMap(grant.revokedAcceptedDocuments)
+      && validTokenMap(grant.revokedAcceptedAttemptIds)
+      && validAttemptRevisionMap(grant.revokedAcceptedAttemptRevisions)
+      && validTokenMap(grant.revokedProvisionalDocuments)
+      && validTokenMap(grant.revokedProvisionalAttemptIds)
+      && validAttemptRevisionMap(grant.revokedProvisionalAttemptRevisions);
+  }
   return Number.isSafeInteger(grant.topDocumentEpoch) && grant.topDocumentEpoch > 0
     && (grant.topDocumentToken === undefined || (typeof grant.topDocumentToken === 'string' && grant.topDocumentToken.length > 0))
     && grant.frames && typeof grant.frames === 'object' && !Array.isArray(grant.frames)
     && Object.entries(grant.frames).every(([frameId, epoch]) => (
       /^\d+$/.test(frameId) && Number.isSafeInteger(epoch) && epoch > 0
     ))
-    && validTokenMap(grant.documents) && validTokenMap(grant.startedDocuments);
+       && validTokenMap(grant.documents) && validTokenMap(grant.startedDocuments)
+        && validTokenMap(grant.acceptedDocuments)
+        && validTokenMap(grant.acceptedAttemptIds) && validAttemptRevisionMap(grant.acceptedAttemptRevisions)
+        && validTokenMap(grant.provisionalDocuments) && validTokenMap(grant.provisionalAttemptIds)
+        && validAttemptRevisionMap(grant.provisionalAttemptRevisions);
+};
+const updateConfirmedManualAttempt = (grant, attemptId, attemptRevision) => {
+  if (Number.isSafeInteger(attemptRevision)
+      && (!grant.confirmedAttemptRevision || attemptRevision >= Number(grant.confirmedAttemptRevision))) {
+    grant.confirmedAttemptId = attemptId;
+    grant.confirmedAttemptRevision = String(attemptRevision);
+  }
 };
 
 export class PageNavigationTracker {
@@ -73,7 +103,8 @@ export class PageNavigationTracker {
         this.state = saved || { nextDocumentEpoch: 0, frames: {}, manualContinuity: {} };
         this.state.manualContinuity ||= {};
         for (const [tabId, grant] of Object.entries(this.state.manualContinuity)) {
-          if (!grant.revoked && (!grant.armed || !grant.topDocumentToken)) {
+          if (!grant.revoked && (!grant.armed || !grant.topDocumentToken
+              || !Number.isSafeInteger(grant.attemptRevision) || !grant.attemptId)) {
             this.state.manualContinuity[tabId] = { generation: grant.generation + 1, revoked: true };
             this.dirty = true;
           }
@@ -98,6 +129,12 @@ export class PageNavigationTracker {
     const block = this.blockedManualContinuity.get(tabId);
     const isBlocked = block && (block.generation == null || block.generation === grant?.generation);
     return !isBlocked && grant && !grant.revoked ? structuredClone(grant) : null;
+  }
+
+  async getManualContinuityForRevocation(tabId) {
+    if (!this.durableState) await this._run(() => null);
+    const grant = this.durableState?.manualContinuity?.[tabId];
+    return grant ? structuredClone(grant) : null;
   }
 
   async getManualContinuityStatus(tabId) {
@@ -128,10 +165,11 @@ export class PageNavigationTracker {
       if (!top) throw new Error('Top document is not admitted');
       const previous = state.manualContinuity[tabId];
       const block = this.blockedManualContinuity.get(tabId);
+      const attemptId = options.attemptId || crypto.randomUUID();
       if (previous && !previous.revoked && previous.armed && previous.topDocumentEpoch === top.documentEpoch
           && previous.topDocumentToken === options.topDocumentToken
           && !(block && (block.generation == null || block.generation === previous.generation))) {
-        return { grant: previous, reused: true };
+        return { grant: previous, reused: true, pendingAttemptId: attemptId, previousAttemptId: previous.attemptId };
       }
       const generation = (previous?.generation || 0) + 1;
       if (!Number.isSafeInteger(generation)) throw new Error('Manual continuity generation exhausted');
@@ -142,6 +180,8 @@ export class PageNavigationTracker {
       const grant = {
         generation, revoked: false, armed: false, topDocumentEpoch: top.documentEpoch, frames,
         topDocumentToken: options.topDocumentToken,
+        attemptRevision: operationRevision,
+        attemptId,
         ...(typeof options.provider === 'string' && { provider: options.provider }),
         ...(typeof options.targetLanguage === 'string' && { targetLanguage: options.targetLanguage }),
         ...(typeof options.isExplicitProvider === 'boolean' && { isExplicitProvider: options.isExplicitProvider }),
@@ -149,11 +189,19 @@ export class PageNavigationTracker {
       state.manualContinuity[tabId] = grant;
       this.dirty = true;
       return { grant, reused: false };
-    }).then(async ({ grant, reused }) => {
+    }).then(async ({ grant, reused, pendingAttemptId, previousAttemptId }) => {
       const durable = (await this.storage.get(STORAGE_KEY))[STORAGE_KEY]?.manualContinuity?.[tabId];
       if (this.manualContinuityRevision.get(tabId) !== operationRevision
-          || !durable || durable.revoked || durable.generation !== grant.generation) throw new Error('Manual continuity grant not durable');
+          || !durable || durable.revoked || durable.generation !== grant.generation
+          || durable.attemptId !== grant.attemptId) throw new Error('Manual continuity grant not durable');
       this.blockedManualContinuity.delete(tabId);
+      if (reused) return {
+        ...durable,
+        attemptId: pendingAttemptId,
+        attemptRevision: operationRevision,
+        previousAttemptId,
+        reused: true,
+      };
       Object.defineProperty(durable, 'reused', { value: reused });
       return durable;
     });
@@ -209,13 +257,17 @@ export class PageNavigationTracker {
     }));
   }
 
-  async claimManualFrameStart(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, frameCursor, documentToken) {
+  async claimManualFrameStart(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, frameCursor, documentToken, attemptId, attemptRevision) {
     return this._run(state => {
       const grant = state.manualContinuity[tabId];
       const frame = state.frames[`${tabId}:${frameId}`];
       const top = state.frames[`${tabId}:0`];
       const block = this.blockedManualContinuity.get(tabId);
+      const attemptAccepted = Number.isSafeInteger(attemptRevision) && (Object.entries(grant?.acceptedAttemptIds || {}).some(([acceptedFrameId, acceptedId]) => (
+        acceptedId === attemptId && grant.acceptedAttemptRevisions?.[acceptedFrameId] === String(attemptRevision)
+      )) || this.hasConfirmedManualAttempt(tabId, generation, attemptId, attemptRevision));
       if (!grant || grant.revoked || !grant.armed || grant.generation !== generation
+          || !attemptAccepted
           || grant.topDocumentEpoch !== topDocumentEpoch || top?.documentEpoch !== topDocumentEpoch
           || grant.topDocumentToken !== topDocumentToken
           || grant.frames?.[frameId] !== frameCursor?.documentEpoch
@@ -230,7 +282,7 @@ export class PageNavigationTracker {
     });
   }
 
-  async completeManualFrameStart(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, frameCursor, documentToken, accepted) {
+  async completeManualFrameStart(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, frameCursor, documentToken, accepted, attemptId, attemptRevision) {
     const claimKey = `${tabId}:${frameId}:${generation}:${documentToken}`;
     try {
       return await this._run(state => {
@@ -238,20 +290,53 @@ export class PageNavigationTracker {
         const frame = state.frames[`${tabId}:${frameId}`];
         const top = state.frames[`${tabId}:0`];
         const block = this.blockedManualContinuity.get(tabId);
+        const attemptAccepted = Number.isSafeInteger(attemptRevision) && (Object.entries(grant?.acceptedAttemptIds || {}).some(([acceptedFrameId, acceptedId]) => (
+          acceptedId === attemptId && grant.acceptedAttemptRevisions?.[acceptedFrameId] === String(attemptRevision)
+        )) || this.hasConfirmedManualAttempt(tabId, generation, attemptId, attemptRevision));
+        const existingTargetTuple = grant?.acceptedDocuments?.[frameId] === documentToken
+          && (grant.acceptedAttemptIds?.[frameId] !== attemptId
+            || grant.acceptedAttemptRevisions?.[frameId] !== String(attemptRevision));
         const current = grant && !grant.revoked && grant.armed && grant.generation === generation
+          && attemptAccepted
           && grant.topDocumentEpoch === topDocumentEpoch && grant.topDocumentToken === topDocumentToken
           && top?.documentEpoch === topDocumentEpoch && grant.frames?.[frameId] === frameCursor?.documentEpoch
           && grant.documents?.[frameId] === documentToken
           && frame?.documentEpoch === frameCursor?.documentEpoch
           && frame?.routeRevision === frameCursor?.routeRevision && frame?.url === frameCursor?.url
           && this.manualFrameStartClaims.has(claimKey)
+          && grant.startedDocuments?.[frameId] !== documentToken
+          && !existingTargetTuple
           && !(block && (block.generation == null || block.generation === generation));
-        if (!accepted || !current) return false;
+        const clearMatchingProvisional = () => {
+          if (grant?.provisionalAttemptIds?.[frameId] === attemptId
+              && grant.provisionalAttemptRevisions?.[frameId] === String(attemptRevision)
+              && grant.provisionalDocuments?.[frameId] === documentToken) {
+            delete grant.provisionalDocuments[frameId];
+            delete grant.provisionalAttemptIds[frameId];
+            delete grant.provisionalAttemptRevisions[frameId];
+            this.dirty = true;
+          }
+        };
+        if (!accepted || !current) {
+          clearMatchingProvisional();
+          return false;
+        }
         grant.startedDocuments ||= {};
         if (grant.startedDocuments[frameId] !== documentToken) {
           grant.startedDocuments[frameId] = documentToken;
           this.dirty = true;
         }
+        if (attemptId != null && Number.isSafeInteger(attemptRevision)) {
+          grant.acceptedDocuments ||= {};
+          grant.acceptedAttemptIds ||= {};
+          grant.acceptedAttemptRevisions ||= {};
+          grant.acceptedDocuments[frameId] = documentToken;
+          grant.acceptedAttemptIds[frameId] = attemptId;
+          grant.acceptedAttemptRevisions[frameId] = String(attemptRevision);
+          updateConfirmedManualAttempt(grant, attemptId, attemptRevision);
+          this.dirty = true;
+        }
+        clearMatchingProvisional();
         return true;
       });
     } finally {
@@ -259,16 +344,212 @@ export class PageNavigationTracker {
     }
   }
 
-  isManualFrameStartCurrent(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, frameCursor, documentToken) {
+  async recordManualFrameAcceptance(
+    tabId, generation, attemptId, attemptRevision, frameId, documentToken, frameCursor,
+    expectedActiveAttemptId = null, requireCurrentRevision = false
+  ) {
+    if (!Number.isInteger(frameId) || frameId < 0 || typeof documentToken !== 'string' || !documentToken) return false;
+    return this._run(state => {
+      const grant = state.manualContinuity[tabId];
+      const top = state.frames[`${tabId}:0`];
+      const frame = state.frames[`${tabId}:${frameId}`];
+      const sameAcceptedTuple = grant?.acceptedAttemptIds?.[frameId] === attemptId
+        && grant?.acceptedAttemptRevisions?.[frameId] === String(attemptRevision)
+        && grant?.acceptedDocuments?.[frameId] === documentToken;
+      const activeTuple = grant?.attemptId === attemptId && grant?.attemptRevision === attemptRevision
+        && (!requireCurrentRevision || this.manualContinuityRevision.get(tabId) === attemptRevision);
+      const currentProvisionalTuple = grant?.attemptId === expectedActiveAttemptId
+        && this.manualContinuityRevision.get(tabId) === attemptRevision;
+      if (!grant || !frame || !frameCursor || grant.revoked || grant.generation !== generation
+          || (!sameAcceptedTuple && !activeTuple && !currentProvisionalTuple)
+          || grant.topDocumentEpoch !== top?.documentEpoch || frame?.documentEpoch !== frameCursor?.documentEpoch
+          || frame?.routeRevision !== frameCursor?.routeRevision || frame?.url !== frameCursor?.url
+          || (frameId === 0 && (documentToken !== grant.topDocumentToken || frame.documentEpoch !== grant.topDocumentEpoch))) return false;
+      grant.frames[frameId] = frame.documentEpoch;
+      grant.documents ||= {};
+      grant.documents[frameId] = documentToken;
+      grant.acceptedDocuments ||= {};
+      grant.acceptedAttemptIds ||= {};
+      grant.acceptedAttemptRevisions ||= {};
+      grant.acceptedDocuments[frameId] = documentToken;
+      grant.acceptedAttemptIds[frameId] = attemptId;
+      grant.acceptedAttemptRevisions[frameId] = String(attemptRevision);
+      updateConfirmedManualAttempt(grant, attemptId, attemptRevision);
+      this.dirty = true;
+      if (currentProvisionalTuple && !activeTuple) {
+        grant.attemptId = attemptId;
+        grant.attemptRevision = attemptRevision;
+      }
+      if (!grant.armed) {
+        grant.armed = true;
+        this.dirty = true;
+      }
+      return true;
+    });
+  }
+
+  async stageManualFrameAcceptance(
+    tabId, generation, attemptId, attemptRevision, frameId, documentToken, frameCursor,
+    expectedActiveAttemptId = null, requireCurrentRevision = false, strictTuple = false
+  ) {
+    if (!Number.isInteger(frameId) || frameId < 0 || typeof documentToken !== 'string' || !documentToken) return false;
+    return this._run(state => {
+      const grant = state.manualContinuity[tabId];
+      const top = state.frames[`${tabId}:0`];
+      const frame = state.frames[`${tabId}:${frameId}`];
+      const activeTuple = grant?.attemptId === attemptId && grant?.attemptRevision === attemptRevision
+        && (!requireCurrentRevision || this.manualContinuityRevision.get(tabId) === attemptRevision);
+      const pendingTuple = grant?.attemptId === expectedActiveAttemptId
+        && this.manualContinuityRevision.get(tabId) === attemptRevision;
+      const acceptedTuple = Object.entries(grant?.acceptedAttemptIds || {}).some(([acceptedFrame, acceptedId]) => (
+        acceptedId === attemptId && grant.acceptedAttemptRevisions?.[acceptedFrame] === String(attemptRevision)
+      ));
+      const block = this.blockedManualContinuity.get(tabId);
+      const alreadyAccepted = Object.entries(grant?.acceptedAttemptIds || {}).some(([acceptedFrame, acceptedId]) => (
+        acceptedId === attemptId
+          && grant.acceptedAttemptRevisions?.[acceptedFrame] === String(attemptRevision)
+      ));
+      const confirmedSource = this.hasConfirmedManualAttempt(tabId, generation, attemptId, attemptRevision);
+      if (!grant || !frame || !frameCursor || grant.revoked || grant.generation !== generation
+          || (strictTuple ? (!acceptedTuple && !confirmedSource)
+            : (!activeTuple && !pendingTuple && !alreadyAccepted && !confirmedSource))
+          || (block && (block.generation == null || block.generation === generation))
+          || grant.topDocumentEpoch !== top?.documentEpoch || frame?.documentEpoch !== frameCursor?.documentEpoch
+          || frame?.routeRevision !== frameCursor?.routeRevision || frame?.url !== frameCursor?.url
+          || (frameId === 0 && (documentToken !== grant.topDocumentToken || frame.documentEpoch !== grant.topDocumentEpoch))) return false;
+      grant.provisionalDocuments ||= {};
+      grant.provisionalAttemptIds ||= {};
+      grant.provisionalAttemptRevisions ||= {};
+      grant.provisionalDocuments[frameId] = documentToken;
+      grant.provisionalAttemptIds[frameId] = attemptId;
+      grant.provisionalAttemptRevisions[frameId] = String(attemptRevision);
+      this.dirty = true;
+      return true;
+    });
+  }
+
+  hasAcceptedManualAttempt(tabId, generation, attemptId, attemptRevision) {
+    const grants = [
+      this.state?.manualContinuity?.[tabId],
+      this.durableState?.manualContinuity?.[tabId],
+    ];
+    return grants.every(grant => grant && !grant.revoked && grant.generation === generation
+      && Object.entries(grant.acceptedAttemptIds || {}).some(([frameId, acceptedId]) => (
+        acceptedId === attemptId
+          && grant.acceptedAttemptRevisions?.[frameId] === String(attemptRevision)
+          && typeof grant.acceptedDocuments?.[frameId] === 'string'
+      )));
+  }
+
+  hasConfirmedManualAttempt(tabId, generation, attemptId, attemptRevision) {
+    const grants = [
+      this.state?.manualContinuity?.[tabId],
+      this.durableState?.manualContinuity?.[tabId],
+    ];
+    return grants.every(grant => grant && !grant.revoked && grant.armed && grant.generation === generation
+      && Object.keys(grant.acceptedAttemptIds || {}).length === 0
+      && grant.confirmedAttemptId === attemptId
+      && grant.confirmedAttemptRevision === String(attemptRevision));
+  }
+
+  async promoteManualFrameAcceptance(tabId, generation, attemptId, attemptRevision, frameId, documentToken, frameCursor) {
+    return this._run(state => {
+      const grant = state.manualContinuity[tabId];
+      const frame = state.frames[`${tabId}:${frameId}`];
+      const top = state.frames[`${tabId}:0`];
+      const block = this.blockedManualContinuity.get(tabId);
+      const matches = grant && frame && frameCursor && !grant.revoked && grant.generation === generation
+        && !(block && (block.generation == null || block.generation === generation))
+        && grant.provisionalAttemptIds?.[frameId] === attemptId
+        && grant.provisionalAttemptRevisions?.[frameId] === String(attemptRevision)
+        && grant.provisionalDocuments?.[frameId] === documentToken
+        && grant.topDocumentEpoch === top?.documentEpoch
+        && frame?.documentEpoch === frameCursor?.documentEpoch
+        && frame?.routeRevision === frameCursor?.routeRevision && frame?.url === frameCursor?.url;
+      if (!matches) return false;
+      grant.frames[frameId] = frame.documentEpoch;
+      grant.documents ||= {};
+      grant.documents[frameId] = documentToken;
+      grant.startedDocuments ||= {};
+      grant.startedDocuments[frameId] = documentToken;
+      grant.acceptedDocuments ||= {};
+      grant.acceptedAttemptIds ||= {};
+      grant.acceptedAttemptRevisions ||= {};
+      grant.acceptedDocuments[frameId] = documentToken;
+      grant.acceptedAttemptIds[frameId] = attemptId;
+      grant.acceptedAttemptRevisions[frameId] = String(attemptRevision);
+      updateConfirmedManualAttempt(grant, attemptId, attemptRevision);
+      grant.armed = true;
+      for (const key of ['provisionalDocuments', 'provisionalAttemptIds', 'provisionalAttemptRevisions']) {
+        delete grant[key][frameId];
+      }
+      this.dirty = true;
+      return true;
+    });
+  }
+
+  async clearProvisionalManualFrameAcceptance(tabId, generation, attemptId, attemptRevision, frameId, documentToken) {
+    return this._run(state => {
+      const grant = state.manualContinuity[tabId];
+      if (!grant || grant.generation !== generation
+          || grant.provisionalAttemptIds?.[frameId] !== attemptId
+          || grant.provisionalAttemptRevisions?.[frameId] !== String(attemptRevision)
+          || (documentToken != null && grant.provisionalDocuments?.[frameId] !== documentToken)) return false;
+      delete grant.provisionalDocuments[frameId];
+      delete grant.provisionalAttemptIds[frameId];
+      delete grant.provisionalAttemptRevisions[frameId];
+      for (const key of ['provisionalDocuments', 'provisionalAttemptIds', 'provisionalAttemptRevisions']) {
+        if (Object.keys(grant[key]).length === 0) delete grant[key];
+      }
+      this.dirty = true;
+      return true;
+    });
+  }
+
+  isManualFrameAttemptCurrent(tabId, generation, frameId, attemptId, attemptRevision, documentToken, { includeRevoked = false } = {}) {
+    const current = this.state?.manualContinuity?.[tabId];
+    const durable = this.durableState?.manualContinuity?.[tabId];
+    const currentRevoked = includeRevoked && current?.revoked;
+    const tupleMatches = grant => {
+      if (!grant) return false;
+      const acceptedIds = grant.revoked ? grant.revokedAcceptedAttemptIds : grant.acceptedAttemptIds;
+      const acceptedRevisions = grant.revoked ? grant.revokedAcceptedAttemptRevisions : grant.acceptedAttemptRevisions;
+      const acceptedDocuments = grant.revoked ? grant.revokedAcceptedDocuments : grant.acceptedDocuments;
+      const provisionalIds = grant.revoked ? grant.revokedProvisionalAttemptIds : grant.provisionalAttemptIds;
+      const provisionalRevisions = grant.revoked ? grant.revokedProvisionalAttemptRevisions : grant.provisionalAttemptRevisions;
+      const provisionalDocuments = grant.revoked ? grant.revokedProvisionalDocuments : grant.provisionalDocuments;
+      const accepted = acceptedIds?.[frameId] === attemptId
+        && acceptedRevisions?.[frameId] === String(attemptRevision)
+        && acceptedDocuments?.[frameId] === documentToken;
+      const provisional = provisionalIds?.[frameId] === attemptId
+        && provisionalRevisions?.[frameId] === String(attemptRevision)
+        && provisionalDocuments?.[frameId] === documentToken;
+      return accepted || provisional;
+    };
+    const effectiveGeneration = grant => grant?.revoked ? grant.revokedGeneration : grant?.generation;
+    return Boolean(current && durable
+      && effectiveGeneration(current) === generation && effectiveGeneration(durable) === generation
+      && (currentRevoked || (!current.revoked && !durable.revoked))
+      && tupleMatches(current) && tupleMatches(durable));
+  }
+
+  isManualFrameStartCurrent(tabId, frameId, generation, topDocumentEpoch, topDocumentToken, frameCursor, documentToken, attemptId, attemptRevision) {
     const currentGrant = this.state?.manualContinuity?.[tabId];
     const durableGrant = this.durableState?.manualContinuity?.[tabId];
     const currentFrame = this.state?.frames?.[`${tabId}:${frameId}`];
     const durableFrame = this.durableState?.frames?.[`${tabId}:${frameId}`];
     const top = this.state?.frames?.[`${tabId}:0`];
     const block = this.blockedManualContinuity.get(tabId);
+    const hasTuple = grant => Object.entries(grant?.acceptedAttemptIds || {}).some(([acceptedFrameId, acceptedId]) => (
+      acceptedId === attemptId && grant.acceptedAttemptRevisions?.[acceptedFrameId] === String(attemptRevision)
+    ));
+    const attemptAccepted = Number.isSafeInteger(attemptRevision)
+      && (hasTuple(currentGrant) && hasTuple(durableGrant)
+        || this.hasConfirmedManualAttempt(tabId, generation, attemptId, attemptRevision));
     return Boolean(currentGrant && durableGrant && !currentGrant.revoked && !durableGrant.revoked
       && currentGrant.armed && durableGrant.armed
       && currentGrant.generation === generation && durableGrant.generation === generation
+      && attemptAccepted
       && currentGrant.topDocumentEpoch === topDocumentEpoch && durableGrant.topDocumentEpoch === topDocumentEpoch
       && currentGrant.topDocumentToken === topDocumentToken && durableGrant.topDocumentToken === topDocumentToken
       && top?.documentEpoch === topDocumentEpoch
@@ -323,14 +604,35 @@ export class PageNavigationTracker {
       if (expectedGeneration != null && previous?.generation !== expectedGeneration) return null;
       const generation = Math.max(previous?.generation || 0, expectedGeneration || 0) + 1;
       if (!Number.isSafeInteger(generation)) throw new Error('Manual continuity generation exhausted');
-      state.manualContinuity[tabId] = { generation, revoked: true };
+      state.manualContinuity[tabId] = {
+        generation,
+        revoked: true,
+        ...(previous && !previous.revoked && {
+          revokedGeneration: previous.generation,
+          revokedAttemptRevision: previous.attemptRevision,
+          revokedAttemptId: previous.attemptId,
+          revokedTopDocumentEpoch: previous.topDocumentEpoch,
+          revokedTopDocumentToken: previous.topDocumentToken,
+          revokedFrames: structuredClone(previous.frames || {}),
+           revokedAcceptedDocuments: structuredClone(previous.acceptedDocuments || {}),
+           revokedAcceptedAttemptIds: structuredClone(previous.acceptedAttemptIds || {}),
+           revokedAcceptedAttemptRevisions: structuredClone(previous.acceptedAttemptRevisions || {}),
+           revokedProvisionalDocuments: structuredClone(previous.provisionalDocuments || {}),
+           revokedProvisionalAttemptIds: structuredClone(previous.provisionalAttemptIds || {}),
+           revokedProvisionalAttemptRevisions: structuredClone(previous.provisionalAttemptRevisions || {}),
+        }),
+      };
       this.dirty = true;
       return generation;
     }).then(async generation => {
-      if (generation == null || !isCurrentRevision()) return null;
+      if (!isCurrentRevision()) return null;
       const saved = (await this.storage.get(STORAGE_KEY))[STORAGE_KEY];
       const grant = saved?.manualContinuity?.[tabId];
       if (!isCurrentRevision()) return null;
+      if (generation == null) {
+        return expectedGeneration != null && grant?.revoked === true
+          && grant.generation > expectedGeneration ? grant.generation : null;
+      }
       if (grant?.generation !== generation || grant.revoked !== true) {
         throw new Error('Manual continuity revocation not durable');
       }
@@ -338,20 +640,24 @@ export class PageNavigationTracker {
     });
   }
 
-  async validateManualContinuity(tabId, frameId, generation, topDocumentEpoch, frameCursor) {
+  async validateManualContinuity(tabId, frameId, generation, topDocumentEpoch, frameCursor, attemptId = null) {
     const grant = await this.getManualContinuity(tabId);
     if (!grant || grant.generation !== generation || grant.topDocumentEpoch !== topDocumentEpoch
+        || (attemptId != null && grant.attemptId !== attemptId)
         || grant.frames?.[frameId] !== frameCursor?.documentEpoch) return false;
     const top = await this.getAdmissionCursor(tabId, 0);
     const frame = await this.getAdmissionCursor(tabId, frameId);
     const currentGrant = await this.getManualContinuity(tabId);
     return Boolean(currentGrant?.generation === generation && currentGrant.topDocumentEpoch === topDocumentEpoch
+      && (attemptId == null || currentGrant.attemptId === attemptId)
       && top?.documentEpoch === topDocumentEpoch
       && frame?.documentEpoch === frameCursor?.documentEpoch
       && frame?.routeRevision === frameCursor?.routeRevision && frame?.url === frameCursor?.url);
   }
 
-  async validateManualContinuityBatch(tabId, frameId, generation, topDocumentEpoch, frameCursor) {
+  async validateManualContinuityBatch(
+    tabId, frameId, generation, topDocumentEpoch, frameCursor, attemptRevision = null, attemptId = null, documentToken = null
+  ) {
     if (!this.state || !this.durableState) await this._run(() => null);
     const grant = this.durableState?.manualContinuity?.[tabId];
     const currentGrant = this.state?.manualContinuity?.[tabId];
@@ -361,6 +667,16 @@ export class PageNavigationTracker {
     const durableFrame = this.durableState?.frames?.[`${tabId}:${frameId}`];
     return Boolean(grant && !grant.revoked && currentGrant?.generation === generation
       && grant.generation === generation && grant.topDocumentEpoch === topDocumentEpoch
+      && (attemptId == null || ([
+        ['acceptedAttemptIds', 'acceptedAttemptRevisions', 'acceptedDocuments'],
+        ['provisionalAttemptIds', 'provisionalAttemptRevisions', 'provisionalDocuments'],
+      ].some(([ids, revisions, documents]) => currentGrant[ids]?.[frameId] === attemptId
+        && grant[ids]?.[frameId] === attemptId
+        && currentGrant[revisions]?.[frameId] === String(attemptRevision)
+        && grant[revisions]?.[frameId] === String(attemptRevision)
+        && (documentToken == null || grant[documents]?.[frameId] === documentToken)
+        && typeof grant[documents]?.[frameId] === 'string'
+        && currentGrant[documents]?.[frameId] === grant[documents]?.[frameId])))
       && top?.documentEpoch === topDocumentEpoch && currentFrame && durableFrame
       && currentFrame.documentEpoch === frameCursor?.documentEpoch
       && durableFrame.documentEpoch === frameCursor?.documentEpoch
@@ -388,6 +704,24 @@ export class PageNavigationTracker {
     return cursor;
   }
 
+  _retireManualFrame(state, tabId, frameId) {
+    const grant = state.manualContinuity[tabId];
+    if (!grant) return;
+    for (const key of [
+      'frames', 'documents', 'startedDocuments',
+      'acceptedDocuments', 'acceptedAttemptIds', 'acceptedAttemptRevisions',
+      'provisionalDocuments', 'provisionalAttemptIds', 'provisionalAttemptRevisions',
+      'revokedFrames', 'revokedAcceptedDocuments', 'revokedAcceptedAttemptIds',
+      'revokedAcceptedAttemptRevisions', 'revokedProvisionalDocuments',
+      'revokedProvisionalAttemptIds', 'revokedProvisionalAttemptRevisions',
+    ]) {
+      if (Object.hasOwn(grant[key] || {}, frameId)) {
+        delete grant[key][frameId];
+        this.dirty = true;
+      }
+    }
+  }
+
   seed(tabId, frames) {
     return this._run(state => {
       if (!Array.isArray(frames)) throw new Error('Invalid Page frame');
@@ -402,12 +736,7 @@ export class PageNavigationTracker {
           this.dirty = true;
           delete state.frames[key];
           const frameId = key.slice(`${tabId}:`.length);
-          const grant = state.manualContinuity[tabId];
-          if (grant && !grant.revoked) {
-            delete grant.frames[frameId];
-            delete grant.documents?.[frameId];
-            delete grant.startedDocuments?.[frameId];
-          }
+          this._retireManualFrame(state, tabId, frameId);
         }
       }
       for (const frame of frames) {
@@ -472,15 +801,7 @@ export class PageNavigationTracker {
       if (tracked) {
         if (typeof url !== 'string' || !url) throw new Error('Missing committed Page URL');
         state.frames[key] = this._newDocument(state, url);
-        if (frameId > 0) {
-          const grant = state.manualContinuity[tabId];
-          if (grant && !grant.revoked) {
-            delete grant.frames[frameId];
-            delete grant.documents?.[frameId];
-            delete grant.startedDocuments?.[frameId];
-            this.dirty = true;
-          }
-        }
+        if (frameId > 0) this._retireManualFrame(state, tabId, frameId);
       } else if (frameId > 0 && typeof url === 'string' && url) {
         const grant = state.manualContinuity[tabId];
         if (grant && !grant.revoked && grant.armed) {

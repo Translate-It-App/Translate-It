@@ -266,6 +266,18 @@ export async function handleActivateSelectElementMode(message, sender, internalO
         };
       }
 
+      const { revokeManualPageAuthority } = await import('@/core/background/handlers/page-translation/handlePageTranslation.js');
+      if (!await revokeManualPageAuthority(targetTabId)
+          || !isActivationAttemptCurrent(targetTabId, activationGeneration, activationAttemptToken)
+          || (isRecoveryActivation && !isRecoveryValidForTab(targetTabId, activationAttemptToken))) {
+        return {
+          success: false,
+          message: 'Select Element activation was superseded or Page Translation authority could not be revoked',
+          tabId: targetTabId,
+          activated: false,
+        };
+      }
+
       const frameResults = await Promise.all(frameIds.map(async frameId => {
         try {
           const documentId = frameDetails.get(frameId) || null;

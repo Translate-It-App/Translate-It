@@ -822,6 +822,7 @@ describe('PageTranslationManager', () => {
 
       expect(result.success).toBe(false);
       expect(validateNavigation).toHaveBeenCalledOnce();
+      expect(validateNavigation).toHaveBeenCalledWith({ phase: 'accept' });
       expect(pageEventBus.emit.mock.calls.some(([event]) => event === MessageActions.PAGE_TRANSLATE_START)).toBe(false);
       expect(manager.pendingSettingsAttempt).toBeNull();
     });
@@ -1641,6 +1642,26 @@ describe('PageTranslationManager', () => {
         expect.objectContaining({ sessionId: messageId })
       );
       expect(manager.acceptedLifecycleSessionId).toBeNull();
+    });
+
+    it('clears local continuity on internal Select takeover without user Stop semantics', async () => {
+      manager.hasManualContinuity = true;
+      manager.manualContinuityGeneration = 8;
+      manager.manualContinuityTopDocumentToken = 'top-token';
+      manager.scheduler.manualContinuityAuthorization = { generation: 8 };
+      manager.isTranslated = true;
+      const result = await manager.restorePage({
+        clearManualContinuity: true,
+        cancellationReason: 'operation-abort',
+      });
+      expect(result.success).toBe(true);
+      expect(manager.hasManualContinuity).toBe(false);
+      expect(manager.scheduler.manualContinuityAuthorization).toBeNull();
+      expect(manager.userRestoredOverride).not.toBe(true);
+      expect(manager.bridge.restore).toHaveBeenCalled();
+      expect(manager.scheduler.setTranslationState).toHaveBeenCalledWith(
+        false, undefined, undefined, 'operation-abort',
+      );
     });
 
     it('should stop auto-translation without full restore', async () => {

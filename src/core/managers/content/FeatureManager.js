@@ -559,9 +559,13 @@ export class FeatureManager extends ResourceTracker {
 
     if (requestingFeature === 'selectElement') {
       const pageTranslationManager = this.featureHandlers.get('pageTranslation');
-      if (!pageTranslationManager?.isTranslating && !pageTranslationManager?.isTranslated) return false;
+      if (!pageTranslationManager?.isTranslating && !pageTranslationManager?.isTranslated
+          && !pageTranslationManager?.hasManualContinuity && !pageTranslationManager?.preStartAttempt) return false;
 
-      await pageTranslationManager.restorePage();
+      await pageTranslationManager.restorePage({
+        clearManualContinuity: true,
+        cancellationReason: 'operation-abort',
+      });
       return true;
     }
 
@@ -966,8 +970,11 @@ export class FeatureManager extends ResourceTracker {
               origin: 'manual-spa',
               restartFence: navigationIdentity.restartFence,
               manualContinuityGeneration: manager.manualContinuityGeneration,
+              manualContinuityAttemptRevision: manager.manualContinuityAttemptRevision,
+              manualContinuityAttemptId: manager.manualContinuityAttemptId,
               topDocumentEpoch: manager.manualContinuityTopDocumentEpoch,
               topDocumentToken: manager.manualContinuityTopDocumentToken,
+              documentToken: window.__translateItPageDocumentToken,
               navigationCursor: navigationIdentity.navigationCursor,
             },
           }, { returnFailureResponse: true });
@@ -981,6 +988,8 @@ export class FeatureManager extends ResourceTracker {
           targetLanguage: manager.settings?.targetLanguage,
           hasManualContinuity: true,
           manualContinuityGeneration: manager.manualContinuityGeneration,
+          manualContinuityAttemptRevision: manager.manualContinuityAttemptRevision,
+          manualContinuityAttemptId: manager.manualContinuityAttemptId,
           topDocumentEpoch: manager.manualContinuityTopDocumentEpoch,
           topDocumentToken: manager.manualContinuityTopDocumentToken,
           navigationCursor: navigationIdentity.navigationCursor,

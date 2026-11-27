@@ -977,7 +977,14 @@ export class ContentMessageHandler extends ResourceTracker {
   }
 
   async handlePageTranslate(message) {
-    if (message.data?.origin !== 'manual-frame') return this._handlePageTranslate(message);
+    if (message.data?.origin !== 'manual-frame') {
+      const result = await this._handlePageTranslate(message);
+      return message.data?.hasManualContinuity === true && result?.success === true
+        && typeof window.__translateItPageDocumentToken === 'string'
+        && window.__translateItPageDocumentToken
+        ? { ...result, documentToken: window.__translateItPageDocumentToken }
+        : result;
+    }
     const documentToken = message.data.documentToken;
     if (typeof documentToken !== 'string' || !documentToken
         || window.__translateItPageDocumentToken !== documentToken) {
@@ -998,7 +1005,13 @@ export class ContentMessageHandler extends ResourceTracker {
       if (result?.success === true && window.__translateItPageDocumentToken === documentToken) {
         this._manualFrameStartAcceptedKey = key;
       }
-      return result;
+      return message.data?.hasManualContinuity === true && result && typeof result === 'object'
+        ? {
+          ...result,
+          ...(typeof window.__translateItPageDocumentToken === 'string'
+            && { documentToken: window.__translateItPageDocumentToken }),
+        }
+        : result;
     } finally {
       this._manualFrameStartInFlight.delete(key);
     }
@@ -1025,20 +1038,25 @@ export class ContentMessageHandler extends ResourceTracker {
         : 'auto',
       localRevision: this._pageRestartRevision,
     } : null;
-    const navigationIsCurrent = async () => {
+    const navigationIsCurrent = async ({ phase } = {}) => {
       if (!boundNavigation) return true;
       if (this._pageRestartRevision !== boundNavigation.localRevision
           || window.location.href !== boundNavigation.navigationCursor?.url) return false;
+      const documentToken = boundNavigation.documentToken ?? window.__translateItPageDocumentToken;
+      if (hasManualGrant && (typeof documentToken !== 'string' || !documentToken)) return false;
       const admission = await sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE_ADMIT,
         data: {
           origin: boundNavigation.origin,
+          admissionPhase: phase,
           restartFence: boundNavigation.restartFence,
           manualContinuityGeneration: boundNavigation.manualContinuityGeneration,
+          manualContinuityAttemptRevision: boundNavigation.manualContinuityAttemptRevision,
+          manualContinuityAttemptId: boundNavigation.manualContinuityAttemptId,
           topDocumentEpoch: boundNavigation.topDocumentEpoch,
           topDocumentToken: boundNavigation.topDocumentToken,
           navigationCursor: boundNavigation.navigationCursor,
-          documentToken: boundNavigation.documentToken,
+          documentToken,
           topNavigationCursor: boundNavigation.topNavigationCursor,
         },
       }, { returnFailureResponse: true });
@@ -1131,7 +1149,7 @@ export class ContentMessageHandler extends ResourceTracker {
       // Execute page translation - PASS message.data to support options like { isAuto: true }
       const result = await this.pageTranslationManager.translatePage({
         ...(message.data || {}),
-        ...(boundNavigation && { validateNavigation: navigationIsCurrent }),
+          ...(boundNavigation && { validateNavigation: navigationIsCurrent }),
       });
 
       // Log appropriate message based on whether this is auto-translation (async) or immediate completion
@@ -1280,6 +1298,8 @@ export class ContentMessageHandler extends ResourceTracker {
 
     try {
       const result = await this.pageTranslationManager.stopAutoTranslation({
+        ...(message.data?.internalSettingsInvalidation === true
+          && { cancellationReason: 'operation-abort' }),
         manualContinuityGeneration: message.data?.manualContinuityGeneration,
         clearManualContinuity: message.data?.hasManualContinuity === false,
       });

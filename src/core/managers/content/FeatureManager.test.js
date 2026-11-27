@@ -273,6 +273,50 @@ describe('FeatureManager SPA auto page command transport', () => {
     expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
   });
 
+  it('binds manual SPA admission to this frame document token', async () => {
+    const owner = FeatureManager.getInstance();
+    const previousToken = window.__translateItPageDocumentToken;
+    window.__translateItPageDocumentToken = 'child-frame-document-token';
+    const page = {
+      currentUrl: window.location.href,
+      isActive: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 7,
+      manualContinuityAttemptRevision: 12,
+      manualContinuityAttemptId: 'accepted-frame-attempt',
+      manualContinuityTopDocumentEpoch: 3,
+      manualContinuityTopDocumentToken: 'top-document-token',
+      settings: { targetLanguage: 'fr', isExplicitProvider: false },
+      translatePage: vi.fn(async ({ validateNavigation }) => {
+        expect(await validateNavigation()).toBe(true);
+      }),
+    };
+    owner.featureHandlers.set('pageTranslation', page);
+    owner.reevaluateFeatures = vi.fn().mockResolvedValue(undefined);
+    mocks.loadFeature.mockResolvedValue(page);
+
+    try {
+      await owner.handleUrlChange('https://old.example/', window.location.href, null, {
+        navigationCursor: cursor(1),
+        restartFence: 'manual-spa-fence',
+      });
+      expect(mocks.sendRegularMessage).toHaveBeenCalledWith({
+        action: MessageActions.PAGE_TRANSLATE_ADMIT,
+        data: expect.objectContaining({
+          origin: 'manual-spa',
+          manualContinuityAttemptId: 'accepted-frame-attempt',
+          topDocumentToken: 'top-document-token',
+          documentToken: 'child-frame-document-token',
+        }),
+      }, { returnFailureResponse: true });
+      expect(mocks.sendRegularMessage.mock.calls[0][0].data.documentToken)
+        .not.toBe(mocks.sendRegularMessage.mock.calls[0][0].data.topDocumentToken);
+    } finally {
+      if (previousToken === undefined) delete window.__translateItPageDocumentToken;
+      else window.__translateItPageDocumentToken = previousToken;
+    }
+  });
+
   it.each(['no-rule', 'disabled', 'extension-disabled', 'excluded', 'manual-restore', 'cancelled-url', 'iframe'])(
     'does not auto restart a missed round trip when %s', async (condition) => {
       const { owner, page } = configureSameUrlPage();
@@ -562,6 +606,9 @@ describe('FeatureManager conflict resolution', () => {
   it.each([
     ['translating', { isTranslating: true, isTranslated: false }],
     ['translated', { isTranslating: false, isTranslated: true }],
+    ['continuity-only', { isTranslating: false, isTranslated: false, hasManualContinuity: true }],
+    ['child-only continuity', { isTranslating: false, isTranslated: false, hasManualContinuity: true, manualContinuityGeneration: 4 }],
+    ['pending-start', { isTranslating: false, isTranslated: false, preStartAttempt: {} }],
   ])('restores %s Whole Page for Select Element', async (_state, state) => {
     const restorePage = vi.fn().mockResolvedValue(undefined);
     manager.featureHandlers.set('pageTranslation', { ...state, restorePage });
@@ -569,7 +616,10 @@ describe('FeatureManager conflict resolution', () => {
     await expect(manager.resolveFeatureConflict('selectElement')).resolves.toBe(true);
 
     expect(restorePage).toHaveBeenCalledOnce();
-    expect(restorePage).toHaveBeenCalledWith();
+    expect(restorePage).toHaveBeenCalledWith({
+      clearManualContinuity: true,
+      cancellationReason: 'operation-abort',
+    });
   });
 
   it('leaves idle Whole Page untouched', async () => {

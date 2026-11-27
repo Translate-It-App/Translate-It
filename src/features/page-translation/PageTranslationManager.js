@@ -52,6 +52,8 @@ export class PageTranslationManager extends ResourceTracker {
     this.isAutoTranslating = false;
     this.hasManualContinuity = false;
     this.manualContinuityGeneration = null;
+    this.manualContinuityAttemptRevision = null;
+    this.manualContinuityAttemptId = null;
     this.manualContinuityTopDocumentEpoch = null;
     this.manualContinuityTopDocumentToken = null;
     this.currentSessionIsAuto = false;
@@ -255,7 +257,7 @@ export class PageTranslationManager extends ResourceTracker {
       if (typeof options.validateNavigation === 'function') {
         let navigationValid = false;
         try {
-          navigationValid = await options.validateNavigation();
+          navigationValid = await options.validateNavigation({ phase: 'accept' });
         } catch {
           // Admission uncertainty is fail-closed for navigation-bound starts.
         }
@@ -266,12 +268,17 @@ export class PageTranslationManager extends ResourceTracker {
       if (Number.isSafeInteger(options.manualContinuityGeneration)) {
         this.hasManualContinuity = true;
         this.manualContinuityGeneration = options.manualContinuityGeneration;
+        this.manualContinuityAttemptRevision = options.manualContinuityAttemptRevision ?? null;
+        this.manualContinuityAttemptId = options.manualContinuityAttemptId ?? null;
         this.manualContinuityTopDocumentEpoch = options.topDocumentEpoch ?? options.navigationCursor?.documentEpoch ?? null;
         this.manualContinuityTopDocumentToken = options.topDocumentToken ?? null;
         this.scheduler.manualContinuityAuthorization = {
           generation: options.manualContinuityGeneration,
+          attemptRevision: options.manualContinuityAttemptRevision,
+          attemptId: options.manualContinuityAttemptId,
           topDocumentEpoch: this.manualContinuityTopDocumentEpoch,
           navigationCursor: options.navigationCursor,
+          documentToken: options.documentToken ?? window.__translateItPageDocumentToken,
         };
       }
       this.acceptedLifecycleSessionId = attempt.messageId;
@@ -662,7 +669,14 @@ export class PageTranslationManager extends ResourceTracker {
       this.manualContinuityTopDocumentToken = null;
       if (Number.isSafeInteger(options.manualContinuityGeneration)) {
         this.manualContinuityGeneration = options.manualContinuityGeneration;
+        this.manualContinuityAttemptRevision = options.manualContinuityAttemptRevision ?? null;
+        this.manualContinuityAttemptId = options.manualContinuityAttemptId ?? null;
       }
+    }
+    if (options.clearManualContinuity) {
+      this.hasManualContinuity = false;
+      this.manualContinuityTopDocumentToken = null;
+      this.scheduler.manualContinuityAuthorization = null;
     }
     const cancellationReason = options.cancellationReason
       ?? (options.manual ? ActionReasons.USER_STOPPED_PAGE_TRANSLATION : INTERNAL_CANCELLATION_REASON);
@@ -675,7 +689,7 @@ export class PageTranslationManager extends ResourceTracker {
 
       // 1. First stop batcher to prevent loop during library's restore
       this.scheduler.setTranslationState(false, undefined, undefined, cancellationReason);
-      if (options.manual) this.scheduler.manualContinuityAuthorization = null;
+      if (options.manual || options.clearManualContinuity) this.scheduler.manualContinuityAuthorization = null;
       this.isTranslated = false;
       this.isAutoTranslating = false;
 

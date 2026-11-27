@@ -149,12 +149,16 @@ export class PageTranslationEventManager {
     }).catch(() => {
       this.logger.warn('Stopping obsolete page translation failed');
     });
-    if (window === window.top && Number.isSafeInteger(manualGeneration)) {
+    if (Number.isSafeInteger(manualGeneration)) {
       void sendRegularMessage({
         action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
         data: {
           settingsInvalidation: true,
           expectedManualContinuityGeneration: manualGeneration,
+          topDocumentEpoch: this.manager.manualContinuityTopDocumentEpoch,
+          manualContinuityAttemptRevision: this.manager.manualContinuityAttemptRevision,
+          manualContinuityAttemptId: this.manager.manualContinuityAttemptId,
+          documentToken: window.__translateItPageDocumentToken,
         },
       }, { returnFailureResponse: true }).catch(() => {});
     }
