@@ -96,7 +96,7 @@ export class PageNavigationTracker {
     return this.mintRestartFence(tabId);
   }
 
-  _run(update) {
+  _run(update, { rollbackManualTabId = null } = {}) {
     const operation = this.pending.then(async () => {
       if (!this.state) {
         const saved = (await this.storage.get(STORAGE_KEY))[STORAGE_KEY];
@@ -129,9 +129,19 @@ export class PageNavigationTracker {
         }
         this.durableState = structuredClone(this.state);
       }
+      const previousManualGrant = rollbackManualTabId == null ? null
+        : structuredClone(this.state.manualContinuity[rollbackManualTabId] ?? null);
       const result = await update(this.state);
       if (this.dirty) {
-        await this.storage.set({ [STORAGE_KEY]: this.state });
+        try {
+          await this.storage.set({ [STORAGE_KEY]: this.state });
+        } catch (error) {
+          if (rollbackManualTabId != null) {
+            if (previousManualGrant) this.state.manualContinuity[rollbackManualTabId] = previousManualGrant;
+            else delete this.state.manualContinuity[rollbackManualTabId];
+          }
+          throw error;
+        }
         this.dirty = false;
         this.durableState = structuredClone(this.state);
       }
@@ -524,7 +534,10 @@ export class PageNavigationTracker {
       && grant.confirmedAttemptRevision === String(attemptRevision));
   }
 
-  async promoteManualFrameAcceptance(tabId, generation, attemptId, attemptRevision, frameId, documentToken, frameCursor) {
+  async promoteManualFrameAcceptance(
+    tabId, generation, attemptId, attemptRevision, frameId, documentToken, frameCursor,
+    topDocumentToken, boundTopCursor
+  ) {
     return this._run(state => {
       const grant = state.manualContinuity[tabId];
       const frame = state.frames[`${tabId}:${frameId}`];
@@ -532,10 +545,14 @@ export class PageNavigationTracker {
       const block = this.blockedManualContinuity.get(tabId);
       const matches = grant && frame && frameCursor && !grant.revoked && grant.generation === generation
         && !(block && (block.generation == null || block.generation === generation))
+        && this.manualContinuityRevision.get(tabId) === attemptRevision
         && grant.provisionalAttemptIds?.[frameId] === attemptId
         && grant.provisionalAttemptRevisions?.[frameId] === String(attemptRevision)
         && grant.provisionalDocuments?.[frameId] === documentToken
         && grant.topDocumentEpoch === top?.documentEpoch
+        && (frameId !== 0 || (documentToken === grant.topDocumentToken
+          && topDocumentToken === grant.topDocumentToken && boundTopCursor
+          && top?.routeRevision === boundTopCursor.routeRevision && top?.url === boundTopCursor.url))
         && frame?.documentEpoch === frameCursor?.documentEpoch
         && frame?.routeRevision === frameCursor?.routeRevision && frame?.url === frameCursor?.url;
       if (!matches) return false;
@@ -557,7 +574,7 @@ export class PageNavigationTracker {
       }
       this.dirty = true;
       return true;
-    });
+    }, { rollbackManualTabId: tabId });
   }
 
   async clearProvisionalManualFrameAcceptance(tabId, generation, attemptId, attemptRevision, frameId, documentToken) {

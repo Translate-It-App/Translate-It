@@ -780,7 +780,7 @@ describe('Page navigation producer cursor', () => {
     )).toBe(true);
     expect(await tracker.promoteManualFrameAcceptance(
       42, replacement.generation, replacement.attemptId, replacement.attemptRevision,
-      0, 'top-document-token', topCursor,
+      0, 'top-document-token', topCursor, 'top-document-token', topCursor,
     )).toBe(true);
     expect(await tuple(original.attemptId, original.attemptRevision, 'top-document-token', topCursor)).toBe(false);
     expect(await tuple(replacement.attemptId, replacement.attemptRevision, 'top-document-token', topCursor)).toBe(true);
@@ -884,9 +884,43 @@ describe('Page navigation producer cursor', () => {
     tracker.blockManualContinuity(42, grant.generation);
     expect(await tracker.promoteManualFrameAcceptance(
       42, grant.generation, grant.attemptId, grant.attemptRevision,
-      0, grant.topDocumentToken, cursor,
+      0, grant.topDocumentToken, cursor, grant.topDocumentToken, cursor,
     )).toBe(false);
     expect(await tracker.getManualContinuityForRevocation(42)).toMatchObject({ generation: grant.generation, armed: false });
+  });
+
+  it('rolls back only a failed promotion and preserves the previously accepted grant', async () => {
+    await tracker.seed(42, frames);
+    const original = await grantManual();
+    const cursor = await tracker.getAdmissionCursor(42, 0);
+    expect(await tracker.stageManualFrameAcceptance(
+      42, original.generation, original.attemptId, original.attemptRevision,
+      0, original.topDocumentToken, cursor, original.attemptId,
+    )).toBe(true);
+    expect(await tracker.promoteManualFrameAcceptance(
+      42, original.generation, original.attemptId, original.attemptRevision,
+      0, original.topDocumentToken, cursor, original.topDocumentToken, cursor,
+    )).toBe(true);
+
+    const revision = tracker.reserveManualContinuityStart(42);
+    const replacement = await grantManual(revision, { topDocumentToken: original.topDocumentToken });
+    expect(await tracker.stageManualFrameAcceptance(
+      42, replacement.generation, replacement.attemptId, replacement.attemptRevision,
+      0, original.topDocumentToken, cursor, original.attemptId,
+    )).toBe(true);
+    storage.set.mockRejectedValueOnce(new Error('promotion write failed'));
+    await expect(tracker.promoteManualFrameAcceptance(
+      42, replacement.generation, replacement.attemptId, replacement.attemptRevision,
+      0, original.topDocumentToken, cursor, original.topDocumentToken, cursor,
+    )).rejects.toThrow('promotion write failed');
+
+    const current = await tracker.getManualContinuityForRevocation(42);
+    expect(current).toMatchObject({
+      generation: replacement.generation,
+      acceptedAttemptIds: { 0: original.attemptId },
+      acceptedDocuments: { 0: original.topDocumentToken },
+      provisionalAttemptIds: { 0: replacement.attemptId },
+    });
   });
 
   it('keeps revocation closed on storage failure in-worker and documents the uncommitted restart boundary', async () => {

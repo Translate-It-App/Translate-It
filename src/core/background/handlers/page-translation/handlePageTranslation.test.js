@@ -1148,7 +1148,7 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
     )).toBe(true);
     expect(await pageNavigationTracker.promoteManualFrameAcceptance(
       42, newer.generation, newer.attemptId, newer.attemptRevision, 0,
-      'top-document-token', topCursor,
+      'top-document-token', topCursor, 'top-document-token', topCursor,
     )).toBe(true);
     expect(newer).toMatchObject({ reused: true, attemptRevision: newerRevision });
     expect((await pageNavigationTracker.getManualContinuity(42)).attemptId).toBe(original.attemptId);
@@ -3581,6 +3581,143 @@ describe('bounded frame command response deadline', () => {
     expect((await pageNavigationTracker.getManualContinuity(42)).acceptedAttemptIds).toEqual({ 0: grant.attemptId });
   });
 
+  it('durably accepts the main frame before a pending sibling settles and survives SPA route navigation', async () => {
+    const siblingResponse = deferred();
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, run: () => siblingResponse.promise },
+    ]);
+    const result = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    const accepted = await vi.waitFor(async () => {
+      const grant = await pageNavigationTracker.getManualContinuity(42);
+      if (!grant?.acceptedAttemptIds?.[0]) throw new Error('main-frame ACK not durable yet');
+      return grant;
+    });
+    expect(accepted).toMatchObject({ armed: true, acceptedAttemptIds: { 0: accepted.attemptId } });
+
+    await pageNavigationTracker.capture(42, 0, 'https://frame-0.example/spa-route');
+    expect(await pageNavigationTracker.getManualContinuity(42)).toMatchObject({
+      generation: accepted.generation, acceptedAttemptIds: { 0: accepted.attemptId },
+    });
+
+    siblingResponse.resolve({ success: true });
+    await expect(result).resolves.toMatchObject({ success: true });
+  });
+
+  it('resumes provisional iframe readiness only after main ACK persistence and before its sibling settles', async () => {
+    const mainResponse = deferred();
+    const siblingResponse = deferred();
+    const promotionWrite = deferred();
+    setupBoundedFrames([
+      { frameId: 0, run: () => mainResponse.promise },
+      { frameId: 7, run: () => siblingResponse.promise },
+    ]);
+    const originalSet = browser.storage.session.set.getMockImplementation();
+    let holdPromotion = false;
+    browser.storage.session.set.mockImplementation(async value => {
+      const grant = Object.values(value)[0]?.manualContinuity?.['42'];
+      if (holdPromotion && grant?.acceptedAttemptIds?.['0']) {
+        holdPromotion = false;
+        await promotionWrite.promise;
+      }
+      return originalSet(value);
+    });
+    const result = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    const admit = vi.spyOn(pageNavigationTracker, 'admitManualFrame');
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && message.data?.hasManualContinuity
+        && message.data.manualContinuityGeneration != null
+    ))).toBe(true));
+    holdPromotion = true;
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-14-token' },
+    }, { ...sender, frameId: 14 })).resolves.toMatchObject({ success: true, pending: true });
+
+    mainResponse.resolve({ success: true });
+    await vi.waitFor(() => expect(holdPromotion).toBe(false));
+    await Promise.resolve();
+    expect(admit).not.toHaveBeenCalled();
+    expect((await pageNavigationTracker.getManualContinuity(42)).acceptedAttemptIds).toBeUndefined();
+
+    promotionWrite.resolve();
+    await vi.waitFor(async () => expect(
+      (await pageNavigationTracker.getManualContinuity(42))?.acceptedAttemptIds?.[0],
+    ).toBeDefined());
+    await vi.waitFor(() => expect(admit).toHaveBeenCalledOnce());
+    expect(admit).toHaveBeenCalledWith(
+      42, 14, expect.any(Number), expect.any(Number), 'top-document-token',
+      'https://frame-2.example', 'frame-14-token',
+    );
+    expect(await pageNavigationTracker.getManualContinuity(42)).toMatchObject({ armed: true });
+
+    siblingResponse.resolve({ success: true });
+    await expect(result).resolves.toMatchObject({ success: true });
+  });
+
+  it('releases start ownership after provisional cleanup failure so a manual retry can proceed', async () => {
+    const rejectedAck = deferred();
+    setupBoundedFrames([{ frameId: 0, run: () => rejectedAck.promise }]);
+    const firstStart = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && message.data?.hasManualContinuity
+    ))).toBe(true));
+    browser.storage.session.set.mockRejectedValueOnce(new Error('cleanup persistence failed'));
+    rejectedAck.resolve({
+      success: false, reason: 'token_confirmation_rejected', documentToken: 'top-document-token',
+    });
+    await expect(firstStart).resolves.toMatchObject({
+      success: false,
+      reason: 'manual_continuity_acceptance_uncertain',
+      isTransportFailure: true,
+      continuityUncertainFrames: [0],
+    });
+
+    setupBoundedFrames([{ frameId: 0, run: () => Promise.resolve({ success: true }) }]);
+    await expect(handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender))
+      .resolves.toMatchObject({ success: true });
+  });
+
+  it.each([
+    ['unsuccessful response', () => Promise.resolve({ success: false, reason: 'token_confirmation_rejected' })],
+    ['transport rejection', () => Promise.reject(new Error('frame transport failed'))],
+  ])('clears staged provisional proof after a settled %s without a document token', async (_kind, run) => {
+    setupBoundedFrames([{ frameId: 0, run }]);
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    const tombstone = await pageNavigationTracker.getManualContinuityForRevocation(42);
+    expect(tombstone).toMatchObject({ revoked: true });
+    expect(tombstone.revokedProvisionalAttemptIds || {}).not.toHaveProperty('0');
+    expect(tombstone.revokedProvisionalDocuments || {}).not.toHaveProperty('0');
+
+    setupBoundedFrames([{ frameId: 0, run: () => Promise.resolve({ success: true }) }]);
+    await expect(handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender))
+      .resolves.toMatchObject({ success: true });
+  });
+
+  it('clears a failed reused-attempt provisional proof without removing prior accepted authority', async () => {
+    await pageNavigationTracker.seed(42, [{ frameId: 0, url: 'https://example.com' }]);
+    const original = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    await pageNavigationTracker.armManualContinuity(42, original.generation);
+    await recordTopManualAcceptance(original);
+
+    setupBoundedFrames([{
+      frameId: 0, run: () => Promise.resolve({ success: false, reason: 'token_confirmation_rejected' }),
+    }]);
+    await handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+
+    const grant = await pageNavigationTracker.getManualContinuity(42);
+    expect(grant).toMatchObject({
+      generation: original.generation,
+      armed: true,
+      acceptedAttemptIds: { 0: original.attemptId },
+      acceptedDocuments: { 0: original.topDocumentToken },
+    });
+    expect(grant.provisionalAttemptIds || {}).not.toHaveProperty('0');
+    expect(grant.provisionalDocuments || {}).not.toHaveProperty('0');
+  });
+
   it('revokes exact provisional settings proof before ACK and ignores the late successful ACK', async () => {
     const pendingResponse = deferred();
     const grant = await beginUnconfirmedManualStart(pendingResponse.promise);
@@ -3709,7 +3846,9 @@ describe('bounded frame command response deadline', () => {
 
     lateSuccess.resolve({ success: true });
     await vi.waitFor(() => expect(promote).toHaveBeenCalledOnce());
-    lateRejection.resolve({ success: false, reason: 'token_confirmation_rejected' });
+    lateRejection.resolve({
+      success: false, reason: 'token_confirmation_rejected', documentToken: provisional.provisionalDocuments[7],
+    });
     await vi.waitFor(() => expect(clear).toHaveBeenCalled());
     expect(await pageNavigationTracker.getManualContinuity(42)).toMatchObject({
       generation: provisional.generation, armed: false, revoked: false,
@@ -3860,6 +3999,43 @@ describe('bounded frame command response deadline', () => {
     expect(await pageNavigationTracker.getManualContinuity(42)).toMatchObject({
       generation: grant.generation, armed: false,
     });
+  });
+
+  it('ignores a gated stale ACK across navigation, Stop revocation, and a newer attempt', async () => {
+    const oldResponse = deferred();
+    const oldGrant = await beginUnconfirmedManualStart(oldResponse.promise);
+    const promotionGate = deferred();
+    const gatedPromotion = vi.spyOn(pageNavigationTracker, 'promoteManualFrameAcceptance')
+      .mockImplementation(async (...args) => {
+        if (args[2] === oldGrant.attemptId) await promotionGate.promise;
+        return PageNavigationTracker.prototype.promoteManualFrameAcceptance.call(pageNavigationTracker, ...args);
+      });
+
+    oldResponse.resolve({ success: true });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(gatedPromotion).toHaveBeenCalledOnce());
+    await onCommittedListener({
+      tabId: 42, frameId: 0, url: 'https://frame-0.example/navigated', transitionType: 'link',
+    });
+    expect(await revokeManualPageAuthority(42)).toBe(true);
+    setupBoundedFrames([{ frameId: 0, run: () => Promise.resolve({ success: true }) }]);
+    await expect(handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender))
+      .resolves.toMatchObject({ success: true });
+    const newer = await pageNavigationTracker.getManualContinuity(42);
+    expect(newer.generation).toBeGreaterThan(oldGrant.generation);
+
+    promotionGate.resolve();
+    await vi.waitFor(async () => expect(
+      await pageNavigationTracker.getManualContinuity(42),
+    ).toMatchObject({ generation: newer.generation, armed: true, revoked: false }));
+    expect(await pageNavigationTracker.getManualContinuity(42)).toMatchObject({
+      generation: newer.generation,
+      attemptId: newer.attemptId,
+      acceptedAttemptIds: { 0: newer.attemptId },
+      armed: true,
+      revoked: false,
+    });
+    gatedPromotion.mockRestore();
   });
 
   it('does not allow a duplicate start to supersede an unresolved dispatched delivery', async () => {
