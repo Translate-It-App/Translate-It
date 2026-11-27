@@ -273,6 +273,165 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.manualContinuityGeneration.value).toBe(5);
     });
 
+    it('clears continuity on confirmed restricted status without lowering its generation', async () => {
+      let status = { success: true, hasManualContinuity: true, manualContinuityGeneration: 7 };
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve(status)
+        : Promise.resolve({ success: true }));
+      const pageTranslation = await createPageTranslation();
+      await pageTranslation.refreshStatus();
+      status = { success: false, isRestrictedPage: true };
+      await getTabUpdateListener()(1, { status: 'complete' }, {
+        id: 1,
+        url: 'https://example.com/restricted',
+      });
+
+      expect(pageTranslation.hasManualContinuity.value).toBe(false);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(7);
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: {
+          isAggregated: true,
+          tabId: 1,
+          aggregateScope: 'old-document',
+          aggregateRevision: 1,
+          topLevelUrl: 'https://example.com/article',
+          hasManualContinuity: true,
+          manualContinuityGeneration: 7,
+          translatedCount: 3,
+          totalCount: 5,
+        },
+      });
+      expect(pageTranslation.hasManualContinuity.value).toBe(false);
+    });
+
+    it('keeps restricted state against same-generation lifecycle and releases it for a newer accepted start', async () => {
+      let status = { success: false, isRestrictedPage: true, manualContinuityGeneration: 7 };
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve(status)
+        : Promise.resolve({ success: true }));
+      const pageTranslation = await createPageTranslation();
+      await pageTranslation.refreshStatus();
+
+      const listener = getRuntimeMessageListener();
+      const event = (action, generation, revision, extra = {}) => listener({
+        action,
+        data: {
+          isAggregated: true,
+          tabId: 1,
+          aggregateScope: 'restricted-document',
+          aggregateRevision: revision,
+          topLevelUrl: 'https://example.com/restricted',
+          manualContinuityGeneration: generation,
+          ...extra,
+        },
+      });
+      event(MessageActions.PAGE_TRANSLATE_START, 7, 1, {
+        isTranslating: true, isAutoTranslating: true, isTranslated: true,
+      });
+      event(MessageActions.PAGE_TRANSLATE_PROGRESS, 7, 2, {
+        isTranslating: true, isAutoTranslating: true, isTranslated: true,
+      });
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isAutoTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.canStopAuto.value).toBe(false);
+      expect(pageTranslation.canTranslate.value).toBe(true);
+      expect(pageTranslation.canRestore.value).toBe(false);
+
+      event(MessageActions.PAGE_TRANSLATE_START, 8, 3, {
+        isTranslating: true, isAutoTranslating: false, isTranslated: false,
+      });
+      event(MessageActions.PAGE_TRANSLATE_PROGRESS, 8, 4, {
+        isTranslating: true, isAutoTranslating: false, isTranslated: false,
+      });
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isAutoTranslating.value).toBe(false);
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.canStopAuto.value).toBe(false);
+      expect(pageTranslation.canTranslate.value).toBe(false);
+      expect(pageTranslation.canRestore.value).toBe(false);
+    });
+
+    it('does not let an obsolete generation restore activity flags or clear independent auto state', async () => {
+      const pageTranslation = await createPageTranslation();
+      pageTranslation.manualContinuityGeneration.value = 5;
+      pageTranslation.isTranslating.value = false;
+      pageTranslation.isAutoTranslating.value = true;
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'same-document', aggregateRevision: 100,
+          topLevelUrl: 'https://example.com/page', manualContinuityGeneration: 4,
+          isTranslating: true, isAutoTranslating: false, isTranslated: true,
+        },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(false);
+      expect(pageTranslation.isAutoTranslating.value).toBe(true);
+      expect(pageTranslation.isTranslated.value).toBe(false);
+      expect(pageTranslation.canStopAuto.value).toBe(true);
+      expect(pageTranslation.canTranslate.value).toBe(false);
+      expect(pageTranslation.canRestore.value).toBe(false);
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: {
+          isAggregated: true, tabId: 1, aggregateScope: 'same-document', aggregateRevision: 1,
+          topLevelUrl: 'https://example.com/page', manualContinuityGeneration: 5,
+          isTranslating: true, isTranslated: true,
+        },
+      });
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.isAutoTranslating.value).toBe(true);
+      expect(pageTranslation.isTranslated.value).toBe(true);
+    });
+
+    it('ignores a delayed status response after same-tab navigation', async () => {
+      let resolveOldStatus;
+      let statusCalls = 0;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action !== MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: true });
+        statusCalls++;
+        if (statusCalls === 1) return new Promise(resolve => { resolveOldStatus = resolve; });
+        return Promise.resolve({ success: false, isRestrictedPage: true });
+      });
+      const pageTranslation = await createPageTranslation();
+      pageTranslation.hasManualContinuity.value = true;
+      pageTranslation.manualContinuityGeneration.value = 7;
+      const oldStatus = pageTranslation.refreshStatus();
+      await Promise.resolve();
+
+      await getTabUpdateListener()(1, { status: 'complete' }, {
+        id: 1,
+        url: 'https://example.com/restricted',
+      });
+      resolveOldStatus({ success: true, hasManualContinuity: true, manualContinuityGeneration: 7 });
+      await oldStatus;
+
+      expect(pageTranslation.hasManualContinuity.value).toBe(false);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(7);
+    });
+
+    it('preserves continuity across temporary status failures', async () => {
+      let failStatus = false;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action !== MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: true });
+        return failStatus
+          ? Promise.reject(new Error('temporarily unavailable'))
+          : Promise.resolve({ success: true, hasManualContinuity: true, manualContinuityGeneration: 7 });
+      });
+      const pageTranslation = await createPageTranslation();
+      await pageTranslation.refreshStatus();
+      failStatus = true;
+
+      await pageTranslation.refreshStatus();
+
+      expect(pageTranslation.hasManualContinuity.value).toBe(true);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(7);
+    });
+
     it('resets the tab-local continuity high-water mark before refreshing another tab', async () => {
       let status = { success: true, hasManualContinuity: true, manualContinuityGeneration: 10 };
       sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
@@ -292,6 +451,47 @@ describe('usePageTranslation Composable', () => {
 
       expect(pageTranslation.hasManualContinuity.value).toBe(false);
       expect(pageTranslation.manualContinuityGeneration.value).toBe(1);
+    });
+
+    it('drops restricted tab state before a temporary status failure on another tab', async () => {
+      let statusFailure = false;
+      sendRegularMessage.mockImplementation(({ action }) => {
+        if (action !== MessageActions.PAGE_TRANSLATE_GET_STATUS) return Promise.resolve({ success: true });
+        return statusFailure
+          ? Promise.reject(new Error('temporarily unavailable'))
+          : Promise.resolve({
+            success: false,
+            isRestrictedPage: true,
+            tabId: 1,
+            manualContinuityGeneration: 7,
+          });
+      });
+      const pageTranslation = await createPageTranslation();
+      await pageTranslation.refreshStatus();
+      expect(pageTranslation.canTranslate.value).toBe(true);
+
+      statusFailure = true;
+      browser.tabs.onActivated.addListener.mock.calls.at(-1)[0]({ tabId: 2, windowId: 10 });
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_START,
+        data: {
+          isAggregated: true,
+          tabId: 2,
+          sessionId: 'tab-two-session',
+          aggregateScope: 'tab-two-document',
+          aggregateRevision: 1,
+          topLevelUrl: 'https://example.com/tab-two',
+          hasManualContinuity: false,
+          manualContinuityGeneration: 1,
+          isTranslating: true,
+        },
+      });
+
+      expect(pageTranslation.isTranslating.value).toBe(true);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(1);
+      expect(pageTranslation.canTranslate.value).toBe(false);
     });
 
     it('preserves manual continuity when Stop cannot confirm a committed revoke', async () => {
@@ -332,6 +532,38 @@ describe('usePageTranslation Composable', () => {
       expect(pageTranslation.isAutoTranslating.value).toBe(true);
       expect(pageTranslation.translatedCount.value).toBe(3);
       expect(pageTranslation.message.value).toMatch(/cancellation delivery was incomplete/);
+    });
+
+    it('rejects stale aggregate continuity after a partial Stop delivery', async () => {
+      sendRegularMessage.mockImplementation(({ action }) => action === MessageActions.PAGE_TRANSLATE_GET_STATUS
+        ? Promise.resolve({ success: true, hasManualContinuity: true, manualContinuityGeneration: 4 })
+        : Promise.resolve({
+          success: false,
+          hasManualContinuity: false,
+          manualContinuityGeneration: 5,
+          frames: [{ success: true }, { success: false }],
+        }));
+      const pageTranslation = await createPageTranslation();
+      await pageTranslation.refreshStatus();
+      await pageTranslation.stopAutoTranslation();
+
+      getRuntimeMessageListener()({
+        action: MessageActions.PAGE_TRANSLATE_PROGRESS,
+        data: {
+          isAggregated: true,
+          tabId: 1,
+          aggregateScope: 'old-document',
+          aggregateRevision: 1,
+          topLevelUrl: 'https://example.com/article',
+          hasManualContinuity: true,
+          manualContinuityGeneration: 4,
+          translatedCount: 2,
+          totalCount: 5,
+        },
+      });
+
+      expect(pageTranslation.hasManualContinuity.value).toBe(false);
+      expect(pageTranslation.manualContinuityGeneration.value).toBe(5);
     });
 
     it('translatePage should send intent without changing lifecycle state', async () => {

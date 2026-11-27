@@ -149,6 +149,28 @@ describe("PageTranslationButton.vue", () => {
     expect(wrapper.text()).toContain("page_translation_btn_restore");
   });
 
+  it("shows only the current action for activity and manual continuity state", () => {
+    mockUsePageTranslation.isTranslating.value = true;
+    const staleActivity = mount(PageTranslationButton);
+    expect(staleActivity.findComponent({ name: "BaseButton" }).exists()).toBe(true);
+    expect(staleActivity.text()).toContain("popup_string_during_translate");
+    expect(staleActivity.text()).not.toContain("page_translation_btn_translate");
+    staleActivity.unmount();
+
+    mockUsePageTranslation.isTranslating.value = false;
+    mockUsePageTranslation.isAutoTranslating.value = true;
+    const autoActive = mount(PageTranslationButton);
+    expect(autoActive.text()).toContain("page_translation_btn_stop");
+    autoActive.unmount();
+
+    mockUsePageTranslation.isAutoTranslating.value = false;
+    mockUsePageTranslation.isTranslated.value = true;
+    mockUsePageTranslation.canRestore.value = true;
+    const translated = mount(PageTranslationButton);
+    expect(translated.text()).toContain("page_translation_btn_restore");
+    expect(translated.text()).not.toContain("page_translation_btn_stop");
+  });
+
   it("should show progress bar when translating with progress > 0", async () => {
     mockUsePageTranslation.isTranslating.value = true;
     mockUsePageTranslation.progress.value = 45;

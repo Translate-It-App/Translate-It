@@ -97,6 +97,11 @@ export function usePageTranslation() {
   let statusRefreshToken = 0;
   let lifecycleStateRevision = 0;
   let refreshAfterTabResolution = false;
+  let restrictedPageGeneration = null;
+  let restrictedPageLatched = false;
+  let restrictedPageTabId = null;
+  let restrictedPageScope = null;
+  let restrictedPageUrl = null;
 
   function applyManualContinuity(data) {
     const generation = data?.manualContinuityGeneration;
@@ -175,6 +180,7 @@ export function usePageTranslation() {
       if (activeInfo.tabId !== activeTabId) {
         hasManualContinuity.value = false;
         manualContinuityGeneration.value = -1;
+        releaseRestrictedPage();
       }
       activeTabId = activeInfo.tabId;
       activeTabVersion++;
@@ -216,6 +222,11 @@ export function usePageTranslation() {
         && activeTabId === latest.priorActiveTabId
         && Number.isInteger(latest.info.tabId)
       ) {
+        if (latest.info.tabId !== activeTabId) {
+          hasManualContinuity.value = false;
+          manualContinuityGeneration.value = -1;
+          releaseRestrictedPage();
+        }
         activeTabId = latest.info.tabId;
         activeTabVersion++;
       }
@@ -253,6 +264,22 @@ export function usePageTranslation() {
   function applyRestrictedPageState(response) {
     const restrictedMessage = response?.message || 'Feature not available on this page';
 
+    hasManualContinuity.value = false;
+    const responseGeneration = response?.manualContinuityGeneration;
+    if (Number.isSafeInteger(responseGeneration) && responseGeneration >= 0
+      && responseGeneration >= manualContinuityGeneration.value) {
+      manualContinuityGeneration.value = responseGeneration;
+      hasManualContinuity.value = false;
+    }
+    restrictedPageGeneration = manualContinuityGeneration.value;
+    restrictedPageLatched = true;
+    restrictedPageTabId = Number.isInteger(response?.tabId) ? response.tabId : activeTabId;
+    restrictedPageScope = typeof response?.aggregateScope === 'string'
+      ? response.aggregateScope
+      : aggregateStreamsByTab.get(restrictedPageTabId)?.scope ?? null;
+    restrictedPageUrl = typeof response?.currentUrl === 'string'
+      ? response.currentUrl
+      : aggregateStreamsByTab.get(restrictedPageTabId)?.url ?? null;
     isTranslating.value = false;
     isTranslated.value = false;
     isAutoTranslating.value = false;
@@ -261,6 +288,27 @@ export function usePageTranslation() {
     totalNodes.value = 0;
     error.value = null;
     message.value = restrictedMessage;
+  }
+
+  function canApplyLifecycle(action, data) {
+    const generation = data?.manualContinuityGeneration;
+    if (Number.isSafeInteger(generation) && generation >= 0 && generation < manualContinuityGeneration.value) return false;
+    if (!restrictedPageLatched) return true;
+    if (action !== MessageActions.PAGE_TRANSLATE_START) return false;
+    if (Number.isSafeInteger(generation)) return generation > restrictedPageGeneration;
+    const tabId = Number.isInteger(data?.tabId) ? data.tabId : null;
+    if (tabId === null) return false;
+    if (tabId !== restrictedPageTabId) return tabId === activeTabId;
+    const transition = pendingDocumentTransitions.get(tabId);
+    return !!transition?.confirmed && transition.url === data.topLevelUrl;
+  }
+
+  function releaseRestrictedPage() {
+    restrictedPageLatched = false;
+    restrictedPageGeneration = null;
+    restrictedPageTabId = null;
+    restrictedPageScope = null;
+    restrictedPageUrl = null;
   }
 
 
@@ -315,6 +363,7 @@ export function usePageTranslation() {
         if (!result.isAggregated || hasValidAggregateRevision(result)) {
           applyManualContinuity(result);
         }
+        releaseRestrictedPage();
         isTranslated.value = result.isTranslated || false;
         isTranslating.value = result.isTranslating || false;
         isAutoTranslating.value = result.isAutoTranslating || false;
@@ -461,13 +510,13 @@ export function usePageTranslation() {
             || eventSessionId === pendingRequestSessionId
             || aggregateFrameStart;
           if (!tabMatches || !sessionMatches) continue;
-          if (!acceptAggregateRevision(eventData, event.action)) continue;
+          if (!acceptLifecycleRevision(eventData, event.action)) continue;
           applyStartEvent(eventData);
           continue;
         }
 
         if (evaluateEventOwnership(eventData, event.action) !== EVENT_APPLY) continue;
-        if (!acceptAggregateRevision(eventData, event.action)) continue;
+        if (!acceptLifecycleRevision(eventData, event.action)) continue;
         if (event.action === MessageActions.PAGE_TRANSLATE_ERROR && eventData.isFatal === true) {
           replayedFatalError = true;
         }
@@ -553,6 +602,7 @@ export function usePageTranslation() {
       }
 
       if (!result?.success) throw new Error(result?.reason || 'Translation failed');
+      releaseRestrictedPage();
     } catch (e) {
       // A superseded request must not change UI state and must not cancel a
       // pending error of the current session.
@@ -592,7 +642,7 @@ export function usePageTranslation() {
             pendingRequestSessionId = eventData.sessionId;
             replayingFatalSessionId = eventData.sessionId;
             if (evaluateEventOwnership(eventData, event.action) !== EVENT_APPLY) continue;
-            if (!acceptAggregateRevision(eventData, event.action)) continue;
+            if (!acceptLifecycleRevision(eventData, event.action)) continue;
             if (event.action === MessageActions.PAGE_TRANSLATE_ERROR) {
               replayedError = true;
               await handleError(eventData);
@@ -670,6 +720,7 @@ export function usePageTranslation() {
       }
 
       if (result.success) {
+        releaseRestrictedPage();
         isTranslated.value = false;
         isAutoTranslating.value = false;
         message.value = `Restored ${result.restoredCount} elements`;
@@ -721,6 +772,7 @@ export function usePageTranslation() {
         && revokedGeneration >= 0
         && revokedGeneration >= manualContinuityGeneration.value;
       if (hasCommittedRevoke) {
+        releaseRestrictedPage();
         applyManualContinuity(result);
       } else if (result?.success !== true || revokedGeneration !== undefined || hasManualContinuity.value) {
         error.value = 'Unable to confirm that auto-translation was stopped';
@@ -1010,7 +1062,6 @@ export function usePageTranslation() {
   function handleRestoreComplete(data) {
     errorPresentationRevision++;
     hasManualContinuity.value = false;
-    manualContinuityGeneration.value = -1;
     translateRequestOwnership++;
     supersedeCompletedSessions();
     if (typeof data?.sessionId === 'string') suppressSession(data.sessionId);
@@ -1274,6 +1325,25 @@ export function usePageTranslation() {
     return true;
   }
 
+  function acceptLifecycleRevision(data, action) {
+    if (!canApplyLifecycle(action, data) || !acceptAggregateRevision(data, action)) return false;
+    if (restrictedPageLatched && action === MessageActions.PAGE_TRANSLATE_START) {
+      const generation = data?.manualContinuityGeneration;
+      const tabId = Number.isInteger(data?.tabId) ? data.tabId : activeTabId;
+      const current = aggregateStreamsByTab.get(tabId);
+      const verifiedNewDocument = tabId !== null
+        && tabId === activeTabId
+        && (tabId !== restrictedPageTabId
+          || (current && (current.scope !== restrictedPageScope || current.url !== restrictedPageUrl)));
+      if ((Number.isSafeInteger(generation) && generation > restrictedPageGeneration) || verifiedNewDocument) {
+        releaseRestrictedPage();
+      } else {
+        return false;
+      }
+    }
+    return true;
+  }
+
   function rememberRetiredScope(tabId, scope) {
     if (typeof scope !== 'string' || !scope) return;
     const retired = retiredAggregateScopesByTab.get(tabId) || new Set();
@@ -1507,7 +1577,7 @@ export function usePageTranslation() {
           pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
           break;
         }
-        if (!acceptAggregateRevision(data, runtimeMessage.action)) break;
+        if (!acceptLifecycleRevision(data, runtimeMessage.action)) break;
         if (eventTabId !== null) activeTabId = eventTabId;
         applyStartEvent(data);
         break;
@@ -1523,7 +1593,7 @@ export function usePageTranslation() {
           pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
           break;
         }
-        if (!acceptAggregateRevision(data, runtimeMessage.action)) break;
+        if (!acceptLifecycleRevision(data, runtimeMessage.action)) break;
         updateProgress(data);
         break;
       }
@@ -1535,7 +1605,7 @@ export function usePageTranslation() {
           pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
           break;
         }
-        if (!acceptAggregateRevision(data, runtimeMessage.action)) break;
+        if (!acceptLifecycleRevision(data, runtimeMessage.action)) break;
         handleComplete(data);
         break;
       }
@@ -1547,7 +1617,7 @@ export function usePageTranslation() {
           pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
           break;
         }
-        if (!acceptAggregateRevision(data, runtimeMessage.action)) break;
+        if (!acceptLifecycleRevision(data, runtimeMessage.action)) break;
         handleError(data);
         break;
       }
@@ -1562,7 +1632,7 @@ export function usePageTranslation() {
           pendingLifecycleEvents.push({ action: runtimeMessage.action, data });
           break;
         }
-        if (!acceptAggregateRevision(data, runtimeMessage.action)) break;
+        if (!acceptLifecycleRevision(data, runtimeMessage.action)) break;
         applyLifecycleEvent(runtimeMessage.action, data);
         break;
       }
@@ -1592,37 +1662,37 @@ export function usePageTranslation() {
       const action = data?.status === 'idle'
         ? MessageActions.PAGE_TRANSLATE_IDLE
         : MessageActions.PAGE_TRANSLATE_PROGRESS;
-      if (acceptAggregateRevision(data, action)) updateProgress(data);
+      if (acceptLifecycleRevision(data, action)) updateProgress(data);
     };
     pageEventBus.on('page-translation-progress', progressListener);
 
     // Translation complete
     completeListener = (data) => {
-      if (acceptAggregateRevision(data, MessageActions.PAGE_TRANSLATE_COMPLETE)) handleComplete(data);
+      if (acceptLifecycleRevision(data, MessageActions.PAGE_TRANSLATE_COMPLETE)) handleComplete(data);
     };
     pageEventBus.on('page-translation-complete', completeListener);
 
     // Translation error
     errorListener = (data) => {
-      if (acceptAggregateRevision(data, MessageActions.PAGE_TRANSLATE_ERROR)) return handleError(data);
+      if (acceptLifecycleRevision(data, MessageActions.PAGE_TRANSLATE_ERROR)) return handleError(data);
     };
     pageEventBus.on('page-translation-error', errorListener);
 
     // Restore complete
     restoreCompleteListener = (data) => {
-      if (acceptAggregateRevision(data, MessageActions.PAGE_RESTORE_COMPLETE)) handleRestoreComplete(data);
+      if (acceptLifecycleRevision(data, MessageActions.PAGE_RESTORE_COMPLETE)) handleRestoreComplete(data);
     };
     pageEventBus.on('page-restore-complete', restoreCompleteListener);
 
     // Auto restore complete
     autoRestoreCompleteListener = (data) => {
-      if (acceptAggregateRevision(data, MessageActions.PAGE_AUTO_RESTORE_COMPLETE)) handleAutoRestoreComplete(data);
+      if (acceptLifecycleRevision(data, MessageActions.PAGE_AUTO_RESTORE_COMPLETE)) handleAutoRestoreComplete(data);
     };
     pageEventBus.on(MessageActions.PAGE_AUTO_RESTORE_COMPLETE, autoRestoreCompleteListener);
 
     // Translation cancelled
     cancelledListener = (data) => {
-      if (acceptAggregateRevision(data, MessageActions.PAGE_TRANSLATE_CANCELLED)) handleCancelled(data);
+      if (acceptLifecycleRevision(data, MessageActions.PAGE_TRANSLATE_CANCELLED)) handleCancelled(data);
     };
     pageEventBus.on('page-translation-cancelled', cancelledListener);
 

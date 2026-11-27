@@ -53,7 +53,17 @@ describe('useContentAppPageTranslation', () => {
         errorMessage: 'stale error',
       },
       setPageTranslation: vi.fn((state) => Object.assign(mobileStore.pageTranslationData, state)),
-      resetPageTranslation: vi.fn(),
+      resetPageTranslation: vi.fn(() => {
+        const manualContinuityGeneration = mobileStore.pageTranslationData.manualContinuityGeneration ?? -1;
+        Object.assign(mobileStore.pageTranslationData, {
+          isTranslating: false,
+          isTranslated: false,
+          isAutoTranslating: false,
+          hasManualContinuity: false,
+          manualContinuityGeneration,
+          status: 'idle',
+        });
+      }),
       closeSheet: vi.fn(),
       openSheet: vi.fn(),
       setView: vi.fn(),
@@ -116,6 +126,66 @@ describe('useContentAppPageTranslation', () => {
     expect(mobileStore.pageTranslationData).toMatchObject({
       hasManualContinuity: false,
       manualContinuityGeneration: 9,
+    });
+  });
+
+  it('uses the store generation as the high-water mark after Stop and Restore', () => {
+    mobileStore.pageTranslationData.manualContinuityGeneration = 5;
+    mobileStore.pageTranslationData.hasManualContinuity = false;
+
+    listeners.get(MessageActions.PAGE_TRANSLATE_PROGRESS)({
+      isAggregated: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 4,
+    });
+    expect(mobileStore.pageTranslationData.hasManualContinuity).toBe(false);
+
+    listeners.get(MessageActions.PAGE_RESTORE_COMPLETE)();
+    expect(mobileStore.resetPageTranslation).toHaveBeenCalled();
+    expect(mobileStore.pageTranslationData.manualContinuityGeneration).toBe(5);
+
+    listeners.get(MessageActions.PAGE_TRANSLATE_PROGRESS)({
+      isAggregated: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 5,
+    });
+    expect(mobileStore.pageTranslationData.hasManualContinuity).toBe(false);
+
+    listeners.get(MessageActions.PAGE_TRANSLATE_START)({
+      hasManualContinuity: true,
+      manualContinuityGeneration: 6,
+    });
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: true,
+      manualContinuityGeneration: 6,
+    });
+  });
+
+  it('ignores obsolete lifecycle generations without changing activity or translated flags', () => {
+    Object.assign(mobileStore.pageTranslationData, {
+      manualContinuityGeneration: 5,
+      hasManualContinuity: false,
+      isTranslating: false,
+      isAutoTranslating: false,
+      isTranslated: true,
+    });
+
+    listeners.get(MessageActions.PAGE_TRANSLATE_PROGRESS)({
+      isAggregated: true,
+      manualContinuityGeneration: 4,
+      isTranslating: true,
+      isAutoTranslating: true,
+      isTranslated: false,
+      translatedCount: 0,
+      totalCount: 3,
+    });
+
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      isTranslating: false,
+      isAutoTranslating: false,
+      isTranslated: true,
+      hasManualContinuity: false,
+      manualContinuityGeneration: 5,
     });
   });
 
@@ -668,6 +738,49 @@ describe('useContentAppPageTranslation', () => {
     await completion;
 
     expect(mobileStore.setPageTranslation).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [MessageActions.PAGE_TRANSLATE_COMPLETE, {
+      isAggregated: true,
+      translatedCount: 0,
+      failedCount: 1,
+      totalCount: 1,
+      errorDetails: { type: ErrorTypes.MODEL_OVERLOADED, message: 'overloaded' },
+    }],
+    [MessageActions.PAGE_TRANSLATE_ERROR, {
+      isAggregated: true,
+      isFatal: true,
+      errorDetails: { type: ErrorTypes.MODEL_OVERLOADED, message: 'overloaded' },
+    }],
+  ])('discards pending %s presentation after Stop commits a newer continuity generation', async (action, detail) => {
+    const decision = createDeferred();
+    getPageTranslationErrorPresentationMock.mockReturnValueOnce(decision.promise);
+    mobileStore.pageTranslationData.manualContinuityGeneration = 4;
+
+    const pending = listeners.get(action)({
+      ...detail,
+      manualContinuityGeneration: 4,
+    });
+    mobileStore.setPageTranslation({
+      manualContinuityGeneration: 5,
+      hasManualContinuity: false,
+      status: 'idle',
+    });
+    decision.resolve(new Error('obsolete presentation'));
+    await pending;
+
+    expect(mobileStore.setPageTranslation).toHaveBeenCalledTimes(1);
+    expect(mobileStore.setPageTranslation).toHaveBeenCalledWith({
+      manualContinuityGeneration: 5,
+      hasManualContinuity: false,
+      status: 'idle',
+    });
+    expect(mobileStore.pageTranslationData).toMatchObject({
+      manualContinuityGeneration: 5,
+      hasManualContinuity: false,
+      status: 'idle',
+    });
   });
 
   it('keeps newer partial completion when an older zero-result presentation resolves', async () => {

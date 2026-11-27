@@ -31,6 +31,8 @@ export const useMobileStore = defineStore('mobile', () => {
     isTranslating: false,
     isTranslated: false,
     isAutoTranslating: false,
+    hasManualContinuity: false,
+    manualContinuityGeneration: -1,
     translatedCount: 0,
     failedCount: 0,
     totalCount: 0,
@@ -132,10 +134,13 @@ export const useMobileStore = defineStore('mobile', () => {
 
   const resetPageTranslation = () => {
     logger.debug('Resetting page translation data');
+    const manualContinuityGeneration = pageTranslationData.value.manualContinuityGeneration ?? -1;
     pageTranslationData.value = {
       isTranslating: false,
       isTranslated: false,
       isAutoTranslating: false,
+      hasManualContinuity: false,
+      manualContinuityGeneration,
       translatedCount: 0,
       failedCount: 0,
       totalCount: 0,

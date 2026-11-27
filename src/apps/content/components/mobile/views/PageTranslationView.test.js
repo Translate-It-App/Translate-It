@@ -170,6 +170,23 @@ describe('PageTranslationView page action', () => {
     expect(wrapper.text()).not.toContain('Restore Original Page')
   })
 
+  it('renders Translate rather than Stop when stale lifecycle activity was rejected', () => {
+    mobileStore.pageTranslationData.value = {
+      ...mobileStore.pageTranslationData.value,
+      status: 'idle',
+      isTranslating: false,
+      isAutoTranslating: false,
+      isTranslated: false,
+      hasManualContinuity: false,
+    }
+
+    const wrapper = mount(PageTranslationView)
+
+    expect(wrapper.get('.ti-m-header-primary-btn').text()).toBe('Start Translation')
+    expect(wrapper.text()).not.toContain('Stop Auto-Translation')
+    expect(wrapper.text()).not.toContain('Restore Original Page')
+  })
+
   it('disables page translation for a resolved provider without bulk support', () => {
     settingsStore.effectiveProvider = 'vajehyab'
     const wrapper = mount(PageTranslationView)

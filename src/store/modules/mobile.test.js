@@ -16,6 +16,16 @@ describe('mobile store', () => {
     expect(store.pageTranslationData.failedCount).toBe(0);
   });
 
+  it('clears manual continuity on reset without lowering its generation', () => {
+    const store = useMobileStore();
+    store.setPageTranslation({ hasManualContinuity: false, manualContinuityGeneration: 5 });
+
+    store.resetPageTranslation();
+
+    expect(store.pageTranslationData.hasManualContinuity).toBe(false);
+    expect(store.pageTranslationData.manualContinuityGeneration).toBe(5);
+  });
+
   it('does not expose Mobile Whole Page retry state', () => {
     const store = useMobileStore();
 
