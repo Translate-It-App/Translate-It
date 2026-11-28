@@ -2,6 +2,10 @@
 
 Recorded benchmark reports and their original artifacts. Historical reports remain unchanged; the Issue #406 and Issue #432 syntheses are separate final records.
 
+## Select Element
+
+The [manual live Select Element benchmark](../../../scripts/dev/select-element/live-benchmark/README.md) compares baseline and candidate trials using fixture-based timings and DOM-change proxy metrics. Its README is the source of truth for setup and execution instructions.
+
 ## Whole-page translation
 
 - [DeepL Translate concurrency evaluation](deepl-translate-concurrency.md) — C5 baseline and C6 attempts, with low sample size and separate quota-exhaustion/rate-limit outcomes.

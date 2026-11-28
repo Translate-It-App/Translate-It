@@ -778,6 +778,7 @@ are not interchangeable.
 - [Messaging System](MessagingSystem.md)
 - [Smart Handler Registration System](SMART_HANDLER_REGISTRATION_SYSTEM.md)
 - [Toast Integration System](TOAST_INTEGRATION_SYSTEM.md)
+- [Manual Select Element live benchmark](../../scripts/dev/select-element/live-benchmark/README.md)
 
 ---
 
