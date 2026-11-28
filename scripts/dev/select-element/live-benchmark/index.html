@@ -9,8 +9,27 @@
       [data-target] { margin: 8px 0; padding: 8px; border-bottom: 1px solid #eee; }
       #fixture-root { box-sizing: border-box; width: 300px; height: 300px; overflow: auto; border: 1px solid #888; }
       #fixture-root p { margin: 8px 0; }
-      #benchmark-panel { position: fixed; z-index: 2147483647; right: 12px; top: 12px; width: min(340px,calc(100vw - 24px)); max-height: 90vh; overflow:auto; box-sizing:border-box; padding:14px; background:white; border:1px solid #bbc7d1; border-radius:10px; box-shadow:0 5px 20px #0002; font:13px/1.45 system-ui,sans-serif; }
-      #benchmark-panel button,#benchmark-panel select { margin:3px; padding:6px; }
+      #benchmark-panel { position: fixed; z-index: 2147483647; right: 12px; top: 12px; width: min(360px,calc(100vw - 24px)); max-height: min(82vh, 680px); overflow:auto; box-sizing:border-box; padding:12px; background:white; border:1px solid #bbc7d1; border-radius:10px; box-shadow:0 5px 20px #0002; font:13px/1.4 system-ui,sans-serif; }
+      #benchmark-panel h2 { margin: 0 0 8px; font-size: 16px; }
+      #benchmark-panel section { border-top:1px solid #dce2e7; padding:8px 0; }
+      #benchmark-panel section h3 { margin:0 0 6px; font-size:13px; }
+      #benchmark-panel label { display:grid; grid-template-columns: minmax(105px, 1fr) minmax(0, 1.25fr); align-items:center; gap:6px; margin:4px 0; }
+      #benchmark-panel select { min-width:0; }
+      #benchmark-panel button,#benchmark-panel select { box-sizing:border-box; margin:2px 0; padding:5px 7px; }
+      #benchmark-panel .actions { display:flex; flex-wrap:wrap; gap:5px; }
+      #benchmark-panel .actions button { flex:1 1 auto; }
+      #trial-state, #copy-feedback { margin:5px 0 0; }
+      #results section { padding:5px 0; }
+      #results section + section { border-top:1px solid #eee; }
+      .fixture-heading { display:flex; justify-content:space-between; gap:8px; }
+      .metric-row { margin:4px 0; padding:5px 7px; border-left:3px solid; border-radius:3px; font-size:12px; }
+      .metric-row.baseline { border-color:#3568a8; background:#eef4fc; }
+      .metric-row.candidate { border-color:#a45a1c; background:#fff3e8; }
+      .metric-row > strong { display:block; margin-bottom:3px; text-transform:capitalize; }
+      .metric-values { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:1px 8px; margin:0; }
+      .metric-values dt { color:#4c5661; }
+      .metric-values dd { margin:0; font-variant-numeric:tabular-nums; text-align:right; }
+      @media (max-width: 760px) { #benchmark-panel { position:static; width:auto; max-height:none; margin:12px auto; } }
       #fixture { padding-top: 10px; }
     </style>
   </head>
@@ -22,20 +41,32 @@
     </main>
     <aside id="benchmark-panel" translate="no" data-translate-ignore="true" aria-label="Benchmark controls">
       <h2>Select Element trial</h2>
-      <label>Fixture <select id="fixture-choice"><option>Small</option><option>Medium</option><option>Large</option><option>Mixed HTML</option></select></label>
-      <label>Label <select id="trial-label"><option>baseline</option><option>candidate</option></select></label>
-      <button id="start-trial" type="button">Start trial</button>
-      <p>After clicking, use the extension's normal Select Element workflow. This button does not activate selection.</p>
-      <p id="trial-state" aria-live="polite">No active trial</p>
-      <label>Operator-reported outcome
-        <select id="outcome"><option value="">Choose only if known</option><option>successful</option><option>partial</option><option>failed</option><option>cancelled</option></select>
-      </label>
-      <button id="finish-trial" type="button">Record outcome</button>
-      <button id="export" type="button">Export JSON</button>
-      <button id="clear" type="button">Clear results</button>
-      <p>Latest results by fixture (DOM-change proxies only)</p>
-      <div id="results" aria-live="polite"></div>
-      <p>Physical provider request counts are unavailable; dispatch is extension-side only.</p>
+      <section aria-labelledby="configuration-heading">
+        <h3 id="configuration-heading">Trial Configuration</h3>
+        <label>Fixture <select id="fixture-choice"><option>Small</option><option>Medium</option><option>Large</option><option>Mixed HTML</option></select></label>
+        <label>Label <select id="trial-label"><option>baseline</option><option>candidate</option></select></label>
+        <button id="start-trial" type="button">Start trial</button>
+        <p>After clicking, use the extension's normal Select Element workflow. This button does not activate selection.</p>
+        <p id="trial-state" aria-live="polite" role="status">No active trial</p>
+      </section>
+      <section aria-labelledby="outcome-heading">
+        <h3 id="outcome-heading">Trial Outcome</h3>
+        <label>Operator-reported outcome
+          <select id="outcome"><option value="">Choose only if known</option><option>successful</option><option>partial</option><option>failed</option><option>cancelled</option></select>
+        </label>
+        <button id="finish-trial" type="button">Record outcome</button>
+      </section>
+      <section aria-labelledby="results-heading">
+        <h3 id="results-heading">Results</h3>
+        <div class="actions">
+          <button id="export" type="button">Export JSON</button>
+          <button id="copy" type="button">Copy JSON</button>
+          <button id="clear" type="button">Clear results</button>
+        </div>
+        <p id="copy-feedback" role="status" aria-live="polite"></p>
+        <div id="results" aria-live="polite"></div>
+        <p>Physical provider request counts are unavailable; dispatch is extension-side only.</p>
+      </section>
     </aside>
     <script src="./benchmark.js" defer></script>
   </body>

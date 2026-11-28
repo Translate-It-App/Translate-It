@@ -57,18 +57,52 @@
     } catch { return []; }
   }
   function save() { try { localStorage.setItem(KEY, JSON.stringify(records)); } catch { /* Storage may be disabled. */ } }
+  function serializeResults() {
+    return JSON.stringify({ schemaVersion: 2, exportedAt: new Date().toISOString(), metadataOnly: true, trials: records.map(clean) }, null, 2);
+  }
+  function formatMs(value) { return Number.isFinite(value) ? `${value.toFixed(1)} ms` : "—"; }
   function render() {
     const output = document.getElementById("results");
     output.replaceChildren();
     for (const name of Object.keys(counts)) {
       const section = document.createElement("section");
-      const heading = document.createElement("strong");
-      heading.textContent = name;
+      const heading = document.createElement("div");
+      heading.className = "fixture-heading";
+      const fixtureName = document.createElement("strong");
+      fixtureName.textContent = name;
+      heading.append(fixtureName);
       section.append(heading);
       for (const label of ["baseline", "candidate"]) {
         const record = [...records].reverse().find((item) => item.fixture === name && item.label === label);
-        const row = document.createElement("p");
-        row.textContent = `${label}: ${record ? `${record.status}; ${record.logicalParentCount ?? "—"} logical parents/${record.textNodeCount ?? "—"} text nodes; click processing ${record.timings.selectionClickMs ?? "—"} ms; click→extension dispatch ${record.timings.clickToRequestDispatchMs ?? "—"} ms; click→terminal ${record.timings.clickToTerminalMs ?? "—"} ms; first/last unit mutation ${record.timings.firstMutationMs ?? "—"}/${record.timings.lastMutationMs ?? "—"} ms; changed parents ${record.mutatedUnitCount ?? "—"}; terminal ${record.terminalStatus ?? "—"}` : "no trial"}`;
+        const row = document.createElement("div");
+        row.className = `metric-row ${label}`;
+        const title = document.createElement("strong");
+        title.textContent = `${label}: ${record ? record.status : "no trial"}`;
+        row.append(title);
+        if (record) {
+          const metrics = document.createElement("dl");
+          metrics.className = "metric-values";
+          const addMetric = (name, value) => {
+            const term = document.createElement("dt");
+            term.textContent = name;
+            const detail = document.createElement("dd");
+            detail.textContent = value;
+            metrics.append(term, detail);
+          };
+          addMetric("Fixture units", `${record.logicalParentCount ?? "—"} parents / ${record.textNodeCount ?? "—"} text nodes`);
+          addMetric("Processing", formatMs(record.timings.selectionClickMs));
+          addMetric("Dispatch", formatMs(record.timings.clickToRequestDispatchMs));
+          addMetric("Click to terminal", formatMs(record.timings.clickToTerminalMs));
+          addMetric("First mutation", formatMs(record.timings.firstMutationMs));
+          addMetric("Last mutation", formatMs(record.timings.lastMutationMs));
+          addMetric("Changed parents", `${record.mutatedUnitCount ?? "—"}`);
+          addMetric("Terminal status", record.terminalStatus ?? "—");
+          row.append(metrics);
+        } else {
+          const empty = document.createElement("span");
+          empty.textContent = "No trial recorded";
+          row.append(empty);
+        }
         section.append(row);
       }
       output.append(section);
@@ -156,8 +190,18 @@
     if (active && status) finish(status);
   });
   document.getElementById("export").addEventListener("click", () => {
-    const blob = new Blob([JSON.stringify({ schemaVersion: 2, exportedAt: new Date().toISOString(), metadataOnly: true, trials: records.map(clean) }, null, 2)], { type: "application/json" });
-    const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "select-element-benchmark.json"; link.click(); URL.revokeObjectURL(link.href);
+    const blob = new Blob([serializeResults()], { type: "application/json" });
+    const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "select-element-benchmark.json"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0);
+  });
+  document.getElementById("copy").addEventListener("click", async () => {
+    const feedback = document.getElementById("copy-feedback");
+    try {
+      if (typeof navigator.clipboard?.writeText !== "function") throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(serializeResults());
+      feedback.textContent = "Copied results to clipboard.";
+    } catch {
+      feedback.textContent = "Copy failed: clipboard unavailable or permission denied.";
+    }
   });
   document.getElementById("clear").addEventListener("click", () => { if (confirm("Clear all saved results?")) { records = []; save(); render(); } });
   window.addEventListener("pagehide", () => finish("incomplete"));

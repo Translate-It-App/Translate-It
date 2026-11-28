@@ -10,12 +10,13 @@ const html = await readFile(new NodeURL("./index.html", directory), "utf8");
 const script = await readFile(new NodeURL("./benchmark.js", directory), "utf8");
 const key = "translate-it-select-element-live-benchmark-v2";
 const page = html.replace('<script src="./benchmark.js" defer></script>', `<script>${script}</script>`);
-const createPage = (records = []) => new JSDOM(page, {
+const createPage = (records = [], beforeParse = () => {}) => new JSDOM(page, {
   url: "http://127.0.0.1/",
   runScripts: "dangerously",
   beforeParse(window) {
     window.localStorage.setItem(key, JSON.stringify(records));
     window.confirm = () => true;
+    beforeParse(window);
   },
 });
 const emitProbe = (window, type, payload) => {
@@ -121,6 +122,45 @@ describe("Select Element live benchmark", () => {
     expect(window.document.getElementById("results").textContent).toContain("baseline: partial");
     expect(window.document.getElementById("results").textContent).toContain("candidate: no trial");
     expect(JSON.stringify(records)).not.toMatch(/secret page text|credential|changed/);
+    dom.window.close();
+  });
+
+  it("copies the export JSON with full precision and announces copy failures", async () => {
+    const copied = [];
+    const dom = createPage([{
+      label: "baseline", fixture: "Small", status: "successful",
+      timings: { selectionClickMs: 1.23456 },
+    }], (window) => {
+      Object.defineProperty(window.navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: async (text) => copied.push(text) },
+      });
+      window.Blob = class {
+        constructor(parts) { this.parts = parts; }
+      };
+      window.URL.createObjectURL = (blob) => {
+        window.exported = blob.parts.join("");
+        return "blob:export";
+      };
+      window.URL.revokeObjectURL = () => {};
+      window.Date = class extends Date {
+        constructor(...args) { super(...(args.length ? args : ["2026-01-01T00:00:00.000Z"])); }
+        static now() { return new Date("2026-01-01T00:00:00.000Z").getTime(); }
+      };
+    });
+    const { window } = dom;
+    window.document.getElementById("export").click();
+    window.document.getElementById("copy").click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(copied).toHaveLength(1);
+    expect(copied[0]).toBe(window.exported);
+    expect(JSON.parse(copied[0]).trials[0].timings.selectionClickMs).toBe(1.23456);
+    expect(window.document.getElementById("results").textContent).toContain("1.2 ms");
+    expect(window.document.getElementById("copy-feedback").textContent).toBe("Copied results to clipboard.");
+    window.navigator.clipboard.writeText = async () => { throw new Error("denied"); };
+    window.document.getElementById("copy").click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(window.document.getElementById("copy-feedback").textContent).toMatch(/Copy failed/);
     dom.window.close();
   });
 
