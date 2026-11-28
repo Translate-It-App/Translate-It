@@ -234,18 +234,25 @@ describe('PAGE_TRANSLATE producer cursor admission', () => {
     browser.tabs.query.mockResolvedValue([{ id: 42 }]);
     let resolvePreparation;
     const preparation = new Promise(resolve => { resolvePreparation = resolve; });
-    browser.webNavigation.getAllFrames.mockReturnValueOnce(preparation.promise);
+    browser.webNavigation.getAllFrames.mockReturnValueOnce(preparation);
     const start = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
     await vi.waitFor(() => expect(browser.webNavigation.getAllFrames).toHaveBeenCalled());
     const ready = handlePageTranslation({
       action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
       data: { documentToken: 'child-document-token' },
     }, { ...sender, frameId: 7 });
+    let readySettled = false;
+    ready.then(() => { readySettled = true; }, () => { readySettled = true; });
+    await Promise.resolve();
+    expect(readySettled).toBe(false);
 
     onRemovedListener(42);
+    await expect(ready).resolves.toMatchObject({ success: false });
     resolvePreparation([]);
     await expect(start).resolves.toMatchObject({ success: false });
-    await expect(ready).resolves.toMatchObject({ success: false });
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => (
+      message.action === MessageActions.PAGE_TRANSLATE
+    ))).toBe(false);
   });
 
   it('releases READY after rejected preparation and revalidates authority', async () => {
