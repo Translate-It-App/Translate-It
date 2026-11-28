@@ -78,7 +78,9 @@ describe('getPersistedDefaultSettings', () => {
     expect(defaults.WEBAI_MODELS).toEqual(CONFIG.WEBAI_MODELS);
     expect(defaults.GEMINI_THINKING_MODE).toBe('default');
     expect(defaults).not.toHaveProperty('OPENAI_API_URL');
+    expect(defaults.ENABLE_SHORTCUT_FOR_TEXT_FIELDS).toBe(false);
     expect(defaults.TEXT_FIELD_SHORTCUT).toBe(CONFIG.TEXT_FIELD_SHORTCUT);
+    expect(defaults.TEXT_FIELD_SHORTCUT).toBe('Ctrl+/');
     expect(defaults.CUSTOM_PROVIDER_LIST_ENABLED).toBe(false);
     expect(defaults.CUSTOM_PROVIDER_LIST).toEqual([]);
     expect(defaults.COLLAPSED_PROVIDER_CATEGORIES).toEqual({ ids: [], revision: 0 });

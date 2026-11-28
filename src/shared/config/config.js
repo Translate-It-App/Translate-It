@@ -282,7 +282,7 @@ export const CONFIG = {
   FAB_IDLE_OPACITY: 20, // میزان شفافیت دکمه شناور در حالت بیکار (0-100)
   FAB_SIZE: "1", // ضریب اندازه دکمه شناور (0.8, 1, 1.2, 1.5)
   TRANSLATE_ON_TEXT_FIELDS: false, // نمایش آیکون ترجمه در فیلدهای متنی
-  ENABLE_SHORTCUT_FOR_TEXT_FIELDS: true, // فعال کردن شورتکات Ctrl+/ برای فیلدهای متنی
+  ENABLE_SHORTCUT_FOR_TEXT_FIELDS: false, // فعال کردن شورتکات Ctrl+/ برای فیلدهای متنی
   TRANSLATE_WITH_SELECT_ELEMENT: true, // فعال کردن ترجمه با انتخاب المان (مثلاً از منوی راست‌کلیک)
   TRANSLATE_ON_TEXT_SELECTION: !isMobile, // فعال کردن ترجمه با انتخاب متن در صفحه (غیرفعال در موبایل)
   REQUIRE_CTRL_FOR_TEXT_SELECTION: false, // نیاز به نگه داشتن Ctrl هنگام انتخاب متن

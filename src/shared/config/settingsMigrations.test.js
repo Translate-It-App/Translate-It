@@ -33,6 +33,7 @@ describe('Settings Migrations', () => {
     expect(logs).toContain('Added missing setting: CUSTOM_PROVIDER_LIST_ENABLED');
     expect(logs).toContain('Added missing setting: CUSTOM_PROVIDER_LIST');
     expect(updates.TIMEOUT).toBe(CONFIG.TIMEOUT);
+    expect(updates.ENABLE_SHORTCUT_FOR_TEXT_FIELDS).toBe(false);
     expect(updates.TEXT_FIELD_SHORTCUT).toBe(CONFIG.TEXT_FIELD_SHORTCUT);
     expect(updates.translationHistory).toBeUndefined();
     expect(updates.CHANGELOG_URL).toBeUndefined();
@@ -45,6 +46,19 @@ describe('Settings Migrations', () => {
     expect(updates.DEEPSEEK_API_MODEL).toBe('deepseek-flash');
     expect(updates.WEBAI_API_MODEL).toBe('gemini-auto');
     expect(updates.CUSTOM_API_MODEL).toBe('');
+  });
+
+  it('preserves existing text field shortcut preferences during defaults migration', async () => {
+    const currentSettings = {
+      ENABLE_SHORTCUT_FOR_TEXT_FIELDS: true,
+      TEXT_FIELD_SHORTCUT: 'Alt+T'
+    };
+    const { updates } = await runSettingsMigrations(currentSettings);
+
+    expect(updates.ENABLE_SHORTCUT_FOR_TEXT_FIELDS).toBeUndefined();
+    expect(updates.TEXT_FIELD_SHORTCUT).toBeUndefined();
+    expect(currentSettings.ENABLE_SHORTCUT_FOR_TEXT_FIELDS).toBe(true);
+    expect(currentSettings.TEXT_FIELD_SHORTCUT).toBe('Alt+T');
   });
 
   it('adds default hidden providers only when the persisted key is missing', async () => {
