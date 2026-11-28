@@ -3514,22 +3514,41 @@ describe('bounded frame command response deadline', () => {
     browser.tabs.query.mockResolvedValue([{ id: activeTabId }]);
     tabPermissionChecker.checkTabAccess.mockResolvedValue({ isAccessible: true });
     browser.webNavigation.getAllFrames.mockResolvedValue(
-      frameHandlers.map((_, index) => ({
-        frameId: index === 0 ? 0 : index * 7,
-        url: `https://frame-${index}.example`,
-      }))
+      frameHandlers.map((frame, index) => {
+        const frameId = frame.frameId ?? (index === 0 ? 0 : index * 7);
+        return {
+          frameId,
+          url: frame.url || `https://frame-${index}.example`,
+          ...((frame.identity?.documentId || frame.documentId)
+            && { documentId: frame.identity?.documentId || frame.documentId }),
+        };
+      })
     );
-    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => ({
-      url: `https://frame-${frameId === 0 ? 0 : frameId / 7}.example`,
-    }));
-      browser.tabs.sendMessage.mockImplementation(async (_tabId, message, { frameId }) => {
+    const getFrameHandler = frameId => frameHandlers.find(candidate => candidate.frameId === frameId)
+      || frameHandlers[(frameId === 0 ? 0 : frameId / 7)];
+    const identityFor = frameId => {
+      const frame = getFrameHandler(frameId);
+      return {
+        documentToken: frame?.identity?.documentToken || (frameId === 0 ? 'top-document-token' : `frame-${frameId}-token`),
+        documentId: frame?.identity?.documentId || frame?.documentId,
+        url: frame?.identity?.url || frame?.url || `https://frame-${frameId === 0 ? 0 : frameId / 7}.example`,
+      };
+    };
+    browser.webNavigation.getFrame.mockImplementation(async ({ frameId }) => identityFor(frameId));
+    browser.tabs.sendMessage.mockImplementation(async (_tabId, message, { frameId }) => {
       if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE) {
-        return Promise.resolve({ documentToken: frameId === 0 ? 'top-document-token' : `frame-${frameId}-token` });
+        const probe = getFrameHandler(frameId)?.probeDeferred;
+        const probeError = getFrameHandler(frameId)?.probeError;
+        if (probeError) throw probeError;
+        if (probe) {
+          await probe.promise;
+        }
+        return identityFor(frameId);
       }
-       const handler = frameHandlers.find(candidate => candidate.frameId === frameId);
+       const handler = getFrameHandler(frameId);
        if (message.action === MessageActions.PAGE_TRANSLATE
            && message.data?.hasManualContinuity === true) {
-         const documentToken = frameId === 0 ? 'top-document-token' : `frame-${frameId}-token`;
+         const documentToken = identityFor(frameId).documentToken;
          const admission = await handlePageTranslation({
            action: MessageActions.PAGE_TRANSLATE_ADMIT,
            data: {
@@ -3543,8 +3562,8 @@ describe('bounded frame command response deadline', () => {
          const result = await (handler ? handler.run() : Promise.resolve({ success: true }));
          return result?.success === true ? { ...result, documentToken } : result;
        }
-       return handler ? handler.run() : Promise.resolve({ success: true });
-     });
+        return handler ? handler.run() : Promise.resolve({ success: true });
+    });
   }
 
   const never = () => new Promise(() => {});
@@ -3655,6 +3674,827 @@ describe('bounded frame command response deadline', () => {
     await expect(result).resolves.toMatchObject({ success: true });
   });
 
+  it('queues READY for the initially dispatched iframe until its start response settles', async () => {
+    const childResponse = deferred();
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, run: () => childResponse.promise },
+    ]);
+    const admit = vi.spyOn(pageNavigationTracker, 'admitManualFrame');
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, { ...sender, frameId: 7 })).resolves.toMatchObject({ success: true, pending: true });
+    expect(admit.mock.calls.some(([, frameId]) => frameId === 7)).toBe(false);
+    const grant = await pageNavigationTracker.getManualContinuity(42);
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: {
+        documentToken: 'frame-7-token',
+        manualContinuityGeneration: grant.generation,
+        manualContinuityAttemptId: grant.attemptId,
+        manualContinuityAttemptRevision: grant.attemptRevision,
+        topDocumentEpoch: grant.topDocumentEpoch,
+        navigationCursor: await pageNavigationTracker.getAdmissionCursor(42, 7),
+      },
+    }, { ...sender, frameId: 7 })).resolves.toMatchObject({ success: true, pending: true });
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_START
+    ))).toBe(false);
+
+    childResponse.resolve({ success: true });
+    await expect(initial).resolves.toMatchObject({ success: true });
+    await vi.waitFor(() => expect(admit.mock.calls.some(([, frameId]) => frameId === 7)).toBe(true));
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_START
+    ))).toBe(false);
+  });
+
+  it('reserves child documents before asynchronous initial identity probes complete', async () => {
+    const childProbe = deferred();
+    const childResponse = deferred();
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, probeDeferred: childProbe, run: () => childResponse.promise },
+    ]);
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE && options.frameId === 7
+    ))).toBe(true));
+
+    const ready = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, { ...sender, frameId: 7 });
+    childProbe.resolve();
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+    await expect(ready).resolves.toMatchObject({ success: true, pending: true });
+
+    childResponse.resolve({ success: true });
+    await expect(initial).resolves.toMatchObject({ success: true });
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toHaveLength(1);
+  });
+
+  it('isolates a stalled child identity probe while healthy frames start and prevents late dispatch', async () => {
+    const childProbe = deferred();
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, probeDeferred: childProbe, run: () => Promise.resolve({ success: true }) },
+      { frameId: 8, run: () => Promise.resolve({ success: true }) },
+    ]);
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE && options.frameId === 7
+    ))).toBe(true));
+
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 8
+    ))).toBe(true));
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 0
+    ))).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(PRE_FANOUT_TIMEOUT_MS + 1);
+    await expect(initial).resolves.toMatchObject({ success: true });
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(false);
+    const dispatchCount = browser.tabs.sendMessage.mock.calls.length;
+    childProbe.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(browser.tabs.sendMessage.mock.calls.length).toBe(dispatchCount);
+
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, run: () => Promise.resolve({ success: true }) },
+    ]);
+    await expect(handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender))
+      .resolves.toMatchObject({ success: true });
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && message.data?.hasManualContinuity
+    ))).toBe(true);
+  });
+
+  it('releases a rejected identity-probe lease and permits a later manual retry', async () => {
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      {
+        frameId: 7,
+        probeError: new Error('probe transport rejected'),
+        run: () => Promise.resolve({ success: true }),
+      },
+    ]);
+    await expect(handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender))
+      .resolves.toMatchObject({ success: true });
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(false);
+
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, run: () => Promise.resolve({ success: true }) },
+    ]);
+    await expect(handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender))
+      .resolves.toMatchObject({ success: true });
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true);
+  });
+
+  it('revalidates when a lease settles while READY validation is still in progress', async () => {
+    const childResponse = deferred();
+    const readyProbe = deferred();
+    let childCalls = 0;
+    const child = {
+      frameId: 7,
+      run: () => {
+        childCalls += 1;
+        return childCalls === 1 ? childResponse.promise : Promise.resolve({ success: true });
+      },
+    };
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      child,
+    ]);
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+
+    child.probeDeferred = readyProbe;
+    const probeCount = browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE && options.frameId === 7
+    )).length;
+    const ready = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, { ...sender, frameId: 7 });
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE && options.frameId === 7
+    ))).toHaveLength(probeCount + 1));
+
+    child.probeDeferred = null;
+    childResponse.resolve({ success: false, reason: 'initial_rejected' });
+    await expect(initial).resolves.toMatchObject({ success: true });
+    readyProbe.resolve();
+    const ticket = await ready;
+    expect(ticket).toMatchObject({ success: true, start: true });
+    expect(ticket).not.toHaveProperty('pending');
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: ticket,
+    }, { ...sender, frameId: 7 })).resolves.toMatchObject({ success: true });
+    expect(childCalls).toBe(2);
+  });
+
+  it.each([
+    ['accepted', true, 1],
+    ['rejected', false, 2],
+  ])('replays deferred READY after an initial iframe response is %s', async (_label, firstSuccess, expectedChildStarts) => {
+    const childResponse = deferred();
+    let childCalls = 0;
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      {
+        frameId: 7,
+        run: () => {
+          childCalls += 1;
+          return childCalls === 1 ? childResponse.promise : Promise.resolve({ success: true });
+        },
+      },
+    ]);
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+    const grant = await pageNavigationTracker.getManualContinuity(42);
+    const replay = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: {
+        documentToken: 'frame-7-token',
+        deferredManualAttemptId: grant.attemptId,
+        deferredManualAttemptRevision: grant.attemptRevision,
+        deferredManualGeneration: grant.generation,
+      },
+    }, { ...sender, frameId: 7 });
+    await expect(replay).resolves.toMatchObject({ success: true, pending: true });
+    expect(childCalls).toBe(1);
+
+    childResponse.resolve({ success: firstSuccess });
+    await expect(initial).resolves.toMatchObject({ success: true });
+    await vi.waitFor(() => expect(childCalls).toBe(expectedChildStarts));
+    expect(childCalls).toBe(expectedChildStarts);
+  });
+
+  it('does not replay queued readiness after an explicit USER_CANCELLED response', async () => {
+    const childResponse = deferred();
+    let childCalls = 0;
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      {
+        frameId: 7,
+        run: () => {
+          childCalls += 1;
+          return childCalls === 1 ? childResponse.promise : Promise.resolve({ success: true });
+        },
+      },
+    ]);
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, { ...sender, frameId: 7 })).resolves.toMatchObject({ success: true, pending: true });
+    await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: {
+        documentToken: 'frame-7-token',
+        ...(await pageNavigationTracker.getManualContinuity(42)),
+        navigationCursor: await pageNavigationTracker.getAdmissionCursor(42, 7),
+      },
+    }, { ...sender, frameId: 7 });
+
+    childResponse.resolve({ success: false, reason: ActionReasons.USER_CANCELLED });
+    await expect(initial).resolves.toMatchObject({ success: true });
+    await Promise.resolve();
+    expect(childCalls).toBe(1);
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toHaveLength(1);
+  });
+
+  it('preserves same-document readiness for a newer owner after a late USER_CANCELLED response', async () => {
+    const oldChildResponse = deferred();
+    const successorTopProbe = deferred();
+    const successorTopProbeStarted = deferred();
+    let holdSuccessorTopProbe = true;
+    let childDispatches = 0;
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      {
+        frameId: 7,
+        documentId: 'frame-7-document',
+        identity: { documentToken: 'frame-7-token', documentId: 'frame-7-document' },
+        run: () => {
+          childDispatches += 1;
+          return childDispatches === 1
+            ? oldChildResponse.promise
+            : Promise.resolve({ success: true, documentToken: 'frame-7-token' });
+        },
+      },
+    ]);
+    const admitManualFrame = vi.spyOn(pageNavigationTracker, 'admitManualFrame');
+    const child = { ...sender, frameId: 7, documentId: 'frame-7-document' };
+    const oldStart = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(childDispatches).toBe(1));
+    const oldGrant = await pageNavigationTracker.getManualContinuity(42);
+
+    const originalSend = browser.tabs.sendMessage.getMockImplementation();
+    browser.tabs.sendMessage.mockImplementation((tabId, message, options) => (
+      message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
+        ? Promise.resolve({ success: true })
+        : originalSend(tabId, message, options)
+    ));
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+      data: { expectedManualContinuityGeneration: oldGrant.generation },
+    }, sender)).resolves.toMatchObject({ success: true });
+    await expect(pageNavigationTracker.getManualContinuity(42)).resolves.toBeNull();
+
+    browser.tabs.sendMessage.mockImplementation((tabId, message, options) => {
+      if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE
+          && options.frameId === 0 && holdSuccessorTopProbe) {
+        holdSuccessorTopProbe = false;
+        successorTopProbeStarted.resolve();
+        return successorTopProbe.promise.then(() => originalSend(tabId, message, options));
+      }
+      return originalSend(tabId, message, options);
+    });
+    const successorStart = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await successorTopProbeStarted.promise;
+    const ready = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, child);
+    await expect(ready).resolves.toMatchObject({ success: true, pending: true });
+    expect(admitManualFrame.mock.calls.filter(([, frameId]) => frameId === 7)).toHaveLength(0);
+
+    oldChildResponse.resolve({ success: false, reason: ActionReasons.USER_CANCELLED });
+    await expect(oldStart).resolves.toMatchObject({ success: true });
+    expect(childDispatches).toBe(1);
+
+    successorTopProbe.resolve();
+    await expect(successorStart).resolves.toMatchObject({ success: true });
+    const successorGrant = await pageNavigationTracker.getManualContinuity(42);
+    expect(successorGrant.armed).toBe(true);
+    let admissionCallIndex = -1;
+    await vi.waitFor(() => {
+      admissionCallIndex = admitManualFrame.mock.calls.findIndex(args => (
+        args[0] === 42 && args[1] === 7 && args[2] === successorGrant.generation
+          && args[3] === successorGrant.topDocumentEpoch
+          && args[4] === successorGrant.topDocumentToken
+          && args[5] === 'https://frame-1.example'
+          && args[6] === 'frame-7-token'
+      ));
+      expect(admissionCallIndex).toBeGreaterThanOrEqual(0);
+    });
+    const admission = await admitManualFrame.mock.results[admissionCallIndex].value;
+    expect(admission.cursor).toEqual(await pageNavigationTracker.getAdmissionCursor(42, 7));
+    expect(childDispatches).toBe(2);
+    admitManualFrame.mockRestore();
+  });
+
+  it.each([
+    ['accepted', true, 1],
+    ['rejected', false, 2],
+  ])('replays direct READY and START after an initial iframe response is %s', async (_label, firstSuccess, expectedChildStarts) => {
+    const childResponse = deferred();
+    let childCalls = 0;
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      {
+        frameId: 7,
+        run: () => {
+          childCalls += 1;
+          return childCalls === 1 ? childResponse.promise : Promise.resolve({ success: true });
+        },
+      },
+    ]);
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+    const ready = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, { ...sender, frameId: 7 });
+    await expect(ready).resolves.toMatchObject({ success: true, pending: true });
+    const grant = await pageNavigationTracker.getManualContinuity(42);
+    const start = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: {
+        documentToken: 'frame-7-token',
+        manualContinuityGeneration: grant.generation,
+        manualContinuityAttemptId: grant.attemptId,
+        manualContinuityAttemptRevision: grant.attemptRevision,
+        topDocumentEpoch: grant.topDocumentEpoch,
+        navigationCursor: await pageNavigationTracker.getAdmissionCursor(42, 7),
+      },
+    }, { ...sender, frameId: 7 });
+    await expect(start).resolves.toMatchObject({ success: true, pending: true });
+    expect(childCalls).toBe(1);
+
+    childResponse.resolve({ success: firstSuccess });
+    await expect(initial).resolves.toMatchObject({ success: true });
+    await vi.waitFor(() => expect(childCalls).toBe(expectedChildStarts));
+    expect(childCalls).toBe(expectedChildStarts);
+  });
+
+  it('keeps a dispatched lease through the response timeout and replays only after the late rejection', async () => {
+    const childResponse = deferred();
+    let childCalls = 0;
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      {
+        frameId: 7,
+        run: () => {
+          childCalls += 1;
+          return childCalls === 1 ? childResponse.promise : Promise.resolve({ success: true });
+        },
+      },
+    ]);
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, { ...sender, frameId: 7 })).resolves.toMatchObject({ success: true, pending: true });
+
+    await vi.advanceTimersByTimeAsync(RESPONSE_TIMEOUT_MS + 1);
+    await expect(initial).resolves.toMatchObject({ success: true });
+    expect(childCalls).toBe(1);
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: {
+        documentToken: 'frame-7-token',
+        manualContinuityGeneration: (await pageNavigationTracker.getManualContinuity(42)).generation,
+        manualContinuityAttemptId: (await pageNavigationTracker.getManualContinuity(42)).attemptId,
+        manualContinuityAttemptRevision: (await pageNavigationTracker.getManualContinuity(42)).attemptRevision,
+        topDocumentEpoch: (await pageNavigationTracker.getManualContinuity(42)).topDocumentEpoch,
+        navigationCursor: await pageNavigationTracker.getAdmissionCursor(42, 7),
+      },
+    }, { ...sender, frameId: 7 })).resolves.toMatchObject({ success: true, pending: true });
+    expect(childCalls).toBe(1);
+
+    childResponse.resolve({ success: false, reason: 'initial_rejected' });
+    await vi.waitFor(() => expect(childCalls).toBe(2));
+    expect(childCalls).toBe(2);
+  });
+
+  it('admits an unrelated iframe while an initially dispatched sibling remains pending', async () => {
+    const childResponse = deferred();
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, run: () => childResponse.promise },
+    ]);
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+    const ticket = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-14-token' },
+    }, { ...sender, frameId: 14 });
+    expect(ticket).toMatchObject({ success: true, start: true });
+    const start = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: ticket,
+    }, { ...sender, frameId: 14 });
+    expect(start).toMatchObject({ success: true });
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 14
+    ))).toBe(true);
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true);
+
+    childResponse.resolve({ success: true });
+    await expect(initial).resolves.toMatchObject({ success: true });
+  });
+
+  it.each([
+    ['worker restart', () => {
+      pageNavigationTracker.manualContinuityRevision.clear();
+      pageNavigationTracker.manualContinuityHighWater.clear();
+      pageNavigationTracker.manualStartOperations.clear();
+    }],
+    ['rejected replacement', () => {
+      pageNavigationTracker.reserveManualContinuityStart(42, 'rejected-replacement');
+      pageNavigationTracker.cancelManualContinuityStart(42, 'rejected-replacement');
+    }],
+  ])('admits a dynamic iframe from durable authority after %s', async (_scenario, invalidateOperationRevision) => {
+    let childDispatches = 0;
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, run: () => {
+        childDispatches += 1;
+        return Promise.resolve({ success: true, documentToken: 'frame-7-token' });
+      } },
+    ]);
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://frame-0.example' },
+      { frameId: 7, url: 'https://frame-1.example' },
+    ]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    await pageNavigationTracker.armManualContinuity(42, grant.generation, grant.attemptRevision);
+    await recordTopManualAcceptance(grant);
+    const child = { ...sender, frameId: 7 };
+    const ticket = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, child);
+    expect(ticket).toMatchObject({ success: true, start: true });
+
+    invalidateOperationRevision();
+    const start = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: ticket,
+    }, child);
+
+    expect(start).toMatchObject({ success: true });
+    expect(childDispatches).toBe(1);
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE
+        && message.data?.hasManualContinuity === true && options.frameId === 7
+    ))).toHaveLength(1);
+  });
+
+  it('serializes a dynamic START behind an initial lease registered after its first lookup', async () => {
+    const dynamicGrantRead = deferred();
+    const releaseDynamicGrantRead = deferred();
+    const successorTopProbe = deferred();
+    const successorTopProbeStarted = deferred();
+    const successorChildResponse = deferred();
+    let holdSuccessorTopProbe = true;
+    let dynamicGrantReads = 0;
+    let successorChildDispatches = 0;
+    const topFrame = { frameId: 0, run: () => Promise.resolve({ success: true }) };
+    setupBoundedFrames([
+      topFrame,
+      {
+        frameId: 7,
+        documentId: 'frame-7-document',
+        identity: { documentToken: 'frame-7-token', documentId: 'frame-7-document' },
+        run: () => {
+          successorChildDispatches += 1;
+          return successorChildResponse.promise;
+        },
+      },
+    ]);
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://frame-0.example' },
+      { frameId: 7, url: 'https://frame-1.example' },
+    ]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    await pageNavigationTracker.armManualContinuity(42, grant.generation, grant.attemptRevision);
+    await recordTopManualAcceptance(grant);
+    const child = { ...sender, frameId: 7, documentId: 'frame-7-document' };
+    const ticket = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, child);
+    expect(ticket).toMatchObject({ success: true, start: true });
+
+    const originalGetManualContinuity = pageNavigationTracker.getManualContinuity.bind(pageNavigationTracker);
+    vi.spyOn(pageNavigationTracker, 'getManualContinuity').mockImplementation(async tabId => {
+      if (tabId === 42 && dynamicGrantReads < 3) {
+        dynamicGrantReads += 1;
+        if (dynamicGrantReads === 3) {
+          dynamicGrantRead.resolve();
+          await releaseDynamicGrantRead.promise;
+        }
+      }
+      return originalGetManualContinuity(tabId);
+    });
+    const dynamicStart = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: ticket,
+    }, child);
+    await dynamicGrantRead.promise;
+
+    const originalSend = browser.tabs.sendMessage.getMockImplementation();
+    browser.tabs.sendMessage.mockImplementation((tabId, message, options) => {
+      if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE
+          && options.frameId === 0 && holdSuccessorTopProbe) {
+        holdSuccessorTopProbe = false;
+        successorTopProbeStarted.resolve();
+        return successorTopProbe.promise.then(() => originalSend(tabId, message, options));
+      }
+      return originalSend(tabId, message, options);
+    });
+    const frameProbeCount = browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE && options.frameId === 7
+    )).length;
+    const successorStart = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await successorTopProbeStarted.promise;
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_FRAME_PROBE && options.frameId === 7
+    )).length).toBeGreaterThan(frameProbeCount));
+
+    releaseDynamicGrantRead.resolve();
+    await expect(dynamicStart).resolves.toMatchObject({ success: true, pending: true });
+    expect(successorChildDispatches).toBe(0);
+    successorTopProbe.resolve();
+    await vi.waitFor(() => expect(successorChildDispatches).toBe(1));
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toHaveLength(1);
+
+    successorChildResponse.resolve({ success: true, documentToken: 'frame-7-token' });
+    await expect(successorStart).resolves.toMatchObject({ success: true });
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toHaveLength(1);
+    pageNavigationTracker.getManualContinuity.mockRestore();
+  });
+
+  it('waits for an in-flight dynamic child start and its reconciliation before an explicit successor', async () => {
+    const dynamicResponse = deferred();
+    let childDeliveries = 0;
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, run: () => {
+        childDeliveries += 1;
+        return childDeliveries === 1 ? dynamicResponse.promise : Promise.resolve({ success: true });
+      } },
+    ]);
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://frame-0.example' },
+      { frameId: 7, url: 'https://frame-1.example' },
+    ]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    await recordTopManualAcceptance(grant);
+    const child = { ...sender, frameId: 7 };
+    const ticket = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, child);
+    expect(ticket).toMatchObject({ success: true, start: true });
+    const dynamic = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: ticket,
+    }, child);
+    await vi.waitFor(() => expect(childDeliveries).toBe(1));
+
+    const successor = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 0
+        && message.data?.hasManualContinuity
+    ))).toBe(true));
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toHaveLength(1);
+
+    dynamicResponse.resolve({ success: true, documentToken: 'frame-7-token' });
+    await expect(dynamic).resolves.toMatchObject({ success: true });
+    await expect(successor).resolves.toMatchObject({ success: true });
+    expect(childDeliveries).toBe(2);
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toHaveLength(2);
+  });
+
+  it('releases a dynamic reservation when tracker claim rejects before dispatch', async () => {
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, run: () => Promise.resolve({ success: true }) },
+    ]);
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://frame-0.example' },
+      { frameId: 7, url: 'https://frame-1.example' },
+    ]);
+    const grant = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    await recordTopManualAcceptance(grant);
+    const child = { ...sender, frameId: 7 };
+    const ticket = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, child);
+    const claim = vi.spyOn(pageNavigationTracker, 'claimManualFrameStart')
+      .mockRejectedValueOnce(new Error('claim storage failed'));
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: ticket,
+    }, child)).resolves.toMatchObject({ success: false, error: 'claim storage failed' });
+    claim.mockRestore();
+
+    await expect(handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender))
+      .resolves.toMatchObject({ success: true });
+    expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true);
+  });
+
+  it('admits a replacement document in the same frame while fencing the old document ACK', async () => {
+    const childResponse = deferred();
+    const identity = { documentId: 'child-document-1', documentToken: 'child-token-1' };
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      { frameId: 7, documentId: identity.documentId, identity, run: () => childResponse.promise },
+    ]);
+    const admit = vi.spyOn(pageNavigationTracker, 'admitManualFrame');
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+    expect(browser.tabs.sendMessage.mock.calls.find(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))[2]).toMatchObject({ documentId: 'child-document-1' });
+
+    identity.documentId = 'child-document-2';
+    identity.documentToken = 'child-token-2';
+    identity.url = 'https://frame-1.example/reloaded';
+    await pageNavigationTracker.capture(42, 7, identity.url);
+    const replacementTicket = await handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'child-token-2' },
+    }, { ...sender, frameId: 7, documentId: 'child-document-2' });
+    expect(replacementTicket).toMatchObject({ success: true, start: true });
+    expect(admit).toHaveBeenCalledWith(
+      42, 7, expect.any(Number), expect.any(Number), 'top-document-token',
+      identity.url, 'child-token-2',
+    );
+
+    const acceptedBeforeLateAck = (await pageNavigationTracker.getManualContinuity(42)).acceptedDocuments;
+    childResponse.resolve({ success: true });
+    await expect(initial).resolves.toMatchObject({ success: true });
+    expect((await pageNavigationTracker.getManualContinuity(42)).acceptedDocuments)
+      .toEqual(acceptedBeforeLateAck);
+  });
+
+  it('fences queued READY and a late iframe ACK across Stop and a superseding attempt', async () => {
+    const oldChildResponse = deferred();
+    let childCalls = 0;
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      {
+        frameId: 7,
+        run: () => {
+          childCalls += 1;
+          return childCalls === 1 ? oldChildResponse.promise : Promise.resolve({ success: true });
+        },
+      },
+    ]);
+    const oldStart = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+    const oldGrant = await pageNavigationTracker.getManualContinuity(42);
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, { ...sender, frameId: 7 })).resolves.toMatchObject({ success: true, pending: true });
+
+    const originalSend = browser.tabs.sendMessage.getMockImplementation();
+    browser.tabs.sendMessage.mockImplementation((tabId, message, options) => (
+      message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
+        ? Promise.resolve({ success: true })
+        : originalSend(tabId, message, options)
+    ));
+    const stopping = handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+      data: { expectedManualContinuityGeneration: oldGrant.generation },
+    }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message]) => (
+      message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
+    ))).toBe(true));
+    await expect(stopping).resolves.toMatchObject({ success: true });
+    const replacementStart = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 0
+    ))).toHaveLength(2));
+    expect(childCalls).toBe(1);
+    const replacementGrant = await pageNavigationTracker.getManualContinuity(42);
+    expect(replacementGrant.attemptId).not.toBe(oldGrant.attemptId);
+
+    oldChildResponse.resolve({ success: true });
+    await expect(oldStart).resolves.toMatchObject({ success: true });
+    await expect(replacementStart).resolves.toMatchObject({ success: true });
+    expect(childCalls).toBe(2);
+    expect(await pageNavigationTracker.getManualContinuity(42)).toMatchObject({
+      armed: true,
+      revoked: false,
+      acceptedAttemptIds: { 7: replacementGrant.attemptId },
+    });
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toHaveLength(2);
+  });
+
+  it('does not invalidate queued readiness for a newer owner on stale UI Stop generation', async () => {
+    const childResponse = deferred();
+    let childCalls = 0;
+    setupBoundedFrames([
+      { frameId: 0, run: () => Promise.resolve({ success: true }) },
+      {
+        frameId: 7,
+        run: () => {
+          childCalls += 1;
+          return childCalls === 1 ? childResponse.promise : Promise.resolve({ success: true });
+        },
+      },
+    ]);
+    const initial = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === 7
+    ))).toBe(true));
+    const grant = await pageNavigationTracker.getManualContinuity(42);
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-7-token' },
+    }, { ...sender, frameId: 7 })).resolves.toMatchObject({ success: true, pending: true });
+
+    const originalSend = browser.tabs.sendMessage.getMockImplementation();
+    browser.tabs.sendMessage.mockImplementation((tabId, message, options) => (
+      message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO
+        ? Promise.resolve({ success: true })
+        : originalSend(tabId, message, options)
+    ));
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+      data: { expectedManualContinuityGeneration: grant.generation + 1 },
+    }, {})).resolves.toMatchObject({
+      success: false, reason: 'manual_continuity_stop_superseded',
+    });
+
+    childResponse.resolve({ success: false, reason: 'initial_rejected' });
+    await expect(initial).resolves.toMatchObject({ success: true });
+    await vi.waitFor(() => expect(childCalls).toBe(2));
+    expect(childCalls).toBe(2);
+  });
+
   it('releases start ownership after provisional cleanup failure so a manual retry can proceed', async () => {
     const rejectedAck = deferred();
     setupBoundedFrames([{ frameId: 0, run: () => rejectedAck.promise }]);
@@ -3716,6 +4556,212 @@ describe('bounded frame command response deadline', () => {
     });
     expect(grant.provisionalAttemptIds || {}).not.toHaveProperty('0');
     expect(grant.provisionalDocuments || {}).not.toHaveProperty('0');
+  });
+
+  it('replays reused-grant READY with the active owner and rejects an older accepted START ticket', async () => {
+    const frameId = 97;
+    const childUrl = 'https://frame-97.example';
+    const initialChildAck = deferred();
+    const retryChildAck = deferred();
+    const replacementTopAck = deferred();
+    let childCalls = 0;
+    setupBoundedFrames([
+      { frameId: 0, url: 'https://example.com', run: () => replacementTopAck.promise },
+      {
+        frameId, url: childUrl,
+        identity: { documentToken: 'frame-97-document-token' },
+        run: () => {
+          childCalls += 1;
+          return childCalls === 1 ? initialChildAck.promise : retryChildAck.promise;
+        },
+      },
+    ]);
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://example.com' },
+      { frameId, url: childUrl },
+    ]);
+    const original = await pageNavigationTracker.grantManualContinuity(42, undefined, {
+      topDocumentToken: 'top-document-token',
+    });
+    await pageNavigationTracker.armManualContinuity(42, original.generation);
+    await recordTopManualAcceptance(original);
+    const oldChildCursor = await pageNavigationTracker.getAdmissionCursor(42, frameId);
+    const oldAdmission = await pageNavigationTracker.admitManualFrame(
+      42, frameId, original.generation, original.topDocumentEpoch,
+      original.topDocumentToken, childUrl, 'frame-97-document-token',
+    );
+    await pageNavigationTracker.recordManualFrameAcceptance(
+      42, original.generation, original.attemptId, original.attemptRevision,
+      frameId, 'frame-97-document-token', oldAdmission.cursor, original.attemptId,
+    );
+
+    browser.tabs.sendMessage.mockClear();
+    const replacementStart = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+    await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === frameId
+    ))).toBe(true));
+    const firstChildStart = browser.tabs.sendMessage.mock.calls.find(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === frameId
+    ))[1];
+    const newAttemptId = firstChildStart.data.manualContinuityAttemptId;
+    const newAttemptRevision = firstChildStart.data.manualContinuityAttemptRevision;
+    expect(newAttemptId).not.toBe(original.attemptId);
+
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+      data: {
+        documentToken: 'frame-97-document-token',
+        manualContinuityGeneration: original.generation,
+        manualContinuityAttemptId: original.attemptId,
+        manualContinuityAttemptRevision: original.attemptRevision,
+        topDocumentEpoch: original.topDocumentEpoch,
+        navigationCursor: oldChildCursor,
+      },
+    }, { ...sender, frameId })).resolves.toMatchObject({
+      success: false, reason: 'obsolete_navigation',
+    });
+    expect(childCalls).toBe(1);
+
+    await expect(handlePageTranslation({
+      action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+      data: { documentToken: 'frame-97-document-token' },
+    }, { ...sender, frameId })).resolves.toMatchObject({ success: true, pending: true });
+
+    replacementTopAck.resolve({ success: true });
+    await vi.waitFor(async () => expect(
+      (await pageNavigationTracker.getManualContinuity(42)).acceptedAttemptIds?.[0],
+    ).toBe(newAttemptId));
+    initialChildAck.resolve({ success: false, reason: 'initial_rejected' });
+    await expect(replacementStart).resolves.toMatchObject({ success: true });
+    await vi.waitFor(() => expect(childCalls).toBe(2));
+    const beforeRetryAck = await pageNavigationTracker.getManualContinuity(42);
+    expect(beforeRetryAck.acceptedAttemptIds?.[frameId]).toBe(original.attemptId);
+    expect(beforeRetryAck.acceptedDocuments?.[frameId]).toBe('frame-97-document-token');
+
+    retryChildAck.resolve({ success: false, reason: 'retry_rejected' });
+    const afterRetryRejection = await pageNavigationTracker.getManualContinuity(42);
+    expect(afterRetryRejection.acceptedAttemptIds?.[frameId]).toBe(original.attemptId);
+    expect(afterRetryRejection.acceptedDocuments?.[frameId]).toBe('frame-97-document-token');
+    const childStarts = browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+      message.action === MessageActions.PAGE_TRANSLATE && options.frameId === frameId
+    ));
+    expect(childStarts).toHaveLength(2);
+    expect(childStarts.map(([, message]) => message.data.manualContinuityAttemptId))
+      .toEqual([newAttemptId, newAttemptId]);
+    expect(childStarts.map(([, message]) => message.data.manualContinuityAttemptRevision))
+      .toEqual([newAttemptRevision, newAttemptRevision]);
+  });
+
+  it('updates queued READY revision when a hydrated grant raises the active attempt high-water mark', async () => {
+    const frameId = 97;
+    const childUrl = 'https://frame-97.example';
+    const topAck = deferred();
+    const initialChildAck = deferred();
+    let retryCalls = 0;
+    setupBoundedFrames([
+      { frameId: 0, url: 'https://example.com', run: () => topAck.promise },
+      {
+        frameId, url: childUrl,
+        identity: { documentToken: 'frame-97-token' },
+        run: () => {
+          retryCalls += 1;
+          return retryCalls === 1
+            ? initialChildAck.promise
+            : Promise.resolve({ success: false, reason: 'retry_rejected' });
+        },
+      },
+    ]);
+    await pageNavigationTracker.seed(42, [
+      { frameId: 0, url: 'https://example.com' },
+      { frameId, url: childUrl },
+    ]);
+    let persistedRevision;
+    for (let index = 0; index < 8; index += 1) {
+      persistedRevision = pageNavigationTracker.reserveManualContinuityStart(42);
+    }
+    const original = await pageNavigationTracker.grantManualContinuity(42, persistedRevision, {
+      topDocumentToken: 'top-document-token',
+      attemptId: 'hydrated-original-attempt',
+    });
+    await pageNavigationTracker.armManualContinuity(42, original.generation, persistedRevision);
+    await recordTopManualAcceptance(original);
+    const oldAdmission = await pageNavigationTracker.admitManualFrame(
+      42, frameId, original.generation, original.topDocumentEpoch,
+      original.topDocumentToken, childUrl, 'frame-97-token',
+    );
+    await pageNavigationTracker.recordManualFrameAcceptance(
+      42, original.generation, original.attemptId, original.attemptRevision,
+      frameId, 'frame-97-token', oldAdmission.cursor, original.attemptId,
+    );
+
+    pageNavigationTracker.state = null;
+    pageNavigationTracker.durableState = null;
+    pageNavigationTracker.dirty = false;
+    pageNavigationTracker.pending = Promise.resolve();
+    pageNavigationTracker.restartFences.clear();
+    pageNavigationTracker.blockedManualContinuity.clear();
+    pageNavigationTracker.manualRevocationIntents.clear();
+    pageNavigationTracker.manualStartSnapshots.clear();
+    pageNavigationTracker.manualContinuityRevision.clear();
+    pageNavigationTracker.manualContinuityHighWater.clear();
+    pageNavigationTracker.manualStartOperations.clear();
+
+    const originalGrant = pageNavigationTracker.grantManualContinuity.bind(pageNavigationTracker);
+    const grantEntered = deferred();
+    const grantGate = deferred();
+    const grantSpy = vi.spyOn(pageNavigationTracker, 'grantManualContinuity').mockImplementation(async (...args) => {
+      grantEntered.resolve();
+      await grantGate.promise;
+      return originalGrant(...args);
+    });
+    try {
+      browser.tabs.sendMessage.mockClear();
+      const replacementStart = handlePageTranslation({ action: MessageActions.PAGE_TRANSLATE, data: {} }, sender);
+      await grantEntered.promise;
+      const reservedRevision = pageNavigationTracker.manualContinuityRevision.get(42);
+      const queuedReady = handlePageTranslation({
+        action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+        data: { documentToken: 'frame-97-token' },
+      }, { ...sender, frameId });
+      await expect(queuedReady).resolves.toMatchObject({ success: true, pending: true });
+
+      grantGate.resolve();
+      await vi.waitFor(() => expect(browser.tabs.sendMessage.mock.calls.some(([, message, options]) => (
+        message.action === MessageActions.PAGE_TRANSLATE && options.frameId === frameId
+      ))).toBe(true));
+      const firstChildStart = browser.tabs.sendMessage.mock.calls.find(([, message, options]) => (
+        message.action === MessageActions.PAGE_TRANSLATE && options.frameId === frameId
+      ))[1];
+      const activeAttemptId = firstChildStart.data.manualContinuityAttemptId;
+      const activeAttemptRevision = firstChildStart.data.manualContinuityAttemptRevision;
+      expect(activeAttemptRevision).toBeGreaterThan(reservedRevision);
+      expect(activeAttemptId).not.toBe(original.attemptId);
+
+      topAck.resolve({ success: true });
+      await vi.waitFor(async () => {
+        const current = await pageNavigationTracker.getManualContinuity(42);
+        expect(current.acceptedAttemptIds?.[0]).toBe(activeAttemptId);
+        expect(current.acceptedAttemptRevisions?.[0]).toBe(String(activeAttemptRevision));
+      });
+      initialChildAck.resolve({ success: false, reason: 'initial_rejected' });
+      await expect(replacementStart).resolves.toMatchObject({ success: true });
+      await vi.waitFor(() => expect(retryCalls).toBe(2));
+
+      const childStarts = browser.tabs.sendMessage.mock.calls.filter(([, message, options]) => (
+        message.action === MessageActions.PAGE_TRANSLATE && options.frameId === frameId
+      ));
+      expect(childStarts).toHaveLength(2);
+      expect(childStarts.map(([, message]) => message.data.manualContinuityAttemptId))
+        .toEqual([activeAttemptId, activeAttemptId]);
+      expect(childStarts.map(([, message]) => message.data.manualContinuityAttemptRevision))
+        .toEqual([activeAttemptRevision, activeAttemptRevision]);
+      const afterRejectedRetry = await pageNavigationTracker.getManualContinuity(42);
+      expect(afterRejectedRetry.acceptedAttemptIds?.[frameId]).toBe(original.attemptId);
+      expect(afterRejectedRetry.acceptedDocuments?.[frameId]).toBe('frame-97-token');
+    } finally {
+      grantGate.resolve();
+      grantSpy.mockRestore();
+    }
   });
 
   it('revokes exact provisional settings proof before ACK and ignores the late successful ACK', async () => {

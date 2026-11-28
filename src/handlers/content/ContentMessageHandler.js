@@ -977,6 +977,11 @@ export class ContentMessageHandler extends ResourceTracker {
   }
 
   async handlePageTranslate(message) {
+    if (Object.hasOwn(message.data || {}, 'initialDocumentToken')
+        && (typeof message.data.initialDocumentToken !== 'string' || !message.data.initialDocumentToken
+          || window.__translateItPageDocumentToken !== message.data.initialDocumentToken)) {
+      return { success: false, reason: 'obsolete_navigation' };
+    }
     if (message.data?.origin !== 'manual-frame') {
       const result = await this._handlePageTranslate(message);
       return message.data?.hasManualContinuity === true && result?.success === true

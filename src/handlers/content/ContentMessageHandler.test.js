@@ -843,6 +843,29 @@ describe('ContentMessageHandler iframe Select Element activation', () => {
     }
   });
 
+  it('rejects a stale initial-frame nonce before changing restart revision', async () => {
+    const previousDocumentToken = window.__translateItPageDocumentToken;
+    window.__translateItPageDocumentToken = 'replacement-document';
+    const translatePage = vi.fn().mockResolvedValue({ success: true });
+    handler.setPageTranslationManager({ isActive: true, translatePage });
+    const admission = vi.spyOn(UnifiedMessaging, 'sendRegularMessage').mockResolvedValue({ success: true });
+    try {
+      await expect(handler.handlePageTranslate({
+        data: {
+          hasManualContinuity: true,
+          initialDocumentToken: 'original-document',
+        },
+      })).resolves.toEqual({ success: false, reason: 'obsolete_navigation' });
+      expect(handler._pageRestartRevision).toBe(0);
+      expect(admission).not.toHaveBeenCalled();
+      expect(translatePage).not.toHaveBeenCalled();
+    } finally {
+      admission.mockRestore();
+      if (previousDocumentToken === undefined) delete window.__translateItPageDocumentToken;
+      else window.__translateItPageDocumentToken = previousDocumentToken;
+    }
+  });
+
   it('rejects missing or stale local iframe identity before mutating start state', async () => {
     const translatePage = vi.fn().mockResolvedValue({ success: true });
     handler.setPageTranslationManager({ isActive: true, translatePage });

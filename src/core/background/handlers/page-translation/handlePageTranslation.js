@@ -2,6 +2,7 @@ import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { MessageContexts } from '@/shared/messaging/core/MessagingCore.js';
+import { ActionReasons } from '@/shared/messaging/core/MessagingConstants.js';
 import browser from 'webextension-polyfill';
 import ExtensionContextManager from '@/core/extensionContext.js';
 import { unifiedTranslationService } from '@/core/services/translation/UnifiedTranslationService.js';
@@ -17,11 +18,114 @@ const autoTranslateRegistry = new Map();
 const pendingFrameRetirements = new Map();
 const pendingManualFrameReadiness = new Map();
 const pendingManualStartOwners = new Map();
+const pendingInitialFrameStarts = new Map();
+
+function initialFrameLeaseKey(tabId, frameId) {
+  return `${tabId}:${frameId}`;
+}
+
+function createInitialFrameLease(owner, frameId, documentId) {
+  let resolveIdentity;
+  let resolveSettlement;
+  const lease = {
+    owner, frameId, kind: 'initial', documentId: documentId || null, documentToken: null,
+    identityResolved: false, waiters: [],
+    identityPromise: new Promise(resolve => { resolveIdentity = resolve; }),
+    settled: false,
+    settlementPromise: new Promise(resolve => { resolveSettlement = resolve; }),
+    resolveIdentity(identity) {
+      if (lease.identityResolved) return;
+      lease.documentId = identity?.documentId || lease.documentId;
+      lease.documentToken = identity?.documentToken || null;
+      lease.identityResolved = true;
+      resolveIdentity();
+    },
+    resolveSettlement() {
+      if (lease.settled) return;
+      lease.settled = true;
+      resolveSettlement();
+    },
+  };
+  return lease;
+}
+
+function markInitialReservationsReady(owner) {
+  if (!owner || owner.initialReservationsResolved) return;
+  owner.initialReservationsResolved = true;
+  owner.resolveInitialReservations();
+}
+
+async function findInitialFrameLease(tabId, frameId, documentId, documentToken) {
+  const leases = pendingInitialFrameStarts.get(initialFrameLeaseKey(tabId, frameId)) || [];
+  for (const lease of leases) {
+    if (lease.kind !== 'initial') continue;
+    await lease.identityPromise;
+    if ((documentId && lease.documentId && documentId === lease.documentId)
+        || (documentToken && lease.documentToken && documentToken === lease.documentToken)) {
+      return lease;
+    }
+  }
+  return null;
+}
+
+function findMatchingLiveInitialFrameLease(tabId, frameId, documentId, documentToken) {
+  const leases = pendingInitialFrameStarts.get(initialFrameLeaseKey(tabId, frameId)) || [];
+  return leases.find(lease => {
+    if (lease.kind !== 'initial' || lease.settled) return false;
+    if (documentId && lease.documentId && documentId !== lease.documentId) return false;
+    if (documentToken && lease.documentToken && documentToken !== lease.documentToken) return false;
+    if (documentId && lease.documentId && documentToken && lease.documentToken) return true;
+    if (documentToken && lease.documentToken) return documentToken === lease.documentToken;
+    return !lease.identityResolved
+      || Boolean(documentId && lease.documentId && documentId === lease.documentId);
+  });
+}
+
+function releaseInitialFrameLease(lease) {
+  if (lease.settled) return lease.replayPromise || Promise.resolve();
+  const key = initialFrameLeaseKey(lease.owner.tabId, lease.frameId);
+  const leases = pendingInitialFrameStarts.get(key) || [];
+  const remaining = leases.filter(candidate => candidate !== lease);
+  if (remaining.length) pendingInitialFrameStarts.set(key, remaining);
+  else pendingInitialFrameStarts.delete(key);
+  if (!lease.identityResolved) lease.resolveIdentity(null);
+  lease.resolveSettlement();
+  if (lease.suppressReadinessReplay) return Promise.resolve();
+  const replayTasks = [];
+  for (const waiter of lease.waiters) {
+    replayTasks.push((async () => {
+      const grant = await pageNavigationTracker.getManualContinuity(waiter.sender.tab.id);
+      const currentOwner = pendingManualStartOwners.get(waiter.sender.tab.id);
+      if (waiter.owner?.invalidated || (currentOwner && currentOwner !== waiter.owner)
+          || (!currentOwner && !grantMatchesManualAttempt(grant, waiter.attemptId, waiter.attemptRevision))) return;
+      const ticket = await handlePageTranslation(waiter.message, waiter.sender);
+      const latestGrant = await pageNavigationTracker.getManualContinuity(waiter.sender.tab.id);
+      const latestOwner = pendingManualStartOwners.get(waiter.sender.tab.id);
+      if (waiter.message.action === MessageActions.PAGE_TRANSLATE_FRAME_READY
+          && ticket?.success && ticket.start
+          && !lease.suppressReadinessReplay
+          && !waiter.owner?.invalidated
+          && (!latestOwner || latestOwner === waiter.owner)
+          && latestGrant?.armed
+          && grantMatchesManualAttempt(latestGrant, waiter.attemptId, waiter.attemptRevision)
+          && ticket.manualContinuityAttemptId === waiter.attemptId
+          && String(ticket.manualContinuityAttemptRevision) === String(waiter.attemptRevision)) {
+        await handlePageTranslation({
+          action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+          data: { ...waiter.message.data, ...ticket },
+        }, waiter.sender);
+      }
+    })().catch(error => logger.debug('Deferred competing frame start failed:', error?.message)));
+  }
+  lease.replayPromise = Promise.all(replayTasks);
+  return lease.replayPromise;
+}
 
 export async function revokeManualPageAuthority(tabId) {
   if (!Number.isInteger(tabId)) return false;
   pageNavigationTracker.revokeRestartFence(tabId);
   const owner = pendingManualStartOwners.get(tabId);
+  if (owner) owner.invalidated = true;
   const revision = pageNavigationTracker.blockManualContinuity(tabId);
   releaseManualStartOwner(owner);
   let result = await revokeManualContinuity(tabId, null, revision);
@@ -89,7 +193,7 @@ function resumePendingManualFrameReadiness(tabId) {
           deferredManualGeneration: grant.generation,
         },
       }, childSender);
-      if (ticket?.success && ticket.start) {
+      if (!pending.suppressReplay && ticket?.success && ticket.start) {
         void handlePageTranslation({
           action: MessageActions.PAGE_TRANSLATE_FRAME_START,
           data: {
@@ -240,10 +344,14 @@ async function sendFrameCommandWithResponseDeadline(
   frameId,
   deadlineMs = FRAME_COMMAND_RESPONSE_TIMEOUT_MS,
   boundNavigation = null,
-  onLateResult = null
+  onLateResult = null,
+  targetDocumentId = null,
+  absoluteDeadlineAt = null,
+  dispatchGuard = null
 ) {
   let timeoutId;
-  let expired = false;
+  const responseDeadlineAt = absoluteDeadlineAt ?? (Date.now() + deadlineMs);
+  let expired = Date.now() >= responseDeadlineAt;
   let dispatchedCursor = null;
   let didDispatch = false;
   try {
@@ -270,10 +378,17 @@ async function sendFrameCommandWithResponseDeadline(
         }
         message = { ...message, data: { ...message.data, ...data } };
       }
-      if (expired) return null;
-      didDispatch = true;
+       if (expired) {
+         const timeoutError = new Error(`Frame ${frameId} command response timed out`);
+         timeoutError.isResponseTimeout = true;
+         throw timeoutError;
+       }
+       if (dispatchGuard && !dispatchGuard()) return null;
+       didDispatch = true;
       try {
-        const response = await browser.tabs.sendMessage(tabId, message, { frameId });
+        const response = await browser.tabs.sendMessage(tabId, message, {
+          frameId, ...(targetDocumentId && { documentId: targetDocumentId }),
+        });
         await onLateResult?.({ response, navigationCursor: dispatchedCursor });
         return response;
       } catch (error) {
@@ -289,7 +404,7 @@ async function sendFrameCommandWithResponseDeadline(
           const timeoutError = new Error(`Frame ${frameId} command response timed out`);
           timeoutError.isResponseTimeout = true;
           reject(timeoutError);
-        }, deadlineMs);
+        }, Math.max(0, responseDeadlineAt - Date.now()));
       }),
     ]);
     return { frameId, response, navigationCursor: dispatchedCursor, isResponseTimeout: false, wasDispatched: didDispatch };
@@ -426,6 +541,20 @@ function projectFrameDelivery({ frameId, response, isResponseTimeout }) {
       reason: FRAME_COMMAND_RESPONSE_TIMEOUT_REASON,
     }),
   };
+}
+
+async function settleBeforeDeadline(promise, deadlineAt) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).then(value => ({ value }), error => ({ error })),
+      new Promise(resolve => {
+        timeoutId = setTimeout(() => resolve({ timedOut: true }), Math.max(0, deadlineAt - Date.now()));
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 /**
@@ -583,6 +712,10 @@ export async function handlePageTranslation(message, sender) {
           || typeof data.documentToken !== 'string' || !data.documentToken) {
         return { success: false, reason: 'ineligible_frame' };
       }
+      const initialOwner = pendingManualStartOwners.get(senderTabId);
+      if (initialOwner && !initialOwner.initialReservationsResolved) {
+        await initialOwner.initialReservationsReady;
+      }
       const access = await tabPermissionChecker.checkTabAccess(senderTabId);
       if (!access.isAccessible) return { success: false, reason: 'ineligible_frame' };
       const [grant, frame] = await Promise.all([
@@ -659,6 +792,53 @@ export async function handlePageTranslation(message, sender) {
         return { success: false, reason: 'obsolete_navigation' };
       }
 
+      const initialLease = await findInitialFrameLease(
+        senderTabId, frameId, sender?.documentId || frame.documentId, data.documentToken,
+      );
+      const frameLeases = pendingInitialFrameStarts.get(initialFrameLeaseKey(senderTabId, frameId));
+      if (initialLease && !initialLease.settled && frameLeases?.includes(initialLease)) {
+        if (initialLease.owner !== owner
+            || pendingManualStartOwners.get(senderTabId) !== owner
+            || owner?.invalidated
+            || pageNavigationTracker.manualContinuityRevision.get(senderTabId) !== owner?.attemptRevision) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+        if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_START && owner
+            && (data.manualContinuityAttemptId !== owner.attemptId
+              || String(data.manualContinuityAttemptRevision) !== String(owner.attemptRevision))) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+        const authorizedAttempt = message.action === MessageActions.PAGE_TRANSLATE_FRAME_START
+          ? { attemptId: data.manualContinuityAttemptId, attemptRevision: data.manualContinuityAttemptRevision }
+            : isDeferredReplay
+              ? { attemptId: deferredManualAttemptId, attemptRevision: data.deferredManualAttemptRevision }
+              : owner
+                ? { attemptId: owner.attemptId, attemptRevision: owner.attemptRevision }
+                : latestAcceptedManualAttempt(currentGrant, senderTabId);
+        if (typeof authorizedAttempt?.attemptId !== 'string'
+            || !Number.isSafeInteger(Number(authorizedAttempt.attemptRevision))) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+        if (!initialLease.waiters.some(waiter => waiter.message.action === message.action
+            && waiter.message.data?.documentToken === data.documentToken
+            && waiter.attemptId === authorizedAttempt.attemptId
+            && waiter.attemptRevision === Number(authorizedAttempt.attemptRevision)
+            && waiter.owner === owner)) {
+          if (initialLease.settled
+              || !pendingInitialFrameStarts.get(initialFrameLeaseKey(senderTabId, frameId))?.includes(initialLease)
+              || pendingManualStartOwners.get(senderTabId) !== owner
+              || owner?.invalidated) {
+            return { success: false, reason: 'obsolete_navigation' };
+          }
+          initialLease.waiters.push({
+            message, sender, owner,
+            attemptId: authorizedAttempt.attemptId,
+            attemptRevision: Number(authorizedAttempt.attemptRevision),
+          });
+        }
+        return { success: true, pending: true };
+      }
+
       if (message.action === MessageActions.PAGE_TRANSLATE_FRAME_READY) {
         if (!currentGrant.armed) {
           const currentOwner = pendingManualStartOwners.get(senderTabId);
@@ -718,14 +898,64 @@ export async function handlePageTranslation(message, sender) {
            )) return { success: false, reason: 'obsolete_navigation' };
       const attemptId = data.manualContinuityAttemptId;
       const attemptRevision = data.manualContinuityAttemptRevision;
-      if (!hasDynamicManualAttempt(grant, senderTabId, attemptId, attemptRevision)) {
+      const latestGrant = await pageNavigationTracker.getManualContinuity(senderTabId);
+      if (!latestGrant || latestGrant.generation !== grant.generation || latestGrant.revoked
+          || !hasDynamicManualAttempt(latestGrant, senderTabId, attemptId, attemptRevision)) {
         return { success: false, reason: 'obsolete_navigation' };
       }
-      const claimed = await pageNavigationTracker.claimManualFrameStart(
-        senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
-        grant.topDocumentToken, navigationCursor, data.documentToken, attemptId, attemptRevision
+      const currentOwner = pendingManualStartOwners.get(senderTabId);
+      const documentId = sender?.documentId || frame.documentId;
+      const matchingInitialLease = findMatchingLiveInitialFrameLease(
+        senderTabId, frameId, documentId, data.documentToken,
       );
+      if (matchingInitialLease
+          && pendingInitialFrameStarts.get(initialFrameLeaseKey(senderTabId, frameId))
+            ?.includes(matchingInitialLease)) {
+        if (currentOwner?.invalidated) return { success: false, reason: 'obsolete_navigation' };
+        const waiterOwner = currentOwner || null;
+        if (!matchingInitialLease.waiters.some(waiter => waiter.message.action === message.action
+            && waiter.message.data?.documentToken === data.documentToken
+            && waiter.attemptId === attemptId
+            && String(waiter.attemptRevision) === String(attemptRevision)
+            && waiter.owner === waiterOwner)) {
+          matchingInitialLease.waiters.push({
+            message, sender, owner: waiterOwner, attemptId,
+            attemptRevision: Number(attemptRevision),
+          });
+        }
+        return { success: true, pending: true };
+      }
+      const dynamicLease = createInitialFrameLease(
+        { tabId: senderTabId, attemptId, attemptRevision, generation: grant.generation },
+        frameId, documentId,
+      );
+      dynamicLease.kind = 'dynamic';
+      dynamicLease.resolveIdentity({ documentId, documentToken: data.documentToken });
+      const leaseKey = initialFrameLeaseKey(senderTabId, frameId);
+      const reservations = pendingInitialFrameStarts.get(leaseKey) || [];
+      reservations.push(dynamicLease);
+      pendingInitialFrameStarts.set(leaseKey, reservations);
+      // No await between the owner check and reservation: initial starts observe this delivery.
+       if (pendingManualStartOwners.get(senderTabId) !== currentOwner) {
+        releaseInitialFrameLease(dynamicLease);
+        return { success: false, reason: 'obsolete_navigation' };
+      }
+      let claimed;
+      try {
+        claimed = await pageNavigationTracker.claimManualFrameStart(
+          senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
+          grant.topDocumentToken, navigationCursor, data.documentToken, attemptId, attemptRevision
+        );
+      } catch (error) {
+        await pageNavigationTracker.completeManualFrameStart(
+          senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
+          grant.topDocumentToken, navigationCursor, data.documentToken, false, attemptId, attemptRevision
+        ).catch(() => {});
+        releaseInitialFrameLease(dynamicLease);
+        throw error;
+      }
       if (!claimed) {
+        releaseInitialFrameLease(dynamicLease);
         if (!hasDynamicManualAttempt(grant, senderTabId, attemptId, attemptRevision)) {
           return { success: false, reason: 'obsolete_navigation' };
         }
@@ -787,7 +1017,7 @@ export async function handlePageTranslation(message, sender) {
             grant.topDocumentToken, navigationCursor, data.documentToken, false, attemptId, attemptRevision
           ).catch(() => {});
           return { error };
-        });
+        }).finally(() => releaseInitialFrameLease(dynamicLease));
         const timedOut = new Promise(resolve => {
           timeoutId = setTimeout(() => resolve({ timedOut: true }), FRAME_COMMAND_RESPONSE_TIMEOUT_MS);
         });
@@ -806,6 +1036,7 @@ export async function handlePageTranslation(message, sender) {
             senderTabId, frameId, grant.generation, grant.topDocumentEpoch,
             grant.topDocumentToken, navigationCursor, data.documentToken, false, attemptId, attemptRevision
           ).catch(() => {});
+          releaseInitialFrameLease(dynamicLease);
         }
       }
     }
@@ -834,10 +1065,17 @@ export async function handlePageTranslation(message, sender) {
       && message.data?.reason === 'operation-abort';
     if (Number.isInteger(senderTabId) && isManualRevocation
         && Number.isSafeInteger(message.data?.expectedManualContinuityGeneration)) {
+      const ownerAtAuthorizationStart = pendingManualStartOwners.get(senderTabId);
       const status = await pageNavigationTracker.getManualContinuityStatus(senderTabId).catch(() => null);
       const owner = pendingManualStartOwners.get(senderTabId);
       const currentGrant = message.data?.settingsInvalidation === true
         ? await pageNavigationTracker.getManualContinuityForRevocation(senderTabId).catch(() => null) : null;
+      if (owner !== ownerAtAuthorizationStart
+          || pendingManualStartOwners.get(senderTabId) !== owner
+          || (Number.isSafeInteger(message.data.expectedManualContinuityGeneration)
+            && owner && owner.generation !== message.data.expectedManualContinuityGeneration)) {
+        return { success: false, reason: 'manual_continuity_stop_superseded' };
+      }
       if (!status || (status.manualContinuityGeneration !== message.data.expectedManualContinuityGeneration
           && !(status.hasManualContinuity === false
             && status.manualContinuityGeneration > message.data.expectedManualContinuityGeneration)
@@ -862,9 +1100,12 @@ export async function handlePageTranslation(message, sender) {
       if (isManualRevocation && !internalBatchAbort) {
         const expectedGeneration = message.data?.expectedManualContinuityGeneration;
         const owner = pendingManualStartOwners.get(senderTabId);
-        if (expectedGeneration == null || !owner || owner.generation === expectedGeneration) {
+        const ownerAuthorized = owner && pendingManualStartOwners.get(senderTabId) === owner
+          && (expectedGeneration == null || owner.generation === expectedGeneration);
+        if (ownerAuthorized || (expectedGeneration == null && !owner)) {
           clearPendingManualFrameReadiness(senderTabId);
         }
+        if (ownerAuthorized) owner.invalidated = true;
         releaseManualStartOwner(owner, expectedGeneration);
       }
       if (isManualRevocation && !internalBatchAbort) {
@@ -1237,11 +1478,15 @@ export async function handlePageTranslation(message, sender) {
         }
         const attemptId = crypto.randomUUID();
         manualStartRevision = pageNavigationTracker.reserveManualContinuityStart(targetTabId, attemptId);
+        let resolveInitialReservations;
         manualStartOwner = {
           tabId: targetTabId,
           generation: null,
           attemptRevision: manualStartRevision,
           attemptId,
+          initialReservationsResolved: false,
+          initialReservationsReady: new Promise(resolve => { resolveInitialReservations = resolve; }),
+          resolveInitialReservations: () => resolveInitialReservations(),
         };
         pendingManualStartOwners.set(targetTabId, manualStartOwner);
       }
@@ -1250,9 +1495,12 @@ export async function handlePageTranslation(message, sender) {
         if (isManualRevocation && !internalBatchAbort) {
           const expectedGeneration = message.data?.expectedManualContinuityGeneration;
           const owner = pendingManualStartOwners.get(targetTabId);
-          if (expectedGeneration == null || !owner || owner.generation === expectedGeneration) {
+          const ownerAuthorized = owner && pendingManualStartOwners.get(targetTabId) === owner
+            && (expectedGeneration == null || owner.generation === expectedGeneration);
+          if (ownerAuthorized || (expectedGeneration == null && !owner)) {
             clearPendingManualFrameReadiness(targetTabId);
           }
+          if (ownerAuthorized) owner.invalidated = true;
           releaseManualStartOwner(owner, expectedGeneration);
           manualStopRevision = pageNavigationTracker.blockManualContinuity(
             targetTabId, message.data?.expectedManualContinuityGeneration ?? null
@@ -1265,6 +1513,7 @@ export async function handlePageTranslation(message, sender) {
       }
     });
     if (preparation.error) {
+      markInitialReservationsReady(manualStartOwner);
       if (manualStartOwner) pageNavigationTracker.cancelManualContinuityStart(manualStartOwner.tabId, manualStartOwner.attemptId);
       releaseManualStartOwner(manualStartOwner);
       const revokeResult = await waitForManualRevocation(manualRevokePromise);
@@ -1299,6 +1548,40 @@ export async function handlePageTranslation(message, sender) {
     }
 
     const { targetTabId, access, allFrames, navigationUnavailable, navigationAdmissionInvalid } = preparation;
+    const initialLeases = new Map();
+    if (isManualStart && manualStartOwner && access.isAccessible
+        && !navigationUnavailable && !navigationAdmissionInvalid) {
+      for (const frame of allFrames.filter(candidate => candidate.frameId > 0)) {
+        const key = initialFrameLeaseKey(targetTabId, frame.frameId);
+        const leases = pendingInitialFrameStarts.get(key) || [];
+        const lease = createInitialFrameLease(manualStartOwner, frame.frameId, frame.documentId);
+        lease.predecessors = [...leases];
+        leases.push(lease);
+        pendingInitialFrameStarts.set(key, leases);
+        initialLeases.set(frame.frameId, lease);
+      }
+      markInitialReservationsReady(manualStartOwner);
+      for (const frame of allFrames.filter(candidate => candidate.frameId > 0)) {
+        const lease = initialLeases.get(frame.frameId);
+        const probe = Promise.all([
+          Promise.resolve().then(() => probeFrameDocument(targetTabId, frame.frameId)),
+          Promise.resolve().then(() => browser.webNavigation.getFrame({
+            tabId: targetTabId, frameId: frame.frameId,
+          })),
+        ]).then(([identity, liveFrame]) => ({
+          ...identity,
+          documentId: liveFrame?.documentId || frame.documentId,
+        }));
+        void settleBeforeDeadline(probe, preparation.deadlineAt).then(result => {
+          const identity = result.error || result.timedOut ? null : result.value;
+          lease.resolveIdentity(identity);
+          if (typeof identity?.documentToken !== 'string' || !identity.documentToken) {
+            releaseInitialFrameLease(lease);
+          }
+        });
+      }
+    }
+    markInitialReservationsReady(manualStartOwner);
     if (navigationUnavailable) message = { ...message, data: { ...message.data, navigationUnavailable: true } };
     if (!access.isAccessible) {
       if (manualStartOwner) pageNavigationTracker.cancelManualContinuityStart(manualStartOwner.tabId, manualStartOwner.attemptId);
@@ -1327,10 +1610,14 @@ export async function handlePageTranslation(message, sender) {
           const remaining = Math.max(0, preparation.deadlineAt - Date.now());
           const manualPreparation = (async () => {
             const topProbe = await probeFrameDocument(targetTabId, 0).catch(() => null);
-            if (pendingManualStartOwners.get(targetTabId) !== manualStartOwner
+            if (Date.now() >= preparation.deadlineAt
+                || pendingManualStartOwners.get(targetTabId) !== manualStartOwner
                 || typeof topProbe?.documentToken !== 'string' || !topProbe.documentToken) {
-              const error = new Error('Top document identity is unavailable');
-              error.code = 'top_identity_unavailable';
+              const error = new Error(Date.now() >= preparation.deadlineAt
+                ? 'Whole Page command preparation timed out' : 'Top document identity is unavailable');
+              error.code = Date.now() >= preparation.deadlineAt
+                ? PRE_FANOUT_COMMAND_TIMEOUT_REASON : 'top_identity_unavailable';
+              error.isPreFanoutTimeout = error.code === PRE_FANOUT_COMMAND_TIMEOUT_REASON;
               throw error;
             }
             const grant = await pageNavigationTracker.grantManualContinuity(targetTabId, manualStartRevision, {
@@ -1341,11 +1628,28 @@ export async function handlePageTranslation(message, sender) {
               attemptId: manualStartOwner.attemptId,
               handlerManaged: true,
             });
+            if (Date.now() >= preparation.deadlineAt
+                || pendingManualStartOwners.get(targetTabId) !== manualStartOwner) {
+              throw Object.assign(new Error('Manual continuity start superseded'), {
+                isPreFanoutTimeout: Date.now() >= preparation.deadlineAt,
+              });
+            }
             if (grant.attemptRevision !== manualStartRevision) {
               manualStartRevision = grant.attemptRevision;
               manualStartOwner.attemptRevision = grant.attemptRevision;
               for (const pending of pendingManualFrameReadiness.values()) {
                 if (pending.owner === manualStartOwner) pending.attemptRevision = grant.attemptRevision;
+              }
+              for (const leases of pendingInitialFrameStarts.values()) {
+                for (const lease of leases) {
+                  if (lease.owner !== manualStartOwner) continue;
+                  for (const waiter of lease.waiters) {
+                    if (waiter.owner === manualStartOwner
+                        && waiter.attemptId === manualStartOwner.attemptId) {
+                      waiter.attemptRevision = grant.attemptRevision;
+                    }
+                  }
+                }
               }
             }
             if (pendingManualStartOwners.get(targetTabId) !== manualStartOwner
@@ -1369,6 +1673,7 @@ export async function handlePageTranslation(message, sender) {
         } catch (error) {
           pageNavigationTracker.cancelManualContinuityStart(targetTabId, manualStartOwner.attemptId);
           releaseManualStartOwner(manualStartOwner);
+          for (const lease of initialLeases.values()) releaseInitialFrameLease(lease);
           if (error?.isPreFanoutTimeout) {
             return { success: false, reason: PRE_FANOUT_COMMAND_TIMEOUT_REASON, isTransportFailure: true };
           }
@@ -1493,6 +1798,22 @@ export async function handlePageTranslation(message, sender) {
         settledFrames.add(frameId);
         activeLateReconciliations += 1;
         try {
+          const lease = initialLeases.get(frameId);
+          if (response?.success === false && response.reason === ActionReasons.USER_CANCELLED && lease) {
+            lease.suppressReadinessReplay = true;
+            for (const [key, pending] of pendingManualFrameReadiness) {
+              const sameDocument = pending.documentToken === lease.documentToken
+                && !(pending.documentId && lease.documentId && pending.documentId !== lease.documentId);
+              if (pending.tabId === targetTabId && pending.frameId === frameId
+                  && pending.owner === lease.owner
+                  && pending.attemptId === lease.owner.attemptId
+                  && String(pending.attemptRevision) === String(lease.owner.attemptRevision)
+                  && sameDocument) {
+                pending.suppressReplay = true;
+                pendingManualFrameReadiness.delete(key);
+              }
+            }
+          }
           if (!manualStartOwner || pendingManualStartOwners.get(targetTabId) !== manualStartOwner) return;
           const documentToken = response?.documentToken;
           let promoted = false;
@@ -1530,20 +1851,93 @@ export async function handlePageTranslation(message, sender) {
         } finally {
           activeLateReconciliations -= 1;
           pendingLateFrames.delete(frameId);
+          if (initialLeases.has(frameId)) releaseInitialFrameLease(initialLeases.get(frameId));
           await finalizeLateResults();
         }
       };
       const frameResults = await Promise.all(
-        allFrames.map(frame =>
-          sendFrameCommandWithResponseDeadline(
-            targetTabId, outboundMessage, frame.frameId, FRAME_COMMAND_RESPONSE_TIMEOUT_MS, boundNavigation,
-            manualStartOwner ? result => {
-              const reconciliation = reconcileLateResult(result, frame.frameId);
-              reconciliationPromises.set(frame.frameId, reconciliation);
-              return reconciliation;
-            } : null
-          )
-        )
+        allFrames.map(frame => {
+          const lease = initialLeases.get(frame.frameId);
+          const commandDeadlineAt = Date.now() + FRAME_COMMAND_RESPONSE_TIMEOUT_MS;
+          return (async () => {
+            if (lease) {
+              const preflight = (async () => {
+                await lease.identityPromise;
+                if (!lease.documentToken || lease.settled) return false;
+                await Promise.all(lease.predecessors.map(async prior => {
+                  await prior.identityPromise;
+                  const sameDocument = (lease.documentId && prior.documentId === lease.documentId)
+                    || (lease.documentToken && prior.documentToken === lease.documentToken);
+                  if (sameDocument) await prior.settlementPromise;
+                }));
+                if (pendingManualStartOwners.get(targetTabId) !== manualStartOwner
+                    || manualStartOwner.invalidated
+                    || pageNavigationTracker.manualContinuityRevision.get(targetTabId) !== manualStartRevision) {
+                  return false;
+                }
+                const currentGrant = await pageNavigationTracker.getManualContinuity(targetTabId);
+                if (!currentGrant || currentGrant.generation !== manualGrant.generation
+                    || currentGrant.revoked
+                    || currentGrant.topDocumentEpoch !== manualGrant.topDocumentEpoch
+                    || currentGrant.topDocumentToken !== manualGrant.topDocumentToken) return false;
+                const [finalAccess, liveFrame, liveIdentity, liveTopIdentity, liveTopCursor] = await Promise.all([
+                  Promise.resolve().then(() => tabPermissionChecker.checkTabAccess(targetTabId)),
+                  Promise.resolve().then(() => browser.webNavigation.getFrame({
+                    tabId: targetTabId, frameId: frame.frameId,
+                  })),
+                  Promise.resolve().then(() => probeFrameDocument(targetTabId, frame.frameId)),
+                  Promise.resolve().then(() => probeFrameDocument(targetTabId, 0)),
+                  Promise.resolve().then(() => pageNavigationTracker.getAdmissionCursor(targetTabId, 0)),
+                ]);
+                return finalAccess.isAccessible && isEligibleManualFrameUrl(liveFrame?.url)
+                  && liveIdentity?.documentToken === lease.documentToken
+                  && (!lease.documentId || !liveFrame?.documentId || lease.documentId === liveFrame.documentId)
+                  && liveTopIdentity?.documentToken === manualGrant.topDocumentToken
+                  && liveTopCursor?.documentEpoch === manualGrant.topDocumentEpoch
+                  && !lease.settled
+                  && pendingInitialFrameStarts.get(initialFrameLeaseKey(targetTabId, frame.frameId))
+                    ?.includes(lease)
+                  && pendingManualStartOwners.get(targetTabId) === manualStartOwner
+                  && !manualStartOwner.invalidated
+                  && pageNavigationTracker.manualContinuityRevision.get(targetTabId) === manualStartRevision;
+              })();
+              const result = await settleBeforeDeadline(preflight, commandDeadlineAt);
+              if (result.timedOut || result.error || !result.value) {
+                releaseInitialFrameLease(lease);
+                return {
+                  frameId: frame.frameId, response: null,
+                  isResponseTimeout: result.timedOut === true, wasDispatched: false,
+                };
+              }
+            }
+            const frameMessage = lease ? {
+              ...outboundMessage,
+              data: { ...outboundMessage.data, initialDocumentToken: lease.documentToken },
+            } : outboundMessage;
+            return sendFrameCommandWithResponseDeadline(
+              targetTabId, frameMessage, frame.frameId, FRAME_COMMAND_RESPONSE_TIMEOUT_MS, boundNavigation,
+              manualStartOwner ? result => {
+                const reconciliation = reconcileLateResult(result, frame.frameId);
+                reconciliationPromises.set(frame.frameId, reconciliation);
+                return reconciliation;
+              } : null,
+              lease?.documentId,
+              commandDeadlineAt,
+              lease ? () => !lease.settled
+                && pendingInitialFrameStarts.get(initialFrameLeaseKey(targetTabId, frame.frameId))?.includes(lease)
+                && pendingManualStartOwners.get(targetTabId) === manualStartOwner
+                && !manualStartOwner.invalidated
+                && pageNavigationTracker.manualContinuityRevision.get(targetTabId) === manualStartRevision
+                && pendingManualStartOwners.get(targetTabId)?.generation === manualStartOwner.generation
+                && pageNavigationTracker.state?.manualContinuity?.[targetTabId]?.generation === manualGrant.generation
+                && !pageNavigationTracker.state?.manualContinuity?.[targetTabId]?.revoked
+                : null,
+            ).then(result => {
+              if (lease && !result.wasDispatched) releaseInitialFrameLease(lease);
+              return result;
+            });
+          })();
+        })
       );
 
       await Promise.allSettled(frameResults
@@ -1749,6 +2143,14 @@ if (typeof browser !== 'undefined' && browser.webNavigation) {
     if (owner) pageNavigationTracker.cancelManualContinuityStart(tabId, owner.attemptId);
     releaseManualStartOwner(owner);
     clearPendingManualFrameReadiness(tabId);
+    const leasePrefix = `${tabId}:`;
+    for (const [key, leases] of [...pendingInitialFrameStarts]) {
+      if (!key.startsWith(leasePrefix)) continue;
+      for (const lease of leases) {
+        lease.suppressReadinessReplay = true;
+        releaseInitialFrameLease(lease);
+      }
+    }
     autoTranslateRegistry.delete(tabId);
     pageNavigationTracker.revokeRestartFence(tabId);
     const tabKeyPrefix = `${tabId}:`;
