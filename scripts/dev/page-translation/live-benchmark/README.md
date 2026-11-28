@@ -5,10 +5,10 @@ This opt-in development fixture measures Page Translation using the extension's 
 ## Run
 
 ```sh
-node scripts/dev/page-translation/live-benchmark/serve.mjs
+PORT=4178 node scripts/dev/page-translation/live-benchmark/serve.mjs
 ```
 
-Open the printed `http://127.0.0.1:<port>/` URL in a browser profile with the Translate It extension installed. Configure the provider, API credentials, source language, and target language manually in the extension first. Before running the standard benchmark, also disable `WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES` and `WHOLE_PAGE_LAZY_LOADING` in the extension configuration. These are extension settings, not benchmark URL parameters. With automatic DOM translation enabled, the scheduler may emit IDLE rather than terminal COMPLETE; the benchmark does not treat IDLE as completion. Start Page Translation on the fixture page and allow it to finish. For comparison, use the same settings and a fresh page/profile for each trial.
+Open the printed `http://127.0.0.1:<port>/` URL in a browser profile with the Translate It extension installed. Specifying `PORT` is optional; without it, the server selects an available port automatically. Reuse the same port and origin across server restarts to keep accessing saved results in that origin's `localStorage`. Configure the provider, API credentials, source language, and target language manually in the extension first. Before running the standard benchmark, also disable `WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES` and `WHOLE_PAGE_LAZY_LOADING` in the extension configuration. These are extension settings, not benchmark URL parameters. With automatic DOM translation enabled, the scheduler may emit IDLE rather than terminal COMPLETE; the benchmark does not treat IDLE as completion. Start Page Translation on the fixture page and allow it to finish. For comparison, use the same settings and a fresh page for each trial.
 
 Optional URL parameters include `?variant=A&level=1` for recorded labels and `?targets=600` for the higher-load fixture. Labels do not select a provider, change optimization settings, or configure the extension. The default fixture remains 120 targets; `targets=600` adds 480 deterministic, distinct paragraphs.
 
