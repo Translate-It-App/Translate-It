@@ -240,7 +240,7 @@ export class PageTranslationManager extends ResourceTracker {
       // Show warning for token-heavy providers. 
       // We show it even for auto-translation to ensure user is aware, but limited to 2 times total.
       if (isTokenHeavy) {
-        const confirmed = await this._confirmTokenUsage(providerId, provider.displayName);
+        const confirmed = await this._confirmTokenUsage(providerId, provider.displayName, attempt);
         if (!this._isCurrentPreStartAttempt(attempt)) return this._settleStalePreStartAttempt(attempt);
         if (!confirmed) {
           this.logger.info('Page translation cancelled: User declined token usage');
@@ -877,50 +877,80 @@ export class PageTranslationManager extends ResourceTracker {
    * @returns {Promise<boolean>} True if user confirms, false if cancelled
    * @private
    */
-  async _confirmTokenUsage(providerId, providerName) {
+  _confirmTokenUsage(providerId, providerName, attempt) {
     // 1. Check if the warning is permanently hidden in settings
     if (this.settings.tokenWarningHidden) {
       this.logger.debug('Token usage warning is permanently hidden in settings');
-      return true;
+      return Promise.resolve(true);
     }
 
     this.logger.info(`Showing token usage warning for provider: ${providerName}`);
+    return new Promise((resolve, reject) => {
+      const signal = attempt?.controller?.signal;
+      const notificationId = `page-translation-token-warning-${attempt?.messageId || crypto.randomUUID()}`;
+      let notificationShown = false;
+      let settled = false;
+      const isCurrent = () => !signal?.aborted && (!attempt || this.preStartAttempt === attempt);
+      const settle = value => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        resolve(value);
+      };
+      const onAbort = () => {
+        settle(false);
+        if (notificationShown) this.notificationManager.dismiss(notificationId);
+      };
+      if (signal?.aborted || !isCurrent()) return settle(false);
+      signal?.addEventListener('abort', onAbort, { once: true });
 
-    const rawMessage = await getTranslationString('page_translation_token_warning');
-    const message = (rawMessage || 'The selected provider ({provider}) uses tokens/credits. Do you want to proceed?')
-      .replace('{provider}', providerName);
-    const confirmLabel = await getTranslationString('page_translation_token_confirm');
-    const cancelLabel = await getTranslationString('page_translation_token_cancel');
-    const dontShowAgainLabel = await getTranslationString('dont_show_again');
-
-    return new Promise((resolve) => {
-      this.notificationManager.show(message, 'warning', Infinity, {
-        persistent: true,
-        hasCheckbox: true,
-        checkboxLabel: dontShowAgainLabel || "Don't show again",
-        actions: [
-          {
-            label: confirmLabel || 'Translate Anyway',
-            onClick: (dontShowAgain) => {
-              this.logger.info('User confirmed token usage', { dontShowAgain });
-              if (dontShowAgain) {
-                this._persistTokenWarningHidden();
+      void (async () => {
+        try {
+          const rawMessage = await getTranslationString('page_translation_token_warning');
+          const message = (rawMessage || 'The selected provider ({provider}) uses tokens/credits. Do you want to proceed?')
+            .replace('{provider}', providerName);
+          const confirmLabel = await getTranslationString('page_translation_token_confirm');
+          const cancelLabel = await getTranslationString('page_translation_token_cancel');
+          const dontShowAgainLabel = await getTranslationString('dont_show_again');
+          if (!isCurrent() || settled) return settle(false);
+          this.notificationManager.show(message, 'warning', Infinity, {
+            id: notificationId,
+            persistent: true,
+            hasCheckbox: true,
+            checkboxLabel: dontShowAgainLabel || "Don't show again",
+            actions: [
+              {
+                label: confirmLabel || 'Translate Anyway',
+                onClick: (dontShowAgain) => {
+                  if (!isCurrent() || settled) return;
+                  this.logger.info('User confirmed token usage', { dontShowAgain });
+                  if (dontShowAgain) this._persistTokenWarningHidden();
+                  settle(true);
+                }
+              },
+              {
+                label: cancelLabel || 'Cancel',
+                onClick: (dontShowAgain) => {
+                  if (!isCurrent() || settled) return;
+                  this.logger.info('User cancelled translation due to token warning', { dontShowAgain });
+                  if (dontShowAgain) this._persistTokenWarningHidden();
+                  settle(false);
+                }
               }
-              resolve(true);
-            }
-          },
-          {
-            label: cancelLabel || 'Cancel',
-            onClick: (dontShowAgain) => {
-              this.logger.info('User cancelled translation due to token warning', { dontShowAgain });
-              if (dontShowAgain) {
-                this._persistTokenWarningHidden();
-              }
-              resolve(false);
-            }
+            ]
+          });
+          notificationShown = true;
+        } catch (error) {
+          this.logger.warn('Failed to show token usage confirmation:', error);
+          if (isCurrent() && !settled) {
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+            reject(error);
+          } else {
+            settle(false);
           }
-        ]
-      });
+        }
+      })();
     });
   }
 

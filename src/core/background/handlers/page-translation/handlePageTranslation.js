@@ -137,6 +137,7 @@ export async function revokeManualPageAuthority(tabId) {
 function releaseManualStartOwner(owner, expectedGeneration = null) {
   if (owner && pendingManualStartOwners.get(owner.tabId) === owner
       && (expectedGeneration == null || owner.generation === expectedGeneration)) {
+    markInitialReservationsReady(owner);
     pendingManualStartOwners.delete(owner.tabId);
     for (const [key, pending] of pendingManualFrameReadiness) {
       if (pending.owner === owner && !pending.registering && !pending.dispatching) {
@@ -1070,7 +1071,8 @@ export async function handlePageTranslation(message, sender) {
       const owner = pendingManualStartOwners.get(senderTabId);
       const currentGrant = message.data?.settingsInvalidation === true
         ? await pageNavigationTracker.getManualContinuityForRevocation(senderTabId).catch(() => null) : null;
-      if (owner !== ownerAtAuthorizationStart
+      if ((ownerAtAuthorizationStart && owner && owner !== ownerAtAuthorizationStart)
+          || (!ownerAtAuthorizationStart && owner)
           || pendingManualStartOwners.get(senderTabId) !== owner
           || (Number.isSafeInteger(message.data.expectedManualContinuityGeneration)
             && owner && owner.generation !== message.data.expectedManualContinuityGeneration)) {

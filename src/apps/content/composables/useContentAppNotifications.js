@@ -4,6 +4,7 @@ import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 
 const logger = getScopedLogger(LOG_COMPONENTS.CONTENT_APP, 'useContentAppNotifications');
+const ATTEMPT_TOKEN_WARNING_ID_PREFIX = 'page-translation-token-warning-';
 
 /**
  * Composable for managing toast notifications in the ContentApp.
@@ -165,7 +166,8 @@ export function useContentAppNotifications({ shouldShowGlobalUI, toastRTL, track
     const { id, message, type, duration, persistent } = detail;
 
     // Skip duplicate check for updates
-    if (isDuplicateNotification(message, type) && !detail.isUpdate) {
+    const isAttemptOwnedTokenWarning = id?.startsWith(ATTEMPT_TOKEN_WARNING_ID_PREFIX);
+    if (isDuplicateNotification(message, type) && !detail.isUpdate && !isAttemptOwnedTokenWarning) {
       logger.debug('Skipping notification: Duplicate detected');
       return;
     }

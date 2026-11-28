@@ -152,6 +152,7 @@ vi.mock('@/core/managers/core/NotificationManager.js', () => ({
   default: class {
     constructor() {
       this.show = vi.fn();
+      this.dismiss = vi.fn();
     }
   }
 }));
@@ -2619,6 +2620,31 @@ describe('PageTranslationManager', () => {
         MessageActions.PAGE_RESTORE_COMPLETE,
         expect.any(Object)
       ));
+    });
+
+    it('settles a stopped token confirmation and admits a replacement attempt', async () => {
+      const { findProviderById } = await import('@/features/translation/providers/ProviderManifest.js');
+      findProviderById.mockReturnValue({ displayName: 'AI Provider', consumesTokens: true });
+      await manager.activate();
+      manager.currentUrl = window.location.href;
+      const pending = manager.translatePage();
+      await vi.waitFor(() => expect(manager.notificationManager.show).toHaveBeenCalled());
+      const oldNotificationOptions = manager.notificationManager.show.mock.calls.at(-1)[3];
+      const oldActions = oldNotificationOptions.actions;
+
+      manager.cancelTranslation();
+      expect(await pending).toEqual({ success: false, reason: 'silent_error' });
+      expect(manager.notificationManager.dismiss).toHaveBeenCalledWith(oldNotificationOptions.id);
+
+      const replacement = manager.translatePage();
+      await vi.waitFor(() => expect(manager.notificationManager.show).toHaveBeenCalledTimes(2));
+      const replacementOptions = manager.notificationManager.show.mock.calls.at(-1)[3];
+      expect(replacementOptions.id).not.toBe(oldNotificationOptions.id);
+      mockStorageManagerSet.mockClear();
+      oldActions[0].onClick(true);
+      expect(mockStorageManagerSet).not.toHaveBeenCalledWith({ WHOLE_PAGE_TOKEN_WARNING_HIDDEN: true });
+      replacementOptions.actions[0].onClick(false);
+      await expect(replacement).resolves.toMatchObject({ success: true });
     });
 
     it('does not admit a settings continuation after navigation', async () => {
