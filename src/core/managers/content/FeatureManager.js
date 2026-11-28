@@ -559,9 +559,13 @@ export class FeatureManager extends ResourceTracker {
 
     if (requestingFeature === 'selectElement') {
       const pageTranslationManager = this.featureHandlers.get('pageTranslation');
-      if (!pageTranslationManager?.isTranslating && !pageTranslationManager?.isTranslated) return false;
+      if (!pageTranslationManager?.isTranslating && !pageTranslationManager?.isTranslated
+          && !pageTranslationManager?.hasManualContinuity && !pageTranslationManager?.preStartAttempt) return false;
 
-      await pageTranslationManager.restorePage();
+      await pageTranslationManager.restorePage({
+        clearManualContinuity: true,
+        cancellationReason: 'operation-abort',
+      });
       return true;
     }
 
@@ -845,7 +849,7 @@ export class FeatureManager extends ResourceTracker {
 
   _stopPageForNavigation() {
     this._navigationRevision += 1;
-    this.featureHandlers.get('pageTranslation')?.stopAutoTranslation({ cancellationReason: 'operation-abort' }).catch(() => {
+    this._navigationStopPromise = this.featureHandlers.get('pageTranslation')?.stopAutoTranslation({ cancellationReason: 'operation-abort' }).catch(() => {
       logger.warn('Stopping obsolete page translation on navigation failed');
     });
   }
@@ -863,7 +867,7 @@ export class FeatureManager extends ResourceTracker {
     return true;
   }
 
-  checkForUrlChange({ navigationCursor, navigationUnavailable = false } = {}) {
+  checkForUrlChange({ navigationCursor, navigationUnavailable = false, restartFence } = {}) {
     const newUrl = window.location.href;
     let capturedNavigation = false;
     if (navigationCursor !== undefined) {
@@ -880,10 +884,13 @@ export class FeatureManager extends ResourceTracker {
     this._lastDetectedUrl = newUrl;
     this._stopPageForNavigation();
     if (navigationUnavailable) return false;
-    return this.handleUrlChange(oldUrl, newUrl, this._navigationRevision);
+    return this.handleUrlChange(oldUrl, newUrl, this._navigationRevision, {
+      navigationCursor: capturedNavigation ? { ...navigationCursor } : null,
+      restartFence,
+    });
   }
 
-  async handleUrlChange(oldUrl, newUrl, expectedRevision = null) {
+  async handleUrlChange(oldUrl, newUrl, expectedRevision = null, navigationIdentity = null) {
     if (expectedRevision !== null && this._isNavigationStale(expectedRevision)) return;
     let capturedRevision;
     if (expectedRevision !== null) {
@@ -910,6 +917,88 @@ export class FeatureManager extends ResourceTracker {
         return;
       }
 
+      const currentPageManager = this.featureHandlers.get('pageTranslation');
+      if (currentPageManager?.hasManualContinuity) {
+        // A manual grant owns this admitted frame independently of Auto Rules.
+        // Even a stale/rejected manual admission must not fall through to a
+        // second automatic start for the same route.
+        if (!navigationIdentity?.navigationCursor || !navigationIdentity?.restartFence) return;
+        const settingsManager = (await import('@/shared/managers/SettingsManager.js')).default;
+        if (isStale()) return;
+        if (!settingsManager.get('WHOLE_PAGE_TRANSLATION_ENABLED', true) || !settingsManager.isExtensionEnabled()) {
+          const { MessageActions } = await import('@/shared/messaging/core/MessageActions.js');
+          const { sendRegularMessage } = await import('@/shared/messaging/core/UnifiedMessaging.js');
+          void sendRegularMessage({
+            action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+            data: { expectedManualContinuityGeneration: currentPageManager.manualContinuityGeneration },
+          }, { returnFailureResponse: true }).catch(() => {});
+          await currentPageManager.stopAutoTranslation({
+            cancellationReason: 'operation-abort',
+            clearManualContinuity: true,
+          });
+          return;
+        }
+        const isAllowed = await this.exclusionChecker.isFeatureAllowed('pageTranslation');
+        if (isStale()) return;
+        if (!isAllowed) {
+          const { MessageActions } = await import('@/shared/messaging/core/MessageActions.js');
+          const { sendRegularMessage } = await import('@/shared/messaging/core/UnifiedMessaging.js');
+          void sendRegularMessage({
+            action: MessageActions.PAGE_TRANSLATE_STOP_AUTO,
+            data: { expectedManualContinuityGeneration: currentPageManager.manualContinuityGeneration },
+          }, { returnFailureResponse: true }).catch(() => {});
+          await currentPageManager.stopAutoTranslation({
+            cancellationReason: 'operation-abort',
+            clearManualContinuity: true,
+          });
+          return;
+        }
+        const { loadFeature } = await import('@/core/content-scripts/chunks/lazy-features.js');
+        if (isStale()) return;
+        const manager = await loadFeature('pageTranslation');
+        if (isStale() || !manager) return;
+        if (!manager.isActive && !(await manager.activate())) return;
+        if (isStale()) return;
+        await this._navigationStopPromise;
+        if (isStale() || !manager.hasManualContinuity) return;
+        const { MessageActions } = await import('@/shared/messaging/core/MessageActions.js');
+        const { sendRegularMessage } = await import('@/shared/messaging/core/UnifiedMessaging.js');
+        const manualNavigationIsCurrent = async () => {
+          const admission = await sendRegularMessage({
+            action: MessageActions.PAGE_TRANSLATE_ADMIT,
+            data: {
+              origin: 'manual-spa',
+              restartFence: navigationIdentity.restartFence,
+              manualContinuityGeneration: manager.manualContinuityGeneration,
+              manualContinuityAttemptRevision: manager.manualContinuityAttemptRevision,
+              manualContinuityAttemptId: manager.manualContinuityAttemptId,
+              topDocumentEpoch: manager.manualContinuityTopDocumentEpoch,
+              topDocumentToken: manager.manualContinuityTopDocumentToken,
+              documentToken: window.__translateItPageDocumentToken,
+              navigationCursor: navigationIdentity.navigationCursor,
+            },
+          }, { returnFailureResponse: true });
+          return !isStale() && admission?.success === true;
+        };
+        await manager.translatePage({
+          manualSpa: true,
+          isAuto: false,
+          preserveAcceptedTranslations: true,
+          ...(manager.settings?.isExplicitProvider && { provider: manager.settings.translationApi }),
+          targetLanguage: manager.settings?.targetLanguage,
+          hasManualContinuity: true,
+          manualContinuityGeneration: manager.manualContinuityGeneration,
+          manualContinuityAttemptRevision: manager.manualContinuityAttemptRevision,
+          manualContinuityAttemptId: manager.manualContinuityAttemptId,
+          topDocumentEpoch: manager.manualContinuityTopDocumentEpoch,
+          topDocumentToken: manager.manualContinuityTopDocumentToken,
+          navigationCursor: navigationIdentity.navigationCursor,
+          restartFence: navigationIdentity.restartFence,
+          validateNavigation: manualNavigationIsCurrent,
+        });
+        return;
+      }
+
       if (window !== window.top) return;
 
       const { default: settingsManager } = await import('@/shared/managers/SettingsManager.js');
@@ -926,6 +1015,9 @@ export class FeatureManager extends ResourceTracker {
       const isMatch = autoRules.some(rule => matchesAutoTranslateRule(newUrl, rule));
       if (!isMatch) return;
       if (isStale()) return;
+      // URL-only history observations can stop obsolete work, but only a
+      // trusted native identity plus its background fence may restart it.
+      if (!navigationIdentity?.navigationCursor || !navigationIdentity?.restartFence) return;
 
       const isAllowed = await this.exclusionChecker.isFeatureAllowed('pageTranslation');
       if (isStale() || !isAllowed) return;
@@ -935,8 +1027,10 @@ export class FeatureManager extends ResourceTracker {
       const manager = await loadFeature('pageTranslation');
       if (isStale() || !manager) return;
 
-      if (manager.currentUrl !== newUrl) {
+      const overrideUrl = manager.userRestoredOverrideUrl ?? manager.currentUrl;
+      if (manager.userRestoredOverride && overrideUrl && overrideUrl !== newUrl) {
         manager.userRestoredOverride = false;
+        manager.userRestoredOverrideUrl = null;
       }
       if (isStale()) return;
       if (!manager.isActive) {
@@ -952,7 +1046,12 @@ export class FeatureManager extends ResourceTracker {
         if (isStale()) return;
         const response = await sendRegularMessage({
           action: MessageActions.PAGE_TRANSLATE,
-          data: { isAuto: true, preserveAcceptedTranslations: true },
+          data: {
+            isAuto: true,
+            preserveAcceptedTranslations: true,
+            navigationCursor: navigationIdentity.navigationCursor,
+            restartFence: navigationIdentity.restartFence,
+          },
         }, { returnFailureResponse: true });
         if (response?.success === false) {
           logger.debug('SPA auto page translation command rejected', response);

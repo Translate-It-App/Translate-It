@@ -47,10 +47,54 @@ const safeSendMessage = (...args) => {
   };
 }
 
-export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge, replacementConfig, onBuildEnvironment, successfulReplyGate = false, pageBatchOverride }) {
+export function createIframeAdmissionBoundaryPlugin() {
+  const suffix = '/src/core/content-scripts/IFrameContentScriptCore.js';
+  const ready = `const ticket = await browserAPI.runtime.sendMessage({
+                action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+                data: { documentToken },
+              });`;
+  const start = `const result = await browserAPI.runtime.sendMessage({
+                action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+                data: { ...ticket, documentToken },
+              });`;
+  const modules = new Set();
+  return {
+    name: 'benchmark-iframe-admission-boundary',
+    enforce: 'pre',
+    transform(source, id) {
+      const normalizedId = id.split('?')[0].replaceAll('\\', '/');
+      if (!normalizedId.endsWith(suffix)) return null;
+      if (modules.has(normalizedId) || source.split(ready).length !== 2 || source.split(start).length !== 2) {
+        throw new Error(`Expected exactly one production iframe READY and START send site in ${normalizedId}`);
+      }
+      const transformed = source
+        .replace(ready, `const ticket = await globalThis.__pageTranslationIframeCanary.callThrough('ready', browserAPI.runtime, browserAPI.runtime.sendMessage, {
+                action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+                data: { documentToken },
+              });`)
+        .replace(start, `const result = await globalThis.__pageTranslationIframeCanary.callThrough('start', browserAPI.runtime, browserAPI.runtime.sendMessage, {
+                action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+                data: { ...ticket, documentToken },
+              });`);
+      if (transformed.includes(ready) || transformed.includes(start)) throw new Error('Iframe admission boundary transform was incomplete.');
+      modules.add(normalizedId);
+      return { code: transformed, map: null };
+    },
+    assertApplied() {
+      if (modules.size !== 1) throw new Error(`Expected one transformed IFrameContentScriptCore module; found ${modules.size}`);
+      return [...modules];
+    },
+  };
+}
+
+export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', browser = 'chrome', workerEntry, contentEntry, runtimeBridge, replacementConfig, onBuildEnvironment, successfulReplyGate = false, pageBatchOverride, iframeAdmissionCanary = false }) {
   if (!flags[mode]) throw new TypeError(`Unknown discovery mode: ${mode}`);
   if (browser !== 'chrome' && browser !== 'firefox') throw new TypeError(`Unknown browser: ${browser}`);
   if (typeof successfulReplyGate !== 'boolean') throw new TypeError('successfulReplyGate must be boolean.');
+  if (typeof iframeAdmissionCanary !== 'boolean') throw new TypeError('iframeAdmissionCanary must be boolean.');
+  if (iframeAdmissionCanary && (browser !== 'chrome' || mode !== 'sliced' || runtimeBridge || replacementConfig || successfulReplyGate || pageBatchOverride)) {
+    throw new TypeError('iframeAdmissionCanary requires an isolated Sliced Chrome benchmark build.');
+  }
   if (pageBatchOverride !== undefined && (!pageBatchOverride || ![10, 25].includes(pageBatchOverride.batchSize)
       || ![2, 4].includes(pageBatchOverride.workerCap))) throw new TypeError('pageBatchOverride requires batchSize 10/25 and workerCap 2/4.');
   if (successfulReplyGate && (browser !== 'chrome' || mode !== 'sliced' || !contentEntry)) {
@@ -94,6 +138,7 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   const replacementPlugins = replacementConfig ? createReplacementPlugins({ replacementConfig, workerEntry, contentEntry }) : [];
   const firefoxSchedulerBatchPlugin = runtimeBridge?.pageTranslationE2E === true ? createFirefoxSchedulerBatchPlugin() : null;
   const successfulReplyBoundaryPlugin = successfulReplyGate ? createSuccessfulReplyBoundaryPlugin() : null;
+  const iframeAdmissionBoundaryPlugin = iframeAdmissionCanary ? createIframeAdmissionBoundaryPlugin() : null;
   const pageBatchOverridePlugin = pageBatchOverride ? createPageBatchOverridePlugin(pageBatchOverride) : null;
   const environmentPlugin = role => ({
     name: `benchmark-build-environment-${role}`,
@@ -144,7 +189,9 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
     ...base,
     mode: 'production',
     base: './',
-    plugins: [...base.plugins, environmentPlugin(role), ...(role === 'content' && successfulReplyBoundaryPlugin ? [successfulReplyBoundaryPlugin] : [])],
+    plugins: [...base.plugins, environmentPlugin(role),
+      ...(role === 'content' && successfulReplyBoundaryPlugin ? [successfulReplyBoundaryPlugin] : []),
+      ...(role === 'content' && iframeAdmissionBoundaryPlugin ? [iframeAdmissionBoundaryPlugin] : [])],
     configFile: false,
     publicDir: false,
     logLevel: runtimeBridge || replacementConfig ? 'silent' : 'error',
@@ -168,8 +215,11 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
       : replacementConfig ? 'virtual:page-replacement-content'
       : contentEntry ?? resolve('src/core/content-scripts/index-main.js');
     await buildEntry('worker', { worker: workerInput }, workerOut, false);
-    await buildEntry('content', { 'content-entry': contentInput }, contentOut, true);
+    await buildEntry('content', iframeAdmissionCanary
+      ? { 'content-entry': contentInput, 'iframe-entry': resolve('src/core/content-scripts/index-iframe.js') }
+      : { 'content-entry': contentInput }, contentOut, true);
     successfulReplyBoundaryPlugin?.assertApplied();
+    iframeAdmissionBoundaryPlugin?.assertApplied();
     firefoxSchedulerBatchPlugin?.assertApplied();
     pageBatchOverridePlugin?.assertApplied();
     const environment = { worker: environmentProfiles.worker[0], content: environmentProfiles.content[0] };
@@ -213,14 +263,17 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
       : { service_worker: 'worker.js', type: 'module' },
     permissions: ['storage', 'alarms', 'tabs', 'scripting', 'notifications', 'contextMenus', 'webNavigation'],
     host_permissions: ['http://127.0.0.1/*', 'https://*/*', 'http://*/*'],
-    content_scripts: [{ matches: ['http://127.0.0.1/*'], js: ['content-loader.js'], run_at: 'document_idle' }],
+    content_scripts: [iframeAdmissionCanary
+      ? { matches: ['http://127.0.0.1/*', 'http://a.test/*', 'http://b.test/*'], js: ['iframe-canary-loader.js'], run_at: 'document_start', all_frames: true }
+      : { matches: ['http://127.0.0.1/*'], js: ['content-loader.js'], run_at: 'document_idle' }],
     commands: {
       'SELECT-ELEMENT-COMMAND': {
         suggested_key: { default: 'Alt+A', mac: 'Alt+Shift+S' },
         description: 'Activate the Select Element mode for translation.',
       },
     },
-    web_accessible_resources: [{ resources: ['content-entry.js', 'chunks/*'], matches: ['http://127.0.0.1/*'] }],
+    web_accessible_resources: [{ resources: iframeAdmissionCanary ? ['content-entry.js', 'iframe-entry.js', 'chunks/*'] : ['content-entry.js', 'chunks/*'], matches: iframeAdmissionCanary
+      ? ['http://127.0.0.1/*', 'http://a.test/*', 'http://b.test/*'] : ['http://127.0.0.1/*'] }],
   };
   if (browser === 'firefox') {
     manifest.browser_specific_settings = {
@@ -233,7 +286,66 @@ export async function buildBenchmarkExtension({ outputDir, mode = 'legacy', brow
   }
   await writeFile(resolve(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   const runtime = browser === 'firefox' ? 'browser' : 'chrome';
-  await writeFile(resolve(outDir, 'content-loader.js'), `import(${runtime}.runtime.getURL('content-entry.js')).catch(error => console.error('Benchmark content entry failed', error));\n`);
+  await writeFile(resolve(outDir, iframeAdmissionCanary ? 'iframe-canary-loader.js' : 'content-loader.js'), iframeAdmissionCanary
+    ? `(() => {
+  if (window === window.top) {
+    import(chrome.runtime.getURL('content-entry.js')).catch(error => console.error('Benchmark content entry failed', error));
+    return;
+  }
+  const events = [];
+  const iframeCanary = {
+    events,
+    holdStart: window.name === '__page_translation_hold_start__',
+    heldStart: false,
+    releaseStart: null,
+    abortStart: null,
+    releaseHeldStart() {
+      if (!this.releaseStart) return false;
+      const release = this.releaseStart;
+      this.releaseStart = null;
+      this.abortStart = null;
+      release();
+      return true;
+    },
+    abortHeldStart() {
+      if (!this.abortStart) return false;
+      const abort = this.abortStart;
+      this.releaseStart = null;
+      this.abortStart = null;
+      abort(new Error('Held benchmark iframe START aborted during cleanup.'));
+      return true;
+    },
+    async callThrough(stage, receiver, send, message) {
+      const startedAt = performance.now();
+      if (stage === 'start' && this.holdStart && !this.heldStart) {
+        this.heldStart = true;
+        events.push({ stage: 'start-held', message, startedAt,
+          documentToken: globalThis.__translateItPageDocumentToken ?? null });
+        await new Promise((resolve, reject) => {
+          this.releaseStart = resolve;
+          this.abortStart = reject;
+        });
+        this.holdStart = false;
+      }
+      try {
+        const response = await Reflect.apply(send, receiver, [message]);
+        events.push({ stage, message, response, startedAt, settledAt: performance.now(),
+          documentToken: globalThis.__translateItPageDocumentToken ?? null });
+        return response;
+      } catch (error) {
+        events.push({ stage, message, error: { name: error?.name ?? 'Error', message: error?.message ?? String(error) },
+          startedAt, settledAt: performance.now(), documentToken: globalThis.__translateItPageDocumentToken ?? null });
+        throw error;
+      }
+    },
+  };
+  globalThis.__pageTranslationIframeCanary = {
+    ...iframeCanary,
+  };
+  import(chrome.runtime.getURL('iframe-entry.js')).catch(error => console.error('Benchmark iframe entry failed', error));
+})();
+`
+    : `import(${runtime}.runtime.getURL('content-entry.js')).catch(error => console.error('Benchmark content entry failed', error));\n`);
   if (harnessSecret) await assertBridgeTokenIsolation(outDir, harnessSecret);
   return outDir;
   } finally {

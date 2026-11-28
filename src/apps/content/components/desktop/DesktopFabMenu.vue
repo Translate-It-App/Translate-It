@@ -514,11 +514,48 @@ const emit = defineEmits(["dismiss", "presence"]);
 const sendPageCommand = (message) => {
   void sendRegularMessage(message, { returnFailureResponse: true })
     .then((response) => {
+      if (message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) {
+        const state = mobileStore.pageTranslationData;
+        const generation = response?.manualContinuityGeneration;
+        const committedRevoke = response?.hasManualContinuity === false
+          && Number.isSafeInteger(generation)
+          && generation >= 0
+          && generation >= (state.manualContinuityGeneration ?? -1);
+        const cancellationUncertain = (response?.success !== true && !committedRevoke)
+          || (!committedRevoke && state.hasManualContinuity === true)
+          || (Array.isArray(response?.frames) && response.frames.some((frame) => frame?.success !== true));
+
+        if (committedRevoke) {
+          mobileStore.setPageTranslation({
+            hasManualContinuity: false,
+            manualContinuityGeneration: generation,
+          });
+        }
+        if (cancellationUncertain || (!committedRevoke && state.hasManualContinuity === true)) {
+          mobileStore.setPageTranslation({
+            status: state.isTranslating || state.isAutoTranslating
+              ? state.status
+              : TRANSLATION_STATUS.ERROR,
+            errorMessage: committedRevoke
+              ? "Stop committed, but cancellation delivery was incomplete"
+              : "Unable to confirm that auto-translation was stopped",
+          });
+        }
+      }
       if (response?.success === false) {
-        logger.debug("Page translation command rejected", response);
+        logger.warn("Page translation command was not fully successful", response);
       }
     })
     .catch((error) => {
+      if (message.action === MessageActions.PAGE_TRANSLATE_STOP_AUTO) {
+        const state = mobileStore.pageTranslationData;
+        mobileStore.setPageTranslation({
+          status: state.isTranslating || state.isAutoTranslating
+            ? state.status
+            : TRANSLATION_STATUS.ERROR,
+          errorMessage: "Unable to confirm that auto-translation was stopped",
+        });
+      }
       if (ExtensionContextManager.isContextError(error)) {
         ExtensionContextManager.handleContextError(
           error,
@@ -1093,7 +1130,7 @@ const menuItems = computed(() => {
       }
     : null;
 
-  if (status.isAuto || status.isTranslating) {
+  if (status.isAuto || status.isTranslating || status.hasManualContinuity) {
     items.push({
       id: "page_translating_stop",
       label: t("desktop_fab_stop_auto_translating_label"),
@@ -1150,19 +1187,21 @@ const pageTranslationStatus = computed(() => {
   const data = mobileStore.pageTranslationData;
   const isTranslating = data.status === TRANSLATION_STATUS.TRANSLATING;
   const isAuto = data.isAutoTranslating;
+  const hasManualContinuity = data.hasManualContinuity === true;
 
   // A page is considered "Completed" (for UI purposes) if it's fully translated,
   // marked as completed, OR has some partial translations that can be restored.
   const isCompleted =
     !isTranslating &&
     !isAuto &&
+    !hasManualContinuity &&
     (data.isTranslated ||
       data.status === TRANSLATION_STATUS.COMPLETED ||
       (data.totalCount > 0 && data.translatedCount >= data.totalCount));
 
   const isError = data.status === TRANSLATION_STATUS.ERROR;
 
-  const isActive = isTranslating || isAuto || isCompleted || isError;
+  const isActive = isTranslating || isAuto || hasManualContinuity || isCompleted || isError;
   const processedCount = (data.translatedCount || 0) + (data.failedCount || 0);
   const percent =
     data.totalCount > 0
@@ -1173,6 +1212,8 @@ const pageTranslationStatus = computed(() => {
     isActive,
     isTranslating,
     isAuto,
+    hasManualContinuity,
+    isTranslated: data.isTranslated === true,
     isCompleted,
     isError,
     percent,

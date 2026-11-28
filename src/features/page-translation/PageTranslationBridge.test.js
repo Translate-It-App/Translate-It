@@ -129,7 +129,7 @@ describe('PageTranslationBridge', () => {
       const result = await translateWithContext(originalText, 1);
       
       // targetLanguage is 'fa' (RTL), so should use RLM
-      expect(onTranslateCallback).toHaveBeenCalledWith('Hello', null, 1, undefined);
+      expect(onTranslateCallback).toHaveBeenCalledWith('Hello', null, 1, undefined, expect.any(Function));
       expect(result).toBe(`  ${BIDI_MARKS.RLM}Translated: Hello  `);
     });
 

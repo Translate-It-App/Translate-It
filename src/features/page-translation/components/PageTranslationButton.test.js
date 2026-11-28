@@ -39,6 +39,7 @@ const mockUsePageTranslation = {
   isTranslating: ref(false),
   isTranslated: ref(false),
   isAutoTranslating: ref(false),
+  hasManualContinuity: ref(false),
   progress: ref(0),
   message: ref(""),
   canTranslate: ref(true),
@@ -105,6 +106,7 @@ describe("PageTranslationButton.vue", () => {
     mockUsePageTranslation.isTranslating.value = false;
     mockUsePageTranslation.isTranslated.value = false;
     mockUsePageTranslation.isAutoTranslating.value = false;
+    mockUsePageTranslation.hasManualContinuity.value = false;
     mockUsePageTranslation.progress.value = 0;
     mockUsePageTranslation.canTranslate.value = true;
     mockUsePageTranslation.canRestore.value = false;
@@ -145,6 +147,28 @@ describe("PageTranslationButton.vue", () => {
     mockUsePageTranslation.canRestore.value = true;
     const wrapper = mount(PageTranslationButton);
     expect(wrapper.text()).toContain("page_translation_btn_restore");
+  });
+
+  it("shows only the current action for activity and manual continuity state", () => {
+    mockUsePageTranslation.isTranslating.value = true;
+    const staleActivity = mount(PageTranslationButton);
+    expect(staleActivity.findComponent({ name: "BaseButton" }).exists()).toBe(true);
+    expect(staleActivity.text()).toContain("popup_string_during_translate");
+    expect(staleActivity.text()).not.toContain("page_translation_btn_translate");
+    staleActivity.unmount();
+
+    mockUsePageTranslation.isTranslating.value = false;
+    mockUsePageTranslation.isAutoTranslating.value = true;
+    const autoActive = mount(PageTranslationButton);
+    expect(autoActive.text()).toContain("page_translation_btn_stop");
+    autoActive.unmount();
+
+    mockUsePageTranslation.isAutoTranslating.value = false;
+    mockUsePageTranslation.isTranslated.value = true;
+    mockUsePageTranslation.canRestore.value = true;
+    const translated = mount(PageTranslationButton);
+    expect(translated.text()).toContain("page_translation_btn_restore");
+    expect(translated.text()).not.toContain("page_translation_btn_stop");
   });
 
   it("should show progress bar when translating with progress > 0", async () => {
@@ -750,5 +774,33 @@ describe("PageTranslationButton.vue", () => {
         "ERRORS_API_URL_MISSING",
       );
     });
+  });
+});
+
+describe("manual continuity controls", () => {
+  it("shows only Stop for retained content between manual passes", () => {
+    mockUsePageTranslation.hasManualContinuity.value = true;
+    mockUsePageTranslation.isTranslated.value = true;
+    mockUsePageTranslation.canRestore.value = true;
+    const wrapper = mount(PageTranslationButton);
+
+    expect(wrapper.text()).toContain("page_translation_btn_stop");
+    expect(wrapper.text()).not.toContain("page_translation_btn_restore");
+  });
+
+  it("shows Restore after continuity stops and Translate after content is restored", () => {
+    mockUsePageTranslation.isTranslating.value = false;
+    mockUsePageTranslation.isAutoTranslating.value = false;
+    mockUsePageTranslation.hasManualContinuity.value = false;
+    mockUsePageTranslation.isTranslated.value = true;
+    mockUsePageTranslation.canRestore.value = true;
+    const restored = mount(PageTranslationButton);
+    expect(restored.text()).toContain("page_translation_btn_restore");
+    expect(restored.text()).not.toContain("page_translation_btn_stop");
+
+    mockUsePageTranslation.isTranslated.value = false;
+    mockUsePageTranslation.canRestore.value = false;
+    const idle = mount(PageTranslationButton);
+    expect(idle.text()).toContain("page_translation_btn_translate");
   });
 });

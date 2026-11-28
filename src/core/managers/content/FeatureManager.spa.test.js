@@ -35,7 +35,6 @@ describe('SPA navigation behavioral deterministic', () => {
     manager = new FeatureManager();
     manager._lifecycleRevision = 0;
     manager._navigationRevision = 0;
-    manager._lastDetectedUrl = 'https://a.example/';
     manager.initialized = true;
     manager.exclusionChecker = mocks.exclusionChecker;
     mocks.settingsManager.isExtensionEnabled.mockReturnValue(true);
@@ -46,7 +45,7 @@ describe('SPA navigation behavioral deterministic', () => {
     });
     mocks.matchesAutoTranslateRule.mockReturnValue(true);
     mocks.exclusionChecker.isFeatureAllowed.mockResolvedValue(true);
-    mocks.loadFeature.mockResolvedValue({ currentUrl: 'https://b.example/pageB', userRestoredOverride: false, autoStartCancelledUrls: new Set(), isActive: false, activate: vi.fn().mockResolvedValue() });
+    mocks.loadFeature.mockResolvedValue({ userRestoredOverride: false, autoStartCancelledUrls: new Set(), isActive: false, activate: vi.fn().mockResolvedValue() });
     mocks.sendRegularMessage.mockResolvedValue({ success: true });
     vi.spyOn(manager, 'reevaluateFeatures').mockResolvedValue();
   });
@@ -64,20 +63,80 @@ describe('SPA navigation behavioral deterministic', () => {
       return Promise.resolve(true);
     });
 
-    const navA = manager.handleUrlChange('https://a.example/', 'https://a.example/pageA');
-    await enteredA.promise;
-    expect(mocks.exclusionChecker.isFeatureAllowed).toHaveBeenCalledTimes(1);
+    const originalUrl = window.location.href;
+    const navigate = (path, routeRevision) => {
+      window.history.replaceState({}, '', path);
+      return manager.checkForUrlChange({
+        navigationCursor: { documentEpoch: 1, routeRevision, url: window.location.href },
+        restartFence: 'same-tab-fence',
+      });
+    };
 
-    const navB = manager.handleUrlChange('https://a.example/pageA', 'https://b.example/pageB');
-    await navB;
-    expect(mocks.sendRegularMessage).toHaveBeenCalledTimes(1);
-    expect(manager._lastDetectedUrl).toBe('https://b.example/pageB');
+    try {
+      const navA = navigate('/pageA', 1);
+      await enteredA.promise;
+      expect(mocks.exclusionChecker.isFeatureAllowed).toHaveBeenCalledTimes(1);
 
-    allowA.resolve(true);
-    await navA;
-    // A should not have caused second send
-    expect(mocks.sendRegularMessage).toHaveBeenCalledTimes(1);
-    // A should not have mutated stale manager state
-    expect(manager._lastDetectedUrl).toBe('https://b.example/pageB');
+      await navigate('/pageB', 2);
+      const urlB = window.location.href;
+      expect(mocks.sendRegularMessage).toHaveBeenCalledOnce();
+      expect(manager._lastDetectedUrl).toBe(urlB);
+
+      allowA.resolve(true);
+      await navA;
+      expect(mocks.sendRegularMessage).toHaveBeenCalledOnce();
+      expect(manager._lastDetectedUrl).toBe(urlB);
+    } finally {
+      allowA.resolve(true);
+      window.history.replaceState({}, '', originalUrl);
+    }
+  });
+
+  it('continues a manual grant locally across A→B→A without an Auto Rule duplicate', async () => {
+    const originalUrl = window.location.href;
+    const pageManager = {
+      hasManualContinuity: true,
+      manualContinuityGeneration: 7,
+      manualContinuityTopDocumentEpoch: 3,
+      isActive: true,
+      settings: { isExplicitProvider: true, translationApi: 'explicit-provider', targetLanguage: 'fr' },
+      stopAutoTranslation: vi.fn().mockResolvedValue({ success: true }),
+      translatePage: vi.fn().mockResolvedValue({ success: true }),
+      activate: vi.fn().mockResolvedValue(true),
+    };
+    manager.featureHandlers.set('pageTranslation', pageManager);
+    mocks.loadFeature.mockResolvedValue(pageManager);
+
+    const navigate = async (path, routeRevision) => {
+      window.history.replaceState({}, '', path);
+      await manager.checkForUrlChange({
+        navigationCursor: { documentEpoch: 3, routeRevision, url: window.location.href },
+        restartFence: 'shared-fence',
+      });
+    };
+    try {
+      await navigate('/a', 1);
+      await navigate('/b', 2);
+      await navigate('/a', 3);
+      await navigate('/a', 3); // duplicate notification is a no-op
+
+      expect(pageManager.translatePage).toHaveBeenCalledTimes(3);
+      for (const [options] of pageManager.translatePage.mock.calls) {
+        expect(options).toMatchObject({
+          manualSpa: true,
+          isAuto: false,
+          preserveAcceptedTranslations: true,
+          provider: 'explicit-provider',
+          targetLanguage: 'fr',
+          manualContinuityGeneration: 7,
+          topDocumentEpoch: 3,
+          restartFence: 'shared-fence',
+        });
+        expect(options.validateNavigation).toEqual(expect.any(Function));
+      }
+      expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState({}, '', originalUrl);
+    }
   });
 });

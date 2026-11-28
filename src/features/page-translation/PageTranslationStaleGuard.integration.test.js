@@ -591,7 +591,8 @@ describe('PageTranslationBridge stale settlement integration', () => {
     pendingElement.appendChild(pendingNode);
     document.body.append(completedNode, pendingElement);
     const { pending } = await startDeferredTranslation();
-    await vi.waitFor(() => expect(pending.length).toBe(2));
+    await vi.waitFor(() => expect(pending.some(item => item.node === completedNode)
+      && pending.some(item => item.node === pendingNode)).toBe(true));
     pending.find(item => item.node === completedNode).resolve(settlement('Completed translation'));
     await vi.waitFor(() => expect(completedNode.nodeValue).toContain('Completed translation'));
 
@@ -608,7 +609,8 @@ describe('PageTranslationBridge stale settlement integration', () => {
     bridge.restore(document.body);
     expect(completedNode.nodeValue).toBe('Completed source');
     const { pending: nextSession } = await startDeferredTranslation();
-    nextSession.forEach(item => item.resolve(settlement('Retranslated')));
+    await vi.waitFor(() => expect(nextSession.some(item => item.node === pendingNode)).toBe(true));
+    nextSession.find(item => item.node === pendingNode).resolve(settlement('Retranslated'));
     await vi.waitFor(() => expect(pendingNode.nodeValue).toContain('Retranslated'));
   });
 

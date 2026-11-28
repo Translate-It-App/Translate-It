@@ -3,11 +3,17 @@ import browser from 'webextension-polyfill';
 
 vi.mock('webextension-polyfill', () => ({
   default: {
-    tabs: { sendMessage: vi.fn(), query: vi.fn(() => Promise.resolve([])) },
+    tabs: {
+      sendMessage: vi.fn(), query: vi.fn(() => Promise.resolve([])),
+      onRemoved: { addListener: vi.fn() },
+    },
     webNavigation: { getAllFrames: vi.fn(() => Promise.resolve([])), onCommitted: { addListener: vi.fn() } },
     scripting: { executeScript: vi.fn() },
     runtime: { sendMessage: vi.fn(() => Promise.resolve()), getURL: vi.fn(() => 'chrome-extension://test/'), id: 'test' },
-    storage: { onChanged: { addListener: vi.fn(), removeListener: vi.fn() } },
+    storage: {
+      session: { get: vi.fn(() => Promise.resolve({})), set: vi.fn(() => Promise.resolve()) },
+      onChanged: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
     contextMenus: { create: vi.fn(), update: vi.fn(), remove: vi.fn(), removeAll: vi.fn(), onClicked: { addListener: vi.fn() } },
   },
 }));
@@ -47,6 +53,9 @@ vi.mock('../utils/activationError.js', () => ({
 vi.mock('@/features/exclusion/utils/exclusion-utils.js', () => ({
   checkUrlExclusionAsync: vi.fn(() => Promise.resolve(false)),
 }));
+vi.mock('@/core/background/handlers/page-translation/handlePageTranslation.js', () => ({
+  revokeManualPageAuthority: vi.fn(),
+}));
 
 import {
   clearStateForTab,
@@ -74,6 +83,7 @@ import { handleDeactivateSelectElementMode } from './handleDeactivateSelectEleme
 import { handleActivateSelectElementMode } from './handleActivateSelectElementMode.js';
 import { handleSelectElementFrameReady } from './handleSelectElementFrameReady.js';
 import { checkUrlExclusionAsync } from '@/features/exclusion/utils/exclusion-utils.js';
+import { revokeManualPageAuthority } from '@/core/background/handlers/page-translation/handlePageTranslation.js';
 
 function establishActiveSession(tabId, frameId, documentId) {
   const generation = createActivationGeneration(tabId);
@@ -97,6 +107,7 @@ function establishProvisionalDebt(tabId, frameId, documentId) {
 describe('Select Element authority races', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    revokeManualPageAuthority.mockResolvedValue(true);
     for (const tabId of [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119]) {
       clearStateForTab(tabId);
       clearTabParticipants(tabId);
@@ -428,6 +439,33 @@ describe('Select Element authority races', () => {
     expect(result).toMatchObject({ success: true, activated: true });
     expect(getParticipants(tabId).size).toBe(0);
     expect(getCompatibilityFrames(tabId)).toEqual(new Map([[0, activationGeneration]]));
+  });
+
+  it('waits for tab authority revocation before dispatching Select activation', async () => {
+    const tabId = 120;
+    let finishRevocation;
+    revokeManualPageAuthority.mockImplementation(() => new Promise(resolve => { finishRevocation = resolve; }));
+    browser.tabs.sendMessage.mockImplementation(async (_id, message) => ({
+      success: true,
+      activated: true,
+      activationGeneration: message.data.activationGeneration,
+      activationEpoch: message.data.activationEpoch,
+    }));
+    const activation = handleActivateSelectElementMode({ data: { tabId, active: true } }, {});
+    await vi.waitFor(() => expect(finishRevocation).toBeTypeOf('function'));
+    expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
+    finishRevocation(true);
+    await expect(activation).resolves.toMatchObject({ success: true, activated: true });
+    expect(revokeManualPageAuthority).toHaveBeenCalledWith(tabId);
+    expect(browser.tabs.sendMessage).toHaveBeenCalled();
+  });
+
+  it('does not dispatch Select activation when tab authority revocation fails', async () => {
+    const tabId = 121;
+    revokeManualPageAuthority.mockResolvedValue(false);
+    const result = await handleActivateSelectElementMode({ data: { tabId, active: true } }, {});
+    expect(result).toMatchObject({ success: false, activated: false });
+    expect(browser.tabs.sendMessage).not.toHaveBeenCalled();
   });
 
   it('reuses authoritative generation for ready iframe without allocating another generation', async () => {

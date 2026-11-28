@@ -2,6 +2,7 @@ import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
 import { MessageFormat, MessagingContexts, reconstructTranslationError, isStructuredTranslationError } from '@/shared/messaging/core/MessagingCore.js';
 import { TranslationMode } from '@/shared/config/config.js';
 import browser from 'webextension-polyfill';
+import { sendRegularMessage } from '@/shared/messaging/core/UnifiedMessaging.js';
 import { getScopedLogger } from '@/shared/logging/logger.js';
 import { LOG_COMPONENTS } from '@/shared/logging/logConstants.js';
 import { revertHandler } from './RevertHandler.js';
@@ -75,6 +76,8 @@ export class ContentMessageHandler extends ResourceTracker {
     this._externallyRegistered = false;
     this._externalMessageHandler = null;
     this._registeredActions = new Set();
+    this._pageRestartRevision = 0;
+    this._manualContinuityGeneration = null;
     this.isActive = false;
     this.context = MessagingContexts.CONTENT;
     this.logger = getScopedLogger(LOG_COMPONENTS.MESSAGING, 'MessageHandler');
@@ -974,12 +977,106 @@ export class ContentMessageHandler extends ResourceTracker {
   }
 
   async handlePageTranslate(message) {
+    if (Object.hasOwn(message.data || {}, 'initialDocumentToken')
+        && (typeof message.data.initialDocumentToken !== 'string' || !message.data.initialDocumentToken
+          || window.__translateItPageDocumentToken !== message.data.initialDocumentToken)) {
+      return { success: false, reason: 'obsolete_navigation' };
+    }
+    if (message.data?.origin !== 'manual-frame') {
+      const result = await this._handlePageTranslate(message);
+      return message.data?.hasManualContinuity === true && result?.success === true
+        && typeof window.__translateItPageDocumentToken === 'string'
+        && window.__translateItPageDocumentToken
+        ? { ...result, documentToken: window.__translateItPageDocumentToken }
+        : result;
+    }
+    const documentToken = message.data.documentToken;
+    if (typeof documentToken !== 'string' || !documentToken
+        || window.__translateItPageDocumentToken !== documentToken) {
+      return { success: false, reason: 'obsolete_navigation' };
+    }
+    const cursor = message.data.navigationCursor || {};
+    const key = `${documentToken}:${message.data.manualContinuityGeneration}:${cursor.documentEpoch}:${cursor.routeRevision}`;
+    if (this._manualFrameStartAcceptedKey === key) {
+      return { success: true, skipped: true, reason: 'duplicate_manual_frame_start' };
+    }
+    this._manualFrameStartInFlight ||= new Set();
+    if (this._manualFrameStartInFlight.has(key)) {
+      return { success: false, skipped: true, reason: 'manual_frame_start_in_progress' };
+    }
+    this._manualFrameStartInFlight.add(key);
+    try {
+      const result = await this._handlePageTranslate(message);
+      if (result?.success === true && window.__translateItPageDocumentToken === documentToken) {
+        this._manualFrameStartAcceptedKey = key;
+      }
+      return message.data?.hasManualContinuity === true && result && typeof result === 'object'
+        ? {
+          ...result,
+          ...(typeof window.__translateItPageDocumentToken === 'string'
+            && { documentToken: window.__translateItPageDocumentToken }),
+        }
+        : result;
+    } finally {
+      this._manualFrameStartInFlight.delete(key);
+    }
+  }
+
+  async _handlePageTranslate(message) {
     this.logger.info('Page translation request received');
+    const continuityGeneration = message.data?.manualContinuityGeneration;
+    if (Number.isSafeInteger(continuityGeneration)
+        && this._manualContinuityGeneration != null
+        && continuityGeneration < this._manualContinuityGeneration) {
+      return { success: false, reason: 'stale_manual_continuity_generation' };
+    }
+    if (Number.isSafeInteger(continuityGeneration)) this._manualContinuityGeneration = continuityGeneration;
+    if (message.data?.cancel === true || message.data?.isAuto !== true) this._pageRestartRevision += 1;
+    const hasManualGrant = message.data?.hasManualContinuity === true
+      && Number.isSafeInteger(message.data?.manualContinuityGeneration);
+    const boundNavigation = message.data?.restartFence || hasManualGrant ? {
+      ...message.data,
+      origin: hasManualGrant
+        ? (message.data?.origin === 'manual-frame'
+          ? 'manual-frame'
+          : (message.data?.restartFence ? 'manual-spa' : 'manual-start'))
+        : 'auto',
+      localRevision: this._pageRestartRevision,
+    } : null;
+    const navigationIsCurrent = async ({ phase } = {}) => {
+      if (!boundNavigation) return true;
+      if (this._pageRestartRevision !== boundNavigation.localRevision
+          || window.location.href !== boundNavigation.navigationCursor?.url) return false;
+      const documentToken = boundNavigation.documentToken ?? window.__translateItPageDocumentToken;
+      if (hasManualGrant && (typeof documentToken !== 'string' || !documentToken)) return false;
+      const admission = await sendRegularMessage({
+        action: MessageActions.PAGE_TRANSLATE_ADMIT,
+        data: {
+          origin: boundNavigation.origin,
+          admissionPhase: phase,
+          restartFence: boundNavigation.restartFence,
+          manualContinuityGeneration: boundNavigation.manualContinuityGeneration,
+          manualContinuityAttemptRevision: boundNavigation.manualContinuityAttemptRevision,
+          manualContinuityAttemptId: boundNavigation.manualContinuityAttemptId,
+          topDocumentEpoch: boundNavigation.topDocumentEpoch,
+          topDocumentToken: boundNavigation.topDocumentToken,
+          navigationCursor: boundNavigation.navigationCursor,
+          documentToken,
+          topNavigationCursor: boundNavigation.topNavigationCursor,
+        },
+      }, { returnFailureResponse: true });
+      return this._pageRestartRevision === boundNavigation.localRevision && admission?.success === true;
+    };
+    if (boundNavigation && !await navigationIsCurrent()) {
+      return { success: false, reason: 'obsolete_navigation' };
+    }
 
     // Check for cancel flag
-    if (message.data?.cancel) {
-      if (this.pageTranslationManager) {
-        this.pageTranslationManager.cancelTranslation();
+      if (message.data?.cancel) {
+        if (this.pageTranslationManager) {
+          this.pageTranslationManager.cancelTranslation({
+            manualContinuityGeneration: message.data?.manualContinuityGeneration,
+          });
         return { success: true, cancelled: true };
       }
       return { success: false, error: 'PageTranslationManager not available' };
@@ -1006,6 +1103,10 @@ export class ContentMessageHandler extends ResourceTracker {
         this.logger.warn('translateItContentCore not available, UI state sync may not work');
       }
 
+      if (boundNavigation && !await navigationIsCurrent()) {
+        return { success: false, reason: 'obsolete_navigation' };
+      }
+
       // Reacquire inactive instances so commands share the current navigation owner.
       if (!this.pageTranslationManager?.isActive) {
         try {
@@ -1021,6 +1122,9 @@ export class ContentMessageHandler extends ResourceTracker {
           throw new Error(`PageTranslationManager not available: ${loadError.message}`);
         }
       }
+      if (boundNavigation && !await navigationIsCurrent()) {
+        return { success: false, reason: 'obsolete_navigation' };
+      }
 
       // Ensure manager is initialized
       let managerReady = this.pageTranslationManager.isActive;
@@ -1032,8 +1136,26 @@ export class ContentMessageHandler extends ResourceTracker {
         this._ensureChildFrameRetirementListener();
       }
 
+      if (message.data?.isAuto === true && message.data?.preserveAcceptedTranslations
+          && this.pageTranslationManager.hasManualContinuity) {
+        return { success: true, skipped: true, reason: 'manual_continuity_owns_route' };
+      }
+
+      if (message.data?.origin === 'manual-frame') {
+        if (window.__translateItPageDocumentToken !== message.data.documentToken) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+        if (!await navigationIsCurrent()) return { success: false, reason: 'obsolete_navigation' };
+        if (window.__translateItPageDocumentToken !== message.data.documentToken) {
+          return { success: false, reason: 'obsolete_navigation' };
+        }
+      }
+
       // Execute page translation - PASS message.data to support options like { isAuto: true }
-      const result = await this.pageTranslationManager.translatePage(message.data || {});
+      const result = await this.pageTranslationManager.translatePage({
+        ...(message.data || {}),
+          ...(boundNavigation && { validateNavigation: navigationIsCurrent }),
+      });
 
       // Log appropriate message based on whether this is auto-translation (async) or immediate completion
       if (result.isAutoTranslating) {
@@ -1077,15 +1199,23 @@ export class ContentMessageHandler extends ResourceTracker {
     }
   }
 
-  async handlePageRestore() {
+  async handlePageRestore(message = {}) {
     this.logger.info('Page restore request received');
+    const generation = message.data?.manualContinuityGeneration;
+    if (Number.isSafeInteger(generation) && this._manualContinuityGeneration != null
+        && generation < this._manualContinuityGeneration) return { success: true, ignored: true };
+    this._pageRestartRevision += 1;
+    if (Number.isSafeInteger(generation)) this._manualContinuityGeneration = generation;
 
     if (!this.pageTranslationManager) {
       return { success: false, error: 'PageTranslationManager not available' };
     }
 
     try {
-      const result = await this.pageTranslationManager.restorePage({ manual: true });
+      const result = await this.pageTranslationManager.restorePage({
+        manual: true,
+        manualContinuityGeneration: message.data?.manualContinuityGeneration,
+      });
 
       this.logger.info('Page restore completed', {
         restoredCount: result.restoredCount
@@ -1143,15 +1273,41 @@ export class ContentMessageHandler extends ResourceTracker {
     };
   }
 
-  async handlePageStopAuto() {
+  async handlePageStopAuto(message = {}) {
     this.logger.info('Page stop auto-translation request received');
+    const generation = message.data?.manualContinuityGeneration;
+    if (Number.isSafeInteger(generation)) {
+      const authority = await sendRegularMessage({
+        action: MessageActions.PAGE_TRANSLATE_ADMIT,
+        data: { origin: 'manual-stop', manualContinuityGeneration: generation },
+      }, { returnFailureResponse: true });
+      if (authority?.success === true && authority.authorized === false) {
+        return { success: true, ignored: true };
+      }
+      if (authority?.success !== true || authority.authorized !== true) {
+        return {
+          success: false,
+          reason: 'manual_continuity_status_unavailable',
+          isTransportFailure: true,
+        };
+      }
+    }
+    if (Number.isSafeInteger(generation) && this._manualContinuityGeneration != null
+        && generation < this._manualContinuityGeneration) return { success: true, ignored: true };
+    this._pageRestartRevision += 1;
+    if (Number.isSafeInteger(generation)) this._manualContinuityGeneration = generation;
 
     if (!this.pageTranslationManager) {
       return { success: false, error: 'PageTranslationManager not available' };
     }
 
     try {
-      const result = await this.pageTranslationManager.stopAutoTranslation();
+      const result = await this.pageTranslationManager.stopAutoTranslation({
+        ...(message.data?.internalSettingsInvalidation === true
+          && { cancellationReason: 'operation-abort' }),
+        manualContinuityGeneration: message.data?.manualContinuityGeneration,
+        clearManualContinuity: message.data?.hasManualContinuity === false,
+      });
       return result;
     } catch (error) {
       this.logger.error('Page stop auto failed:', error);

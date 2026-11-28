@@ -98,14 +98,20 @@ describe('FeatureManager SPA auto page command transport', () => {
     manager.reevaluateFeatures = vi.fn().mockResolvedValue(undefined);
     mocks.loadFeature.mockResolvedValue(pageTranslationManager);
 
-    await manager.handleUrlChange('https://old.example/', 'https://new.example/');
+    await manager.handleUrlChange('https://old.example/', 'https://new.example/', null, {
+      navigationCursor: cursor(1, 'https://new.example/'),
+      restartFence: 'test-fence',
+    });
 
     expect(pageTranslationManager.activate).toHaveBeenCalledOnce();
     expect(pageTranslationManager.userRestoredOverride).toBe(false);
     expect(mocks.sendRegularMessage).toHaveBeenCalledOnce();
     expect(mocks.sendRegularMessage).toHaveBeenCalledWith({
       action: MessageActions.PAGE_TRANSLATE,
-      data: { isAuto: true, preserveAcceptedTranslations: true },
+      data: {
+        isAuto: true, preserveAcceptedTranslations: true,
+        navigationCursor: cursor(1, 'https://new.example/'), restartFence: 'test-fence',
+      },
     }, { returnFailureResponse: true });
   });
 
@@ -150,7 +156,8 @@ describe('FeatureManager SPA auto page command transport', () => {
 
   const cursor = (routeRevision, url = window.location.href, documentEpoch = 1) => ({ documentEpoch, routeRevision, url });
   const historyNotification = (routeRevision = 1) => ({
-    navigationCursor: cursor(routeRevision, new URL('/intermediate-route', window.location.href).href),
+    navigationCursor: cursor(routeRevision),
+    restartFence: `fence-${routeRevision}`,
   });
 
   it('keeps pending work for same-route state updates and untracked notifications', () => {
@@ -257,10 +264,57 @@ describe('FeatureManager SPA auto page command transport', () => {
     await pending;
     expect(mocks.sendRegularMessage).toHaveBeenCalledExactlyOnceWith({
       action: MessageActions.PAGE_TRANSLATE,
-      data: { isAuto: true, preserveAcceptedTranslations: true },
+      data: {
+        isAuto: true, preserveAcceptedTranslations: true,
+        navigationCursor: cursor(1), restartFence: 'fence-1',
+      },
     }, { returnFailureResponse: true });
     expect(owner.checkForUrlChange()).toBe(false);
     expect(page.stopAutoTranslation).toHaveBeenCalledOnce();
+  });
+
+  it('binds manual SPA admission to this frame document token', async () => {
+    const owner = FeatureManager.getInstance();
+    const previousToken = window.__translateItPageDocumentToken;
+    window.__translateItPageDocumentToken = 'child-frame-document-token';
+    const page = {
+      currentUrl: window.location.href,
+      isActive: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 7,
+      manualContinuityAttemptRevision: 12,
+      manualContinuityAttemptId: 'accepted-frame-attempt',
+      manualContinuityTopDocumentEpoch: 3,
+      manualContinuityTopDocumentToken: 'top-document-token',
+      settings: { targetLanguage: 'fr', isExplicitProvider: false },
+      translatePage: vi.fn(async ({ validateNavigation }) => {
+        expect(await validateNavigation()).toBe(true);
+      }),
+    };
+    owner.featureHandlers.set('pageTranslation', page);
+    owner.reevaluateFeatures = vi.fn().mockResolvedValue(undefined);
+    mocks.loadFeature.mockResolvedValue(page);
+
+    try {
+      await owner.handleUrlChange('https://old.example/', window.location.href, null, {
+        navigationCursor: cursor(1),
+        restartFence: 'manual-spa-fence',
+      });
+      expect(mocks.sendRegularMessage).toHaveBeenCalledWith({
+        action: MessageActions.PAGE_TRANSLATE_ADMIT,
+        data: expect.objectContaining({
+          origin: 'manual-spa',
+          manualContinuityAttemptId: 'accepted-frame-attempt',
+          topDocumentToken: 'top-document-token',
+          documentToken: 'child-frame-document-token',
+        }),
+      }, { returnFailureResponse: true });
+      expect(mocks.sendRegularMessage.mock.calls[0][0].data.documentToken)
+        .not.toBe(mocks.sendRegularMessage.mock.calls[0][0].data.topDocumentToken);
+    } finally {
+      if (previousToken === undefined) delete window.__translateItPageDocumentToken;
+      else window.__translateItPageDocumentToken = previousToken;
+    }
   });
 
   it.each(['no-rule', 'disabled', 'extension-disabled', 'excluded', 'manual-restore', 'cancelled-url', 'iframe'])(
@@ -295,12 +349,27 @@ describe('FeatureManager SPA auto page command transport', () => {
     expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
   });
 
+  it('preserves a same-live-URL Stop override when manager URL bookkeeping is behind', async () => {
+    const { owner, page } = configureSameUrlPage();
+    page.currentUrl = 'https://example.com/previous';
+    page.userRestoredOverride = true;
+    page.userRestoredOverrideUrl = window.location.href;
+
+    await owner.checkForUrlChange({
+      navigationCursor: cursor(1),
+      restartFence: 'same-url-stop',
+    });
+
+    expect(page.userRestoredOverride).toBe(true);
+    expect(mocks.sendRegularMessage).not.toHaveBeenCalled();
+  });
+
   it('lets only the newest evidenced navigation revision start translation', async () => {
     const { owner } = configureSameUrlPage();
     let release;
     owner.reevaluateFeatures.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
     const obsolete = owner.checkForUrlChange(historyNotification(1));
-    await owner.checkForUrlChange({ navigationCursor: cursor(2, new URL('/another-intermediate-route', window.location.href).href) });
+    await owner.checkForUrlChange({ navigationCursor: cursor(2), restartFence: 'fence-2' });
     release();
     await obsolete;
     expect(mocks.sendRegularMessage).toHaveBeenCalledOnce();
@@ -318,7 +387,9 @@ describe('FeatureManager SPA auto page command transport', () => {
     const firstChange = manager.checkForUrlChange();
     expect(manager._lastDetectedUrl).toBe(newUrl);
     expect(handleUrlChange).toHaveBeenCalledOnce();
-    expect(handleUrlChange).toHaveBeenCalledWith(oldUrl, newUrl, expect.any(Number));
+    expect(handleUrlChange).toHaveBeenCalledWith(oldUrl, newUrl, expect.any(Number), {
+      navigationCursor: null, restartFence: undefined,
+    });
 
     manager.checkForUrlChange();
     expect(handleUrlChange).toHaveBeenCalledOnce();
@@ -338,7 +409,9 @@ describe('FeatureManager SPA auto page command transport', () => {
 
     expect(manager._lastDetectedUrl).toBe(newUrl);
     expect(handleUrlChange).toHaveBeenCalledOnce();
-    expect(handleUrlChange).toHaveBeenCalledWith(oldUrl, newUrl, expect.any(Number));
+    expect(handleUrlChange).toHaveBeenCalledWith(oldUrl, newUrl, expect.any(Number), {
+      navigationCursor: null, restartFence: undefined,
+    });
 
     manager.checkForUrlChange();
 
@@ -359,8 +432,12 @@ describe('FeatureManager SPA auto page command transport', () => {
     window.history.replaceState({}, '', urlC);
     const secondChange = manager.checkForUrlChange();
 
-    expect(handleUrlChange).toHaveBeenNthCalledWith(1, urlA, urlB, expect.any(Number));
-    expect(handleUrlChange).toHaveBeenNthCalledWith(2, urlB, urlC, expect.any(Number));
+    expect(handleUrlChange).toHaveBeenNthCalledWith(1, urlA, urlB, expect.any(Number), {
+      navigationCursor: null, restartFence: undefined,
+    });
+    expect(handleUrlChange).toHaveBeenNthCalledWith(2, urlB, urlC, expect.any(Number), {
+      navigationCursor: null, restartFence: undefined,
+    });
     expect(manager._lastDetectedUrl).toBe(urlC);
     await Promise.all([firstChange, secondChange]);
   });
@@ -529,6 +606,9 @@ describe('FeatureManager conflict resolution', () => {
   it.each([
     ['translating', { isTranslating: true, isTranslated: false }],
     ['translated', { isTranslating: false, isTranslated: true }],
+    ['continuity-only', { isTranslating: false, isTranslated: false, hasManualContinuity: true }],
+    ['child-only continuity', { isTranslating: false, isTranslated: false, hasManualContinuity: true, manualContinuityGeneration: 4 }],
+    ['pending-start', { isTranslating: false, isTranslated: false, preStartAttempt: {} }],
   ])('restores %s Whole Page for Select Element', async (_state, state) => {
     const restorePage = vi.fn().mockResolvedValue(undefined);
     manager.featureHandlers.set('pageTranslation', { ...state, restorePage });
@@ -536,7 +616,10 @@ describe('FeatureManager conflict resolution', () => {
     await expect(manager.resolveFeatureConflict('selectElement')).resolves.toBe(true);
 
     expect(restorePage).toHaveBeenCalledOnce();
-    expect(restorePage).toHaveBeenCalledWith();
+    expect(restorePage).toHaveBeenCalledWith({
+      clearManualContinuity: true,
+      cancellationReason: 'operation-abort',
+    });
   });
 
   it('leaves idle Whole Page untouched', async () => {

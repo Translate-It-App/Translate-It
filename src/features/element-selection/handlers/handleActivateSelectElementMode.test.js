@@ -61,6 +61,10 @@ vi.mock('../utils/activationError.js', () => ({
   getSelectElementActivationErrorMessage: vi.fn(() => Promise.resolve('Could not activate Select Element mode.')),
 }));
 
+vi.mock('@/core/background/handlers/page-translation/handlePageTranslation.js', () => ({
+  revokeManualPageAuthority: vi.fn(() => Promise.resolve(true)),
+}));
+
 vi.mock('@/shared/logging/logger.js', () => ({
   getScopedLogger: vi.fn(() => ({
     debug: vi.fn(),

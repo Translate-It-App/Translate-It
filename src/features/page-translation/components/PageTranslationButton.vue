@@ -18,7 +18,7 @@
     </div>
 
     <!-- State: Not Translated (Show Red dot here if there was a previous error) -->
-    <template v-if="!isTranslated && !isTranslating && !isAutoTranslating">
+    <template v-if="!isTranslated && !isTranslating && !isAutoTranslating && !hasManualContinuity">
       <a
         v-if="textOnly"
         href="#"
@@ -67,7 +67,7 @@
     </template>
 
     <!-- State: Translating or Auto-Translating -->
-    <template v-if="isTranslating || isAutoTranslating">
+    <template v-if="isTranslating || isAutoTranslating || hasManualContinuity">
       <a
         v-if="textOnly"
         href="#"
@@ -114,7 +114,7 @@
     </template>
 
     <!-- State: Translated -->
-    <template v-if="isTranslated && !isTranslating && !isAutoTranslating">
+    <template v-if="isTranslated && !isTranslating && !isAutoTranslating && !hasManualContinuity">
       <div
         v-if="textOnly"
         class="ti-text-status-wrapper"
@@ -297,6 +297,7 @@ const { t } = useUnifiedI18n();
 
 const { activeTabUrl } = useActiveTabUrl({ enabled: computed(() => props.showAutoTranslateToggle) });
 
+const pageTranslation = usePageTranslation();
 const {
   isAutoTranslateToggleVisible,
   isActive,
@@ -346,7 +347,8 @@ const {
   restorePage,
   stopAutoTranslation,
   cancelTranslation,
-} = usePageTranslation();
+} = pageTranslation;
+const hasManualContinuity = pageTranslation.hasManualContinuity || ref(false);
 
 // Computed properties
 const canTranslate = computed(() => baseCanTranslate.value && !props.disabled);
@@ -370,7 +372,7 @@ const useCornerStatus = computed(
  */
 const compactCornerStatusData = computed(() => {
   if (!useCornerStatus.value) return null;
-  if (isTranslating.value || isAutoTranslating.value) {
+  if (isTranslating.value || isAutoTranslating.value || hasManualContinuity.value) {
     return { isTranslating: isTranslating.value, isAutoTranslating: isAutoTranslating.value, isTranslated: isTranslated.value, progress: progress.value };
   }
   if (isTranslated.value) {
@@ -418,7 +420,7 @@ const translateButtonTitle = computed(() => {
 });
 
 const cancelButtonTitle = computed(() => {
-  if (isAutoTranslating.value) return t('page_translation_tooltip_stop_auto', 'Stop auto-translation');
+  if (isAutoTranslating.value || hasManualContinuity.value) return t('page_translation_tooltip_stop_auto', 'Stop auto-translation');
   return t('page_translation_tooltip_cancel', 'Cancel translation');
 });
 
@@ -437,7 +439,7 @@ const handleTranslate = () => {
 };
 
 const handleCancelOrStop = () => {
-  if (isAutoTranslating.value) {
+  if (isAutoTranslating.value || hasManualContinuity.value) {
     stopAutoTranslation();
   } else if (isTranslating.value) {
     cancelTranslation();

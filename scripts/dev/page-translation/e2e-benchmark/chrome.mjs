@@ -125,9 +125,12 @@ export async function configureAttachedTarget({ onAttachedTarget, targetInfo, se
   await send('Runtime.runIfWaitingForDebugger', {}, sessionId);
 }
 
-export async function launchChrome({ extensionPath, binary = '/usr/bin/google-chrome-stable', commandTimeoutMs = 15_000, onAttachedTarget } = {}) {
+export async function launchChrome({ extensionPath, binary = '/usr/bin/google-chrome-stable', commandTimeoutMs = 15_000, onAttachedTarget, extraArgs = [] } = {}) {
   if (typeof extensionPath !== 'string' || !isAbsolute(extensionPath)) {
     throw new TypeError('extensionPath must be an absolute path to an unpacked extension directory.');
+  }
+  if (!Array.isArray(extraArgs) || extraArgs.some(argument => typeof argument !== 'string')) {
+    throw new TypeError('extraArgs must be an array of strings.');
   }
   const unpackedPath = resolve(extensionPath);
   if (!(await stat(unpackedPath)).isDirectory()) throw new TypeError('extensionPath must be a directory.');
@@ -141,6 +144,7 @@ export async function launchChrome({ extensionPath, binary = '/usr/bin/google-ch
     '--remote-debugging-pipe',
     '--enable-unsafe-extension-debugging',
     `--user-data-dir=${profilePath}`,
+    ...extraArgs,
   ], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], detached: true });
   let stderr = '';
   child.stderr.setEncoding('utf8');

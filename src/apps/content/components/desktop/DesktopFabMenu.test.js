@@ -289,6 +289,7 @@ const setupBaseMocks = () => {
       failedCount: 0,
       totalCount: 0,
     },
+    setPageTranslation: (state) => Object.assign(mocks.mobileStore.pageTranslationData, state),
   });
   mocks.settingsStore = reactive({
     isDarkTheme: false,
@@ -368,6 +369,75 @@ describe('DesktopFabMenu page command transport', () => {
 
     expect(mocks.sendRegularMessage).toHaveBeenCalledWith({ action }, { returnFailureResponse: true });
     expect(mocks.pageEventBus.emit).not.toHaveBeenCalledWith(action);
+  });
+
+  it('applies a committed revoke from partial Stop delivery without clearing active state', async () => {
+    mocks.mobileStore.pageTranslationData = {
+      ...mocks.mobileStore.pageTranslationData,
+      status: 'translating',
+      isTranslating: true,
+      isAutoTranslating: true,
+      isTranslated: true,
+      hasManualContinuity: true,
+      manualContinuityGeneration: 4,
+      translatedCount: 3,
+    };
+    mocks.sendRegularMessage.mockResolvedValue({
+      success: false,
+      reason: 'manual_continuity_stop_delivery_uncertain',
+      hasManualContinuity: false,
+      manualContinuityGeneration: 5,
+      frames: [{ success: true }, { success: false }],
+    });
+    const wrapper = mount(DesktopFabMenu);
+    const stop = wrapper.vm.menuItems.find((item) => item.id === 'page_translating_stop');
+
+    stop.action();
+    await Promise.resolve();
+
+    expect(mocks.mobileStore.pageTranslationData).toMatchObject({
+      hasManualContinuity: false,
+      manualContinuityGeneration: 5,
+      status: 'translating',
+      isTranslating: true,
+      isAutoTranslating: true,
+      isTranslated: true,
+      translatedCount: 3,
+    });
+    expect(wrapper.vm.menuItems.map((item) => item.id)).toContain('page_translating_stop');
+    expect(wrapper.vm.menuItems.map((item) => item.id)).not.toContain('restore_page');
+  });
+
+  it('shows Restore only after Stop and Translate after Restore', () => {
+    mocks.mobileStore.pageTranslationData = {
+      ...mocks.mobileStore.pageTranslationData,
+      status: 'completed',
+      isTranslated: true,
+    };
+    const wrapper = mount(DesktopFabMenu);
+    expect(wrapper.vm.menuItems.map((item) => item.id)).toContain('restore_page');
+    expect(wrapper.vm.menuItems.map((item) => item.id)).not.toContain('page_translating_stop');
+
+    mocks.mobileStore.pageTranslationData = {
+      ...mocks.mobileStore.pageTranslationData,
+      status: 'idle',
+      isTranslated: false,
+    };
+    expect(wrapper.vm.menuItems.map((item) => item.id)).toContain('translate_page');
+  });
+
+  it('keeps Stop visible after dismissing a zero-result error with manual continuity', () => {
+    mocks.mobileStore.pageTranslationData = {
+      ...mocks.mobileStore.pageTranslationData,
+      status: 'idle',
+      hasManualContinuity: true,
+      manualContinuityGeneration: 8,
+      isTranslated: false,
+    };
+    const wrapper = mount(DesktopFabMenu);
+
+    expect(wrapper.vm.menuItems.map((item) => item.id)).toContain('page_translating_stop');
+    expect(wrapper.vm.menuItems.map((item) => item.id)).not.toContain('restore_page');
   });
 
   it('opens scope choices from the page secondary action and routes toggles', async () => {

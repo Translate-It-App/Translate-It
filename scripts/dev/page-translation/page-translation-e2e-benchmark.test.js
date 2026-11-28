@@ -24,8 +24,140 @@ import { collectGeminiStructuredRecoveryEvidence } from './e2e-benchmark/resilie
 import { createCancellationCommandSender } from './e2e-benchmark/cancellation-runner.mjs';
 import { waitForSuccessfulReplyCapture } from './e2e-benchmark/stale-success-runner.mjs';
 import { validateTrialTranslation } from './e2e-benchmark/trial-validation.mjs';
+import { createIframeAdmissionBoundaryPlugin } from './e2e-benchmark/build.mjs';
+import { summarizeCanaryRequestSettlements, validateHeldStartRaceEvidence, validateUnorderedExactSourceCoverage } from './e2e-benchmark/iframe-admission-canary.mjs';
+import { validateDynamicIframeBenchmarkOptIn } from './e2e-benchmark/dynamic-iframe-benchmark.mjs';
 
 describe('page translation benchmark measurements', () => {
+  it('builds only exact production iframe READY and START send boundaries', () => {
+    const source = readFileSync('src/core/content-scripts/IFrameContentScriptCore.js', 'utf8');
+    const plugin = createIframeAdmissionBoundaryPlugin();
+    const transformed = plugin.transform(source, '/repo/src/core/content-scripts/IFrameContentScriptCore.js');
+    expect(transformed.code.match(/callThrough\('ready'/g)).toHaveLength(1);
+    expect(transformed.code.match(/callThrough\('start'/g)).toHaveLength(1);
+    expect(transformed.code).toContain('browserAPI.runtime.sendMessage');
+    expect(transformed.code).toContain('data: { ...ticket, documentToken }');
+    expect(plugin.assertApplied()).toEqual(['/repo/src/core/content-scripts/IFrameContentScriptCore.js']);
+
+    const duplicatePlugin = createIframeAdmissionBoundaryPlugin();
+    const readyCall = source.match(/const ticket = await browserAPI\.runtime\.sendMessage\(\{[\s\S]*?^\s+\}\);/m)?.[0];
+    expect(readyCall).toBeTruthy();
+    expect(() => duplicatePlugin.transform(`${source}\n${readyCall}`, '/repo/src/core/content-scripts/IFrameContentScriptCore.js'))
+      .toThrow('Expected exactly one production iframe READY and START send site');
+    expect(() => createIframeAdmissionBoundaryPlugin().assertApplied()).toThrow('Expected one transformed IFrameContentScriptCore module');
+  });
+
+  it('holds the original iframe START only for explicitly named race fixtures and can abort without dispatch', () => {
+    const source = readFileSync('scripts/dev/page-translation/e2e-benchmark/build.mjs', 'utf8');
+    expect(source).toContain("window.name === '__page_translation_hold_start__'");
+    expect(source).toContain("stage === 'start' && this.holdStart && !this.heldStart");
+    expect(source).toContain('releaseHeldStart()');
+    expect(source).toContain('abortHeldStart()');
+    expect(source).toContain('Reflect.apply(send, receiver, [message])');
+  });
+
+  it('accepts reordered physical provider arrivals but rejects missing, duplicate, and unknown source coverage', () => {
+    const expected = ['top source', 'child source', 'third source'];
+    const valid = validateUnorderedExactSourceCoverage([
+      { batchTexts: ['child source', 'top source'] },
+      { batchTexts: ['third source'] },
+    ], expected);
+    expect(valid).toMatchObject({ ok: true, counts: [['child source', 1], ['top source', 1], ['third source', 1]] });
+    expect(validateUnorderedExactSourceCoverage([
+      { batchTexts: ['top source'] }, { batchTexts: ['top source', 'unknown'] },
+    ], expected)).toMatchObject({ ok: false });
+  });
+
+  it('accepts only acknowledged expected blocks and rejects unexpected or unsettled Fetch requests', () => {
+    const knownBlocks = summarizeCanaryRequestSettlements([
+      { blocked: true, knownPlaceholder: true, blockReason: 'placeholder', settlement: { action: 'block', acknowledgedAt: 1 } },
+      { blocked: true, knownNegativeProbe: true, blockReason: 'negative probe', settlement: { action: 'block', acknowledgedAt: 2 } },
+    ]);
+    expect(knownBlocks).toMatchObject({
+      ok: true,
+      allFetchSettlementsAcknowledged: true,
+      missingSettlement: [],
+      unexpectedOrBlockedRequests: [],
+    });
+
+    const unexpectedBlock = summarizeCanaryRequestSettlements([
+      { blocked: true, blockReason: 'unexpected', settlement: { action: 'block', acknowledgedAt: 3 } },
+    ]);
+    expect(unexpectedBlock).toMatchObject({ ok: false, allFetchSettlementsAcknowledged: true });
+    expect(unexpectedBlock.unexpectedOrBlockedRequests).toHaveLength(1);
+
+    const unacknowledged = summarizeCanaryRequestSettlements([
+      { settlement: { action: 'continue-local', acknowledgedAt: Number.NaN } },
+    ]);
+    expect(unacknowledged).toMatchObject({ ok: false, allFetchSettlementsAcknowledged: false });
+    expect(unacknowledged.missingSettlement).toHaveLength(1);
+  });
+
+  it('inserts and lays out the sized iframe before setting its navigation URL', () => {
+    const source = readFileSync('scripts/dev/page-translation/e2e-benchmark/iframe-admission-canary.mjs', 'utf8');
+    const width = source.indexOf("frame.width='320'");
+    const append = source.indexOf('document.body.append(frame)', width);
+    const layoutBoundary = source.indexOf('frame.getBoundingClientRect()', append);
+    const navigation = source.indexOf("document.querySelector('#admitted-child').src=", layoutBoundary);
+    expect(width).toBeGreaterThan(-1);
+    expect(append).toBeGreaterThan(width);
+    expect(layoutBoundary).toBeGreaterThan(append);
+    expect(navigation).toBeGreaterThan(layoutBoundary);
+  });
+
+  it.each(['stop', 'restore'])('validates held START revocation race and %s DOM contract', mode => {
+    const documentToken = 'child-document-token';
+    const ticketResponse = {
+      success: true, start: true, documentToken, manualContinuityGeneration: 3,
+      topDocumentEpoch: 2, navigationCursor: { documentEpoch: 1, routeRevision: 0, url: 'http://a.test/child' },
+    };
+    const ready = {
+      message: { action: 'page-translate-frame-ready', data: { documentToken } },
+      response: ticketResponse,
+    };
+    const heldMessage = {
+      action: 'page-translate-frame-start',
+      data: { ...ticketResponse, documentToken },
+    };
+    const evidence = {
+      mode, documentToken, ticket: ready,
+      heldStart: { stage: 'start-held', message: heldMessage, documentToken },
+      start: { stage: 'start', message: heldMessage, response: { success: false, reason: 'ineligible_frame' } },
+      readyRetry: {
+        message: { action: 'page-translate-frame-ready', data: { documentToken } },
+        response: { success: false, reason: 'ineligible_frame' },
+      },
+      releaseAccepted: true, manualContinuityRevoked: true, providerRequests: [], domMutations: [],
+      raceDomUntranslated: true,
+      parentTranslated: mode === 'stop', liveChildTranslated: mode === 'stop',
+    };
+    expect(validateHeldStartRaceEvidence(evidence)).toMatchObject({ ok: true, issues: [] });
+    expect(validateHeldStartRaceEvidence({
+      ...evidence,
+      start: { ...evidence.start, response: { success: false, reason: 'timeout', isTransportFailure: true } },
+    }).ok).toBe(false);
+    expect(validateHeldStartRaceEvidence({
+      ...evidence,
+      heldStart: { ...evidence.heldStart, message: { ...heldMessage, data: { documentToken: 'different-document' } } },
+    }).ok).toBe(false);
+  });
+
+  it('keeps the iframe canary opt-in separate from default scenario/sample selection', () => {
+    expect(parseScenarioSelection(undefined)).toEqual(['small']);
+    const source = readFileSync('scripts/dev/page-translation/e2e-benchmark/iframe-admission-canary.mjs', 'utf8');
+    expect(source).toContain('BENCH_IFRAME_CANARY_OUTPUT');
+    expect(source).toContain('performanceSamples: 0');
+    expect(source).not.toContain('BENCH_SAMPLES');
+    expect(source).toContain('iframeAdmissionCanary: true');
+  });
+
+  it('requires explicit dynamic iframe opt-in and preserves the approved five-sample count', () => {
+    expect(() => validateDynamicIframeBenchmarkOptIn({})).toThrow('set BENCH_DYNAMIC_IFRAME=1 explicitly');
+    expect(() => validateDynamicIframeBenchmarkOptIn({
+      BENCH_DYNAMIC_IFRAME: '1', BENCH_DYNAMIC_IFRAME_SAMPLES: '4',
+    })).toThrow('must remain 5');
+    expect(validateDynamicIframeBenchmarkOptIn({ BENCH_DYNAMIC_IFRAME: '1' })).toEqual({ sampleCount: 5 });
+  });
   it('records fulfilled Fetch response metadata only after settlement and omits it on failure', async () => {
     let settle;
     let clock = 0;
@@ -1289,18 +1421,23 @@ describe('page translation benchmark measurements', () => {
   });
 
   it('validates effective PageTranslationScheduler batch limits against provider runtime configuration', () => {
-    const providerRuntime = { batching: { characterLimit: 5000 }, maxConcurrent: 5 };
+    const providerRuntime = { batching: { characterLimit: 5000 }, maxConcurrent: 5, supportsPageParallelExecution: true };
     for (const [optimizationLevel, chunkSize] of [[1, 50], [3, 25], [5, 10]]) {
       const scheduler = {
         providerRegistryId: 'edge', chunkSize, maxChars: 5000,
-        parallelExecution: false, maxConcurrentFlushes: 5,
+        parallelExecution: true, maxConcurrentFlushes: 2,
       };
       expect(validateProviderSchedulerRuntime({ provider: 'edge', optimizationLevel, providerRuntime, scheduler }).ok).toBe(true);
       expect(validateProviderSchedulerRuntime({
         provider: 'edge', optimizationLevel, providerRuntime,
-        scheduler: { ...scheduler, chunkSize: chunkSize + 1, parallelExecution: true, maxConcurrentFlushes: 4 },
+        scheduler: { ...scheduler, chunkSize: chunkSize + 1, parallelExecution: false, maxConcurrentFlushes: 5 },
       }).ok).toBe(false);
     }
+    expect(validateProviderSchedulerRuntime({
+      provider: 'edge', optimizationLevel: 3,
+      providerRuntime: { ...providerRuntime, supportsPageParallelExecution: false },
+      scheduler: { providerRegistryId: 'edge', chunkSize: 25, maxChars: 5000, parallelExecution: false, maxConcurrentFlushes: 5 },
+    }).ok).toBe(true);
     expect(validateProviderSchedulerRuntime({ provider: 'edge', optimizationLevel: 3, providerRuntime, scheduler: null }).ok).toBe(false);
     for (const [optimizationLevel, characterLimit, maxConcurrent, pageWorkers, chunkSize, parallelExecution] of [
       [1, 7500, 1, 1, 50, false], [3, 5000, 4, 2, 25, true], [5, 3000, 8, 4, 10, true],
@@ -1715,8 +1852,13 @@ describe('page translation benchmark measurements', () => {
   it('adds an opt-in native-history SPA fixture without changing the static fixtures', () => {
     const small = createFixture('small');
     const spa = createFixture('spa-navigation');
+    const manualSpa = createFixture('spa-manual-continuity');
     expect(parseScenarioSelection()).toEqual(['small']);
     expect(parseScenarioSelection('small,dynamic-dom,spa-navigation')).toEqual(['small', 'dynamic-dom', 'spa-navigation']);
+    expect(parseScenarioSelection('spa-manual-continuity')).toEqual(['spa-manual-continuity']);
+    expect(manualSpa.targets).toEqual(spa.targets);
+    expect(manualSpa.spaChangedIds).toEqual(spa.spaChangedIds);
+    expect(manualSpa.html).toEqual(spa.html);
     expect(spa.targets.map(({ id, source, visible }) => ({ id, source, visible }))).toEqual(small.targets);
     expect(spa.targets.map(target => target.kind)).toEqual([...Array(6).fill('text'), ...Array(6).fill('title')]);
     expect(spa.spaChangedIds).toEqual(['target-1', 'target-5', 'target-9']);
@@ -1732,9 +1874,36 @@ describe('page translation benchmark measurements', () => {
       WHOLE_PAGE_AUTO_TRANSLATE_RULES: ['127.0.0.1/replacement'],
       TRANSLATION_API: 'edge', TARGET_LANGUAGE: 'fr',
     });
+    expect(settingsForScenario({}, 'spa-manual-continuity')).toMatchObject({
+      WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES: false,
+      WHOLE_PAGE_AUTO_TRANSLATE_RULES: [],
+      TRANSLATION_API: 'edge', TARGET_LANGUAGE: 'fr',
+    });
     const routeRule = settingsForScenario({}, 'spa-navigation').WHOLE_PAGE_AUTO_TRANSLATE_RULES[0];
     expect(matchesAutoTranslateRule('http://127.0.0.1:43127/replacement', routeRule)).toBe(true);
     expect(matchesAutoTranslateRule('http://127.0.0.1:43127/', routeRule)).toBe(false);
+  });
+
+  it('validates distinct SPA route-B manager modes using the navigation performance clock', () => {
+    const settings = { provider: 'edge', targetLanguage: 'fr', lazyLoading: false,
+      translateAfterScrollStop: false, autoTranslateOnDOMChanges: false };
+    const managerEvents = (isAutoA, isAutoB) => [
+      { isAuto: isAutoA, performanceAt: 10 },
+      { isAuto: isAutoB, performanceAt: 101 },
+    ];
+    const validate = (scenario, isAutoA, isAutoB) => validateSpaSessions({
+      settingsA: settings, settingsB: settings, managerCallEvents: managerEvents(isAutoA, isAutoB),
+      navStartedAt: 100, sessionA: 'session-a', sessionB: 'session-b', scenario,
+    });
+    expect(validate('spa-navigation', true, true).ok).toBe(true);
+    expect(validate('spa-navigation', false, true).ok).toBe(false);
+    expect(validate('spa-navigation', true, false).ok).toBe(false);
+    expect(validate('spa-manual-continuity', false, false).ok).toBe(true);
+    expect(validate('spa-manual-continuity', true, false).ok).toBe(false);
+    expect(validate('spa-manual-continuity', false, true).ok).toBe(false);
+    expect(validateSpaSessions({ settingsA: settings, settingsB: settings,
+      managerCallEvents: [{ isAuto: true, performanceAt: 10 }, { isAuto: true, at: 101 }],
+      navStartedAt: 100, sessionA: 'session-a', sessionB: 'session-b', scenario: 'spa-navigation' }).ok).toBe(false);
   });
 
   it('defines the five exact Shadow DOM targets and enables only DOM-change translation', () => {
@@ -1809,13 +1978,19 @@ describe('page translation benchmark measurements', () => {
     expect(validateSpaNavigation({ ...input, completionReady: false }).ok).toBe(false);
   });
 
-  it('requires identical A/B settings and a distinct automatic B owner', () => {
+  it('requires identical A/B settings and a distinct manual-continuity B owner on the document clock', () => {
     const settings = { provider: 'edge', targetLanguage: 'fr', lazyLoading: false, translateAfterScrollStop: false, autoTranslateOnDOMChanges: false };
-    expect(validateSpaSessions({ settingsA: settings, settingsB: { ...settings }, autoB: true, sessionA: 'A', sessionB: 'B' }).ok).toBe(true);
-    expect(validateSpaSessions({ settingsA: settings, settingsB: { ...settings, lazyLoading: true }, autoB: true, sessionA: 'A', sessionB: 'B' }).ok).toBe(false);
-    expect(validateSpaSessions({ settingsA: settings, settingsB: { ...settings, provider: 'google' }, autoB: true, sessionA: 'A', sessionB: 'B' }).ok).toBe(false);
-    expect(validateSpaSessions({ settingsA: settings, settingsB: settings, autoB: false, sessionA: 'A', sessionB: 'B' }).ok).toBe(false);
-    expect(validateSpaSessions({ settingsA: settings, settingsB: settings, autoB: true, sessionA: 'A', sessionB: 'A' }).ok).toBe(false);
+    const managerCallEvents = [
+      { at: 20_000, performanceAt: 20, isAuto: false },
+      { at: 21_000, performanceAt: 120, isAuto: false },
+    ];
+    const valid = { settingsA: settings, settingsB: { ...settings }, managerCallEvents, navStartedAt: 100, sessionA: 'A', sessionB: 'B' };
+    expect(validateSpaSessions(valid).ok).toBe(true);
+    expect(validateSpaSessions({ ...valid, settingsB: { ...settings, lazyLoading: true } }).ok).toBe(false);
+    expect(validateSpaSessions({ ...valid, settingsB: { ...settings, provider: 'google' } }).ok).toBe(false);
+    expect(validateSpaSessions({ ...valid, managerCallEvents: managerCallEvents.slice(0, 1) }).ok).toBe(false);
+    expect(validateSpaSessions({ ...valid, managerCallEvents: [...managerCallEvents, { at: 22_000, performanceAt: 130, isAuto: true }] }).ok).toBe(false);
+    expect(validateSpaSessions({ ...valid, sessionB: 'A' }).ok).toBe(false);
   });
 
   it('requires SPA terminal counts, matching session, and timestamp after every B write', () => {

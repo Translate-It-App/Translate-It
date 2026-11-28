@@ -17,7 +17,7 @@ BENCH_MODES=legacy,sliced,viewport BENCH_SCENARIOS=small,early-visible,in-window
   pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
 ```
 
-`BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `dynamic-dom`, `shadow-dom`, `spa-navigation`, `early-visible`, `in-window-visible`, `late-visible`, and `scroll-through`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
+`BENCH_SCENARIOS` accepts a comma-separated, unique selection from `small`, `dynamic-dom`, `shadow-dom`, `spa-navigation`, `spa-manual-continuity`, `early-visible`, `in-window-visible`, `late-visible`, and `scroll-through`; it defaults to `small`. The three large scenarios each contain 1,000 stable-ID targets and four visible targets (`target-500` through `target-503`), with the visible group placed at the beginning, inside the initial 100-step discovery window, or after that window. Discovery steps include element and text-node traversal, plus configured attribute lookups even when the attribute is absent; they are not a count of eligible targets. Actual viewport geometry and ordered source IDs are checked on every run. `BENCH_SAMPLES` accepts integer values 3–40 and `BENCH_WARMUPS` 1–3.
 
 ## Opt-in Edge, Google V2, and Custom provider lanes (Issue #432)
 
@@ -203,7 +203,7 @@ BENCH_MODES=sliced BENCH_SCENARIOS=scroll-through BENCH_SCROLL_SCHEDULING=on-sto
 
 The runner uses deterministic `window.scrollTo` calls and awaits native scroll events plus animation frames; it does not simulate physical input-to-acceptance latency, invoke scheduler signals, or dispatch synthetic scroll events. It records initial visible acceptance separately from actual viewport-entry (`IntersectionObserver` with a zero-pixel root margin) and first accepted DOM-write timestamps on the same renderer `performance.now()` clock. Each target reports viewport-entry-to-write milliseconds when the write follows entry; an earlier accepted write is classified as prefetch and has unavailable (`null`) latency, not a negative measurement. Reports include per-band measurable count, mean, median, maximum, and prefetch count, plus `max(acceptedAt) - max(viewportEntryAt)` for last-entry-to-full-acceptance; that completion delta is signed and may be negative if permitted prefetch completed before the last entry. Production pipeline stages are separately recorded per target: Bridge discovery handoff, `IntersectionScheduler.add` registration, that scheduler's actual observer callback, DOMTranslator primitive admission, and PageTranslationScheduler enqueue. The production observer callback is not inferred from viewport entry; its configured prefetch margin remains a separate stage. Scheduler `isScrolling` is captured at every scroll checkpoint and at each batch selection/dispatch; no value is forbidden because first-batch, emergency, or already-running work can validly dispatch during scrolling. Batch `selectionViewport` geometry is sampled synchronously from the selected nodes when the scheduler chooses the batch. This is distinct from `requestViewport`, which is sampled later when the physical provider request is observed; neither is substituted for actual viewport-entry timestamps. Both geometry ledgers classify targets as in-viewport, within the existing 50px buffer, or outside that buffer. Re-requested targets, incomplete stage/acceptance coverage, missing timestamps, a terminal preceding a write, queue/settlement not drained, Restore mismatch, or observer cleanup errors fail the trial. These are correctness/timing probes, not physical scrolling performance claims.
 
-The opt-in `dynamic-dom` fixture keeps the same 12-target initial page, enables production `WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES` only for that scenario, and inserts two deterministic three-target cohorts into the active session. Cohort one is inserted while the initial session is translating; cohort two is registered and inserted only after all 12 initial targets have both accepted settlements and accepted DOM writes. The report retains each cohort's raw IDs/timestamps and insertion-to-first/all accepted-write intervals. Static scenarios retain the existing setting (`false`) and fixture. The opt-in `spa-navigation` selection exposes a native `history.pushState` control and an exact local `/replacement` auto-rule (route A is not auto-started); its B-source mutation is gated on the real production invalidation callback.
+The opt-in `dynamic-dom` fixture keeps the same 12-target initial page, enables production `WHOLE_PAGE_AUTO_TRANSLATE_ON_DOM_CHANGES` only for that scenario, and inserts two deterministic three-target cohorts into the active session. Cohort one is inserted while the initial session is translating; cohort two is registered and inserted only after all 12 initial targets have both accepted settlements and accepted DOM writes. The report retains each cohort's raw IDs/timestamps and insertion-to-first/all accepted-write intervals. Static scenarios retain the existing setting (`false`) and fixture. Both opt-in SPA scenarios share the native `history.pushState` fixture, exact target accounting, and Restore checks: `spa-navigation` keeps the exact local `/replacement` auto-rule and validates automatic route-B startup; `spa-manual-continuity` has no auto-rule and validates production manual-continuity route-B startup. Each uses only one explicit PAGE_TRANSLATE for route A: `spa-navigation` marks that seed call as auto (`isAuto: true`) so it does not arm manual continuity, while `spa-manual-continuity` uses a manual seed call.
 
 ## Opt-in open Shadow DOM fixture
 
@@ -220,7 +220,7 @@ Timing uses one renderer-document `performance.now()` clock: initial acceptance 
 
 Long-task results are reported only after the fixture's pre-measurement calibration captures a task of at least 50 ms. For the measurement-to-terminal and each insertion-to-accepted-write interval, only calibrated task entries whose full start-to-end interval lies within the renderer-clock bounds are included. Unsupported, failed, or uncaptured calibration makes the interval's long-task result unavailable (`null` with a reason), never zero. Translation and startup voice-list Edge responses are local fixtures; no external Edge service response is used.
 
-`spa-navigation` uses the 12-target mixed text/title fixture and fully translates route A before navigation, then verifies production cursor progression, invalidation-gated source changes, automatic route-B session ownership, retained-node reuse, changed-target-only provider work, same-document `performance.now()` navigation latencies, and exact route-specific Restore of text and title attributes. It never holds provider responses or runs pending/stale-result probes. Run it with the static and dynamic regressions:
+`spa-navigation` is the preserved Auto Rule scenario. Its single explicit route-A PAGE_TRANSLATE is marked `isAuto: true`, then its exact `/replacement` auto-rule starts route B; it verifies both manager calls are auto, production cursor progression, invalidation-gated source changes, retained-node reuse, changed-target-only provider work, same-document `performance.now()` navigation latencies, and exact route-specific Restore of text and title attributes. It never holds provider responses or runs pending/stale-result probes. Run it with the static and dynamic regressions:
 
 ```sh
 BENCH_MODES=legacy,sliced BENCH_SCENARIOS=small,dynamic-dom,spa-navigation BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
@@ -232,6 +232,53 @@ BENCH_MODES=legacy,sliced BENCH_SCENARIOS=small,dynamic-dom,spa-navigation BENCH
 BENCH_MODES=sliced BENCH_SCENARIOS=dynamic-dom BENCH_SAMPLES=3 BENCH_WARMUPS=1 \
   pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
 ```
+
+## Manual continuity / dynamic iframe admission canary
+
+The correctness-only canary must pass and be independently reviewed before any continuity performance scenario is started. It builds an isolated Sliced-only benchmark extension with an all-frames loader and an exact-match instrumentation transform around the production iframe READY ticket and START send sites. The transform calls the original runtime method with its original receiver and message, returning its result or rethrowing its rejection unchanged. The canary first performs a manual top-frame translation, proves the manual continuity generation is armed, and only then inserts a cross-site local OOPIF. It requires a real successful READY ticket, successful START response, child provider payload and translated child DOM, unchanged parent session, exact provider source coverage without assuming physical request arrival order, and request-stage guards on the parent and OOPIF targets before navigation/resume. It also sends blocked negative fetch probes from both child main and extension worlds.
+
+This is a one-trial correctness artifact, not a warmup or performance sample, and does not alter normal `BENCH_SCENARIOS`, `BENCH_SAMPLES`, `BENCH_WARMUPS`, or the production bundle. Use the existing Vite preload only if the local Node/Vite environment requires it:
+
+```sh
+printf 'global.require = require;\n' > /tmp/opencode/benchmark-vite-require.cjs
+NODE_OPTIONS='--require=/tmp/opencode/benchmark-vite-require.cjs' \
+  BENCH_IFRAME_CANARY_OUTPUT=/tmp/opencode/iframe-admission-canary.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/iframe-admission-canary.mjs
+```
+
+Do not run the SPA/iframe performance matrix until this one-shot canary artifact has passed and been independently reviewed. The canary itself starts no benchmark matrix.
+
+## Opt-in SPA continuity and dynamic iframe benchmark
+
+After reviewing a passing one-shot canary, run SPA continuity using the existing `spa-navigation` scenario with Sliced discovery, five measured samples, and one discarded warmup. The existing discovery runner retains its Legacy comparison mode; the Edge provider lane below selects exactly Sliced without changing default mode selection:
+
+```sh
+BENCH_LANE=provider BENCH_PROVIDER=edge BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=spa-navigation \
+  BENCH_SAMPLES=5 BENCH_WARMUPS=1 \
+  BENCH_OUTPUT=/tmp/opencode/page-translation-spa-continuity.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The separate opt-in `spa-manual-continuity` scenario uses the same fixture and validations without the `/replacement` auto-rule; it keeps route A as a manual PAGE_TRANSLATE and verifies both manager calls are manual, with route B started by production manual-continuity handling:
+
+```sh
+BENCH_LANE=provider BENCH_PROVIDER=edge BENCH_OPTIMIZATION_LEVEL=3 \
+  BENCH_MODES=sliced BENCH_SCENARIOS=spa-manual-continuity \
+  BENCH_SAMPLES=5 BENCH_WARMUPS=1 \
+  BENCH_OUTPUT=/tmp/opencode/page-translation-spa-manual-continuity.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/run.mjs
+```
+
+The dynamic iframe race lane is independently opt-in (`BENCH_DYNAMIC_IFRAME=1`) and separate from the normal runner/default scenario selection. It builds the benchmark-only Sliced extension once and runs five fresh correctness-gated trials for each race mode. Each trial first measures successful manual dynamic-frame admission and local fixture translation, then holds an exact production START send after its real READY ticket. It confirms Stop/Restore revocation before releasing that unchanged send, requires explicit non-transport START and READY-retry rejections, and verifies the held frame has no provider request or DOM mutation. Stop must preserve the already translated parent and prior live child; Restore must return each separately to original text. Timeout cleanup aborts rather than dispatches a held START. The lane has no discarded warmup and reports five measured samples per race mode:
+
+```sh
+BENCH_DYNAMIC_IFRAME=1 BENCH_DYNAMIC_IFRAME_SAMPLES=5 \
+  BENCH_DYNAMIC_IFRAME_OUTPUT=/tmp/opencode/page-translation-dynamic-iframe-benchmark.json \
+  pnpm exec node scripts/dev/page-translation/e2e-benchmark/dynamic-iframe-benchmark.mjs
+```
+
+The aggregate artifact and per-trial artifacts are written under `/tmp/opencode`. Reported insertion-to-translation and message round-trip timings use the local synthetic Edge fixture; they are correctness-harness measurements, not live provider latency or user-perceived latency. Each request is still classified, guarded, session/Network-correlated and settled; physical request arrival order is not asserted.
 
 ## Opt-in sliced-discovery cancellation probes
 

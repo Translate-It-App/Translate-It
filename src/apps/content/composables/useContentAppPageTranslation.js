@@ -22,6 +22,18 @@ const logger = getScopedLogger(LOG_COMPONENTS.CONTENT_APP, 'useContentAppPageTra
 export function useContentAppPageTranslation(mobileStore, tracker) {
   let errorPresentationRevision = 0;
 
+  const manualContinuityPatch = (detail) => {
+    const generation = detail?.manualContinuityGeneration;
+    const currentGeneration = mobileStore.pageTranslationData.manualContinuityGeneration ?? -1;
+    if (!Number.isSafeInteger(generation) || generation < 0 || generation < currentGeneration) return {};
+    if (detail.hasManualContinuity !== true && detail.hasManualContinuity !== false) return {};
+    if (generation === currentGeneration
+      && detail.hasManualContinuity !== mobileStore.pageTranslationData.hasManualContinuity) return {};
+    return { hasManualContinuity: detail.hasManualContinuity, manualContinuityGeneration: generation };
+  };
+  const isObsoleteGeneration = (detail) => Number.isSafeInteger(detail?.manualContinuityGeneration)
+    && detail.manualContinuityGeneration < (mobileStore.pageTranslationData.manualContinuityGeneration ?? -1);
+
   onMounted(() => {
     const pageEventBus = window.pageEventBus;
     if (!pageEventBus) return;
@@ -57,11 +69,13 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
     // Page Translation Life-cycle Events
     tracker.addEventListener(pageEventBus, MessageActions.PAGE_TRANSLATE_START, (detail) => {
       logger.debug('PAGE_TRANSLATE_START received:', detail);
+      if (isObsoleteGeneration(detail)) return;
       errorPresentationRevision++;
       mobileStore.setPageTranslation({
         isTranslating: true,
-        isTranslated: false,
+        isTranslated: detail.isTranslated === true,
         isAutoTranslating: detail.isAutoTranslating || false,
+        ...manualContinuityPatch(detail),
         status: TRANSLATION_STATUS.TRANSLATING,
         translatedCount: 0,
         failedCount: 0,
@@ -78,6 +92,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
 
     tracker.addEventListener(pageEventBus, MessageActions.PAGE_TRANSLATE_PROGRESS, (detail) => {
       logger.debug('PAGE_TRANSLATE_PROGRESS received:', detail);
+      if (isObsoleteGeneration(detail)) return;
       
       // If we are in a context with an aggregator (main frame), prioritize aggregated messages
       // to avoid UI "jumping" between iframe-specific and aggregated progress
@@ -106,12 +121,14 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         totalCount,
         isTranslating: detail.isTranslating !== undefined ? detail.isTranslating : mobileStore.pageTranslationData.isTranslating,
         isAutoTranslating: detail.isAutoTranslating !== undefined ? detail.isAutoTranslating : mobileStore.pageTranslationData.isAutoTranslating,
+        ...manualContinuityPatch(detail),
         status: finalStatus
       });
     });
 
     tracker.addEventListener(pageEventBus, MessageActions.PAGE_TRANSLATE_IDLE, (detail) => {
       logger.debug('PAGE_TRANSLATE_IDLE received:', detail);
+      if (isObsoleteGeneration(detail)) return;
 
       const isMainFrame = window.self === window.top;
       if (isMainFrame && !detail.isAggregated) {
@@ -131,12 +148,14 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         totalCount,
         isTranslating: false,
         isAutoTranslating: detail.isAutoTranslating !== undefined ? detail.isAutoTranslating : mobileStore.pageTranslationData.isAutoTranslating,
-        isTranslated: translatedCount > 0,
+        ...manualContinuityPatch(detail),
+        isTranslated: detail.isTranslated === true || translatedCount > 0,
         status: TRANSLATION_STATUS.COMPLETED
       });
     });
 
     tracker.addEventListener(pageEventBus, MessageActions.PAGE_TRANSLATE_COMPLETE, async (detail) => {
+      if (isObsoleteGeneration(detail)) return;
       // Skip empty/invalid completion messages - they might come from iframes or initialization
       // BUT: process if it is aggregated as it represents the whole page state
       if (!detail.isAggregated && (!detail || (detail.translatedCount === 0 && detail.failedCount === 0 && !detail.isTranslated && !mobileStore.pageTranslationData.isTranslating))) {
@@ -153,14 +172,16 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
 
       if (isZeroResult && isStructuredTranslationError(detail.errorDetails)) {
         const displayError = await getPageTranslationErrorPresentation(detail);
-        if (revision !== errorPresentationRevision) return;
+        if (revision !== errorPresentationRevision || isObsoleteGeneration(detail)) return;
         errorMessage = displayError?.message || null;
       }
 
+      if (revision !== errorPresentationRevision || isObsoleteGeneration(detail)) return;
       mobileStore.setPageTranslation({
         isTranslating: false,
-        isTranslated: translatedCount > 0,
+        isTranslated: detail.isTranslated === true || translatedCount > 0,
         isAutoTranslating: detail.isAutoTranslating !== undefined ? detail.isAutoTranslating : mobileStore.pageTranslationData.isAutoTranslating,
+        ...manualContinuityPatch(detail),
         status: isZeroResult ? TRANSLATION_STATUS.ERROR : TRANSLATION_STATUS.COMPLETED,
         translatedCount,
         failedCount,
@@ -170,6 +191,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
     });
 
     tracker.addEventListener(pageEventBus, MessageActions.PAGE_TRANSLATE_ERROR, async (detail) => {
+      if (isObsoleteGeneration(detail)) return;
       if (detail.isFatal === false) return;
 
       const isMainFrame = window.self === window.top;
@@ -177,7 +199,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
 
       const revision = ++errorPresentationRevision;
       const presentation = await getPageTranslationErrorPresentation(detail);
-      if (revision !== errorPresentationRevision) return;
+      if (revision !== errorPresentationRevision || isObsoleteGeneration(detail)) return;
       if (!presentation) return;
 
       const translatedCount = typeof detail.translatedCount === 'number'
@@ -185,10 +207,10 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         : typeof detail.committedCount === 'number'
           ? detail.committedCount
           : null;
-      const hasCommittedContent = translatedCount !== null
+      const hasCommittedContent = detail.isTranslated === true || (translatedCount !== null
         ? translatedCount > 0
         : mobileStore.pageTranslationData.isTranslated
-          || mobileStore.pageTranslationData.translatedCount > 0;
+          || mobileStore.pageTranslationData.translatedCount > 0);
       const currentState = mobileStore.pageTranslationData;
       const isTranslating = detail.isTranslating !== undefined
         ? detail.isTranslating
@@ -197,6 +219,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         ? detail.isAutoTranslating
         : currentState.isAutoTranslating;
 
+      if (revision !== errorPresentationRevision || isObsoleteGeneration(detail)) return;
       mobileStore.setPageTranslation({ 
         isTranslating,
         isAutoTranslating,
@@ -204,6 +227,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         ...(translatedCount !== null && { translatedCount }),
         status: TRANSLATION_STATUS.ERROR,
         errorMessage: presentation.message,
+        ...manualContinuityPatch(detail),
       });
     });
 
@@ -226,7 +250,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         return;
       }
 
-      mobileStore.resetPageTranslation();
+      mobileStore.dismissPageTranslationError();
     });
 
     tracker.addEventListener(pageEventBus, MessageActions.PAGE_RESTORE_COMPLETE, () => {
@@ -236,6 +260,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
     });
 
     tracker.addEventListener(pageEventBus, MessageActions.PAGE_AUTO_RESTORE_COMPLETE, (detail) => {
+      if (isObsoleteGeneration(detail)) return;
       const currentState = mobileStore.pageTranslationData;
       const isMainFrame = window.self === window.top;
 
@@ -253,7 +278,7 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
         ? detail.totalCount
         : currentState.totalCount;
       const hasTranslations = detail.isTranslated !== undefined
-        ? detail.isTranslated
+        ? detail.isTranslated || translatedCount > 0
         : translatedCount > 0;
 
       // Skip empty messages if we already have active/valid translation state
@@ -284,7 +309,8 @@ export function useContentAppPageTranslation(mobileStore, tracker) {
             : TRANSLATION_STATUS.IDLE,
         translatedCount,
         failedCount,
-        totalCount
+        totalCount,
+        ...manualContinuityPatch(detail)
       };
 
       mobileStore.setPageTranslation(baseState);

@@ -221,6 +221,10 @@ vi.mock('@/features/exclusion/utils/exclusion-utils.js', () => ({
   checkUrlExclusionAsync: vi.fn(() => Promise.resolve(false)),
 }));
 
+vi.mock('@/core/background/handlers/page-translation/handlePageTranslation.js', () => ({
+  revokeManualPageAuthority: vi.fn(() => Promise.resolve(true)),
+}));
+
 import browser from 'webextension-polyfill';
 import { ExclusionChecker } from '@/features/exclusion/core/ExclusionChecker.js';
 import { SelectElementManager } from '@/features/element-selection/SelectElementManager.js';

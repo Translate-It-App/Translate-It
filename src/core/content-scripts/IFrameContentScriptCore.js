@@ -3,6 +3,7 @@
 
 import { BaseContentScriptCore } from './BaseContentScriptCore.js';
 import { MessageActions } from '@/shared/messaging/core/MessageActions.js';
+import { installPageTranslationDocumentProbe } from './PageTranslationDocumentIdentity.js';
 
 /**
  * State source for Select Element in a frame that cannot load the full
@@ -120,6 +121,7 @@ export function IFrameContentScriptCore({ tinyFrame = false } = {}) {
       await featureManager.checkForUrlChange({
         navigationCursor: message?.data?.navigationCursor,
         navigationUnavailable: message?.data?.navigationUnavailable,
+        restartFence: message?.data?.restartFence,
       });
       return { success: true };
     });
@@ -186,7 +188,37 @@ export function IFrameContentScriptCore({ tinyFrame = false } = {}) {
         const { MessageActions } = await import('@/shared/messaging/core/MessageActions.js');
         const browserAPI = (typeof browser !== 'undefined' ? browser : (typeof chrome !== 'undefined' ? chrome : null));
         if (browserAPI?.runtime?.sendMessage) {
+          const documentToken = installPageTranslationDocumentProbe(browserAPI);
           void browserAPI.runtime.sendMessage({ action: MessageActions.SELECT_ELEMENT_FRAME_READY, data: {} }).catch(() => {});
+          void (async () => {
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+              if (window.__translateItPageDocumentToken !== documentToken
+                  || window.__translateItFrameStartedToken === documentToken) return;
+              const ticket = await browserAPI.runtime.sendMessage({
+                action: MessageActions.PAGE_TRANSLATE_FRAME_READY,
+                data: { documentToken },
+              });
+              if (ticket?.success === false && ticket.isTransportFailure !== true) {
+                if (attempt === 0) continue;
+                return;
+              }
+              if (!ticket?.success || !ticket.start) return;
+
+              window.__translateItFrameStartedToken = documentToken;
+              const result = await browserAPI.runtime.sendMessage({
+                action: MessageActions.PAGE_TRANSLATE_FRAME_START,
+                data: { ...ticket, documentToken },
+              });
+              if (result?.success === false && result.isTransportFailure !== true) {
+                if (window.__translateItPageDocumentToken === documentToken
+                    && window.__translateItFrameStartedToken === documentToken) {
+                  delete window.__translateItFrameStartedToken;
+                }
+                if (attempt === 0) continue;
+              }
+              return;
+            }
+          })().catch(() => {});
         }
       } catch { /* empty */ }
 
