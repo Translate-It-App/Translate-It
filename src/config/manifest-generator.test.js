@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { generateManifest } from '../../config/manifest-generator.js';
 
+describe('Firefox popup shortcut', () => {
+  it('allows a user-assigned shortcut to open the Firefox translation popup', () => {
+    const manifest = generateManifest('firefox');
+    expect(manifest.action.default_popup).toBe('src/html/popup.html');
+    expect(manifest.commands._execute_action).toEqual({});
+    expect(manifest.commands['SELECT-ELEMENT-COMMAND']).toBeDefined();
+  });
+});
+
 describe('live dubbing manifest capability', () => {
   it('adds Chrome capture permissions only and keeps Chrome minimum at 116', () => {
     const chromeManifest = generateManifest('chrome');
