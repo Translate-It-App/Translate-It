@@ -41,7 +41,7 @@ import { ErrorHandler } from '@/shared/error-management/ErrorHandler.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import { isCancellationError, isFatalError, isTransientError, matchErrorToType } from '@/shared/error-management/ErrorMatcher.js';
 import ExtensionContextManager from '@/core/extensionContext.js';
-import { emitBenchmarkRequestDispatch } from '../utils/liveBenchmarkProbe.js';
+import { emitBenchmarkRequestDispatch, emitBenchmarkRuntimeMetadata } from '../utils/liveBenchmarkProbe.js';
 
 import { registryIdToName, isProviderType, ProviderTypes } from '@/features/translation/providers/ProviderConstants.js';
 
@@ -341,6 +341,11 @@ export class DomTranslatorAdapter extends ResourceTracker {
       const extractionMode = isBlockGroupingEnabled
         ? SelectElementExtractionMode.V3
         : SelectElementExtractionMode.V2;
+      if (import.meta.env.DEV) emitBenchmarkRuntimeMetadata(element, {
+        provider: registryIdToName(provider),
+        extractionMode,
+        targetLanguage,
+      });
 
       // Capability preflight: the policy owns mode capability. A PRE/CODE root
       // under V2 is valid content the current mode cannot represent — surface it
