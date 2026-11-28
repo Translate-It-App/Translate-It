@@ -1710,3 +1710,315 @@ describe('DesktopFabMenu dismissal cleanup and drag persistence', () => {
     });
   });
 });
+
+describe('DesktopFabMenu viewport bounds', () => {
+  let wrapper;
+  let restoreViewport;
+  let restoreScrollport;
+  let buttonHeight = 64;
+  let rectSpy;
+
+  const setViewport = (clientHeight) => {
+    const root = document.documentElement;
+    const scrollport = document.scrollingElement || root;
+    const scrollportHeight = Object.getOwnPropertyDescriptor(scrollport, 'clientHeight');
+    const scrollportTop = Object.getOwnPropertyDescriptor(scrollport, 'clientTop');
+    const innerHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight');
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: clientHeight });
+    Object.defineProperty(scrollport, 'clientTop', { configurable: true, value: 0 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: clientHeight + 15 });
+    restoreViewport = () => {
+      if (scrollportHeight) Object.defineProperty(scrollport, 'clientHeight', scrollportHeight);
+      else delete scrollport.clientHeight;
+      if (scrollportTop) Object.defineProperty(scrollport, 'clientTop', scrollportTop);
+      else delete scrollport.clientTop;
+      if (innerHeight) Object.defineProperty(window, 'innerHeight', innerHeight);
+      else delete window.innerHeight;
+    };
+  };
+
+  const mockButtonHeight = () => {
+    rectSpy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      if (this.classList?.contains('desktop-fab-button')) {
+        return { x: 0, y: 0, left: 0, top: 0, right: buttonHeight, bottom: buttonHeight, width: buttonHeight, height: buttonHeight };
+      }
+      return { x: 0, y: 0, left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    });
+  };
+
+  beforeEach(() => {
+    setupBaseMocks();
+    buttonHeight = 64;
+    mocks.autoRules = {
+      isAutoTranslateToggleVisible: ref(false), isActive: ref(false),
+      hasPageRule: ref(false), hasSiteRule: ref(false), siteScopeAvailable: ref(true),
+      showManageRules: ref(false),
+      scopeActions: { togglePageScope: vi.fn(), toggleSiteScope: vi.fn() }, openManageRules: vi.fn(),
+    };
+    setViewport(500);
+    mockButtonHeight();
+  });
+
+  afterEach(() => {
+    wrapper?.unmount();
+    wrapper = null;
+    rectSpy?.mockRestore();
+    rectSpy = null;
+    restoreViewport?.();
+    restoreViewport = null;
+    restoreScrollport?.();
+    restoreScrollport = null;
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ['0.8', 38.4], ['1', 48], ['1.2', 57.6], ['1.5', 72],
+    ['0.8', 43.2], ['1', 54], ['1.2', 64.8], ['1.5', 81],
+    ['0.8', 51.2], ['1', 64], ['1.2', 76.8], ['1.5', 96],
+  ])('clamps the actual %spx FAB height against the client viewport on both docks', async (scale, height) => {
+    buttonHeight = height;
+    mocks.settingsStore.settings.FAB_SIZE = scale;
+    for (const side of ['left', 'right']) {
+      mocks.getPosition.mockResolvedValue({ y: 690, side });
+      wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+      await vi.waitFor(() => expect(wrapper.vm.isReady).toBe(true));
+      await vi.waitFor(() => expect(wrapper.vm.verticalPos).toBeCloseTo(500 - height - 16));
+
+      expect(wrapper.vm.side).toBe(side);
+      expect(wrapper.vm.verticalPos).toBeCloseTo(500 - height - 16);
+      expect(wrapper.vm.userPreferredY).toBe(690);
+      wrapper.unmount();
+      wrapper = null;
+    }
+  });
+
+  it('keeps the preferred position through resize and size changes', async () => {
+    mocks.getPosition.mockResolvedValue({ y: 620, side: 'left' });
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.isReady).toBe(true));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.verticalPos).toBe(420);
+
+    const scrollport = document.scrollingElement || document.documentElement;
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: 300 });
+    const resize = mocks.tracker.addEventListener.mock.calls.find(([, type]) => type === 'resize')?.[2];
+    resize();
+    expect(wrapper.vm.verticalPos).toBe(220);
+    expect(wrapper.vm.userPreferredY).toBe(620);
+
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: 700 });
+    resize();
+    expect(wrapper.vm.verticalPos).toBe(620);
+
+    buttonHeight = 96;
+    mocks.settingsStore.settings.FAB_SIZE = '1.5';
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.verticalPos).toBe(588);
+    expect(wrapper.vm.userPreferredY).toBe(620);
+  });
+
+  it('does not add the scrollport border to the usable viewport bottom', async () => {
+    const scrollport = document.scrollingElement || document.documentElement;
+    Object.defineProperty(scrollport, 'clientTop', { configurable: true, value: 40 });
+    mocks.getPosition.mockResolvedValue({ y: 690, side: 'right' });
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.verticalPos).toBe(420));
+  });
+
+  it('uses the document scrollport in quirks-mode documents', async () => {
+    const documentScrollport = Object.getOwnPropertyDescriptor(document, 'scrollingElement');
+    const bodyHeight = Object.getOwnPropertyDescriptor(document.body, 'clientHeight');
+    Object.defineProperty(document, 'scrollingElement', {
+      configurable: true,
+      value: document.body,
+    });
+    Object.defineProperty(document.body, 'clientHeight', { configurable: true, value: 500 });
+    Object.defineProperty(document.documentElement, 'clientHeight', { configurable: true, value: 1200 });
+    restoreScrollport = () => {
+      if (documentScrollport) Object.defineProperty(document, 'scrollingElement', documentScrollport);
+      else delete document.scrollingElement;
+      if (bodyHeight) Object.defineProperty(document.body, 'clientHeight', bodyHeight);
+      else delete document.body.clientHeight;
+    };
+    mocks.getPosition.mockResolvedValue({ y: 690, side: 'right' });
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.verticalPos).toBe(420));
+  });
+
+  it('uses the same measured bound when dragging and saves the clamped coordinate', async () => {
+    mocks.getPosition.mockResolvedValue({ y: 100, side: 'right' });
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.isReady).toBe(true));
+    await wrapper.vm.$nextTick();
+
+    wrapper.vm.startDrag(new MouseEvent('mousedown', { button: 0, clientY: 110, clientX: 900 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientY: 900, clientX: 900 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientY: 1300, clientX: 900 }));
+    expect(wrapper.vm.verticalPos).toBe(420);
+    window.dispatchEvent(new MouseEvent('mouseup', { clientY: 1300, clientX: 900 }));
+
+    expect(mocks.storageManager.set).toHaveBeenCalledWith({
+      DESKTOP_FAB_POSITION: { side: 'right', y: 420 },
+    });
+  });
+
+  it('bounds the active drag and keeps its release position through immediate viewport notifications', async () => {
+    let notifyResize;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback) { notifyResize = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    mocks.getPosition.mockResolvedValue({ y: 100, side: 'right' });
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.isReady).toBe(true));
+    const scrollport = document.scrollingElement || document.documentElement;
+    const resize = () => mocks.tracker.addEventListener.mock.calls
+      .find(([, type]) => type === 'resize')?.[2];
+    await vi.waitFor(() => expect(resize()).toBeTypeOf('function'));
+
+    wrapper.vm.startDrag(new MouseEvent('mousedown', { button: 0, clientY: 110, clientX: 900 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientY: 120, clientX: 900 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientY: 270, clientX: 900 }));
+    expect(wrapper.vm.isDragging).toBe(true);
+    expect(wrapper.vm.verticalPos).toBe(250);
+    expect(wrapper.vm.userPreferredY).toBe(100);
+
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: 300 });
+    resize()();
+    expect(wrapper.vm.verticalPos).toBe(220);
+    notifyResize();
+    expect(wrapper.vm.verticalPos).toBe(220);
+
+    window.dispatchEvent(new MouseEvent('mouseup', { clientY: 270, clientX: 900 }));
+    expect(wrapper.vm.userPreferredY).toBe(220);
+    expect(mocks.storageManager.set).toHaveBeenCalledWith({
+      DESKTOP_FAB_POSITION: { side: 'right', y: 220 },
+    });
+
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: 500 });
+    resize()();
+    notifyResize();
+    expect(wrapper.vm.verticalPos).toBe(220);
+    expect(wrapper.vm.userPreferredY).toBe(220);
+  });
+
+  it('uses the released preference during the visual drag delay and preserves ghost-click protection', async () => {
+    mocks.getPosition.mockResolvedValue({ y: 100, side: 'right' });
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.isReady).toBe(true));
+    const scrollport = document.scrollingElement || document.documentElement;
+    const resize = () => mocks.tracker.addEventListener.mock.calls
+      .find(([, type]) => type === 'resize')?.[2];
+    await vi.waitFor(() => expect(resize()).toBeTypeOf('function'));
+
+    wrapper.vm.startDrag(new MouseEvent('mousedown', { button: 0, clientY: 110, clientX: 900 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientY: 120, clientX: 900 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientY: 270, clientX: 900 }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    window.dispatchEvent(new MouseEvent('mouseup', { clientY: 270, clientX: 900 }));
+
+    expect(wrapper.vm.isDragging).toBe(true);
+    expect(wrapper.vm.userPreferredY).toBe(250);
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: 300 });
+    resize()();
+    expect(wrapper.vm.verticalPos).toBe(220);
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: 500 });
+    resize()();
+    expect(wrapper.vm.verticalPos).toBe(250);
+
+    wrapper.vm.toggleMenu();
+    expect(wrapper.vm.isMenuOpen).toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(wrapper.vm.isDragging).toBe(false);
+    expect(wrapper.vm.wasDragged).toBe(true);
+    wrapper.vm.toggleMenu();
+    expect(wrapper.vm.isMenuOpen).toBe(false);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(wrapper.vm.wasDragged).toBe(false);
+    wrapper.vm.toggleMenu();
+    expect(wrapper.vm.isMenuOpen).toBe(true);
+  });
+
+  it('does not save a temporarily clamped position for a click without dragging', async () => {
+    mocks.getPosition.mockResolvedValue({ y: 690, side: 'left' });
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.verticalPos).toBe(420));
+
+    wrapper.vm.startDrag(new MouseEvent('mousedown', { button: 0, clientY: 430, clientX: 20 }));
+    window.dispatchEvent(new MouseEvent('mouseup', { clientY: 430, clientX: 20 }));
+
+    expect(wrapper.vm.isDragging).toBe(false);
+    expect(wrapper.vm.verticalPos).toBe(420);
+    expect(wrapper.vm.userPreferredY).toBe(690);
+    expect(mocks.storageManager.set).not.toHaveBeenCalled();
+  });
+
+  it('waits for the button to return from fullscreen before reclamping', async () => {
+    mocks.getPosition.mockResolvedValue({ y: 690, side: 'right' });
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.verticalPos).toBe(420));
+
+    mocks.mobileStore.isFullscreen = true;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.desktop-fab-button').exists()).toBe(false);
+
+    const scrollport = document.scrollingElement || document.documentElement;
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: 300 });
+    wrapper.vm.checkBounds();
+    expect(wrapper.vm.verticalPos).toBe(420);
+
+    mocks.mobileStore.isFullscreen = false;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.desktop-fab-button').exists()).toBe(true);
+    expect(wrapper.vm.verticalPos).toBe(220);
+  });
+
+  it('initializes the default position if the button first appears after fullscreen', async () => {
+    mocks.getPosition.mockResolvedValue({ y: -1, side: 'right' });
+    mocks.mobileStore.isFullscreen = true;
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.isReady).toBe(true));
+    expect(wrapper.find('.desktop-fab-button').exists()).toBe(false);
+    expect(wrapper.vm.verticalPos).toBe(-1);
+
+    mocks.mobileStore.isFullscreen = false;
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.find('.desktop-fab-button').exists()).toBe(true);
+    expect(wrapper.vm.userPreferredY).toBe(0);
+    expect(wrapper.vm.verticalPos).toBeGreaterThanOrEqual(0);
+    expect(wrapper.vm.verticalPos).toBeLessThanOrEqual(500 - buttonHeight - 16);
+  });
+
+  it('reclamps on dynamic root resize-observer notifications and disconnects on unmount', async () => {
+    let notifyResize;
+    let observedElement;
+    let disconnected = false;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback) { notifyResize = callback; }
+      observe(element) { observedElement = element; }
+      disconnect() { disconnected = true; }
+    });
+    mocks.getPosition.mockResolvedValue({ y: 620, side: 'right' });
+    wrapper = mount(DesktopFabMenu, { attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper.vm.isReady).toBe(true));
+    await wrapper.vm.$nextTick();
+    expect(notifyResize).toBeTypeOf('function');
+    expect(observedElement).toBe(document.scrollingElement || document.documentElement);
+
+    const scrollport = document.scrollingElement || document.documentElement;
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: 300 });
+    notifyResize();
+    expect(wrapper.vm.verticalPos).toBe(220);
+    expect(wrapper.vm.userPreferredY).toBe(620);
+    Object.defineProperty(scrollport, 'clientHeight', { configurable: true, value: 700 });
+    notifyResize();
+    expect(wrapper.vm.verticalPos).toBe(620);
+
+    wrapper.unmount();
+    wrapper = null;
+    expect(disconnected).toBe(true);
+  });
+});

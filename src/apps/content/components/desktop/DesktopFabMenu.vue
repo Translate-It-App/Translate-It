@@ -274,6 +274,7 @@
 
     <!-- Main Button -->
     <div
+      ref="fabButtonRef"
       class="desktop-fab-button"
       :class="{
         'is-open': isMenuOpen,
@@ -641,6 +642,7 @@ const isTextSelectionEnabled = computed(
 );
 
 const fabContainerRef = ref(null);
+const fabButtonRef = ref(null);
 let hoverTimerId = null;
 let fadeTimerId = null;
 let instabilityTimer = null;
@@ -1225,17 +1227,41 @@ const userPreferredY = ref(null);
 const side = ref("right");
 const isDragging = ref(false);
 const wasDragged = ref(false);
+let isDragActive = false;
 let startY = 0;
 let startX = 0;
 
-const checkBounds = () => {
-  if (typeof window === "undefined" || userPreferredY.value === null) return;
+const BOTTOM_VIEWPORT_MARGIN = 16;
+const getBoundedVerticalPosition = (y) => {
+  const buttonHeight = fabButtonRef.value?.getBoundingClientRect().height;
+  if (!Number.isFinite(buttonHeight) || typeof window === "undefined") return null;
 
-  // Dynamically calculate maxY based on window height and a safe margin
-  // (using a slightly larger margin to account for responsive scaling)
-  const maxY = window.innerHeight - 80;
-  verticalPos.value = Math.max(10, Math.min(userPreferredY.value, maxY));
+  const scrollport = document.scrollingElement || document.documentElement;
+  const viewportBottom = scrollport.clientHeight || window.innerHeight;
+  const maxY = Math.max(0, viewportBottom - buttonHeight - BOTTOM_VIEWPORT_MARGIN);
+  return Math.min(maxY, Math.max(Math.min(10, maxY), y));
 };
+
+const checkBounds = () => {
+  if (typeof window === "undefined") return;
+  const y = isDragActive ? verticalPos.value : userPreferredY.value;
+  if (y === null) return;
+  const boundedY = getBoundedVerticalPosition(y);
+  if (boundedY !== null) verticalPos.value = boundedY;
+};
+
+watch(fabScale, checkBounds, { flush: "post" });
+watch(isFullscreen, (fullscreen) => {
+  if (fullscreen) return;
+  if (userPreferredY.value === null && fabContainerRef.value) {
+    const y = verticalPos.value === -1
+      ? fabContainerRef.value.getBoundingClientRect().top
+      : verticalPos.value;
+    verticalPos.value = y;
+    userPreferredY.value = y;
+  }
+  checkBounds();
+}, { flush: "post" });
 
 // Re-anchor the detached hide popover when the dock side flips mid-session.
 watch(side, () => {
@@ -1433,6 +1459,7 @@ const startDrag = (e) => {
 
   const point = isMouseEvent ? e : e.touches[0];
   isDragging.value = false;
+  isDragActive = false;
   startY = point.clientY - verticalPos.value;
   startX = point.clientX;
 
@@ -1456,6 +1483,7 @@ const onDrag = (e) => {
     // Only start dragging if moved beyond threshold
     if (Math.abs(dy) > 5 || Math.abs(dx) > 5) {
       isDragging.value = true;
+      isDragActive = true;
       wasDragged.value = true;
       isFaded.value = false;
 
@@ -1467,9 +1495,8 @@ const onDrag = (e) => {
   if (isDragging.value) {
     if (!isMouseEvent && e.cancelable) e.preventDefault();
 
-    let newY = point.clientY - startY;
-    const maxY = window.innerHeight - 80;
-    newY = Math.max(10, Math.min(newY, maxY));
+    const newY = getBoundedVerticalPosition(point.clientY - startY);
+    if (newY === null) return;
     verticalPos.value = newY;
 
     const screenWidth = window.innerWidth;
@@ -1481,6 +1508,8 @@ const onDrag = (e) => {
 };
 
 const stopDrag = (e) => {
+  const didDrag = isDragActive;
+  isDragActive = false;
   const isMouseEvent = e && e.type === "mouseup";
   if (isMouseEvent) {
     tracker.removeEventListener(window, "mousemove", onDrag);
@@ -1490,21 +1519,22 @@ const stopDrag = (e) => {
     tracker.removeEventListener(window, "touchend", stopDrag);
   }
 
-  if (isDragging.value) {
+  if (didDrag) {
+    const position = { side: side.value, y: verticalPos.value };
     logger.debug("Desktop FAB drag ended", {
       side: side.value,
       y: verticalPos.value,
     });
-  }
 
-  const position = { side: side.value, y: verticalPos.value };
-  void (async () => {
-    try {
-      await storageManager.set({ DESKTOP_FAB_POSITION: position });
-    } catch (err) {
-      logger.info("Failed to save FAB state:", err);
-    }
-  })();
+    userPreferredY.value = position.y;
+    void (async () => {
+      try {
+        await storageManager.set({ DESKTOP_FAB_POSITION: position });
+      } catch (err) {
+        logger.info("Failed to save FAB state:", err);
+      }
+    })();
+  }
 
   // Use a slightly longer delay to ensure ghost clicks are swallowed
   scheduleTimeout(() => {
@@ -1514,8 +1544,6 @@ const stopDrag = (e) => {
     scheduleTimeout(() => {
       wasDragged.value = false;
     }, 150);
-
-    userPreferredY.value = position.y;
 
     // Restart fade timer after drag ends
     if (!isUnmounted) startFadeTimer(false);
@@ -1546,8 +1574,6 @@ onMounted(async () => {
       }
       if (position.side) side.value = position.side;
     }
-    checkBounds();
-
     // Initial check for allowed features
     await updateAllowedFeatures();
     if (isUnmounted) return;
@@ -1583,6 +1609,19 @@ onMounted(async () => {
 
   // Render immediately without transitions, then settle the initial pixel position.
   isReady.value = true;
+  await nextTick();
+  if (isUnmounted) return;
+  checkBounds();
+
+  const scrollport = document.scrollingElement || document.documentElement;
+  if (typeof ResizeObserver === "function" && scrollport) {
+    const viewportObserver = new ResizeObserver(checkBounds);
+    viewportObserver.observe(scrollport);
+    tracker.trackResource(
+      `desktop-fab-viewport-${animationFrameOwnerId}`,
+      () => viewportObserver.disconnect(),
+    );
+  }
 
   // Settling pixel position on first mount if not already set
   // We do this in a double requestAnimationFrame or nextTick to ensure the DOM is ready
@@ -1592,6 +1631,7 @@ onMounted(async () => {
         const rect = fabContainerRef.value.getBoundingClientRect();
         verticalPos.value = rect.top;
         userPreferredY.value = rect.top;
+        checkBounds();
       }
 
       scheduleTimeout(() => {
