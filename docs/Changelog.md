@@ -1,3 +1,20 @@
+#### v1.28.0 – Released on November 28, 2026
+
+##### Added
+
+- Added a customizable keyboard shortcut to open the translation popup in Firefox.
+
+##### Changed
+
+- Improved Page Translation support for dynamic websites, including seamless navigation and automatic translation of newly loaded content.
+- Disabled the Text Field Translation shortcut by default for new installations.
+
+##### Fixed
+
+- Various bug fixes, usability improvements, and website compatibility enhancements.
+
+---
+
 #### v1.27.0 – Released on November 25, 2026
 
 ##### Changed
