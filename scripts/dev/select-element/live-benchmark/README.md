@@ -1,5 +1,7 @@
 # Select Element live benchmark
 
+Use a development build; production builds do not emit benchmark timing events. Build with `pnpm run dev:chrome` or `pnpm run dev:firefox`, then load the extension using the [development instructions](../../../../docs/guides/CONTRIBUTING.md#development).
+
 First configure the extension with the provider credentials, source/target languages, and relevant Select Element extraction/settings; the benchmark does not change settings. Run `PORT=4179 node scripts/dev/select-element/live-benchmark/serve.mjs` and open the printed loopback URL with the extension enabled. Reuse the same fixed port (and URL origin) for baseline and candidate runs so browser localStorage persists. In **Trial Configuration**, choose a fixture and label, click **Start trial**, activate Select Element normally, then click the fixture's border/padding rather than a paragraph. Each trial builds a fresh fixture before measurement and freezes controls until recorded. In **Trial Outcome**, report the outcome; leaving/reloading records incomplete.
 
 Each selectable 300×300 px `<section>` root contains multiple independent `<p>` parents: 8, 50, or 300 logical parents/text nodes; Mixed HTML has 25 logical parents and 50 text nodes with meaningful `<strong>`/`<em>` inline formatting. Root area is 90,000 px², within ElementSelector's area heuristics. Click the root border/padding, not a paragraph, to select the full section. The control panel is outside the fixture and excluded. Keep settings and fixture constant; change only the build being compared.
