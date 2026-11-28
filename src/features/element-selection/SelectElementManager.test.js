@@ -751,20 +751,42 @@ describe('SelectElementManager', () => {
       const el = document.createElement('div');
       manager.elementSelector.getHighlightedElement.mockReturnValue(el);
       isSelectableTextRoot.mockReturnValue(false);
+      vi.stubEnv('DEV', true);
+      document.documentElement.setAttribute('data-translate-it-live-benchmark', 'true');
+      el.setAttribute('data-translate-it-live-benchmark-root', 'true');
+      el.setAttribute('data-translate-it-live-benchmark-trial', 'manager-test');
+      document.body.append(el);
+      const acceptedClick = vi.fn();
+      document.addEventListener('translate-it:select-element-benchmark:accepted-click', acceptedClick);
 
       await manager.handleClick(new MouseEvent('click'));
 
       expect(manager.domTranslatorAdapter.translateElement).not.toHaveBeenCalled();
       expect(manager.elementSelector.deactivate).not.toHaveBeenCalled();
+      expect(acceptedClick).not.toHaveBeenCalled();
+      document.removeEventListener('translate-it:select-element-benchmark:accepted-click', acceptedClick);
+      document.documentElement.removeAttribute('data-translate-it-live-benchmark');
+      vi.unstubAllEnvs();
     });
 
     it('lets an eligible target reach translateElement', async () => {
       const el = document.createElement('div');
       manager.elementSelector.getHighlightedElement.mockReturnValue(el);
+      vi.stubEnv('DEV', true);
+      document.documentElement.setAttribute('data-translate-it-live-benchmark', 'true');
+      el.setAttribute('data-translate-it-live-benchmark-root', 'true');
+      el.setAttribute('data-translate-it-live-benchmark-trial', 'manager-test');
+      document.body.append(el);
+      const acceptedClick = vi.fn();
+      document.addEventListener('translate-it:select-element-benchmark:accepted-click', acceptedClick);
 
       await manager.handleClick(new MouseEvent('click'));
 
       expect(manager.domTranslatorAdapter.translateElement).toHaveBeenCalledWith(el, expect.any(Object));
+      expect(acceptedClick).toHaveBeenCalledOnce();
+      document.removeEventListener('translate-it:select-element-benchmark:accepted-click', acceptedClick);
+      document.documentElement.removeAttribute('data-translate-it-live-benchmark');
+      vi.unstubAllEnvs();
     });
 
     it('does not translate a target that became invalid between hover and click', async () => {
@@ -868,6 +890,40 @@ describe('SelectElementManager', () => {
     beforeEach(() => {
       manager.isActive = true;
       cleanupSpy = vi.spyOn(manager, 'performPostTranslationCleanup').mockImplementation(() => {});
+    });
+
+    it.each([
+      [Object.assign(new Error('failed'), { type: 'TRANSLATION_FAILED' }), 'failed'],
+      [Object.assign(new Error('cancelled'), { type: ErrorTypes.USER_CANCELLED }), 'cancelled'],
+      [Object.assign(new Error('partial'), { type: 'TRANSLATION_FAILED', translationOutcome: { committedParentCount: 1, totalParentCount: 2 } }), 'partial'],
+    ])('emits terminal status %s after thrown translation outcomes', async (error, expectedStatus) => {
+      vi.stubEnv('DEV', true);
+      document.documentElement.setAttribute('data-translate-it-live-benchmark', 'true');
+      const terminal = vi.fn();
+      document.addEventListener('translate-it:select-element-benchmark:operation-terminal', terminal);
+      manager.domTranslatorAdapter.translateElement.mockRejectedValue(error);
+      const target = document.createElement('section');
+      target.setAttribute('data-translate-it-live-benchmark-root', 'true');
+      target.setAttribute('data-translate-it-live-benchmark-trial', 'manager-test');
+      document.body.append(target);
+
+      await manager.startTranslation(target);
+
+      expect(terminal).toHaveBeenCalledOnce();
+      expect(JSON.parse(terminal.mock.calls[0][0].detail)).toMatchObject({ status: expectedStatus });
+      document.removeEventListener('translate-it:select-element-benchmark:operation-terminal', terminal);
+      document.documentElement.removeAttribute('data-translate-it-live-benchmark');
+      vi.unstubAllEnvs();
+    });
+
+    it('retains the inactive guard inside finally', async () => {
+      manager.isActive = false;
+      window.isTranslationInProgress = true;
+
+      await manager.startTranslation(document.createElement('div'));
+
+      expect(window.isTranslationInProgress).toBe(false);
+      expect(manager.domTranslatorAdapter.translateElement).not.toHaveBeenCalled();
     });
 
     it('shows validation failures as visible errors', async () => {

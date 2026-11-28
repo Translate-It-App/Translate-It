@@ -33,6 +33,7 @@ import { DomTranslatorAdapter } from './core/DomTranslatorAdapter.js';
 import { ElementSelector } from './core/ElementSelector.js';
 import { extractTextFromElement, isSelectableTextRoot } from './utils/elementHelpers.js';
 import { SelectElementReason } from './core/SelectElementPolicy.js';
+import { emitBenchmarkAcceptedClick, emitBenchmarkTerminal, getBenchmarkTrialId } from './utils/liveBenchmarkProbe.js';
 import {
   resolveSelectInteractionElement,
   SELECT_ELEMENT_SHADOW_DOM_ENABLED,
@@ -650,6 +651,7 @@ class SelectElementManager extends ResourceTracker {
 
       const text = extractTextFromElement(elementToTranslate);
       if (text && text.trim()) {
+        if (import.meta.env.DEV) emitBenchmarkAcceptedClick(event, elementToTranslate);
         // 1. Stop highlighting logic
         this.elementSelector.deactivate();
         
@@ -682,9 +684,11 @@ class SelectElementManager extends ResourceTracker {
   }
 
   async startTranslation(targetElement, options = {}) {
+    let terminalStatus;
+    let benchmarkTrialId;
     try {
       if (!this.isActive) return;
-
+      if (import.meta.env.DEV) benchmarkTrialId = getBenchmarkTrialId(targetElement);
       // Mark as translating for Memory Garbage Collector protection
       window.isTranslationInProgress = true;
 
@@ -707,8 +711,12 @@ class SelectElementManager extends ResourceTracker {
           }
         }
       });
-
       if (result?.success) {
+        if (import.meta.env.DEV && benchmarkTrialId) {
+          terminalStatus = result.partial
+            ? (hasUsefulCommittedOutput(result) ? 'partial' : 'failed')
+            : 'successful';
+        }
         pageEventBus.emit('hide-translation', { element: targetElement });
         pageEventBus.emit('ELEMENT_TRANSLATIONS_AVAILABLE'); // Notify that revert is now possible
 
@@ -729,18 +737,37 @@ class SelectElementManager extends ResourceTracker {
 
         this.performPostTranslationCleanup({ reason: 'success' });
       } else if (result?.cancelled) {
+        if (import.meta.env.DEV && benchmarkTrialId) terminalStatus = 'cancelled';
         this.deactivate({ reason: 'cancel', silent: true });
       } else {
+        if (import.meta.env.DEV && benchmarkTrialId) terminalStatus = 'failed';
         // Explicit failure contract: any resolved value that is neither success
         // nor cancellation (zero-commit results, undefined, {}) is a failure.
         const failure = (result && result.error) || new Error('Translation failed');
         await this._handleTranslationFailure(failure, result?.translationOutcome || failure.translationOutcome);
       }
     } catch (error) {
-      await this._handleTranslationFailure(error, error?.translationOutcome);
+      const outcome = error?.translationOutcome;
+      if (import.meta.env.DEV && benchmarkTrialId) {
+        terminalStatus = Boolean(outcome?.cancelled)
+          || error?.type === ErrorTypes.USER_CANCELLED
+          || error?.type === ErrorTypes.TRANSLATION_CANCELLED
+          || isCancellationError(error)
+          ? 'cancelled'
+          : Number.isInteger(outcome?.committedParentCount)
+            && Number.isInteger(outcome?.totalParentCount)
+            && outcome.committedParentCount > 0
+            && outcome.committedParentCount < outcome.totalParentCount
+            ? 'partial'
+            : 'failed';
+      }
+      await this._handleTranslationFailure(error, outcome);
     } finally {
       // Clear flag after translation is complete (success or error)
       window.isTranslationInProgress = false;
+      if (import.meta.env.DEV && benchmarkTrialId && terminalStatus) {
+        emitBenchmarkTerminal(targetElement, terminalStatus, benchmarkTrialId);
+      }
     }
   }
 
