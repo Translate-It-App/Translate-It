@@ -1,5 +1,6 @@
 // Main Content script entry point - Top Frame only
 // Manages the complete Vue application, features, and UI.
+import { installLiveBenchmarkMetadataBridge } from '@/features/element-selection/utils/liveBenchmarkMetadataBridge.js';
 
 // --- CRITICAL PRE-INITIALIZATION ---
 // Create placeholder objects for core infrastructure to prevent messaging errors
@@ -13,6 +14,7 @@ if (!window.translateItContentScriptCore) {
 
 // Global reference for the core instance
 let contentScriptCore = null;
+installLiveBenchmarkMetadataBridge();
 
 // Logging state
 let getScopedLogger = null;
