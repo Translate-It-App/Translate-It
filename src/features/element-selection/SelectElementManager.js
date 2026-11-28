@@ -651,7 +651,7 @@ class SelectElementManager extends ResourceTracker {
 
       const text = extractTextFromElement(elementToTranslate);
       if (text && text.trim()) {
-        emitBenchmarkAcceptedClick(event, elementToTranslate);
+        if (import.meta.env.DEV) emitBenchmarkAcceptedClick(event, elementToTranslate);
         // 1. Stop highlighting logic
         this.elementSelector.deactivate();
         
@@ -688,7 +688,7 @@ class SelectElementManager extends ResourceTracker {
     let benchmarkTrialId;
     try {
       if (!this.isActive) return;
-      benchmarkTrialId = getBenchmarkTrialId(targetElement);
+      if (import.meta.env.DEV) benchmarkTrialId = getBenchmarkTrialId(targetElement);
       // Mark as translating for Memory Garbage Collector protection
       window.isTranslationInProgress = true;
 
@@ -712,7 +712,7 @@ class SelectElementManager extends ResourceTracker {
         }
       });
       if (result?.success) {
-        if (benchmarkTrialId) {
+        if (import.meta.env.DEV && benchmarkTrialId) {
           terminalStatus = result.partial
             ? (hasUsefulCommittedOutput(result) ? 'partial' : 'failed')
             : 'successful';
@@ -737,10 +737,10 @@ class SelectElementManager extends ResourceTracker {
 
         this.performPostTranslationCleanup({ reason: 'success' });
       } else if (result?.cancelled) {
-        if (benchmarkTrialId) terminalStatus = 'cancelled';
+        if (import.meta.env.DEV && benchmarkTrialId) terminalStatus = 'cancelled';
         this.deactivate({ reason: 'cancel', silent: true });
       } else {
-        if (benchmarkTrialId) terminalStatus = 'failed';
+        if (import.meta.env.DEV && benchmarkTrialId) terminalStatus = 'failed';
         // Explicit failure contract: any resolved value that is neither success
         // nor cancellation (zero-commit results, undefined, {}) is a failure.
         const failure = (result && result.error) || new Error('Translation failed');
@@ -748,7 +748,7 @@ class SelectElementManager extends ResourceTracker {
       }
     } catch (error) {
       const outcome = error?.translationOutcome;
-      if (benchmarkTrialId) {
+      if (import.meta.env.DEV && benchmarkTrialId) {
         terminalStatus = Boolean(outcome?.cancelled)
           || error?.type === ErrorTypes.USER_CANCELLED
           || error?.type === ErrorTypes.TRANSLATION_CANCELLED
@@ -765,7 +765,9 @@ class SelectElementManager extends ResourceTracker {
     } finally {
       // Clear flag after translation is complete (success or error)
       window.isTranslationInProgress = false;
-      if (benchmarkTrialId && terminalStatus) emitBenchmarkTerminal(targetElement, terminalStatus, benchmarkTrialId);
+      if (import.meta.env.DEV && benchmarkTrialId && terminalStatus) {
+        emitBenchmarkTerminal(targetElement, terminalStatus, benchmarkTrialId);
+      }
     }
   }
 

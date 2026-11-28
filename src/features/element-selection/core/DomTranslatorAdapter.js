@@ -1021,7 +1021,7 @@ export class DomTranslatorAdapter extends ResourceTracker {
       await Promise.race([contentScriptIntegration.initialize(), translationToken.cancelSignal]);
       this._assertCurrentTranslationContext(translationToken);
       
-      emitBenchmarkRequestDispatch(element);
+      if (import.meta.env.DEV) emitBenchmarkRequestDispatch(element);
       const response = await Promise.race([
         contentScriptIntegration.sendTranslationRequest({
           action: MessageActions.TRANSLATE,

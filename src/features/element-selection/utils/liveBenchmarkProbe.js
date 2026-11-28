@@ -6,7 +6,7 @@ const ROOT_ATTRIBUTE = 'data-translate-it-live-benchmark-root';
 const TRIAL_ATTRIBUTE = 'data-translate-it-live-benchmark-trial';
 
 export function getBenchmarkTrialId(element) {
-  if (!import.meta.env?.DEV
+  if (!import.meta.env.DEV
       || document.documentElement.getAttribute(OPT_IN_ATTRIBUTE) !== 'true'
       || !element?.isConnected
       || element.getAttribute(ROOT_ATTRIBUTE) !== 'true') return null;
