@@ -41,6 +41,7 @@ import { ErrorHandler } from '@/shared/error-management/ErrorHandler.js';
 import { ErrorTypes } from '@/shared/error-management/ErrorTypes.js';
 import { isCancellationError, isFatalError, isTransientError, matchErrorToType } from '@/shared/error-management/ErrorMatcher.js';
 import ExtensionContextManager from '@/core/extensionContext.js';
+import { emitBenchmarkRequestDispatch } from '../utils/liveBenchmarkProbe.js';
 
 import { registryIdToName, isProviderType, ProviderTypes } from '@/features/translation/providers/ProviderConstants.js';
 
@@ -1020,6 +1021,7 @@ export class DomTranslatorAdapter extends ResourceTracker {
       await Promise.race([contentScriptIntegration.initialize(), translationToken.cancelSignal]);
       this._assertCurrentTranslationContext(translationToken);
       
+      emitBenchmarkRequestDispatch(element);
       const response = await Promise.race([
         contentScriptIntegration.sendTranslationRequest({
           action: MessageActions.TRANSLATE,

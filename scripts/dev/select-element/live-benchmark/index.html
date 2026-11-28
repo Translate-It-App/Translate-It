@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Select Element live benchmark</title>
+    <style>
+      body { max-width: 850px; margin: 32px auto; padding: 0 20px; font: 16px/1.6 system-ui,sans-serif; color: #252525; }
+      [data-target] { margin: 8px 0; padding: 8px; border-bottom: 1px solid #eee; }
+      #fixture-root { box-sizing: border-box; width: 300px; height: 300px; overflow: auto; border: 1px solid #888; }
+      #fixture-root p { margin: 8px 0; }
+      #benchmark-panel { position: fixed; z-index: 2147483647; right: 12px; top: 12px; width: min(340px,calc(100vw - 24px)); max-height: 90vh; overflow:auto; box-sizing:border-box; padding:14px; background:white; border:1px solid #bbc7d1; border-radius:10px; box-shadow:0 5px 20px #0002; font:13px/1.45 system-ui,sans-serif; }
+      #benchmark-panel button,#benchmark-panel select { margin:3px; padding:6px; }
+      #fixture { padding-top: 10px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Select Element benchmark fixture</h1>
+      <p>Use the same fixture and settings for baseline and candidate trials.</p>
+      <div id="fixture"></div>
+    </main>
+    <aside id="benchmark-panel" translate="no" data-translate-ignore="true" aria-label="Benchmark controls">
+      <h2>Select Element trial</h2>
+      <label>Fixture <select id="fixture-choice"><option>Small</option><option>Medium</option><option>Large</option><option>Mixed HTML</option></select></label>
+      <label>Label <select id="trial-label"><option>baseline</option><option>candidate</option></select></label>
+      <button id="start-trial" type="button">Start trial</button>
+      <p>After clicking, use the extension's normal Select Element workflow. This button does not activate selection.</p>
+      <p id="trial-state" aria-live="polite">No active trial</p>
+      <label>Operator-reported outcome
+        <select id="outcome"><option value="">Choose only if known</option><option>successful</option><option>partial</option><option>failed</option><option>cancelled</option></select>
+      </label>
+      <button id="finish-trial" type="button">Record outcome</button>
+      <button id="export" type="button">Export JSON</button>
+      <button id="clear" type="button">Clear results</button>
+      <p>Latest results by fixture (DOM-change proxies only)</p>
+      <div id="results" aria-live="polite"></div>
+      <p>Physical provider request counts are unavailable; dispatch is extension-side only.</p>
+    </aside>
+    <script src="./benchmark.js" defer></script>
+  </body>
+</html>
